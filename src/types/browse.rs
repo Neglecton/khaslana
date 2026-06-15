@@ -4,7 +4,7 @@
 // 选择「浏览」后，应用进入只读浏览模式，按目录树展示目标引用 tip 提交的
 // 完整文件树，并支持查看文件原始内容或与当前 HEAD 的差异。
 
-use crate::types::DiffEncodingInfo;
+use crate::types::{ChangeState, DiffEncodingInfo};
 
 /// 进入浏览模式时解析出的目标引用：显示名 + tip 提交 OID。
 ///
@@ -14,6 +14,16 @@ use crate::types::DiffEncodingInfo;
 pub struct BrowseTarget {
     pub display_name: String,
     pub commit_oid: String,
+}
+
+/// 分支浏览左侧列表模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BrowseListMode {
+    /// 展示目标引用完整文件树。
+    #[default]
+    Tree,
+    /// 展示目标引用相对当前 HEAD 的差异文件列表。
+    Compare,
 }
 
 /// 浏览树条目种类，映射 libgit2 `TreeEntry::kind()`。
@@ -39,6 +49,16 @@ pub struct BrowseEntry {
     pub kind: BrowseEntryKind,
     /// 文件字节数；目录填 0。
     pub size: u64,
+}
+
+/// 分支比较模式左侧展示的一行差异文件。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowseCompareFile {
+    /// 用于目标分支侧读取内容/差异的路径；删除文件则填旧路径。
+    pub path: String,
+    /// 重命名时的旧路径，用于展示和生成完整 diff。
+    pub old_path: Option<String>,
+    pub status: ChangeState,
 }
 
 /// 只读文件内容视图的数据。

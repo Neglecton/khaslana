@@ -45,11 +45,11 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/lib.rs`：库入口，重新导出 Git、凭据和类型模块，供 `main.rs` 使用。
 - `src/assets.rs`：应用自有静态资源入口，将 `assets/icons/` 与 Yororen 内置资源合并注册给 GPUI。
 - `src/types.rs`：领域类型和错误类型的汇总入口；较独立的领域类型放到 `src/types/` 子目录，例如冲突解决类型在 `src/types/conflicts.rs`。
-- `src/types/browse.rs`：分支浏览模式领域类型，包括 `BrowseTarget`、`BrowseEntry`、`BrowseEntryKind` 和 `BrowseFileContent`。
+- `src/types/browse.rs`：分支浏览和分支比较模式领域类型，包括 `BrowseTarget`、`BrowseListMode`、`BrowseEntry`、`BrowseEntryKind`、`BrowseCompareFile` 和 `BrowseFileContent`。
 - `src/git.rs`：核心 Git 服务层的汇总入口；大型或独立 Git 能力放到 `src/git/` 子目录，例如冲突解决服务在 `src/git/conflicts.rs`，贮藏服务在 `src/git/stash.rs`，变基服务在 `src/git/rebase.rs`。
 - `src/git/submodule.rs`：子模块 Git 服务，包括状态读取、同步父仓库记录版本、快进到子模块远端最新以及递归子模块更新。
 - `src/git/rebase.rs`：变基 Git 服务，包括 `rebase_branch`、`rebase_continue`、`rebase_skip`、`rebase_abort` 和 `pull_branch_rebase`。
-- `src/git/browse.rs`：分支浏览 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
+- `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗等。
@@ -65,6 +65,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
+- `src/browse_compare_view.rs`：分支比较模式左侧差异文件列表 UI，包括差异文件状态徽标、重命名路径展示和列表空状态。
 - `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像等辅助渲染。
 
 ## 4. 核心架构
@@ -100,7 +101,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 历史操作：reset、revert
 - 变基：rebase_branch、rebase_continue、rebase_skip、rebase_abort、pull_branch_rebase
 - diff：工作区 diff、历史 diff、编码识别
-- 浏览：引用解析（分支/标签 → commit OID）、文件树遍历、文件内容读取、与 HEAD 差异
+- 浏览：引用解析（分支/标签 → commit OID）、文件树遍历、差异文件列表、文件内容读取、与 HEAD 差异
 
 Git 操作通常返回新的 `RepositorySnapshot`，让 UI 统一刷新状态。危险操作需要在 UI 层先确认。
 
@@ -221,9 +222,11 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 - 不切换分支查看其他分支/标签的完整代码
 - 从侧边栏本地分支、远端分支和标签的右键菜单进入「浏览此分支 / 浏览此标签」
+- 从侧边栏本地分支和远端分支右键进入「与当前分支比较」，不切换分支列出目标分支相对当前 HEAD 有差异的文件
 - 左侧文件树浏览器：可展开/折叠的目录树，按目录懒加载
 - 右侧默认显示目标分支上文件的只读原始内容（含行号和编码识别）
 - 顶部可一键切换到「与当前 HEAD 的差异」视图
+- 分支比较模式左侧只展示差异文件，右侧同样支持目标分支全文内容和与当前 HEAD 的差异视图
 - 支持切换 diff 编码
 - 整个过程不执行 checkout，不改动工作区
 - 二进制文件提示「无法预览」，超大文件自动报错提示

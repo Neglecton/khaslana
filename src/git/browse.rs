@@ -4,13 +4,13 @@
 use std::path::Path;
 
 use bstr::ByteSlice;
-use git2::{DiffOptions, ObjectType, Repository};
+use git2::{DiffFindOptions, DiffOptions, ObjectType, Repository};
 
 use crate::{
     GitService,
     types::{
-        BrowseEntry, BrowseEntryKind, BrowseFileContent, BrowseTarget, DiffEncodingChoice,
-        DiffEncodingInfo, DiffScope, FileDiff, GitError, Result,
+        BrowseCompareFile, BrowseEntry, BrowseEntryKind, BrowseFileContent, BrowseTarget,
+        DiffEncodingChoice, DiffEncodingInfo, DiffScope, FileDiff, GitError, Result,
     },
 };
 
@@ -204,6 +204,49 @@ impl GitService {
         })
     }
 
+    /// 列出目标分支相对当前 HEAD 有差异的文件。
+    ///
+    /// 方向与 browse_file_diff 保持一致：old=HEAD、new=目标分支，因此 Added 表示
+    /// 文件存在于目标分支但当前分支没有，Deleted 表示目标分支删除了当前分支文件。
+    pub fn browse_compare_files(
+        &self,
+        repo: &Repository,
+        commit_oid: &str,
+    ) -> Result<Vec<BrowseCompareFile>> {
+        let target_commit = self.find_commit_by_oid(repo, commit_oid)?;
+        let target_tree = target_commit.tree()?;
+        let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+
+        let mut options = DiffOptions::new();
+        let mut diff =
+            repo.diff_tree_to_tree(head_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
+        // 分支比较列表启用基础重命名识别，便于左侧用 R 展示重命名而非一增一删。
+        let mut find_options = DiffFindOptions::new();
+        find_options.renames(true).rename_threshold(50);
+        diff.find_similar(Some(&mut find_options))?;
+
+        let mut files = Vec::new();
+        for delta in diff.deltas() {
+            let status = super::change_state_from_delta(delta.status());
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(super::path_to_git);
+            let Some(path) = path else {
+                continue;
+            };
+            let old_path = delta.old_file().path().map(super::path_to_git);
+            files.push(BrowseCompareFile {
+                path,
+                old_path,
+                status,
+            });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
+    }
+
     /// 计算目标分支文件与当前 HEAD 之间的差异。
     ///
     /// 方向锁定为 old=HEAD、new=目标分支，差异里高亮的是被浏览分支相对当前分支的内容。
@@ -216,14 +259,33 @@ impl GitService {
         full_context: bool,
         encoding: DiffEncodingChoice,
     ) -> Result<FileDiff> {
+        self.browse_file_diff_for_compare(repo, commit_oid, path, None, full_context, encoding)
+    }
+
+    /// 计算分支比较列表中某个文件的差异。
+    ///
+    /// 对重命名文件同时传入旧路径和新路径，避免 pathspec 只命中新路径时丢失重命名信息。
+    pub fn browse_file_diff_for_compare(
+        &self,
+        repo: &Repository,
+        commit_oid: &str,
+        path: &Path,
+        old_path: Option<&Path>,
+        full_context: bool,
+        encoding: DiffEncodingChoice,
+    ) -> Result<FileDiff> {
         let target_commit = self.find_commit_by_oid(repo, commit_oid)?;
         let target_tree = target_commit.tree()?;
         let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
 
         let mut options = DiffOptions::new();
-        options
-            .context_lines(super::diff_context_lines(full_context))
-            .pathspec(path);
+        options.context_lines(super::diff_context_lines(full_context));
+        // 重命名文件同时限定旧路径和新路径；普通文件只限定当前路径。
+        if let Some(old_path) = old_path.filter(|old| *old != path) {
+            options.pathspec(old_path).pathspec(path);
+        } else {
+            options.pathspec(path);
+        }
 
         let diff =
             repo.diff_tree_to_tree(head_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
@@ -237,7 +299,7 @@ impl GitService {
 mod tests {
     use super::*;
     use crate::credentials::PromptCredentialProvider;
-    use crate::types::{BranchName, CommitMessage, DiffLineKind};
+    use crate::types::{BranchName, ChangeState, CommitMessage, DiffLineKind};
     use git2::{Oid, RepositoryInitOptions};
     use std::fs;
     use std::path::Path;
@@ -492,6 +554,106 @@ mod tests {
         assert!(
             svc.browse_tree_entries(&repo, &target.commit_oid, Some(Path::new("nonexistent")))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn browse_compare_files_only_changed_paths() {
+        let (dir, svc) = build_repo();
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let feature = svc
+            .resolve_browse_target(&repo, "feature", BrowseRefKind::LocalBranch)
+            .unwrap();
+
+        let files = svc
+            .browse_compare_files(&repo, &feature.commit_oid)
+            .unwrap();
+        let paths = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.status.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec![
+                ("src/lib.rs", ChangeState::Modified),
+                ("src/new.rs", ChangeState::Added),
+            ]
+        );
+        assert!(!files.iter().any(|file| file.path == "README.md"));
+    }
+
+    #[test]
+    fn browse_compare_files_empty_for_same_branch() {
+        let (dir, svc) = build_repo();
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let main = svc
+            .resolve_browse_target(&repo, "main", BrowseRefKind::LocalBranch)
+            .unwrap();
+
+        let files = svc.browse_compare_files(&repo, &main.commit_oid).unwrap();
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn browse_compare_files_reports_deleted_files() {
+        let (dir, svc) = build_repo();
+        let repo_path = dir.path();
+        let mut repo = git2::Repository::open(repo_path).unwrap();
+        svc.checkout_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        fs::remove_file(repo_path.join("README.md")).unwrap();
+        svc.stage_path(&mut repo, Path::new("README.md")).unwrap();
+        svc.commit(&mut repo, &CommitMessage::new("delete readme"))
+            .unwrap();
+        svc.checkout_branch(&mut repo, &BranchName::new("main"))
+            .unwrap();
+        drop(repo);
+
+        let repo = git2::Repository::open(repo_path).unwrap();
+        let feature = svc
+            .resolve_browse_target(&repo, "feature", BrowseRefKind::LocalBranch)
+            .unwrap();
+        let files = svc
+            .browse_compare_files(&repo, &feature.commit_oid)
+            .unwrap();
+
+        let deleted = files
+            .iter()
+            .find(|file| file.path == "README.md")
+            .expect("deleted file should be listed");
+        assert_eq!(deleted.status, ChangeState::Deleted);
+    }
+
+    #[test]
+    fn browse_compare_file_diff_keeps_head_to_target_direction() {
+        let (dir, svc) = build_repo();
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let feature = svc
+            .resolve_browse_target(&repo, "feature", BrowseRefKind::LocalBranch)
+            .unwrap();
+
+        let diff = svc
+            .browse_file_diff_for_compare(
+                &repo,
+                &feature.commit_oid,
+                Path::new("src/lib.rs"),
+                None,
+                false,
+                DiffEncodingChoice::Utf8,
+            )
+            .unwrap();
+
+        assert!(
+            diff.lines
+                .iter()
+                .any(|line| line.kind == DiffLineKind::Removed && line.content.contains("{ 1 }"))
+        );
+        assert!(
+            diff.lines
+                .iter()
+                .any(|line| line.kind == DiffLineKind::Added && line.content.contains("{ 2 }"))
         );
     }
 

@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod assets;
+mod browse_compare_view;
 mod browse_view;
 mod conflicts;
 mod diff_view;
@@ -40,18 +41,18 @@ use gpui::{
     uniform_list,
 };
 use khaslana::{
-    BranchKind, BranchName, BranchSyncStatus, BrowseEntry, BrowseFileContent, BrowseRefKind,
-    BrowseTarget, CommitFileChange, CommitInfo, CommitMessage, ConflictBlockResolution,
-    ConflictFileKind, ConflictFileView, CredentialProvider, CredentialRecord, CredentialRequest,
-    CredentialScope, CredentialStore, CustomProxySettings, DiffEncodingChoice, DiffEncodingInfo,
-    DiffEncodingPreferences, DiffLineKind, DiffScope, FileDiff, GitCredential, GitService,
-    HistoryRefsCache, HistoryScope, KeyringCredentialStore, NetworkProxyMode, NetworkProxySettings,
-    OperationEvent, ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings,
-    RemoteCredentialPolicy, RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode,
-    SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, credential_display_target,
-    credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
-    credential_record_label, credential_record_matches_remote_url, credential_scope_label,
-    test_credential_connection,
+    BranchKind, BranchName, BranchSyncStatus, BrowseCompareFile, BrowseEntry, BrowseFileContent,
+    BrowseListMode, BrowseRefKind, BrowseTarget, ChangeState, CommitFileChange, CommitInfo,
+    CommitMessage, ConflictBlockResolution, ConflictFileKind, ConflictFileView, CredentialProvider,
+    CredentialRecord, CredentialRequest, CredentialScope, CredentialStore, CustomProxySettings,
+    DiffEncodingChoice, DiffEncodingInfo, DiffEncodingPreferences, DiffLineKind, DiffScope,
+    FileDiff, GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
+    NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
+    RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
+    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, SubmoduleInfo,
+    SubmoduleRemoteSyncStatus, TagName, credential_display_target, credential_key_filename,
+    credential_kind_label, credential_record_is_compatible_with_url, credential_record_label,
+    credential_record_matches_remote_url, credential_scope_label, test_credential_connection,
 };
 use lru::LruCache;
 use operation_blocker_view::OperationBlocker;
@@ -126,7 +127,7 @@ const MIN_BROWSE_TREE_WIDTH: f32 = 240.0;
 const MAX_BROWSE_TREE_WIDTH: f32 = 640.0;
 const HISTORY_PAGE_SIZE: usize = 50;
 pub(crate) const BRANCH_MENU_WIDTH: f32 = 190.0;
-pub(crate) const BRANCH_MENU_HEIGHT: f32 = 340.0;
+pub(crate) const BRANCH_MENU_HEIGHT: f32 = 376.0;
 pub(crate) const REMOTE_MENU_WIDTH: f32 = 170.0;
 pub(crate) const REMOTE_MENU_HEIGHT: f32 = 80.0;
 const CHANGE_MENU_WIDTH: f32 = 210.0;
@@ -752,12 +753,18 @@ pub(crate) enum BrowseViewMode {
 pub(crate) struct BrowseState {
     /// 当前浏览的目标引用（显示名 + tip commit OID）。
     pub target: Option<BrowseTarget>,
+    /// 左侧列表模式：完整文件树或仅差异文件。
+    pub list_mode: BrowseListMode,
     /// 已加载的各目录条目，key 为 git 风格相对路径（根为 ""）。
     pub entries_by_dir: HashMap<PathBuf, Vec<BrowseEntry>>,
     /// 当前展开的目录路径集合。
     pub expanded: HashSet<PathBuf>,
     /// 当前选中的文件路径。
     pub selected_file: Option<PathBuf>,
+    /// 比较模式下的差异文件列表。
+    pub compare_files: Vec<BrowseCompareFile>,
+    /// 比较模式下当前选中的差异文件元数据。
+    pub selected_compare_file: Option<BrowseCompareFile>,
     /// 只读内容视图的数据。
     pub content: Option<Arc<BrowseFileContent>>,
     /// 与 HEAD 的差异。
@@ -767,6 +774,7 @@ pub(crate) struct BrowseState {
     /// 差异头部是否展开。
     pub diff_headers_expanded: bool,
     pub loading_tree: bool,
+    pub compare_loading: bool,
     pub loading_content: bool,
     pub loading_diff: bool,
     // 行级文本选区（拖选 + Ctrl+C / Ctrl+A）。
@@ -1095,6 +1103,7 @@ pub(crate) enum DiffHeaderTarget {
     Worktree,
     History,
     Stash,
+    Browse,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1269,6 +1278,13 @@ pub(crate) enum UiEvent {
         tab_id: RepoTabId,
         dir_path: PathBuf,
         entries: Vec<BrowseEntry>,
+        load_id: u64,
+    },
+    // 分支比较模式：差异文件列表加载完成
+    BrowseCompareFilesLoaded {
+        tab_id: RepoTabId,
+        target_oid: String,
+        files: Vec<BrowseCompareFile>,
         load_id: u64,
     },
     // 分支浏览模式：文件只读内容加载完成
@@ -3024,8 +3040,16 @@ impl RepositoryView {
                 self.with_tab_context(tab_id, |this| {
                     if load_id == this.repository_load_id {
                         this.browse.target = Some(target);
-                        // 自动加载根目录树
-                        this.load_browse_tree(PathBuf::new());
+                        match this.browse.list_mode {
+                            BrowseListMode::Tree => {
+                                // 浏览模式自动加载根目录树。
+                                this.load_browse_tree(PathBuf::new());
+                            }
+                            BrowseListMode::Compare => {
+                                // 比较模式只加载差异文件列表，避免遍历完整文件树。
+                                this.load_browse_compare_files();
+                            }
+                        }
                     }
                 });
             }
@@ -3039,6 +3063,39 @@ impl RepositoryView {
                     if load_id == this.repository_load_id {
                         this.browse.loading_tree = false;
                         this.browse.entries_by_dir.insert(dir_path, entries);
+                    }
+                });
+            }
+            UiEvent::BrowseCompareFilesLoaded {
+                tab_id,
+                target_oid,
+                files,
+                load_id,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    let target_matches = this
+                        .browse
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.commit_oid == target_oid);
+                    if load_id == this.repository_load_id
+                        && target_matches
+                        && this.browse.list_mode == BrowseListMode::Compare
+                    {
+                        this.browse.compare_loading = false;
+                        this.browse.compare_files = files;
+                        if let Some(first) = this.browse.compare_files.first().cloned() {
+                            this.status =
+                                format!("已加载 {} 个差异文件", this.browse.compare_files.len());
+                            this.select_browse_compare_file(first);
+                        } else {
+                            this.browse.selected_file = None;
+                            this.browse.selected_compare_file = None;
+                            this.browse.content = None;
+                            this.browse.diff = None;
+                            this.browse.diff_headers_expanded = false;
+                            this.status = "该分支与当前分支没有差异".to_string();
+                        }
                     }
                 });
             }
@@ -6164,6 +6221,11 @@ impl RepositoryView {
         self.reset_uniform_scroll("history-diff-scroll");
     }
 
+    fn toggle_browse_diff_headers(&mut self) {
+        self.browse.diff_headers_expanded = !self.browse.diff_headers_expanded;
+        self.reset_uniform_scroll("browse-diff-scroll");
+    }
+
     pub(crate) fn set_main_mode(&mut self, mode: MainMode) {
         self.main_mode = mode;
         self.close_popups();
@@ -6226,8 +6288,30 @@ impl RepositoryView {
             BranchKind::Remote => BrowseRefKind::RemoteBranch,
         };
         self.browse.reset();
+        self.browse.list_mode = BrowseListMode::Tree;
         self.main_mode = MainMode::Browse;
         self.status = format!("正在解析分支 {branch}");
+        self.open_browse_resolve(repo_path, tab_id, branch, ref_kind);
+    }
+
+    /// 从侧边栏分支右键菜单进入比较模式。
+    pub(crate) fn open_compare_branch(&mut self, branch: String, kind: BranchKind) {
+        self.close_popups();
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(repo_path) = self.repo_path.clone() else {
+            return;
+        };
+        let ref_kind = match kind {
+            BranchKind::Local => BrowseRefKind::LocalBranch,
+            BranchKind::Remote => BrowseRefKind::RemoteBranch,
+        };
+        self.browse.reset();
+        self.browse.list_mode = BrowseListMode::Compare;
+        self.browse.view_mode = BrowseViewMode::Diff;
+        self.main_mode = MainMode::Browse;
+        self.status = format!("正在准备分支比较 {branch}");
         self.open_browse_resolve(repo_path, tab_id, branch, ref_kind);
     }
 
@@ -6241,6 +6325,7 @@ impl RepositoryView {
             return;
         };
         self.browse.reset();
+        self.browse.list_mode = BrowseListMode::Tree;
         self.main_mode = MainMode::Browse;
         self.status = format!("正在解析标签 {tag}");
         self.open_browse_resolve(repo_path, tab_id, tag, BrowseRefKind::Tag);
@@ -6325,6 +6410,54 @@ impl RepositoryView {
         });
     }
 
+    /// 后台加载目标分支与当前 HEAD 的差异文件列表。
+    pub(crate) fn load_browse_compare_files(&mut self) {
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(repo_path) = self.repo_path.clone() else {
+            return;
+        };
+        let Some(target) = self.browse.target.clone() else {
+            return;
+        };
+        let commit_oid = target.commit_oid.clone();
+        self.browse.compare_loading = true;
+        self.browse.compare_files.clear();
+        self.browse.selected_file = None;
+        self.browse.selected_compare_file = None;
+        self.browse.content = None;
+        self.browse.diff = None;
+        self.browse.diff_headers_expanded = false;
+        self.status = "正在加载分支差异".to_string();
+
+        let service = self.service_for_tab(tab_id);
+        let tx = self.tx.clone();
+        let load_id = self.repository_load_id;
+        self.tasks.spawn(TaskKind::Short, move || {
+            let result = (|| -> khaslana::Result<UiEvent> {
+                let repo = Repository::open(&repo_path)?;
+                let files = service.browse_compare_files(&repo, &commit_oid)?;
+                Ok(UiEvent::BrowseCompareFilesLoaded {
+                    tab_id,
+                    target_oid: commit_oid,
+                    files,
+                    load_id,
+                })
+            })();
+            match result {
+                Ok(event) => send_ui_event(&tx, event),
+                Err(err) => send_ui_event(
+                    &tx,
+                    UiEvent::OperationFailed {
+                        tab_id: Some(tab_id),
+                        error: err.to_string(),
+                    },
+                ),
+            }
+        });
+    }
+
     /// 展开/折叠目录；展开时按需懒加载子树。
     pub(crate) fn toggle_browse_dir(&mut self, path: PathBuf) {
         let already_loaded = self
@@ -6341,7 +6474,7 @@ impl RepositoryView {
         }
     }
 
-    /// 选中文件并按当前模式加载内容或差异。
+    /// 选中文件树文件并按当前模式加载内容或差异。
     pub(crate) fn select_browse_file(&mut self, path: PathBuf) {
         if self.browse.selected_file.as_ref() == Some(&path)
             && (self.browse.content.is_some() || self.browse.diff.is_some())
@@ -6349,13 +6482,33 @@ impl RepositoryView {
             return;
         }
         self.browse.selected_file = Some(path.clone());
+        self.browse.selected_compare_file = None;
+        self.clear_browse_current_views();
+        self.load_browse_current();
+    }
+
+    /// 选中比较模式中的差异文件，并保留旧路径/状态供 diff 与全文视图判断。
+    pub(crate) fn select_browse_compare_file(&mut self, file: BrowseCompareFile) {
+        let path = PathBuf::from(&file.path);
+        if self.browse.selected_file.as_ref() == Some(&path)
+            && self.browse.selected_compare_file.as_ref() == Some(&file)
+            && (self.browse.content.is_some() || self.browse.diff.is_some())
+        {
+            return;
+        }
+        self.browse.selected_file = Some(path);
+        self.browse.selected_compare_file = Some(file);
+        self.clear_browse_current_views();
+        self.load_browse_current();
+    }
+
+    fn clear_browse_current_views(&mut self) {
         self.browse.content = None;
         self.browse.diff = None;
         self.browse.diff_headers_expanded = false;
         self.clear_browse_selection();
         self.reset_uniform_scroll("browse-content-scroll");
         self.reset_uniform_scroll("browse-diff-scroll");
-        self.load_browse_current();
     }
 
     /// 切换内容/差异视图模式，并按需重新加载。
@@ -6364,12 +6517,7 @@ impl RepositoryView {
             return;
         }
         self.browse.view_mode = mode;
-        self.browse.content = None;
-        self.browse.diff = None;
-        self.browse.diff_headers_expanded = false;
-        self.clear_browse_selection();
-        self.reset_uniform_scroll("browse-content-scroll");
-        self.reset_uniform_scroll("browse-diff-scroll");
+        self.clear_browse_current_views();
         self.load_browse_current();
     }
 
@@ -6391,6 +6539,21 @@ impl RepositoryView {
         let encoding = self.diff_encoding_choice_for_path(&repo_path);
         let full_context = self.full_file_view;
         let mode = self.browse.view_mode;
+        let compare_file = self.browse.selected_compare_file.clone();
+        let old_path = compare_file
+            .as_ref()
+            .and_then(|file| file.old_path.as_ref())
+            .map(PathBuf::from);
+
+        if mode == BrowseViewMode::Content
+            && compare_file
+                .as_ref()
+                .is_some_and(|file| file.status == ChangeState::Deleted)
+        {
+            self.browse.loading_content = false;
+            self.status = "目标分支中不存在该文件".to_string();
+            return;
+        }
 
         match mode {
             BrowseViewMode::Content => {
@@ -6421,10 +6584,11 @@ impl RepositoryView {
                         })
                     }
                     BrowseViewMode::Diff => {
-                        let diff = service.browse_file_diff(
+                        let diff = service.browse_file_diff_for_compare(
                             &repo,
                             &commit_oid,
                             &path,
+                            old_path.as_deref(),
                             full_context,
                             encoding,
                         )?;

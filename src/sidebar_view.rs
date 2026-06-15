@@ -877,8 +877,18 @@ impl RepositoryView {
                 !self.busy,
                 {
                     let branch = menu.branch.clone();
-                    let kind = menu.kind;
+                    let kind = menu.kind.clone();
                     move |this| this.open_browse_branch(branch.clone(), kind.clone())
+                },
+                cx,
+            ))
+            .child(context_menu_item(
+                "与当前分支比较",
+                !menu.is_head && !self.busy,
+                {
+                    let branch = menu.branch.clone();
+                    let kind = menu.kind.clone();
+                    move |this| this.open_compare_branch(branch.clone(), kind.clone())
                 },
                 cx,
             ))

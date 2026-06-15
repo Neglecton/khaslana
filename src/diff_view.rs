@@ -85,6 +85,13 @@ impl RepositoryView {
         {
             self.select_stash_file(path, true);
         }
+        if self.main_mode == MainMode::Browse
+            && self.browse.view_mode == crate::BrowseViewMode::Diff
+        {
+            self.browse.diff = None;
+            self.browse.diff_headers_expanded = false;
+            self.load_browse_current();
+        }
     }
 
     /// 全文视图加载因文件过大失败时，自动回退到紧凑差异视图。

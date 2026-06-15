@@ -805,6 +805,7 @@ pub(crate) fn diff_header_toggle(
             DiffHeaderTarget::Worktree => "diff-header-toggle",
             DiffHeaderTarget::History => "history-diff-header-toggle",
             DiffHeaderTarget::Stash => "stash-diff-header-toggle",
+            DiffHeaderTarget::Browse => "browse-diff-header-toggle",
         })
         .flex()
         .w_full()
@@ -825,6 +826,7 @@ pub(crate) fn diff_header_toggle(
                 DiffHeaderTarget::Worktree => this.toggle_diff_headers(),
                 DiffHeaderTarget::History => this.toggle_history_diff_headers(),
                 DiffHeaderTarget::Stash => this.toggle_stash_diff_headers(),
+                DiffHeaderTarget::Browse => this.toggle_browse_diff_headers(),
             }
             cx.notify();
         }))

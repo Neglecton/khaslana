@@ -8,7 +8,7 @@ use gpui::{
     ClickEvent, Context, IntoElement, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, div, prelude::*, px, rgb, rgba, uniform_list,
 };
-use khaslana::{BrowseEntry, BrowseEntryKind};
+use khaslana::{BrowseEntry, BrowseEntryKind, BrowseListMode};
 
 /// 内容视图每行高度（px），与 `browse_content_line` 中的 `h(px(18.0))` 一致。
 pub(crate) const BROWSE_ROW_HEIGHT: f32 = 18.0;
@@ -89,7 +89,10 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .child(self.render_browse_file_tree(cx))
+            .child(match self.browse.list_mode {
+                BrowseListMode::Tree => self.render_browse_file_tree(cx).into_any_element(),
+                BrowseListMode::Compare => self.render_browse_compare_files(cx).into_any_element(),
+            })
             .child(self.render_column_splitter(ResizeTarget::BrowseFiles, cx))
             .child(self.render_browse_content_area(cx))
     }
@@ -356,6 +359,9 @@ impl RepositoryView {
             .unwrap_or_else(|| "未选择文件".to_string());
 
         let mode_label = match self.browse.view_mode {
+            BrowseViewMode::Content if self.browse.list_mode == BrowseListMode::Compare => {
+                "目标分支全文"
+            }
             BrowseViewMode::Content => "文件内容",
             BrowseViewMode::Diff => "与当前分支差异",
         };
@@ -568,6 +574,15 @@ impl RepositoryView {
                                 let Some(content) = content.as_ref() else {
                                     return placeholder_row(if this.browse.loading_content {
                                         "正在加载文件内容..."
+                                    } else if this
+                                        .browse
+                                        .selected_compare_file
+                                        .as_ref()
+                                        .is_some_and(|file| {
+                                            file.status == khaslana::ChangeState::Deleted
+                                        })
+                                    {
+                                        "目标分支中不存在该文件，请切换到差异视图查看删除内容"
                                     } else {
                                         "请选择一个文件查看内容"
                                     })
@@ -651,7 +666,7 @@ impl RepositoryView {
             "browse-diff-scroll",
             self.browse.diff.clone(),
             self.browse.diff_headers_expanded,
-            crate::DiffHeaderTarget::History,
+            crate::DiffHeaderTarget::Browse,
             empty_message.to_string(),
             cx,
         )

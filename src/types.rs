@@ -11,7 +11,10 @@ pub use conflicts::{
     ConflictFileKind, ConflictFileView, ConflictResolutionSide,
 };
 
-pub use browse::{BrowseEntry, BrowseEntryKind, BrowseFileContent, BrowseTarget};
+pub use browse::{
+    BrowseCompareFile, BrowseEntry, BrowseEntryKind, BrowseFileContent, BrowseListMode,
+    BrowseTarget,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RepoPath(pub PathBuf);
