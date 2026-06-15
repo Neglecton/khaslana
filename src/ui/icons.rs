@@ -16,6 +16,9 @@ pub(crate) enum ToolbarIcon {
     Stash,
     Submodule,
     More,
+    Search,
+    Close,
+    Plus,
 }
 
 impl ToolbarIcon {
@@ -35,6 +38,9 @@ impl ToolbarIcon {
             Self::Stash => "icons/stash.svg",
             Self::Submodule => "icons/submodule.svg",
             Self::More => "icons/more.svg",
+            Self::Search => "icons/search.svg",
+            Self::Close => "icons/close.svg",
+            Self::Plus => "icons/plus.svg",
         }
     }
 }
@@ -69,6 +75,9 @@ mod tests {
         assert_eq!(ToolbarIcon::History.path(), "icons/history.svg");
         assert_eq!(ToolbarIcon::Stash.path(), "icons/stash.svg");
         assert_eq!(ToolbarIcon::More.path(), "icons/more.svg");
+        assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
+        assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
+        assert_eq!(ToolbarIcon::Plus.path(), "icons/plus.svg");
     }
 
     #[test]
@@ -88,6 +97,9 @@ mod tests {
             ToolbarIcon::Stash,
             ToolbarIcon::Submodule,
             ToolbarIcon::More,
+            ToolbarIcon::Search,
+            ToolbarIcon::Close,
+            ToolbarIcon::Plus,
         ] {
             let asset_path = format!("assets/{}", icon.path());
             let svg = fs::read_to_string(&asset_path).unwrap_or_else(|err| {

@@ -5,35 +5,97 @@ use gpui::{
 use khaslana::{BranchInfo, BranchKind, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
-    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, NAV_ROW_HEIGHT, REMOTE_MENU_HEIGHT,
-    REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT, STASH_MENU_WIDTH,
-    SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH, TagContextMenu,
-    clamped_menu_position, context_menu_item, context_menu_item_with_context, menu_separator,
-    nav_list, nav_row, placeholder_row,
-    ui::{components::glass_menu, theme as ui_theme},
+    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, NAV_ROW_HEIGHT,
+    REMOTE_MENU_HEIGHT, REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT,
+    STASH_MENU_WIDTH, SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH,
+    TagContextMenu, clamped_menu_position, context_menu_item, context_menu_item_with_context,
+    menu_separator, nav_list, nav_row, placeholder_row,
+    ui::{
+        components::glass_menu,
+        icons::{ToolbarIcon, toolbar_icon},
+        theme as ui_theme,
+    },
 };
+
+fn filter_sidebar_branches(
+    branches: &[BranchInfo],
+    kind: BranchKind,
+    query: &str,
+) -> Vec<BranchInfo> {
+    branches
+        .iter()
+        .filter(|branch| branch.kind == kind)
+        .filter(|branch| sidebar_branch_matches_query(branch, query))
+        .cloned()
+        .collect()
+}
+
+fn sidebar_branch_matches_query(branch: &BranchInfo, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+
+    let query = query.to_lowercase();
+    branch.name.to_lowercase().contains(&query)
+        || branch
+            .upstream
+            .as_deref()
+            .is_some_and(|upstream| upstream.to_lowercase().contains(&query))
+}
+
+const SIDEBAR_LOCAL_BRANCH_CREATE_ID: &str = "sidebar-local-branch-create";
+
+fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
+    // 图标按钮不显示文字，必须用分组专属 id，避免本地/远端搜索入口点击命中冲突。
+    match section {
+        SidebarSection::LocalBranches => "sidebar-local-branch-search-toggle",
+        SidebarSection::RemoteBranches => "sidebar-remote-branch-search-toggle",
+        _ => "sidebar-branch-search-toggle",
+    }
+}
 
 impl RepositoryView {
     pub(crate) fn render_sidebar(
         &self,
-        _window: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let snapshot = self.snapshot.as_ref();
         let branches = snapshot
             .map(|snapshot| snapshot.branches.clone())
             .unwrap_or_default();
-        let local_rows = branches
-            .iter()
-            .filter(|branch| branch.kind == BranchKind::Local)
-            .cloned()
-            .map(|branch| self.branch_row(branch, cx).into_any_element())
-            .collect::<Vec<_>>();
-        let remote_branch_rows = branches
+        let local_search = if self.sidebar_local_branch_search_open {
+            self.sidebar_local_branch_search.value.trim()
+        } else {
+            ""
+        };
+        let remote_branch_search = if self.sidebar_remote_branch_search_open {
+            self.sidebar_remote_branch_search.value.trim()
+        } else {
+            ""
+        };
+        let local_placeholder = if local_search.is_empty() {
+            None
+        } else {
+            Some("没有匹配的本地分支")
+        };
+        let remote_branch_placeholder = if self.loading.remote() {
+            Some("远端分支加载中...")
+        } else if remote_branch_search.is_empty() {
+            None
+        } else {
+            Some("没有匹配的远端分支")
+        };
+        let local_rows = filter_sidebar_branches(&branches, BranchKind::Local, local_search)
             .into_iter()
-            .filter(|branch| branch.kind == BranchKind::Remote)
             .map(|branch| self.branch_row(branch, cx).into_any_element())
             .collect::<Vec<_>>();
+        let remote_branch_rows =
+            filter_sidebar_branches(&branches, BranchKind::Remote, remote_branch_search)
+                .into_iter()
+                .map(|branch| self.branch_row(branch, cx).into_any_element())
+                .collect::<Vec<_>>();
         let remote_rows = snapshot
             .map(|snapshot| snapshot.remotes.clone())
             .unwrap_or_default()
@@ -52,6 +114,39 @@ impl RepositoryView {
             .into_iter()
             .map(|stash| self.stash_row(stash, cx).into_any_element())
             .collect::<Vec<_>>();
+        let local_branch_filter = if self.sidebar_local_branch_search_open {
+            Some(
+                self.sidebar_branch_search_input(FieldId::SidebarLocalBranchSearch, window, cx)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let remote_branch_filter = if self.sidebar_remote_branch_search_open {
+            Some(
+                self.sidebar_branch_search_input(FieldId::SidebarRemoteBranchSearch, window, cx)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let local_branch_action = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.sidebar_create_branch_button(cx))
+            .child(self.sidebar_branch_search_button(
+                SidebarSection::LocalBranches,
+                self.sidebar_local_branch_search_open,
+                cx,
+            ))
+            .into_any_element();
+        let remote_branch_action = self.sidebar_branch_search_button(
+            SidebarSection::RemoteBranches,
+            self.sidebar_remote_branch_search_open,
+            cx,
+        );
 
         let mut sidebar = div()
             .relative()
@@ -79,26 +174,17 @@ impl RepositoryView {
                     .bottom(px(0.0))
                     .bg(rgba(ui_theme::SIDEBAR_GRADIENT_SOFTEN)),
             )
-            .child(
-                self.render_nav_section(
-                    "本地分支",
-                    "local-branch-list",
-                    SidebarSection::LocalBranches,
-                    local_rows,
-                    None,
-                    3.0,
-                    Some(
-                        self.button(
-                            "新建",
-                            self.repo_path.is_some() && !self.busy,
-                            |this, _, _| this.open_create_branch_dialog(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    ),
-                    cx,
-                ),
-            )
+            .child(self.render_nav_section(
+                "本地分支",
+                "local-branch-list",
+                SidebarSection::LocalBranches,
+                local_rows,
+                local_placeholder,
+                local_branch_filter,
+                3.0,
+                Some(local_branch_action),
+                cx,
+            ))
             .child(
                 self.render_nav_section(
                     "远端",
@@ -106,6 +192,7 @@ impl RepositoryView {
                     SidebarSection::Remotes,
                     remote_rows,
                     self.loading.remote().then_some("远端加载中..."),
+                    None,
                     2.0,
                     Some(
                         self.button(
@@ -124,9 +211,10 @@ impl RepositoryView {
                 "remote-branch-list",
                 SidebarSection::RemoteBranches,
                 remote_branch_rows,
-                self.loading.remote().then_some("远端分支加载中..."),
+                remote_branch_placeholder,
+                remote_branch_filter,
                 3.0,
-                None,
+                Some(remote_branch_action),
                 cx,
             ));
 
@@ -136,6 +224,7 @@ impl RepositoryView {
                 "tag-list",
                 SidebarSection::Tags,
                 tag_rows,
+                None,
                 None,
                 2.0,
                 None,
@@ -148,6 +237,7 @@ impl RepositoryView {
                 "stash-list",
                 SidebarSection::Stashes,
                 stash_rows,
+                None,
                 None,
                 2.0,
                 None,
@@ -165,6 +255,7 @@ impl RepositoryView {
         section: SidebarSection,
         rows: Vec<gpui::AnyElement>,
         placeholder: Option<&'static str>,
+        filter: Option<gpui::AnyElement>,
         weight: f32,
         action: Option<gpui::AnyElement>,
         cx: &mut Context<Self>,
@@ -192,7 +283,141 @@ impl RepositoryView {
                 this
             })
             .child(header)
+            .when_some(filter.filter(|_| expanded), |this, filter| {
+                this.child(filter)
+            })
             .when(expanded, |this| this.child(nav_list(self, id, rows, cx)))
+    }
+
+    fn sidebar_branch_search_input(
+        &self,
+        field: FieldId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex_none()
+            .px_2()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgba(ui_theme::GLASS_BG))
+            // 复用统一输入框，确保侧边栏搜索也支持现有 IME、选区和光标逻辑。
+            .child(self.input(field, true, window, cx))
+    }
+
+    fn sidebar_create_branch_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.sidebar_header_icon_button(
+            SIDEBAR_LOCAL_BRANCH_CREATE_ID,
+            ToolbarIcon::Plus,
+            false,
+            self.repo_path.is_some() && !self.busy,
+            |this, _, _| this.open_create_branch_dialog(),
+            cx,
+        )
+    }
+
+    fn sidebar_branch_search_button(
+        &self,
+        section: SidebarSection,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let icon = if open {
+            ToolbarIcon::Close
+        } else {
+            ToolbarIcon::Search
+        };
+        self.sidebar_header_icon_button(
+            sidebar_branch_search_button_id(section),
+            icon,
+            open,
+            self.repo_path.is_some(),
+            move |this, window, _| this.toggle_sidebar_branch_search(section, window),
+            cx,
+        )
+    }
+
+    fn sidebar_header_icon_button(
+        &self,
+        id: &'static str,
+        icon: ToolbarIcon,
+        active: bool,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let icon_color = if !enabled {
+            ui_theme::TEXT_FAINT
+        } else if active {
+            ui_theme::ACCENT_STRONG
+        } else {
+            ui_theme::TEXT_MUTED
+        };
+        div()
+            .id(id)
+            .flex_none()
+            .size(px(24.0))
+            .rounded_sm()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(rgb(if active {
+                ui_theme::ROW_SELECTED_BORDER
+            } else {
+                ui_theme::BORDER
+            }))
+            .bg(rgb(if active {
+                ui_theme::ACCENT_SOFT
+            } else {
+                ui_theme::SURFACE
+            }))
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(icon, icon_color))
+            .into_any_element()
+    }
+
+    fn toggle_sidebar_branch_search(&mut self, section: SidebarSection, window: &mut Window) {
+        self.close_popups();
+        match section {
+            SidebarSection::LocalBranches => {
+                self.sidebar_local_branch_search_open = !self.sidebar_local_branch_search_open;
+                if self.sidebar_local_branch_search_open {
+                    // 搜索按钮同时负责展开分组，避免输入框打开后被折叠状态隐藏。
+                    if !self.sidebar_sections.is_expanded(section) {
+                        self.sidebar_sections.toggle(section);
+                    }
+                    window.focus(&self.sidebar_local_branch_search.focus);
+                } else {
+                    self.sidebar_local_branch_search.clear();
+                }
+            }
+            SidebarSection::RemoteBranches => {
+                self.sidebar_remote_branch_search_open = !self.sidebar_remote_branch_search_open;
+                if self.sidebar_remote_branch_search_open {
+                    // 搜索按钮同时负责展开分组，避免输入框打开后被折叠状态隐藏。
+                    if !self.sidebar_sections.is_expanded(section) {
+                        self.sidebar_sections.toggle(section);
+                    }
+                    window.focus(&self.sidebar_remote_branch_search.focus);
+                } else {
+                    self.sidebar_remote_branch_search.clear();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn nav_section_header(
@@ -658,5 +883,137 @@ impl RepositoryView {
                 cx,
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn branch(name: &str, kind: BranchKind, upstream: Option<&str>) -> BranchInfo {
+        BranchInfo {
+            name: name.to_string(),
+            kind,
+            is_head: false,
+            upstream: upstream.map(str::to_string),
+        }
+    }
+
+    fn branch_names(branches: Vec<BranchInfo>) -> Vec<String> {
+        branches.into_iter().map(|branch| branch.name).collect()
+    }
+
+    #[test]
+    fn sidebar_branch_search_empty_query_returns_only_requested_kind() {
+        let branches = vec![
+            branch("main", BranchKind::Local, None),
+            branch("feature/a", BranchKind::Local, None),
+            branch("origin/main", BranchKind::Remote, None),
+        ];
+
+        assert_eq!(
+            branch_names(filter_sidebar_branches(&branches, BranchKind::Local, "")),
+            vec!["main", "feature/a"]
+        );
+        assert_eq!(
+            branch_names(filter_sidebar_branches(&branches, BranchKind::Remote, "")),
+            vec!["origin/main"]
+        );
+    }
+
+    #[test]
+    fn sidebar_branch_search_is_case_insensitive() {
+        let branches = vec![
+            branch("Feature/Login", BranchKind::Local, None),
+            branch("bugfix/logout", BranchKind::Local, None),
+        ];
+
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Local,
+                "feature",
+            )),
+            vec!["Feature/Login"]
+        );
+    }
+
+    #[test]
+    fn sidebar_branch_search_keeps_local_and_remote_groups_separate() {
+        let branches = vec![
+            branch("feature/a", BranchKind::Local, None),
+            branch("origin/feature/a", BranchKind::Remote, None),
+        ];
+
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Local,
+                "feature",
+            )),
+            vec!["feature/a"]
+        );
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Remote,
+                "feature",
+            )),
+            vec!["origin/feature/a"]
+        );
+    }
+
+    #[test]
+    fn sidebar_remote_branch_search_matches_full_or_partial_name() {
+        let branches = vec![
+            branch("origin/feature/a", BranchKind::Remote, None),
+            branch("upstream/release", BranchKind::Remote, None),
+        ];
+
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Remote,
+                "origin/feature",
+            )),
+            vec!["origin/feature/a"]
+        );
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Remote,
+                "release",
+            )),
+            vec!["upstream/release"]
+        );
+    }
+
+    #[test]
+    fn sidebar_branch_action_button_ids_keep_actions_distinct() {
+        assert_ne!(
+            sidebar_branch_search_button_id(SidebarSection::LocalBranches),
+            sidebar_branch_search_button_id(SidebarSection::RemoteBranches),
+        );
+        assert_ne!(
+            SIDEBAR_LOCAL_BRANCH_CREATE_ID,
+            sidebar_branch_search_button_id(SidebarSection::LocalBranches),
+        );
+    }
+
+    #[test]
+    fn sidebar_local_branch_search_matches_upstream() {
+        let branches = vec![
+            branch("main", BranchKind::Local, Some("origin/trunk")),
+            branch("feature/a", BranchKind::Local, Some("origin/feature/a")),
+        ];
+
+        assert_eq!(
+            branch_names(filter_sidebar_branches(
+                &branches,
+                BranchKind::Local,
+                "origin/trunk",
+            )),
+            vec!["main"]
+        );
     }
 }
