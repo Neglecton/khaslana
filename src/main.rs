@@ -873,6 +873,8 @@ struct RepoTabState {
     pub(crate) browse: BrowseState,
     pub(crate) busy: bool,
     pub(crate) operation_blocker: OperationBlocker,
+    /// 操作遮罩层开始时间；用于延迟显示遮罩层，避免快速完成时一闪而过。
+    pub(crate) operation_blocker_started: Option<Instant>,
     operation_kind: OperationKind,
     pub(crate) loading: RepositoryLoading,
     pub(crate) repository_load_id: u64,
@@ -916,6 +918,7 @@ impl RepoTabState {
             browse: BrowseState::default(),
             busy: false,
             operation_blocker: OperationBlocker::None,
+            operation_blocker_started: None,
             operation_kind: OperationKind::Local,
             loading: RepositoryLoading::default(),
             repository_load_id: 0,
@@ -2476,6 +2479,10 @@ impl RepositoryView {
                 let now = Instant::now();
                 self.feedbacks.retain(|feedback| !feedback.is_expired(now));
                 self.sync_conflict_editor_into_state();
+                // 操作遮罩层有延迟显示阈值；UiTick 到达阈值时触发重绘让遮罩层出现。
+                if self.active_operation_blocker_message().is_some() {
+                    cx.notify();
+                }
             }
             UiEvent::OperationStarted { tab_id, message } => {
                 self.apply_status_event(tab_id, |this| {
@@ -2500,6 +2507,7 @@ impl RepositoryView {
                     if load_id == this.repository_load_id {
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
+                        this.operation_blocker_started = None;
                         this.loading = RepositoryLoading {
                             metadata: true,
                             status_fast: true,
@@ -2533,6 +2541,7 @@ impl RepositoryView {
                     if load_id == this.repository_load_id {
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
+                        this.operation_blocker_started = None;
                         this.loading.metadata = false;
                         this.status = message;
                         this.merge_metadata_snapshot(snapshot);
@@ -2595,6 +2604,7 @@ impl RepositoryView {
                     self.apply_status_event(Some(tab_id), |this| {
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
+                        this.operation_blocker_started = None;
                         this.operation_kind = OperationKind::Local;
                     });
                 }
@@ -2616,6 +2626,7 @@ impl RepositoryView {
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
+                    this.operation_blocker_started = None;
                     this.remote_branch_operation.refreshing = false;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
@@ -2691,6 +2702,7 @@ impl RepositoryView {
                         should_notify = true;
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
+                        this.operation_blocker_started = None;
                         this.operation_kind = OperationKind::Local;
                         this.loading = RepositoryLoading::default();
                         this.status = message;
@@ -2718,6 +2730,7 @@ impl RepositoryView {
                 let toast_message = message.clone();
                 self.busy = false;
                 self.operation_blocker = OperationBlocker::None;
+                self.operation_blocker_started = None;
                 self.credential_records = records;
                 self.status = message;
                 self.last_error = None;
@@ -3142,6 +3155,7 @@ impl RepositoryView {
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
+                    this.operation_blocker_started = None;
                     this.remote_branch_operation.refreshing = false;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
@@ -3180,6 +3194,7 @@ impl RepositoryView {
                 let toast_message = message.clone();
                 self.busy = false;
                 self.operation_blocker = OperationBlocker::None;
+                self.operation_blocker_started = None;
                 self.status = message;
                 self.last_error = None;
                 self.notify_success(toast_message, cx);
@@ -3202,6 +3217,7 @@ impl RepositoryView {
                 self.with_tab_context(tab_id, |this| {
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
+                    this.operation_blocker_started = None;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
                     this.status = message;
@@ -4790,6 +4806,7 @@ impl RepositoryView {
             tab.repo_path = Some(path.clone());
             tab.busy = true;
             tab.operation_blocker = OperationBlocker::None;
+            tab.operation_blocker_started = None;
             tab.operation_kind = OperationKind::from_message(started);
             tab.loading = RepositoryLoading::default();
             tab.branch_sync_status = None;
@@ -5260,6 +5277,11 @@ impl RepositoryView {
             this.loading = RepositoryLoading::default();
             this.busy = true;
             this.operation_blocker = blocker;
+            this.operation_blocker_started = if blocker.blocks_interaction() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             this.operation_kind = OperationKind::from_message(&started);
             this.status = started.clone();
             this.last_error = None;
@@ -5516,6 +5538,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn checkout(&mut self, name: String) {
+        self.close_browse_if_comparing();
         self.with_repo_blocking("切换分支完成", move |service, repo| {
             service.checkout_branch(repo, &BranchName::new(name))
         });
@@ -5557,12 +5580,14 @@ impl RepositoryView {
     }
 
     pub(crate) fn checkout_remote_branch(&mut self, name: String) {
+        self.close_browse_if_comparing();
         self.with_repo_blocking("远端分支已拉取到本地", move |service, repo| {
             service.checkout_remote_branch(repo, &BranchName::new(name))
         });
     }
 
     pub(crate) fn checkout_tag(&mut self, name: String) {
+        self.close_browse_if_comparing();
         self.with_repo_blocking("检出标签完成", move |service, repo| {
             service.checkout_tag(repo, &TagName::new(name))
         });
@@ -5755,6 +5780,11 @@ impl RepositoryView {
             this.loading = RepositoryLoading::default();
             this.busy = true;
             this.operation_blocker = blocker;
+            this.operation_blocker_started = if blocker.blocks_interaction() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             this.operation_kind = OperationKind::from_message(started);
             this.status = started.to_string();
             this.last_error = None;
@@ -6640,6 +6670,14 @@ impl RepositoryView {
         self.status = "已退出分支浏览".to_string();
     }
 
+    /// 对比视图依赖具体分支的差异；切换分支/检出后旧差异会失效，
+    /// 命中对比视图时关闭它，回到工作区，让新 HEAD 的状态正常展示。
+    fn close_browse_if_comparing(&mut self) {
+        if self.main_mode == MainMode::Browse && self.browse.list_mode == BrowseListMode::Compare {
+            self.close_browse();
+        }
+    }
+
     /// 将鼠标 Y 坐标映射到内容行索引（基于 uniform_list 滚动偏移与行高）。
     fn browse_row_for_mouse_y(&self, y: Pixels, line_count: usize) -> usize {
         let scroll = self.uniform_scroll_handle("browse-content-scroll");
@@ -7269,6 +7307,11 @@ impl RepositoryView {
             this.loading = RepositoryLoading::default();
             this.busy = true;
             this.operation_blocker = blocker;
+            this.operation_blocker_started = if blocker.blocks_interaction() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             this.operation_kind = OperationKind::from_message(started);
             this.status = started.to_string();
             this.last_error = None;

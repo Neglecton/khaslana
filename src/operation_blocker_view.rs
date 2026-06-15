@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use gpui::{CursorStyle, Div, IntoElement, MouseButton, div, prelude::*, px, rgb, rgba};
 
 use crate::{RepositoryView, ui::theme as ui_theme};
@@ -15,8 +17,24 @@ impl OperationBlocker {
     }
 }
 
-pub(crate) fn should_render_operation_blocker(blocker: OperationBlocker, busy: bool) -> bool {
-    blocker.blocks_interaction() && busy
+/// 遮罩层延迟显示的阈值：操作开始后经过该时长仍未完成，才渲染遮罩层。
+/// 交互阻断（鼠标捕获、文本框禁用）仍立即生效，此值只影响视觉遮罩层。
+/// 用于避免切换分支等本地快速操作一闪而过的闪烁。
+pub(crate) const OPERATION_BLOCKER_VISIBLE_DELAY: Duration = Duration::from_millis(300);
+
+pub(crate) fn should_render_operation_blocker(
+    blocker: OperationBlocker,
+    busy: bool,
+    started: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if !(blocker.blocks_interaction() && busy) {
+        return false;
+    }
+    match started {
+        Some(started) => now.saturating_duration_since(started) >= OPERATION_BLOCKER_VISIBLE_DELAY,
+        None => true,
+    }
 }
 
 pub(crate) fn operation_blocker_overlay(message: impl Into<gpui::SharedString>, phase: u64) -> Div {
@@ -98,7 +116,13 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<gpui::SharedString>, 
 impl RepositoryView {
     pub(crate) fn active_operation_blocker_message(&self) -> Option<String> {
         let tab = self.active_tab_state();
-        should_render_operation_blocker(tab.operation_blocker, tab.busy).then(|| tab.status.clone())
+        should_render_operation_blocker(
+            tab.operation_blocker,
+            tab.busy,
+            tab.operation_blocker_started,
+            Instant::now(),
+        )
+        .then(|| tab.status.clone())
     }
 
     pub(crate) fn render_operation_blocker(&self) -> impl IntoElement {
@@ -112,21 +136,58 @@ impl RepositoryView {
 
 #[cfg(test)]
 mod tests {
-    use super::{OperationBlocker, should_render_operation_blocker};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        OPERATION_BLOCKER_VISIBLE_DELAY, OperationBlocker, should_render_operation_blocker,
+    };
 
     #[test]
-    fn operation_blocker_renders_only_when_modal_and_busy() {
+    fn operation_blocker_renders_only_when_modal_and_busy_and_delay_elapsed() {
+        let now = Instant::now();
+
+        // 无 blocker，即使忙碌也不渲染。
         assert!(!should_render_operation_blocker(
             OperationBlocker::None,
-            true
+            true,
+            Some(now),
+            now,
         ));
+
+        // Modal 但不忙碌，不渲染。
         assert!(!should_render_operation_blocker(
             OperationBlocker::Modal,
-            false
+            false,
+            Some(now),
+            now,
         ));
+
+        // Modal 且忙碌，但延迟未到，不渲染。
+        let started = now;
+        let before_delay = now + Duration::from_millis(100);
+        assert!(before_delay > started);
+        assert!(!should_render_operation_blocker(
+            OperationBlocker::Modal,
+            true,
+            Some(started),
+            before_delay,
+        ));
+
+        // Modal 且忙碌，延迟已到，渲染。
+        let after_delay = started + OPERATION_BLOCKER_VISIBLE_DELAY;
         assert!(should_render_operation_blocker(
             OperationBlocker::Modal,
-            true
+            true,
+            Some(started),
+            after_delay,
+        ));
+
+        // started 为 None（旧状态兼容），Modal 且忙碌时直接渲染，不等待延迟。
+        assert!(should_render_operation_blocker(
+            OperationBlocker::Modal,
+            true,
+            None,
+            now,
         ));
     }
 }

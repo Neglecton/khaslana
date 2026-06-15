@@ -222,7 +222,10 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .p_2()
+            // 右侧留出与滚动条（8px 厚 + 2px 边距）等宽的内边距，避免行白框右端被滚动条压住。
+            .pl_2()
+            .py_2()
+            .pr(px(10.0))
             .bg(rgb(ui_theme::PANEL_BG))
             .child(
                 uniform_list(
@@ -407,6 +410,9 @@ impl RepositoryView {
                 div()
                     .id(format!("browse-compare-file:{}", row.path))
                     .flex()
+                    .flex_none()
+                    .w_full()
+                    .min_w(px(0.0))
                     .items_center()
                     .gap_2()
                     .h(px(CHANGE_ROW_HEIGHT))
