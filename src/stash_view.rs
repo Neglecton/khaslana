@@ -57,7 +57,7 @@ impl RepositoryView {
         let include_untracked = self.stash_include_untracked;
         let keep_index = self.stash_keep_index;
         self.close_dialog();
-        self.with_repo("已贮藏当前修改", move |service, repo| {
+        self.with_repo_blocking("已贮藏当前修改", move |service, repo| {
             service.save_stash(repo, &message, include_untracked, keep_index)
         });
     }

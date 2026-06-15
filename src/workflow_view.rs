@@ -13,9 +13,9 @@ use khaslana::{
 };
 
 use crate::{
-    FieldId, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget, ScrollbarMode,
-    TextFieldState, UiEvent, placeholder_row, scrollable_frame_when, section_header_action,
-    send_ui_event,
+    FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
+    ScrollbarMode, TextFieldState, UiEvent, placeholder_row, scrollable_frame_when,
+    section_header_action, send_ui_event,
     system::open_directory,
     tasks::TaskKind,
     ui::{
@@ -190,6 +190,7 @@ impl RepositoryView {
             this.repository_load_id = this.repository_load_id.wrapping_add(1);
             this.loading = RepositoryLoading::default();
             this.busy = true;
+            this.operation_blocker = OperationBlocker::Modal;
             this.status = "正在运行工作流".to_string();
             this.last_error = None;
         });

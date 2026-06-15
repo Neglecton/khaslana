@@ -12,7 +12,7 @@ use crate::{RepositoryView, ui::theme as ui_theme};
 impl RepositoryView {
     /// 把当前分支变基到指定分支之上。由侧边栏右键菜单调用。
     pub(crate) fn rebase_branch(&mut self, name: String) {
-        self.with_repo("变基完成", move |service, repo| {
+        self.with_repo_blocking("变基完成", move |service, repo| {
             match service.rebase_branch(repo, &BranchName::new(name))? {
                 RebaseOutcome::Completed(snapshot) => Ok(snapshot),
                 RebaseOutcome::Conflicts { snapshot, .. } => {
@@ -25,7 +25,7 @@ impl RepositoryView {
 
     /// 变基遇到冲突后，用户已解决所有冲突，继续重放下一个提交。
     pub(crate) fn rebase_continue(&mut self) {
-        self.with_repo("变基完成", move |service, repo| {
+        self.with_repo_blocking("变基完成", move |service, repo| {
             match service.rebase_continue(repo)? {
                 RebaseOutcome::Completed(snapshot) => Ok(snapshot),
                 RebaseOutcome::Conflicts { snapshot, .. } => {
@@ -37,7 +37,7 @@ impl RepositoryView {
 
     /// 跳过当前冲突提交。
     pub(crate) fn rebase_skip(&mut self) {
-        self.with_repo("变基完成", move |service, repo| {
+        self.with_repo_blocking("变基完成", move |service, repo| {
             match service.rebase_skip(repo)? {
                 RebaseOutcome::Completed(snapshot) => Ok(snapshot),
                 RebaseOutcome::Conflicts { snapshot, .. } => {
@@ -49,7 +49,7 @@ impl RepositoryView {
 
     /// 中止变基，回到变基前状态。
     pub(crate) fn rebase_abort(&mut self) {
-        self.with_repo("变基已中止", move |service, repo| {
+        self.with_repo_blocking("变基已中止", move |service, repo| {
             service.rebase_abort(repo)
         });
     }

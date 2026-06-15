@@ -5,6 +5,7 @@ mod browse_view;
 mod conflicts;
 mod diff_view;
 mod history_view;
+mod operation_blocker_view;
 mod proxy_view;
 mod rebase_view;
 mod remote_branch_operation;
@@ -53,6 +54,7 @@ use khaslana::{
     test_credential_connection,
 };
 use lru::LruCache;
+use operation_blocker_view::OperationBlocker;
 use remote_branch_operation::{
     RemoteBranchOperationKind, RemoteBranchOperationState, default_remote_branch_for,
     local_branch_by_name, remote_branch_dialog_defaults, remote_branch_exists,
@@ -859,6 +861,7 @@ struct RepoTabState {
     // 分支浏览模式状态
     pub(crate) browse: BrowseState,
     pub(crate) busy: bool,
+    pub(crate) operation_blocker: OperationBlocker,
     operation_kind: OperationKind,
     pub(crate) loading: RepositoryLoading,
     pub(crate) repository_load_id: u64,
@@ -901,6 +904,7 @@ impl RepoTabState {
             full_file_view: false,
             browse: BrowseState::default(),
             busy: false,
+            operation_blocker: OperationBlocker::None,
             operation_kind: OperationKind::Local,
             loading: RepositoryLoading::default(),
             repository_load_id: 0,
@@ -2476,6 +2480,7 @@ impl RepositoryView {
                 self.with_tab_context(tab_id, |this| {
                     if load_id == this.repository_load_id {
                         this.busy = false;
+                        this.operation_blocker = OperationBlocker::None;
                         this.loading = RepositoryLoading {
                             metadata: true,
                             status_fast: true,
@@ -2508,6 +2513,7 @@ impl RepositoryView {
                 self.with_tab_context(tab_id, |this| {
                     if load_id == this.repository_load_id {
                         this.busy = false;
+                        this.operation_blocker = OperationBlocker::None;
                         this.loading.metadata = false;
                         this.status = message;
                         this.merge_metadata_snapshot(snapshot);
@@ -2569,6 +2575,7 @@ impl RepositoryView {
                 {
                     self.apply_status_event(Some(tab_id), |this| {
                         this.busy = false;
+                        this.operation_blocker = OperationBlocker::None;
                         this.operation_kind = OperationKind::Local;
                     });
                 }
@@ -2589,6 +2596,7 @@ impl RepositoryView {
                 let mut sync_request = None;
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
+                    this.operation_blocker = OperationBlocker::None;
                     this.remote_branch_operation.refreshing = false;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
@@ -2663,6 +2671,7 @@ impl RepositoryView {
                     if load_id == this.repository_load_id {
                         should_notify = true;
                         this.busy = false;
+                        this.operation_blocker = OperationBlocker::None;
                         this.operation_kind = OperationKind::Local;
                         this.loading = RepositoryLoading::default();
                         this.status = message;
@@ -2689,6 +2698,7 @@ impl RepositoryView {
             UiEvent::CredentialRecordsLoaded { records, message } => {
                 let toast_message = message.clone();
                 self.busy = false;
+                self.operation_blocker = OperationBlocker::None;
                 self.credential_records = records;
                 self.status = message;
                 self.last_error = None;
@@ -3071,6 +3081,7 @@ impl RepositoryView {
                 let toast_message = error.clone();
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
+                    this.operation_blocker = OperationBlocker::None;
                     this.remote_branch_operation.refreshing = false;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
@@ -3108,6 +3119,7 @@ impl RepositoryView {
             UiEvent::ProxyTestFinished { message } => {
                 let toast_message = message.clone();
                 self.busy = false;
+                self.operation_blocker = OperationBlocker::None;
                 self.status = message;
                 self.last_error = None;
                 self.notify_success(toast_message, cx);
@@ -3129,6 +3141,7 @@ impl RepositoryView {
                 let mut sync_request = None;
                 self.with_tab_context(tab_id, |this| {
                     this.busy = false;
+                    this.operation_blocker = OperationBlocker::None;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
                     this.status = message;
@@ -3613,7 +3626,24 @@ impl RepositoryView {
     }
 
     fn focused_text_field(&self, window: &Window, cx: &App) -> Option<FieldId> {
-        self.focused_field(window, cx)
+        let field = self.focused_field(window, cx)?;
+        if self.active_operation_blocker_message().is_some()
+            && !self.operation_blocker_allows_text_field(field)
+        {
+            return None;
+        }
+        Some(field)
+    }
+
+    fn operation_blocker_allows_text_field(&self, field: FieldId) -> bool {
+        self.pending_credential.is_some()
+            && matches!(
+                field,
+                FieldId::CredentialUsername
+                    | FieldId::CredentialSecret
+                    | FieldId::CredentialKeyPath
+                    | FieldId::CredentialPassphrase
+            )
     }
 
     fn text_backspace(&mut self, _: &TextBackspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -4699,6 +4729,7 @@ impl RepositoryView {
             tab.repository_load_id = load_id;
             tab.repo_path = Some(path.clone());
             tab.busy = true;
+            tab.operation_blocker = OperationBlocker::None;
             tab.operation_kind = OperationKind::from_message(started);
             tab.loading = RepositoryLoading::default();
             tab.branch_sync_status = None;
@@ -5050,6 +5081,24 @@ impl RepositoryView {
             + Send
             + 'static,
     {
+        self.with_repo_with_blocker(label, OperationBlocker::None, f);
+    }
+
+    pub(crate) fn with_repo_blocking<F>(&mut self, label: &'static str, f: F)
+    where
+        F: FnOnce(GitService, &mut Repository) -> khaslana::Result<RepositorySnapshot>
+            + Send
+            + 'static,
+    {
+        self.with_repo_with_blocker(label, OperationBlocker::Modal, f);
+    }
+
+    fn with_repo_with_blocker<F>(&mut self, label: &'static str, blocker: OperationBlocker, f: F)
+    where
+        F: FnOnce(GitService, &mut Repository) -> khaslana::Result<RepositorySnapshot>
+            + Send
+            + 'static,
+    {
         let Some(tab_id) = self.active_tab_id() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -5060,34 +5109,39 @@ impl RepositoryView {
         };
         let service = self.service_for_tab(tab_id);
         let snapshot_service = service.clone();
-        self.spawn_operation_for_tab(Some(tab_id), started_message_for_label(label), move || {
-            let mut repo = Repository::open(path)?;
-            match f(service, &mut repo) {
-                Ok(snapshot) => Ok(UiEvent::OperationFinished {
-                    tab_id: Some(tab_id),
-                    message: label.to_string(),
-                    snapshot: Some(snapshot),
-                    diff: None,
-                }),
-                Err(err) => {
-                    let snapshot = snapshot_service.snapshot_after_operation(&mut repo).ok();
-                    if let Some(snapshot) = snapshot
-                        && !snapshot.conflicts.is_empty()
-                    {
-                        return Ok(UiEvent::OperationFinished {
-                            tab_id: Some(tab_id),
-                            message: conflicts::conflict_status_message(
-                                label,
-                                snapshot.conflicts.len(),
-                            ),
-                            snapshot: Some(snapshot),
-                            diff: None,
-                        });
+        self.spawn_operation_for_tab_with_blocker(
+            Some(tab_id),
+            started_message_for_label(label),
+            blocker,
+            move || {
+                let mut repo = Repository::open(path)?;
+                match f(service, &mut repo) {
+                    Ok(snapshot) => Ok(UiEvent::OperationFinished {
+                        tab_id: Some(tab_id),
+                        message: label.to_string(),
+                        snapshot: Some(snapshot),
+                        diff: None,
+                    }),
+                    Err(err) => {
+                        let snapshot = snapshot_service.snapshot_after_operation(&mut repo).ok();
+                        if let Some(snapshot) = snapshot
+                            && !snapshot.conflicts.is_empty()
+                        {
+                            return Ok(UiEvent::OperationFinished {
+                                tab_id: Some(tab_id),
+                                message: conflicts::conflict_status_message(
+                                    label,
+                                    snapshot.conflicts.len(),
+                                ),
+                                snapshot: Some(snapshot),
+                                diff: None,
+                            });
+                        }
+                        Err(err)
                     }
-                    Err(err)
                 }
-            }
-        });
+            },
+        );
     }
 
     fn with_repo_keep_dialog<F>(&mut self, label: &'static str, f: F)
@@ -5096,11 +5150,33 @@ impl RepositoryView {
             + Send
             + 'static,
     {
-        self.with_repo_keep_dialog_owned(label.to_string(), f)
+        self.with_repo_keep_dialog_owned_with_blocker(label.to_string(), OperationBlocker::None, f)
     }
 
-    fn with_repo_keep_dialog_owned<F>(&mut self, label: String, f: F)
+    fn with_repo_keep_dialog_blocking<F>(&mut self, label: &'static str, f: F)
     where
+        F: FnOnce(GitService, &mut Repository) -> khaslana::Result<RepositorySnapshot>
+            + Send
+            + 'static,
+    {
+        self.with_repo_keep_dialog_owned_with_blocker(label.to_string(), OperationBlocker::Modal, f)
+    }
+
+    fn with_repo_keep_dialog_owned_blocking<F>(&mut self, label: String, f: F)
+    where
+        F: FnOnce(GitService, &mut Repository) -> khaslana::Result<RepositorySnapshot>
+            + Send
+            + 'static,
+    {
+        self.with_repo_keep_dialog_owned_with_blocker(label, OperationBlocker::Modal, f)
+    }
+
+    fn with_repo_keep_dialog_owned_with_blocker<F>(
+        &mut self,
+        label: String,
+        blocker: OperationBlocker,
+        f: F,
+    ) where
         F: FnOnce(GitService, &mut Repository) -> khaslana::Result<RepositorySnapshot>
             + Send
             + 'static,
@@ -5123,6 +5199,7 @@ impl RepositoryView {
             this.repository_load_id = this.repository_load_id.wrapping_add(1);
             this.loading = RepositoryLoading::default();
             this.busy = true;
+            this.operation_blocker = blocker;
             this.operation_kind = OperationKind::from_message(&started);
             this.status = started.clone();
             this.last_error = None;
@@ -5337,7 +5414,7 @@ impl RepositoryView {
             RemoteBranchOperationKind::Pull => {
                 if use_rebase {
                     // 用变基代替合并
-                    self.with_repo("变基拉取完成", move |service, repo| {
+                    self.with_repo_blocking("变基拉取完成", move |service, repo| {
                         service.pull_branch_rebase(
                             repo,
                             &RemoteName::new(remote),
@@ -5345,7 +5422,7 @@ impl RepositoryView {
                         )
                     });
                 } else {
-                    self.with_repo("拉取完成", move |service, repo| {
+                    self.with_repo_blocking("拉取完成", move |service, repo| {
                         service.pull_branch(
                             repo,
                             &RemoteName::new(remote),
@@ -5379,7 +5456,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn checkout(&mut self, name: String) {
-        self.with_repo("切换分支完成", move |service, repo| {
+        self.with_repo_blocking("切换分支完成", move |service, repo| {
             service.checkout_branch(repo, &BranchName::new(name))
         });
     }
@@ -5414,31 +5491,31 @@ impl RepositoryView {
     }
 
     pub(crate) fn merge_branch(&mut self, name: String) {
-        self.with_repo("合并完成", move |service, repo| {
+        self.with_repo_blocking("合并完成", move |service, repo| {
             service.merge_branch(repo, &BranchName::new(name))
         });
     }
 
     pub(crate) fn checkout_remote_branch(&mut self, name: String) {
-        self.with_repo("远端分支已拉取到本地", move |service, repo| {
+        self.with_repo_blocking("远端分支已拉取到本地", move |service, repo| {
             service.checkout_remote_branch(repo, &BranchName::new(name))
         });
     }
 
     pub(crate) fn checkout_tag(&mut self, name: String) {
-        self.with_repo("检出标签完成", move |service, repo| {
+        self.with_repo_blocking("检出标签完成", move |service, repo| {
             service.checkout_tag(repo, &TagName::new(name))
         });
     }
 
     pub(crate) fn apply_stash(&mut self, index: usize) {
-        self.with_repo("应用贮藏完成", move |service, repo| {
+        self.with_repo_blocking("应用贮藏完成", move |service, repo| {
             service.apply_stash(repo, index)
         });
     }
 
     pub(crate) fn pop_stash(&mut self, index: usize) {
-        self.with_repo("弹出贮藏完成", move |service, repo| {
+        self.with_repo_blocking("弹出贮藏完成", move |service, repo| {
             service.pop_stash(repo, index)
         });
     }
@@ -5503,25 +5580,25 @@ impl RepositoryView {
     }
 
     fn reset_to_commit(&mut self, oid: String, mode: ResetMode) {
-        self.with_repo("分支已重置", move |service, repo| {
+        self.with_repo_blocking("分支已重置", move |service, repo| {
             service.reset_to_commit(repo, &oid, mode)
         });
     }
 
     fn revert_commit(&mut self, oid: String) {
-        self.with_repo("回滚提交完成", move |service, repo| {
+        self.with_repo_blocking("回滚提交完成", move |service, repo| {
             service.revert_commit(repo, &oid)
         });
     }
 
     fn revert_merge_commit(&mut self, oid: String) {
-        self.with_repo("撤销合并完成", move |service, repo| {
+        self.with_repo_blocking("撤销合并完成", move |service, repo| {
             service.revert_merge_commit(repo, &oid)
         });
     }
 
     fn uncommit_to_staged(&mut self, oid: String) {
-        self.with_repo("提交已还原到暂存区", move |service, repo| {
+        self.with_repo_blocking("提交已还原到暂存区", move |service, repo| {
             service.uncommit_to_staged(repo, &oid)
         });
     }
@@ -5566,9 +5643,10 @@ impl RepositoryView {
             tab.repository_load_id = tab.repository_load_id.wrapping_add(1);
             tab.repository_load_id
         };
-        self.spawn_operation_without_load_bump(
+        self.spawn_operation_without_load_bump_with_blocker(
             Some(tab_id),
             "正在回滚文件更改",
+            OperationBlocker::Modal,
             move || {
                 let mut repo = Repository::open(repo_path)?;
                 let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -5589,10 +5667,11 @@ impl RepositoryView {
         );
     }
 
-    fn spawn_operation_without_load_bump<F>(
+    fn spawn_operation_without_load_bump_with_blocker<F>(
         &mut self,
         tab_id: Option<RepoTabId>,
         started: &'static str,
+        blocker: OperationBlocker,
         f: F,
     ) where
         F: FnOnce() -> khaslana::Result<UiEvent> + Send + 'static,
@@ -5615,6 +5694,7 @@ impl RepositoryView {
         self.apply_status_event(tab_id, |this| {
             this.loading = RepositoryLoading::default();
             this.busy = true;
+            this.operation_blocker = blocker;
             this.operation_kind = OperationKind::from_message(started);
             this.status = started.to_string();
             this.last_error = None;
@@ -6785,7 +6865,7 @@ impl RepositoryView {
         self.commit_message.clear();
         self.scroll_handle("commit-message-input-scroll")
             .set_offset(point(px(0.0), px(0.0)));
-        self.with_repo("提交完成", move |service, repo| {
+        self.with_repo_blocking("提交完成", move |service, repo| {
             service.commit(repo, &CommitMessage::new(message))
         });
     }
@@ -6812,27 +6892,32 @@ impl RepositoryView {
         self.scroll_handle("commit-message-input-scroll")
             .set_offset(point(px(0.0), px(0.0)));
         let service = self.service_for_tab(tab_id);
-        self.spawn_operation_for_tab(Some(tab_id), "正在提交并推送", move || {
-            let mut repo = Repository::open(path)?;
-            match service.commit_and_push(
-                &mut repo,
-                &CommitMessage::new(message),
-                &RemoteName::new(remote),
-            )? {
-                Ok(snapshot) => Ok(UiEvent::OperationFinished {
-                    tab_id: Some(tab_id),
-                    message: "提交并推送完成".to_string(),
-                    snapshot: Some(snapshot),
-                    diff: None,
-                }),
-                Err((snapshot, err)) => Ok(UiEvent::OperationFinished {
-                    tab_id: Some(tab_id),
-                    message: format!("提交已完成，但推送失败：{err}"),
-                    snapshot: Some(snapshot),
-                    diff: None,
-                }),
-            }
-        });
+        self.spawn_operation_for_tab_with_blocker(
+            Some(tab_id),
+            "正在提交并推送",
+            OperationBlocker::Modal,
+            move || {
+                let mut repo = Repository::open(path)?;
+                match service.commit_and_push(
+                    &mut repo,
+                    &CommitMessage::new(message),
+                    &RemoteName::new(remote),
+                )? {
+                    Ok(snapshot) => Ok(UiEvent::OperationFinished {
+                        tab_id: Some(tab_id),
+                        message: "提交并推送完成".to_string(),
+                        snapshot: Some(snapshot),
+                        diff: None,
+                    }),
+                    Err((snapshot, err)) => Ok(UiEvent::OperationFinished {
+                        tab_id: Some(tab_id),
+                        message: format!("提交已完成，但推送失败：{err}"),
+                        snapshot: Some(snapshot),
+                        diff: None,
+                    }),
+                }
+            },
+        );
     }
 
     pub(crate) fn load_diff(&mut self, path: String, scope: DiffScope) {
@@ -6968,6 +7053,18 @@ impl RepositoryView {
     where
         F: FnOnce() -> khaslana::Result<UiEvent> + Send + 'static,
     {
+        self.spawn_operation_for_tab_with_blocker(tab_id, started, OperationBlocker::None, f);
+    }
+
+    fn spawn_operation_for_tab_with_blocker<F>(
+        &mut self,
+        tab_id: Option<RepoTabId>,
+        started: &'static str,
+        blocker: OperationBlocker,
+        f: F,
+    ) where
+        F: FnOnce() -> khaslana::Result<UiEvent> + Send + 'static,
+    {
         if let Some(tab_id) = tab_id
             && self.tab(tab_id).is_none()
         {
@@ -6987,6 +7084,7 @@ impl RepositoryView {
             this.repository_load_id = this.repository_load_id.wrapping_add(1);
             this.loading = RepositoryLoading::default();
             this.busy = true;
+            this.operation_blocker = blocker;
             this.operation_kind = OperationKind::from_message(started);
             this.status = started.to_string();
             this.last_error = None;
@@ -7172,6 +7270,12 @@ impl RepositoryView {
         .on_action(cx.listener(Self::text_copy))
         .on_action(cx.listener(Self::text_cut))
         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+            if this.active_operation_blocker_message().is_some()
+                && !this.operation_blocker_allows_text_field(id)
+            {
+                cx.stop_propagation();
+                return;
+            }
             if event.keystroke.key.as_str() == "enter" {
                 this.submit_focused_field(id);
                 cx.stop_propagation();
@@ -7253,6 +7357,12 @@ impl RepositoryView {
             .on_action(cx.listener(Self::text_cut))
             .on_action(cx.listener(Self::text_submit))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if this.active_operation_blocker_message().is_some()
+                    && !this.operation_blocker_allows_text_field(id)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key.as_str() == "enter"
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.platform
@@ -7363,6 +7473,12 @@ impl RepositoryView {
             .on_action(cx.listener(Self::text_cut))
             .on_action(cx.listener(Self::text_submit))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if this.active_operation_blocker_message().is_some()
+                    && !this.operation_blocker_allows_text_field(FieldId::ConflictEditor)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key.as_str() == "enter"
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.platform
@@ -10830,6 +10946,7 @@ impl Render for RepositoryView {
             .child(self.render_toolbar_more_menu(cx))
             .child(self.render_dialogs(window, cx))
             .child(self.render_credential_context_menu(cx))
+            .child(self.render_operation_blocker())
             .child(self.render_credentials(window, cx))
             .child(self.render_feedback_layer(cx))
     }

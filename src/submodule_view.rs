@@ -189,9 +189,10 @@ impl RepositoryView {
             self.last_error = Some("请先打开一个仓库".into());
             return;
         }
-        self.with_repo_keep_dialog("子模块已同步记录版本", move |service, repo| {
-            service.update_submodules(repo)
-        });
+        self.with_repo_keep_dialog_blocking(
+            "子模块已同步记录版本",
+            move |service, repo| service.update_submodules(repo),
+        );
     }
 
     pub(crate) fn update_submodules_to_remote_latest(&mut self) {
@@ -199,9 +200,10 @@ impl RepositoryView {
             self.last_error = Some("请先打开一个仓库".into());
             return;
         }
-        self.with_repo_keep_dialog("子模块已更新到远端最新", move |service, repo| {
-            service.update_submodules_to_remote_latest(repo)
-        });
+        self.with_repo_keep_dialog_blocking(
+            "子模块已更新到远端最新",
+            move |service, repo| service.update_submodules_to_remote_latest(repo),
+        );
     }
 
     pub(crate) fn update_submodule_to_remote_latest(&mut self, name: String) {
@@ -210,7 +212,7 @@ impl RepositoryView {
             return;
         }
         let label = format!("子模块 {name} 已更新到远端最新");
-        self.with_repo_keep_dialog_owned(label, move |service, repo| {
+        self.with_repo_keep_dialog_owned_blocking(label, move |service, repo| {
             service.update_submodule_to_remote_latest(repo, &name)
         });
     }
