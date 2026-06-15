@@ -763,6 +763,9 @@ pub(crate) struct BrowseState {
     pub selected_file: Option<PathBuf>,
     /// 比较模式下的差异文件列表。
     pub compare_files: Vec<BrowseCompareFile>,
+    /// 比较模式下差异文件树的展开目录集合（git 风格相对路径）。
+    /// 空集合表示默认全部展开；用户首次折叠时固化为显式集合。
+    pub compare_expanded: HashSet<String>,
     /// 比较模式下当前选中的差异文件元数据。
     pub selected_compare_file: Option<BrowseCompareFile>,
     /// 只读内容视图的数据。
@@ -6424,6 +6427,8 @@ impl RepositoryView {
         let commit_oid = target.commit_oid.clone();
         self.browse.compare_loading = true;
         self.browse.compare_files.clear();
+        // 重新加载差异时清空展开状态，让新比较默认全部展开。
+        self.browse.compare_expanded.clear();
         self.browse.selected_file = None;
         self.browse.selected_compare_file = None;
         self.browse.content = None;
@@ -6456,6 +6461,21 @@ impl RepositoryView {
                 ),
             }
         });
+    }
+
+    /// 展开/折叠比较差异文件树中的目录。
+    /// 第一次操作时把默认全展开固化成显式集合，再增删目标目录，
+    /// 避免其它目录意外折叠。
+    pub(crate) fn toggle_compare_dir(&mut self, dir: String) {
+        if self.browse.compare_expanded.is_empty() {
+            self.browse.compare_expanded =
+                browse_compare_view::all_compare_dirs(&self.browse.compare_files);
+        }
+        if self.browse.compare_expanded.contains(&dir) {
+            self.browse.compare_expanded.remove(&dir);
+        } else {
+            self.browse.compare_expanded.insert(dir);
+        }
     }
 
     /// 展开/折叠目录；展开时按需懒加载子树。

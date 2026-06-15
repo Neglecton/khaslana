@@ -1,15 +1,17 @@
 // 分支比较模式左侧差异文件列表 UI。
 //
-// 这里仅负责把 Git 服务层返回的差异文件扁平列表渲染出来；右侧内容/差异视图
-// 继续复用 browse_view.rs 中的浏览模式视图，避免重复实现 diff 与全文渲染逻辑。
+// 这里把 Git 服务层返回的差异文件扁平列表构造成目录嵌套文件树并渲染；
+// 右侧内容/差异视图继续复用 browse_view.rs 中的浏览模式视图，避免重复实现
+// diff 与全文渲染逻辑。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use gpui::{
     Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, div, prelude::*, px,
     rgb, uniform_list,
 };
-use khaslana::BrowseCompareFile;
+use khaslana::{BrowseCompareFile, ChangeState};
 
 use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
@@ -20,10 +22,169 @@ use crate::{
     },
 };
 
-pub(crate) fn browse_compare_file_display(file: &BrowseCompareFile) -> String {
-    match file.old_path.as_deref() {
-        Some(old_path) if old_path != file.path => format!("{old_path} → {}", file.path),
-        _ => file.path.clone(),
+/// 分支比较文件树中的一个可见行，目录和文件共用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompareTreeRow {
+    /// 用于点击定位；目录填目录路径，文件填文件 path。
+    pub path: String,
+    /// 显示用的名字：目录就是目录名，文件就是文件名。
+    pub name: String,
+    pub depth: usize,
+    pub kind: CompareTreeRowKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompareTreeRowKind {
+    /// 目录节点，expanded 表示当前是否展开。
+    Directory { expanded: bool },
+    /// 文件节点，保留原始差异文件信息以支持重命名展示和点击选中。
+    File {
+        status: ChangeState,
+        old_path: Option<String>,
+    },
+}
+
+/// 收集所有差异文件路径涉及的中间目录（git 风格相对路径）。
+/// 渲染时默认全部展开；用户首次折叠时再把该集合固化为显式展开状态。
+pub(crate) fn all_compare_dirs(files: &[BrowseCompareFile]) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for file in files {
+        collect_dirs(&file.path, &mut dirs);
+        // 重命名文件可能涉及不同目录，旧路径所在目录也需要能正确嵌套展示，
+        // 但显示名仍归属新路径所在目录，这里只按新路径构造目录树。
+    }
+    dirs
+}
+
+fn collect_dirs(path: &str, out: &mut HashSet<String>) {
+    let mut acc = String::new();
+    for segment in path.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        if acc.is_empty() {
+            acc = segment.to_string();
+        } else {
+            acc = format!("{acc}/{segment}");
+        }
+    }
+    // acc 现在等于 path 本身；逐步去掉最后一段，得到所有中间目录。
+    // 例如 "src/git/browse.rs" -> ["src", "src/git"]。
+    while let Some(idx) = acc.rfind('/') {
+        acc.truncate(idx);
+        if !acc.is_empty() {
+            out.insert(acc.clone());
+        }
+    }
+}
+
+/// 把差异文件扁平列表展平成带深度的可见行序列。
+///
+/// 目录排在文件之前，各自按名字排序；根目录本身不输出行。
+/// `expanded` 为空时默认全部展开（首次加载）。
+pub(crate) fn flatten_compare_files(
+    files: &[BrowseCompareFile],
+    expanded: &HashSet<String>,
+) -> Vec<CompareTreeRow> {
+    let default_all = expanded.is_empty();
+    let mut rows = Vec::new();
+    // 根 key 使用空字符串，与浏览模式 flatten_browse_tree 一致。
+    flatten_dir("", 0, files, expanded, default_all, &mut rows);
+    rows
+}
+
+fn flatten_dir(
+    dir: &str,
+    depth: usize,
+    files: &[BrowseCompareFile],
+    expanded: &HashSet<String>,
+    default_all: bool,
+    out: &mut Vec<CompareTreeRow>,
+) {
+    // 收集直接子项：子目录名 + 直接文件。
+    let mut subdirs: HashSet<String> = HashSet::new();
+    let mut direct_files: Vec<&BrowseCompareFile> = Vec::new();
+
+    for file in files {
+        // 只处理位于当前目录直接下层或更深层级的文件；不属于该目录的跳过，
+        // 避免 strip_prefix 失败时把根级文件误算进子目录。
+        let rest = if dir.is_empty() {
+            file.path.as_str()
+        } else {
+            match file.path.strip_prefix(&format!("{dir}/")) {
+                Some(rest) => rest,
+                None => continue,
+            }
+        };
+        if let Some(idx) = rest.find('/') {
+            // 直接子目录
+            let name = &rest[..idx];
+            let full = if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}/{name}")
+            };
+            subdirs.insert(full);
+        } else {
+            direct_files.push(file);
+        }
+    }
+
+    let mut subdirs: Vec<String> = subdirs.into_iter().collect();
+    subdirs.sort();
+    // 目录在前，文件在后。
+    for subdir in subdirs {
+        let name = subdir.rsplit('/').next().unwrap_or(&subdir).to_string();
+        let is_expanded = default_all || expanded.contains(&subdir);
+        out.push(CompareTreeRow {
+            path: subdir.clone(),
+            name,
+            depth,
+            kind: CompareTreeRowKind::Directory {
+                expanded: is_expanded,
+            },
+        });
+        if is_expanded {
+            flatten_dir(&subdir, depth + 1, files, expanded, default_all, out);
+        }
+    }
+
+    direct_files.sort_by(|a, b| {
+        let an = a.path.rsplit('/').next().unwrap_or(&a.path);
+        let bn = b.path.rsplit('/').next().unwrap_or(&b.path);
+        an.cmp(bn)
+    });
+    for file in direct_files {
+        let name = file
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.path)
+            .to_string();
+        out.push(CompareTreeRow {
+            path: file.path.clone(),
+            name,
+            depth,
+            kind: CompareTreeRowKind::File {
+                status: file.status.clone(),
+                old_path: file.old_path.clone(),
+            },
+        });
+    }
+}
+
+/// 文件名级别的显示文本；重命名展示为 `old_basename → new_basename`。
+pub(crate) fn compare_file_leaf_display(name: &str, old_path: Option<&str>) -> String {
+    match old_path {
+        Some(old) => {
+            let old_basename = old.rsplit('/').next().unwrap_or(old);
+            if old_basename == name {
+                name.to_string()
+            } else {
+                format!("{old_basename} → {name}")
+            }
+        }
+        None => name.to_string(),
     }
 }
 
@@ -49,7 +210,6 @@ impl RepositoryView {
             })
             .unwrap_or_default();
         let file_count = self.browse.compare_files.len();
-        let row_count = file_count.max(1);
         let has_target = self.browse.target.is_some();
         let content_present = file_count > 0;
         let handle = self.uniform_scroll_handle("browse-compare-scroll");
@@ -67,26 +227,35 @@ impl RepositoryView {
             .child(
                 uniform_list(
                     "browse-compare-list",
-                    row_count,
+                    file_count.max(1),
                     cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                        range
-                            .map(|index| {
-                                if this.browse.compare_files.is_empty() {
-                                    return placeholder_row(if !has_target {
+                        if this.browse.compare_files.is_empty() {
+                            return range
+                                .map(|_| {
+                                    placeholder_row(if !has_target {
                                         "正在解析引用..."
                                     } else if this.browse.compare_loading {
                                         "正在加载分支差异..."
                                     } else {
                                         "该分支与当前分支没有差异"
                                     })
-                                    .into_any_element();
-                                }
-                                this.browse
-                                    .compare_files
-                                    .get(index)
+                                    .into_any_element()
+                                })
+                                .collect::<Vec<_>>();
+                        }
+                        // 展开集合：空表示默认全部展开。
+                        let expanded = if this.browse.compare_expanded.is_empty() {
+                            all_compare_dirs(&this.browse.compare_files)
+                        } else {
+                            this.browse.compare_expanded.clone()
+                        };
+                        let rows = flatten_compare_files(&this.browse.compare_files, &expanded);
+                        range
+                            .map(move |index| {
+                                rows.get(index)
                                     .cloned()
-                                    .map(|file| {
-                                        this.browse_compare_file_row(file, cx).into_any_element()
+                                    .map(|row| {
+                                        this.browse_compare_tree_row(row, cx).into_any_element()
                                     })
                                     .unwrap_or_else(|| placeholder_row("").into_any_element())
                             })
@@ -157,73 +326,146 @@ impl RepositoryView {
             ))
     }
 
-    fn browse_compare_file_row(
+    /// 渲染文件树的一行（目录或文件）。
+    fn browse_compare_tree_row(
         &self,
-        file: BrowseCompareFile,
+        row: CompareTreeRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = self
-            .browse
-            .selected_file
-            .as_deref()
-            .map(|selected| selected == Path::new(&file.path))
-            .unwrap_or(false);
-        let status_label = file.status.label();
-        let status_color = change_state_color(&file.status);
-        let display_path = browse_compare_file_display(&file);
-        let file_for_click = file.clone();
+        let indent = px(12.0 * row.depth as f32);
+        let path_for_click = row.path.clone();
 
-        div()
-            .id(format!("browse-compare-file:{}", file.path))
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(CHANGE_ROW_HEIGHT))
-            .px_2()
-            .rounded_sm()
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
-            } else {
-                rgb(ui_theme::BORDER_MUTED)
-            })
-            .bg(if selected {
-                rgb(ui_theme::ROW_SELECTED)
-            } else {
-                rgb(ui_theme::SURFACE)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                    this.select_browse_compare_file(file_for_click.clone());
-                    cx.notify();
-                }),
-            )
-            .child(
+        match row.kind {
+            CompareTreeRowKind::Directory { expanded } => {
+                let caret = if expanded { "▼" } else { "▶" };
+                let icon = if expanded { "📂" } else { "📁" };
                 div()
+                    .id(format!("browse-compare-dir:{}", row.path))
+                    .flex()
                     .flex_none()
-                    .w(px(22.0))
-                    .py_0p5()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .items_center()
+                    .gap_1()
+                    .h(px(CHANGE_ROW_HEIGHT))
+                    .pl(indent)
+                    .pr(px(8.0))
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .bg(rgb(ui_theme::SURFACE))
+                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            this.toggle_compare_dir(path_for_click.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(14.0))
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .child(caret),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(18.0))
+                            .text_size(px(13.0))
+                            .child(icon),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::TEXT))
+                            .truncate()
+                            .child(row.name),
+                    )
+            }
+            CompareTreeRowKind::File { status, old_path } => {
+                let selected = self
+                    .browse
+                    .selected_file
+                    .as_deref()
+                    .map(|selected| selected == Path::new(&row.path))
+                    .unwrap_or(false);
+                let status_label = status.label();
+                let status_color = change_state_color(&status);
+                let display = compare_file_leaf_display(&row.name, old_path.as_deref());
+                let file_for_click = BrowseCompareFile {
+                    path: row.path.clone(),
+                    old_path,
+                    status,
+                };
+
+                div()
+                    .id(format!("browse-compare-file:{}", row.path))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(CHANGE_ROW_HEIGHT))
+                    .pl(indent)
+                    .pr(px(8.0))
+                    .py_1()
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(status_color))
-                    .text_size(px(10.0))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(status_color))
-                    .text_align(gpui::TextAlign::Center)
-                    .child(status_label),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
-                    .truncate()
-                    .child(display_path),
-            )
+                    .border_color(if selected {
+                        rgb(ui_theme::ROW_SELECTED_BORDER)
+                    } else {
+                        rgb(ui_theme::BORDER_MUTED)
+                    })
+                    .bg(if selected {
+                        rgb(ui_theme::ROW_SELECTED)
+                    } else {
+                        rgb(ui_theme::SURFACE)
+                    })
+                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            this.select_browse_compare_file(file_for_click.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(22.0))
+                            .py_0p5()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(status_color))
+                            .text_size(px(10.0))
+                            .font_family("Consolas, monospace")
+                            .text_color(rgb(status_color))
+                            .text_align(gpui::TextAlign::Center)
+                            .child(status_label),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(18.0))
+                            .text_size(px(13.0))
+                            .child("📄"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::TEXT))
+                            .truncate()
+                            .child(display),
+                    )
+            }
+        }
     }
 }
 
@@ -232,28 +474,138 @@ mod tests {
     use super::*;
     use khaslana::ChangeState;
 
-    #[test]
-    fn browse_compare_file_display_plain_path() {
-        let file = BrowseCompareFile {
-            path: "src/main.rs".to_string(),
+    fn file(path: &str, status: ChangeState) -> BrowseCompareFile {
+        BrowseCompareFile {
+            path: path.to_string(),
             old_path: None,
-            status: ChangeState::Modified,
-        };
+            status,
+        }
+    }
 
-        assert_eq!(browse_compare_file_display(&file), "src/main.rs");
+    fn renamed(path: &str, old_path: &str) -> BrowseCompareFile {
+        BrowseCompareFile {
+            path: path.to_string(),
+            old_path: Some(old_path.to_string()),
+            status: ChangeState::Renamed,
+        }
     }
 
     #[test]
-    fn browse_compare_file_display_rename_path() {
-        let file = BrowseCompareFile {
-            path: "src/new.rs".to_string(),
-            old_path: Some("src/old.rs".to_string()),
-            status: ChangeState::Renamed,
-        };
+    fn flatten_compare_files_builds_nested_tree() {
+        let files = vec![
+            file("src/a.rs", ChangeState::Modified),
+            file("src/b.rs", ChangeState::Added),
+            file("README.md", ChangeState::Modified),
+        ];
+        let expanded = all_compare_dirs(&files);
 
+        let rows = flatten_compare_files(&files, &expanded);
+
+        // src 目录 + 两个文件 + 根级 README
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].depth, 0);
+        assert!(matches!(
+            rows[0].kind,
+            CompareTreeRowKind::Directory { expanded: true }
+        ));
+        assert_eq!(rows[0].name, "src");
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[1].name, "a.rs");
+        assert_eq!(rows[2].depth, 1);
+        assert_eq!(rows[2].name, "b.rs");
+        assert_eq!(rows[3].depth, 0);
+        assert_eq!(rows[3].name, "README.md");
+    }
+
+    #[test]
+    fn flatten_compare_files_collapses_directory() {
+        let files = vec![
+            file("src/a.rs", ChangeState::Modified),
+            file("src/b.rs", ChangeState::Added),
+            file("README.md", ChangeState::Modified),
+        ];
+        // 显式空展开集合以外的集合：不含 src，应当折叠。
+        let mut expanded = HashSet::new();
+        expanded.insert(".".to_string());
+        let rows = flatten_compare_files(&files, &expanded);
+
+        // src 折叠 -> 不输出其下文件
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            rows[0].kind,
+            CompareTreeRowKind::Directory { expanded: false }
+        ));
+        assert_eq!(rows[1].name, "README.md");
+    }
+
+    #[test]
+    fn flatten_compare_files_orders_directories_before_files() {
+        let files = vec![
+            file("z_file.rs", ChangeState::Modified),
+            file("abc_dir/x.rs", ChangeState::Added),
+        ];
+        let expanded = all_compare_dirs(&files);
+        let rows = flatten_compare_files(&files, &expanded);
+
+        // 第一行应是目录 abc_dir，而不是 z_file.rs
+        assert!(matches!(rows[0].kind, CompareTreeRowKind::Directory { .. }));
+        assert_eq!(rows[0].name, "abc_dir");
+        // 根级文件排在后面
+        assert_eq!(rows[2].name, "z_file.rs");
+    }
+
+    #[test]
+    fn flatten_compare_files_keeps_status_and_old_path() {
+        let files = vec![renamed("src/new.rs", "src/old.rs")];
+        let expanded = all_compare_dirs(&files);
+        let rows = flatten_compare_files(&files, &expanded);
+
+        // rows: [src(dir), new.rs(file)]
+        assert_eq!(rows.len(), 2);
+        match &rows[1].kind {
+            CompareTreeRowKind::File { status, old_path } => {
+                assert_eq!(*status, ChangeState::Renamed);
+                assert_eq!(old_path.as_deref(), Some("src/old.rs"));
+            }
+            other => panic!("expected file row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_compare_dirs_collects_intermediate_dirs() {
+        let files = vec![
+            file("a/b/c.rs", ChangeState::Modified),
+            file("x/y.rs", ChangeState::Added),
+        ];
+        let dirs = all_compare_dirs(&files);
+
+        assert!(dirs.contains("a"));
+        assert!(dirs.contains("a/b"));
+        assert!(dirs.contains("x"));
+        // 文件本身不应作为目录
+        assert!(!dirs.contains("a/b/c.rs"));
+        assert!(!dirs.contains("x/y.rs"));
+    }
+
+    #[test]
+    fn compare_file_leaf_display_plain() {
+        assert_eq!(compare_file_leaf_display("main.rs", None), "main.rs");
+    }
+
+    #[test]
+    fn compare_file_leaf_display_rename() {
         assert_eq!(
-            browse_compare_file_display(&file),
-            "src/old.rs → src/new.rs"
+            compare_file_leaf_display("new.rs", Some("src/old.rs")),
+            "old.rs → new.rs"
+        );
+    }
+
+    #[test]
+    fn compare_file_leaf_display_rename_same_basename() {
+        // 同名不同目录：显示新文件名即可，避免重复
+        assert_eq!(
+            compare_file_leaf_display("main.rs", Some("sub/main.rs")),
+            "main.rs"
         );
     }
 }
