@@ -28,6 +28,8 @@ smallvec = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# AI 功能用的轻量同步 HTTP 客户端；后台线程阻塞调用，避免引入 async runtime。
+ureq = { version = "2", features = ["json"] }
 unicode-segmentation = "1"
 yororen_ui = "0.2"
 

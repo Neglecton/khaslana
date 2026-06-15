@@ -8,6 +8,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+use crate::ai::AiProviderSettings;
 use crate::credentials::{
     CredentialRecord, CredentialScope, RemoteCredentialPolicy, StoredCredentialKind,
 };
@@ -152,6 +153,18 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn load_ai_provider_settings(&self) -> Result<AiProviderSettings> {
+        let conn = self.lock_conn()?;
+        load_ai_provider_settings_from_conn(&conn)
+    }
+
+    pub fn save_ai_provider_settings(&self, settings: &AiProviderSettings) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_ai_provider_settings_tx(&tx, settings)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn load_credential_records(&self) -> Result<Vec<CredentialRecord>> {
         let conn = self.lock_conn()?;
         load_credential_records_from_conn(&conn)
@@ -259,6 +272,13 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             last_used INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_provider_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
         );
         "#,
     )
@@ -527,6 +547,39 @@ fn save_proxy_settings_tx(tx: &Transaction<'_>, settings: &NetworkProxySettings)
     Ok(())
 }
 
+fn load_ai_provider_settings_from_conn(conn: &Connection) -> Result<AiProviderSettings> {
+    // AI 配置整体存为 JSON payload，便于后续增字段而不改表结构。
+    conn.query_row(
+        "SELECT payload FROM ai_provider_settings WHERE id = 1",
+        [],
+        |row| {
+            let payload: String = row.get(0)?;
+            serde_json::from_str::<AiProviderSettings>(&payload).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(format!("AI 配置解析失败：{err}"))),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|settings| settings.unwrap_or_default())
+}
+
+fn save_ai_provider_settings_tx(tx: &Transaction<'_>, settings: &AiProviderSettings) -> Result<()> {
+    let payload = serde_json::to_string(settings)
+        .map_err(|err| GitError::Message(format!("AI 配置序列化失败：{err}")))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO ai_provider_settings (id, enabled, payload, updated_at)
+         VALUES (1, ?1, ?2, ?3)",
+        params![if settings.enabled { 1 } else { 0 }, payload, now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 fn load_credential_records_from_conn(conn: &Connection) -> Result<Vec<CredentialRecord>> {
     let mut stmt = conn
         .prepare(
@@ -756,6 +809,54 @@ mod tests {
         };
         storage.save_proxy_settings(&settings).unwrap();
         assert_eq!(storage.load_proxy_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn ai_provider_settings_round_trip() {
+        let (_temp, storage) = temp_storage();
+        // 空表默认值。
+        assert_eq!(
+            storage.load_ai_provider_settings().unwrap(),
+            AiProviderSettings::default()
+        );
+
+        let mut settings = AiProviderSettings::default();
+        settings.enabled = true;
+        settings.base_url = "https://api.deepseek.com".into();
+        settings.api_key = "sk-test-key".into();
+        settings.model = "deepseek-chat".into();
+        settings.temperature = 0.1;
+        settings.max_tokens = 1200;
+        settings.request_timeout_secs = 90;
+
+        storage.save_ai_provider_settings(&settings).unwrap();
+        let loaded = storage.load_ai_provider_settings().unwrap();
+        assert_eq!(loaded.enabled, settings.enabled);
+        assert_eq!(loaded.base_url, settings.base_url);
+        assert_eq!(loaded.api_key, settings.api_key);
+        assert_eq!(loaded.model, settings.model);
+        assert_eq!(loaded.temperature, settings.temperature);
+        assert_eq!(loaded.max_tokens, settings.max_tokens);
+        assert_eq!(loaded.request_timeout_secs, settings.request_timeout_secs);
+    }
+
+    #[test]
+    fn ai_provider_settings_replace_overwrites_previous() {
+        let (_temp, storage) = temp_storage();
+        let mut settings = AiProviderSettings::default();
+        settings.enabled = true;
+        settings.base_url = "https://api.openai.com/v1".into();
+        settings.api_key = "sk-first".into();
+        settings.model = "gpt-4o-mini".into();
+        storage.save_ai_provider_settings(&settings).unwrap();
+
+        settings.api_key = "sk-second".into();
+        settings.model = "gpt-4o".into();
+        storage.save_ai_provider_settings(&settings).unwrap();
+
+        let loaded = storage.load_ai_provider_settings().unwrap();
+        assert_eq!(loaded.api_key, "sk-second");
+        assert_eq!(loaded.model, "gpt-4o");
     }
 
     #[test]

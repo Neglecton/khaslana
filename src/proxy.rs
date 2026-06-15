@@ -44,6 +44,21 @@ impl Default for NetworkProxySettings {
 }
 
 impl NetworkProxySettings {
+    /// 返回给定目标 URL 应使用的代理地址（供 ureq 等通用 HTTP 客户端使用）。
+    ///
+    /// - Disabled：None（直连）。
+    /// - System：读取 http_proxy/https_proxy 环境变量，返回非空值。
+    /// - Custom：按目标协议选择 https_proxy/http_proxy/socks5_proxy。
+    ///
+    /// 与 git2 的 ProxyOptions 不同，这里返回字符串供非 libgit2 的 HTTP 客户端使用。
+    pub fn proxy_url_for_target(&self, target_url: &str) -> Option<String> {
+        match self.mode {
+            NetworkProxyMode::Disabled => None,
+            NetworkProxyMode::System => system_proxy_for_url(target_url),
+            NetworkProxyMode::Custom => self.custom.proxy_for_remote(Some(target_url)),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.mode == NetworkProxyMode::Custom {
             self.custom.validate()?;
@@ -155,6 +170,20 @@ fn first_non_empty<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<Stri
     values
         .into_iter()
         .find(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+}
+
+/// 读取系统/环境变量代理：https URL 取 https_proxy/HTTPS_PROXY，
+/// 其它取 http_proxy/HTTP_PROXY；ALL_PROXY 作为兜底。
+fn system_proxy_for_url(target_url: &str) -> Option<String> {
+    let protocol = remote_protocol(target_url);
+    let env_keys: &[&str] = match protocol {
+        RemoteProtocol::Https => &["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"],
+        _ => &["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"],
+    };
+    env_keys
+        .iter()
+        .find_map(|key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()))
         .map(|value| value.trim().to_string())
 }
 
@@ -329,5 +358,59 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(custom.proxy_for_remote(Some("file:///tmp/repo.git")), None);
+    }
+
+    #[test]
+    fn proxy_url_for_target_disabled_returns_none() {
+        let settings = NetworkProxySettings::default();
+        assert_eq!(
+            settings.proxy_url_for_target("https://api.openai.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn proxy_url_for_target_custom_https_picks_https_proxy() {
+        let settings = NetworkProxySettings {
+            mode: NetworkProxyMode::Custom,
+            custom: CustomProxySettings {
+                https_proxy: "http://127.0.0.1:7890".into(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            settings.proxy_url_for_target("https://api.openai.com"),
+            Some("http://127.0.0.1:7890".into())
+        );
+    }
+
+    #[test]
+    fn proxy_url_for_target_custom_http_picks_http_proxy() {
+        let settings = NetworkProxySettings {
+            mode: NetworkProxyMode::Custom,
+            custom: CustomProxySettings {
+                http_proxy: "http://127.0.0.1:7890".into(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            settings.proxy_url_for_target("http://localhost:1234"),
+            Some("http://127.0.0.1:7890".into())
+        );
+    }
+
+    #[test]
+    fn proxy_url_for_target_custom_falls_back_to_socks5() {
+        let settings = NetworkProxySettings {
+            mode: NetworkProxyMode::Custom,
+            custom: CustomProxySettings {
+                socks5_proxy: "socks5://127.0.0.1:1080".into(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            settings.proxy_url_for_target("https://api.openai.com"),
+            Some("socks5://127.0.0.1:1080".into())
+        );
     }
 }

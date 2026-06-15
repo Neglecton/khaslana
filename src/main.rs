@@ -5514,7 +5514,7 @@ impl RepositoryView {
                 }
             }
             RemoteBranchOperationKind::Push => {
-                self.with_repo("推送完成", move |service, repo| {
+                self.with_repo_blocking("推送完成", move |service, repo| {
                     service.push_branch_to(
                         repo,
                         &RemoteName::new(remote),

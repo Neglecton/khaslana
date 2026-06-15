@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod credentials;
 pub mod git;
 pub mod proxy;
@@ -28,6 +29,10 @@ pub use workflow::{
     RemoteBranchGuardAction, WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition,
     WorkflowPreview, WorkflowPreviewStep, WorkflowProgressEvent, WorkflowRunOptions,
     WorkflowRunResult, WorkflowStep, parse_workflow_json5,
+};
+
+pub use ai::{
+    AiApiType, AiProviderSettings, AiReviewResult, ChatClient, ChatMessage, ChatResult, ChatRole,
 };
 
 // 浏览模式领域类型已在 types::* 中重新导出（BrowseTarget / BrowseEntry / BrowseEntryKind / BrowseFileContent）。
