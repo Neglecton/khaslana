@@ -12,7 +12,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 暂存、取消暂存、丢弃变更、提交
 - fetch、pull、push、merge、checkout
 - 提交历史、提交文件列表、历史 diff、提交图
-- commit reset / revert
+- commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
 - 网络代理设置，支持禁用、Git 配置/环境变量代理和自定义代理
 - diff 编码自动识别与手动选择，支持 UTF-8、GB18030/GBK、Big5
@@ -214,7 +214,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 分页加载更多
 - 查看提交文件列表
 - 查看指定提交文件 diff
-- 右键提交可复制 SHA、reset、revert 等
+- 右键提交可复制 SHA、reset、revert、撤销合并提交等
 
 ### 5.5 分支浏览
 

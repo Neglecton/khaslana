@@ -14,8 +14,8 @@ use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{
     AnnotatedCommit, BranchType, Cred, CredentialType, Delta, DiffFormat, DiffOptions, ErrorCode,
     FetchOptions, FetchPrune, IndexAddOption, MergeAnalysis, MergeOptions, ProxyOptions,
-    PushOptions, Reference, RemoteCallbacks, Repository, ResetType, Signature, Sort, Status,
-    StatusOptions,
+    PushOptions, Reference, RemoteCallbacks, Repository, ResetType, RevertOptions, Signature, Sort,
+    Status, StatusOptions,
 };
 
 use crate::credentials::{CredentialProvider, CredentialRequest, to_git_credential};
@@ -1341,40 +1341,42 @@ impl GitService {
         self.snapshot_after_operation(repo)
     }
 
-    pub fn revert_commit(
+    fn ensure_clean_before_revert(&self, repo: &Repository, message: &str) -> Result<()> {
+        if !self.status_full(repo)?.is_empty() || !self.conflicts(repo)?.is_empty() {
+            return Err(GitError::Git(git2::Error::from_str(message)));
+        }
+        Ok(())
+    }
+
+    fn handle_revert_apply_error(&self, repo: &Repository, err: git2::Error) -> Result<()> {
+        let conflicts = self.conflicts(repo)?;
+        if !conflicts.is_empty() {
+            // libgit2 的 revert 会把冲突写入仓库索引；清理 revert 状态文件后，
+            // 保留索引冲突供现有冲突工作台继续处理。
+            repo.cleanup_state()?;
+            return Err(GitError::Conflicts(conflicts));
+        }
+        Err(err.into())
+    }
+
+    fn finish_revert_commit(
         &self,
         repo: &mut Repository,
-        commit_oid: &str,
+        message: String,
+        finished_label: &'static str,
     ) -> Result<RepositorySnapshot> {
-        if !self.status_full(repo)?.is_empty() || !self.conflicts(repo)?.is_empty() {
-            return Err(GitError::Git(git2::Error::from_str(
-                "回滚提交前需要先提交、暂存或丢弃当前工作区修改",
-            )));
-        }
-        let revert_commit = self.find_commit_by_oid(repo, commit_oid)?;
-        if revert_commit.parent_count() > 1 {
-            return Err(GitError::Git(git2::Error::from_str("暂不支持回滚合并提交")));
-        }
-        let head_commit = repo.head()?.peel_to_commit()?;
-        self.progress
-            .emit(OperationEvent::Started("正在回滚提交".into()));
-        let mut index = repo.revert_commit(&revert_commit, &head_commit, 0, None)?;
+        let mut index = repo.index()?;
         if index.has_conflicts() {
-            index.write()?;
-            repo.checkout_index(Some(&mut index), None)?;
-            return Err(GitError::Git(git2::Error::from_str(
-                "回滚提交产生冲突，请解决冲突后再提交",
-            )));
+            let conflicts = self.conflicts(repo)?;
+            // 成功进入冲突状态时同样清理 revert 状态文件，避免后续手动提交被状态文件干扰。
+            repo.cleanup_state()?;
+            return Err(GitError::Conflicts(conflicts));
         }
 
-        let tree_oid = index.write_tree_to(repo)?;
+        let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
         let signature = signature(repo)?;
-        let summary = revert_commit.summary().ok().flatten().unwrap_or("commit");
-        let message = format!(
-            "Revert \"{summary}\"\n\nThis reverts commit {}.",
-            revert_commit.id()
-        );
+        let head_commit = repo.head()?.peel_to_commit()?;
         repo.commit(
             Some("HEAD"),
             &signature,
@@ -1383,15 +1385,76 @@ impl GitService {
             &tree,
             &[&head_commit],
         )?;
+        repo.cleanup_state()?;
         let mut checkout = CheckoutBuilder::new();
         checkout.force();
         repo.checkout_head(Some(&mut checkout))?;
         drop(tree);
         drop(head_commit);
-        drop(revert_commit);
         self.progress
-            .emit(OperationEvent::Finished("回滚提交完成".into()));
+            .emit(OperationEvent::Finished(finished_label.into()));
         self.snapshot_after_operation(repo)
+    }
+
+    pub fn revert_commit(
+        &self,
+        repo: &mut Repository,
+        commit_oid: &str,
+    ) -> Result<RepositorySnapshot> {
+        self.ensure_clean_before_revert(repo, "回滚提交前需要先提交、暂存或丢弃当前工作区修改")?;
+        let revert_commit = self.find_commit_by_oid(repo, commit_oid)?;
+        if revert_commit.parent_count() > 1 {
+            return Err(GitError::Git(git2::Error::from_str("暂不支持回滚合并提交")));
+        }
+        let summary = revert_commit.summary().ok().flatten().unwrap_or("commit");
+        let message = format!(
+            "Revert \"{summary}\"\n\nThis reverts commit {}.",
+            revert_commit.id()
+        );
+        self.progress
+            .emit(OperationEvent::Started("正在回滚提交".into()));
+        let mut options = RevertOptions::new();
+        let revert_result = repo.revert(&revert_commit, Some(&mut options));
+        drop(revert_commit);
+        if let Err(err) = revert_result {
+            self.handle_revert_apply_error(repo, err)?;
+        }
+        self.finish_revert_commit(repo, message, "回滚提交完成")
+    }
+
+    pub fn revert_merge_commit(
+        &self,
+        repo: &mut Repository,
+        commit_oid: &str,
+    ) -> Result<RepositorySnapshot> {
+        self.ensure_clean_before_revert(repo, "撤销合并前需要先提交、暂存或丢弃当前工作区修改")?;
+        let merge_commit = self.find_commit_by_oid(repo, commit_oid)?;
+        if merge_commit.parent_count() <= 1 {
+            return Err(GitError::Git(git2::Error::from_str(
+                "该提交不是合并提交，请使用普通回滚提交",
+            )));
+        }
+        let summary = merge_commit
+            .summary()
+            .ok()
+            .flatten()
+            .unwrap_or("merge commit");
+        let message = format!(
+            "Revert \"{summary}\"\n\nThis reverts merge commit {}, keeping the first parent side.",
+            merge_commit.id()
+        );
+        self.progress
+            .emit(OperationEvent::Started("正在撤销合并提交".into()));
+
+        // 第一版固定使用 git revert -m 1 语义：保留合并提交的第一父提交主线侧。
+        let mut options = RevertOptions::new();
+        options.mainline(1);
+        let revert_result = repo.revert(&merge_commit, Some(&mut options));
+        drop(merge_commit);
+        if let Err(err) = revert_result {
+            self.handle_revert_apply_error(repo, err)?;
+        }
+        self.finish_revert_commit(repo, message, "撤销合并完成")
     }
 
     pub fn commit_graph(
@@ -5332,6 +5395,136 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("合并提交"));
+    }
+
+    #[test]
+    fn revert_merge_commit_with_first_parent_creates_revert_commit() {
+        let (dir, mut repo, service) = init_repo();
+        write_file(dir.path(), "base.txt", "base\n");
+        commit_all(&repo, "initial");
+
+        service
+            .create_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        service
+            .checkout_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        write_file(dir.path(), "feature.txt", "feature\n");
+        commit_all(&repo, "feature");
+
+        service
+            .checkout_branch(&mut repo, &BranchName::new("main"))
+            .unwrap();
+        write_file(dir.path(), "main.txt", "main\n");
+        commit_all(&repo, "main");
+
+        service
+            .merge_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        let merge_oid = repo.head().unwrap().target().unwrap();
+
+        let snapshot = service
+            .revert_merge_commit(&mut repo, &merge_oid.to_string())
+            .unwrap();
+
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(head.id(), merge_oid);
+        assert!(head.summary().unwrap().unwrap().contains("Revert"));
+        assert!(!dir.path().join("feature.txt").exists());
+        assert_file_text(dir.path(), "main.txt", "main\n");
+        assert!(snapshot.conflicts.is_empty());
+        assert!(service.status_full(&repo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revert_merge_commit_rejects_non_merge_commit() {
+        let (dir, mut repo, service) = init_repo();
+        write_file(dir.path(), "file.txt", "one\n");
+        let oid = commit_all(&repo, "one");
+
+        let error = service
+            .revert_merge_commit(&mut repo, &oid.to_string())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("不是合并提交"));
+        assert_eq!(repo.head().unwrap().target(), Some(oid));
+        assert!(service.status_full(&repo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revert_merge_commit_rejects_dirty_worktree() {
+        let (dir, mut repo, service) = init_repo();
+        write_file(dir.path(), "base.txt", "base\n");
+        commit_all(&repo, "initial");
+
+        service
+            .create_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        service
+            .checkout_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        write_file(dir.path(), "feature.txt", "feature\n");
+        commit_all(&repo, "feature");
+
+        service
+            .checkout_branch(&mut repo, &BranchName::new("main"))
+            .unwrap();
+        write_file(dir.path(), "main.txt", "main\n");
+        commit_all(&repo, "main");
+        service
+            .merge_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        let merge_oid = repo.head().unwrap().target().unwrap();
+        write_file(dir.path(), "scratch.txt", "dirty\n");
+
+        let error = service
+            .revert_merge_commit(&mut repo, &merge_oid.to_string())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("工作区修改"));
+        assert_eq!(repo.head().unwrap().target(), Some(merge_oid));
+    }
+
+    #[test]
+    fn revert_merge_commit_reports_conflicts() {
+        let (dir, mut repo, service) = init_repo();
+        write_file(dir.path(), "same.txt", "base\n");
+        commit_all(&repo, "initial");
+
+        service
+            .create_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        service
+            .checkout_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        write_file(dir.path(), "same.txt", "feature\n");
+        commit_all(&repo, "feature");
+
+        service
+            .checkout_branch(&mut repo, &BranchName::new("main"))
+            .unwrap();
+        write_file(dir.path(), "main.txt", "main\n");
+        commit_all(&repo, "main");
+        service
+            .merge_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        let merge_oid = repo.head().unwrap().target().unwrap();
+
+        write_file(dir.path(), "same.txt", "main after merge\n");
+        commit_all(&repo, "main after merge");
+
+        let err = service
+            .revert_merge_commit(&mut repo, &merge_oid.to_string())
+            .unwrap_err();
+
+        match err {
+            GitError::Conflicts(paths) => assert_eq!(paths, vec!["same.txt"]),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let snapshot = service.snapshot_after_operation(&mut repo).unwrap();
+        assert_eq!(snapshot.conflicts, vec!["same.txt"]);
     }
 
     #[test]

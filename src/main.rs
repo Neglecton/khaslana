@@ -208,6 +208,10 @@ pub(crate) enum DialogState {
         oid: String,
         summary: String,
     },
+    ConfirmRevertMerge {
+        oid: String,
+        summary: String,
+    },
     ConfirmUncommitToStaged {
         oid: String,
         summary: String,
@@ -5456,6 +5460,12 @@ impl RepositoryView {
         self.last_error = None;
     }
 
+    pub(crate) fn open_revert_merge_confirm_dialog(&mut self, oid: String, summary: String) {
+        self.close_popups();
+        self.active_dialog = Some(DialogState::ConfirmRevertMerge { oid, summary });
+        self.last_error = None;
+    }
+
     pub(crate) fn open_uncommit_to_staged_confirm_dialog(&mut self, oid: String, summary: String) {
         self.close_popups();
         self.active_dialog = Some(DialogState::ConfirmUncommitToStaged { oid, summary });
@@ -5501,6 +5511,12 @@ impl RepositoryView {
     fn revert_commit(&mut self, oid: String) {
         self.with_repo("回滚提交完成", move |service, repo| {
             service.revert_commit(repo, &oid)
+        });
+    }
+
+    fn revert_merge_commit(&mut self, oid: String) {
+        self.with_repo("撤销合并完成", move |service, repo| {
+            service.revert_merge_commit(repo, &oid)
         });
     }
 
@@ -8079,7 +8095,12 @@ impl RepositoryView {
         let Some(menu) = self.commit_context_menu.clone() else {
             return div().into_any_element();
         };
-        let can_revert = !self.busy && menu.parent_count <= 1;
+        let is_merge_commit = menu.parent_count > 1;
+        let revert_label = if is_merge_commit {
+            "撤销合并提交..."
+        } else {
+            "回滚提交"
+        };
 
         glass_menu()
             .absolute()
@@ -8182,16 +8203,18 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item(
-                if menu.parent_count > 1 {
-                    "回滚提交（合并提交暂不支持）"
-                } else {
-                    "回滚提交"
-                },
-                can_revert,
+                revert_label,
+                !self.busy,
                 {
                     let oid = menu.oid.clone();
                     let summary = menu.summary.clone();
-                    move |this| this.open_revert_confirm_dialog(oid.clone(), summary.clone())
+                    move |this| {
+                        if is_merge_commit {
+                            this.open_revert_merge_confirm_dialog(oid.clone(), summary.clone())
+                        } else {
+                            this.open_revert_confirm_dialog(oid.clone(), summary.clone())
+                        }
+                    }
                 },
                 cx,
             ))
@@ -9262,6 +9285,9 @@ impl RepositoryView {
             DialogState::ConfirmRevert { oid, summary } => self
                 .render_confirm_revert_dialog(oid, summary, cx)
                 .into_any_element(),
+            DialogState::ConfirmRevertMerge { oid, summary } => self
+                .render_confirm_revert_merge_dialog(oid, summary, cx)
+                .into_any_element(),
             DialogState::ConfirmUncommitToStaged { oid, summary } => self
                 .render_confirm_uncommit_to_staged_dialog(oid, summary, cx)
                 .into_any_element(),
@@ -9506,6 +9532,49 @@ impl RepositoryView {
                         {
                             let oid = oid.clone();
                             move |this, _, _| this.revert_commit(oid.clone())
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_confirm_revert_merge_dialog(
+        &self,
+        oid: String,
+        summary: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("确认撤销合并提交", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::TEXT))
+                    .child(format!("目标提交：{} {}", short_oid(&oid), summary)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .child("确认后会创建一个新的提交，用于撤销这次合并相对主线引入的修改。"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .child("该操作不会删除原合并提交，也不会重写分支历史；若产生冲突，请在冲突解决中心处理后手动提交。"),
+            )
+            .child(danger_callout(
+                "这等价于 git revert -m 1，表示保留合并提交的第一父提交一侧。后续再次合并同一分支时，Git 会认为这次合并的改动曾被主动撤销。",
+            ))
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.danger_button(
+                        "确认撤销合并",
+                        !self.busy,
+                        {
+                            let oid = oid.clone();
+                            move |this, _, _| this.revert_merge_commit(oid.clone())
                         },
                         cx,
                     )),
