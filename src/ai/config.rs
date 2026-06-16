@@ -76,9 +76,7 @@ impl AiProviderSettings {
                 "Base URL 必须以 http:// 或 https:// 开头".into(),
             ));
         }
-        if self.api_key.trim().is_empty() {
-            return Err(GitError::Message("请填写 API Key".into()));
-        }
+        // API Key 允许为空（部分自部署/本地模型如 Ollama 不需要鉴权）。
         if self.model.trim().is_empty() {
             return Err(GitError::Message("请填写模型名称".into()));
         }
@@ -114,15 +112,22 @@ mod tests {
         let mut settings = AiProviderSettings::default();
         settings.enabled = true;
 
-        assert!(settings.validate().is_err());
+        assert!(settings.validate().is_err()); // 缺 base_url 和 model
 
         settings.base_url = "https://api.openai.com/v1".into();
-        assert!(settings.validate().is_err()); // 仍缺 api_key
-
-        settings.api_key = "sk-test".into();
         assert!(settings.validate().is_err()); // 仍缺 model
 
         settings.model = "gpt-4o-mini".into();
+        assert!(settings.validate().is_ok()); // api_key 可选，不填也能通过
+    }
+
+    #[test]
+    fn validate_allows_empty_api_key() {
+        let mut settings = AiProviderSettings::default();
+        settings.enabled = true;
+        settings.base_url = "http://localhost:11434".into();
+        settings.api_key = "".into(); // 本地模型如 Ollama 不需要 API Key
+        settings.model = "llama3".into();
         assert!(settings.validate().is_ok());
     }
 

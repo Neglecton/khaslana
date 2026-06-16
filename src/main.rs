@@ -3345,6 +3345,8 @@ impl RepositoryView {
             UiEvent::AiRequestFailed { error } => {
                 self.ai_commit_loading = false;
                 self.ai_review_loading = false;
+                // 测试连接失败时也要解锁 busy，否则弹窗按钮永久禁用。
+                self.busy = false;
                 self.last_error = Some(error);
             }
             UiEvent::AiConnectionTested { message } => {

@@ -61,11 +61,30 @@ impl RepositoryView {
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(rgb(ui_theme::TEXT_FAINT))
-                    .child("API Key 第一版明文保存在本地配置数据库；请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 800 / 60s）。"),
+                    .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 800 / 60s）。"),
             )
+            // 测试连接期间的进度/结果状态行：在弹窗内部展示，避免被弹窗遮挡。
+            .when(self.busy, |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::TEXT_MUTED))
+                        .child(self.status.clone()),
+                )
+            })
+            .when(!self.busy && self.last_error.is_some(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::DANGER_STRONG))
+                        .truncate()
+                        .child(self.last_error.clone().unwrap_or_default()),
+                )
+            })
             .child(
                 dialog_actions()
-                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    // 取消按钮始终可用，即使测试连接进行中也能关闭弹窗。
+                    .child(self.button("取消", true, |this, _, _| this.close_dialog(), cx))
                     .child(self.button(
                         "测试连接",
                         !self.busy,
