@@ -1354,8 +1354,15 @@ pub(crate) enum UiEvent {
     AiCommitMessageGenerated {
         message: String,
     },
+    AiCommitMessageDelta {
+        delta: String,
+    },
     AiReviewGenerated {
         review: AiReviewResult,
+    },
+    AiReviewDelta {
+        content_delta: Option<String>,
+        reasoning_delta: Option<String>,
     },
     AiRequestFailed {
         error: String,
@@ -1820,8 +1827,14 @@ pub(crate) struct RepositoryView {
     ai_api_key: TextFieldState,
     ai_model: TextFieldState,
     pub(crate) ai_commit_loading: bool,
+    /// commit message 流式生成时的实时缓冲。
+    pub(crate) ai_commit_buffer: String,
     pub(crate) ai_review: Option<Arc<AiReviewResult>>,
     pub(crate) ai_review_loading: bool,
+    /// review 流式生成时的实时正文缓冲。
+    pub(crate) ai_review_buffer: String,
+    /// review 流式生成时的实时思考链缓冲。
+    pub(crate) ai_review_reasoning_buffer: String,
     pub(crate) ai_review_expanded: bool,
 }
 
@@ -1939,8 +1952,11 @@ impl RepositoryView {
             ai_api_key: TextFieldState::new(cx, "API Key").secret(),
             ai_model: TextFieldState::new(cx, "模型名称，例如 gpt-4o-mini"),
             ai_commit_loading: false,
+            ai_commit_buffer: String::new(),
             ai_review: None,
             ai_review_loading: false,
+            ai_review_buffer: String::new(),
+            ai_review_reasoning_buffer: String::new(),
             ai_review_expanded: false,
             proxy_http_url: TextFieldState::new(cx, "HTTP 代理 URL")
                 .with_value(proxy_custom.http_proxy),
@@ -3332,19 +3348,45 @@ impl RepositoryView {
             }
             UiEvent::AiCommitMessageGenerated { message } => {
                 self.ai_commit_loading = false;
+                self.ai_commit_buffer.clear();
+                // 流式期间已逐段填入输入框，这里用最终结果做一次干净覆盖，
+                // 确保最终的 trim 和换行规范化。
                 self.commit_message.set_value(message);
                 self.status = "AI 已生成提交信息".into();
                 self.last_error = None;
             }
+            UiEvent::AiCommitMessageDelta { delta } => {
+                // 直接把增量追加到输入框，让用户实时看到生成内容，
+                // 而不是等全部完成后才一次性填入。
+                self.ai_commit_buffer.push_str(&delta);
+                self.commit_message.value.push_str(&delta);
+                self.commit_message.caret = self.commit_message.value.len();
+            }
             UiEvent::AiReviewGenerated { review } => {
                 self.ai_review_loading = false;
+                self.ai_review_buffer.clear();
+                self.ai_review_reasoning_buffer.clear();
                 self.ai_review = Some(Arc::new(review));
                 self.status = "AI 评审已生成".into();
                 self.last_error = None;
             }
+            UiEvent::AiReviewDelta {
+                content_delta,
+                reasoning_delta,
+            } => {
+                if let Some(delta) = content_delta {
+                    self.ai_review_buffer.push_str(&delta);
+                }
+                if let Some(delta) = reasoning_delta {
+                    self.ai_review_reasoning_buffer.push_str(&delta);
+                }
+            }
             UiEvent::AiRequestFailed { error } => {
                 self.ai_commit_loading = false;
                 self.ai_review_loading = false;
+                self.ai_commit_buffer.clear();
+                self.ai_review_buffer.clear();
+                self.ai_review_reasoning_buffer.clear();
                 // 测试连接失败时也要解锁 busy，否则弹窗按钮永久禁用。
                 self.busy = false;
                 self.last_error = Some(error);

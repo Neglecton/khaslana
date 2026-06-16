@@ -37,7 +37,13 @@ pub(crate) fn should_render_operation_blocker(
     }
 }
 
-pub(crate) fn operation_blocker_overlay(message: impl Into<gpui::SharedString>, phase: u64) -> Div {
+pub(crate) fn wrap_operation_message(message: &str) -> String {
+    // 远端推送等状态常包含两个很长的分支名；在“到”前后主动换行，避免遮罩层标题溢出。
+    message.replace(" 到 ", " 到\n")
+}
+
+pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) -> Div {
+    let message = wrap_operation_message(&message.into());
     let offset = ((phase % 7) as f32 - 2.0) * 42.0;
     div()
         .absolute()
@@ -59,7 +65,7 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<gpui::SharedString>, 
         })
         .child(
             div()
-                .w(px(360.0))
+                .w(px(520.0))
                 .p_4()
                 .rounded_sm()
                 .border_1()
@@ -72,18 +78,26 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<gpui::SharedString>, 
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_2()
                         .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(rgb(ui_theme::TEXT))
                         .child(
                             div()
+                                .flex_none()
+                                .mt(px(5.0))
                                 .size(px(10.0))
                                 .rounded_full()
                                 .bg(rgb(ui_theme::PROGRESS_FILL)),
                         )
-                        .child(message.into()),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .line_height(px(20.0))
+                                .child(message),
+                        ),
                 )
                 .child(
                     div()
@@ -140,6 +154,7 @@ mod tests {
 
     use super::{
         OPERATION_BLOCKER_VISIBLE_DELAY, OperationBlocker, should_render_operation_blocker,
+        wrap_operation_message,
     };
 
     #[test]
@@ -189,5 +204,15 @@ mod tests {
             None,
             now,
         ));
+    }
+
+    #[test]
+    fn operation_blocker_message_wraps_remote_push_target() {
+        let message = "正在推送 dev_wzf_20260609_引进新保单检视系统 到 origin/dev_wzf_20260609_引进新保单检视系统";
+
+        assert_eq!(
+            wrap_operation_message(message),
+            "正在推送 dev_wzf_20260609_引进新保单检视系统 到\norigin/dev_wzf_20260609_引进新保单检视系统"
+        );
     }
 }

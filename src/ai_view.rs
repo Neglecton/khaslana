@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, IntoElement, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Window, div, point, prelude::*, px, rgb};
 use khaslana::{
     AiApiType, AiReviewResult, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffLineKind,
     DiffScope,
@@ -14,6 +14,7 @@ use khaslana::{
 use crate::{
     FieldId, RepositoryView,
     ui::{components::dialog_actions, theme as ui_theme},
+    ui_helpers::{ScrollbarMode, scrollable_frame_when},
 };
 
 impl RepositoryView {
@@ -145,6 +146,7 @@ impl RepositoryView {
         }
 
         self.ai_commit_loading = true;
+        self.ai_commit_buffer.clear();
         self.status = "正在生成提交信息".into();
         self.last_error = None;
 
@@ -176,7 +178,16 @@ impl RepositoryView {
                 }
                 let (system, user) = khaslana::ai::commit_message_prompts(&diff_text, None);
                 let client = ChatClient::new(settings, proxy_url);
-                let result = client.request(&[system, user])?;
+                // 流式请求：每个 content chunk 增量推回 UI，让用户实时看到生成进度。
+                let tx = tx.clone();
+                let result = client.request_stream(&[system, user], &mut |delta| {
+                    if let khaslana::StreamDelta::Content(text) = delta {
+                        crate::send_ui_event(
+                            &tx,
+                            crate::UiEvent::AiCommitMessageDelta { delta: text },
+                        );
+                    }
+                })?;
                 Ok(result.content)
             })();
             match result {
@@ -280,6 +291,10 @@ impl RepositoryView {
 
         self.ai_review_loading = true;
         self.ai_review = None;
+        self.ai_review_buffer.clear();
+        self.ai_review_reasoning_buffer.clear();
+        self.scroll_handle("ai-review-scroll")
+            .set_offset(point(px(0.0), px(0.0)));
         self.status = "正在生成 AI 评审".into();
         self.last_error = None;
 
@@ -291,7 +306,22 @@ impl RepositoryView {
         self.tasks.spawn(crate::TaskKind::Long, move || {
             let (system, user) = khaslana::ai::review_prompts(&file_path, &diff_text, &branch_name);
             let client = ChatClient::new(settings, proxy_url);
-            match client.request(&[system, user]) {
+            // 流式请求：content 和 reasoning 增量分别推回 UI，实时渲染评审内容。
+            let tx = tx.clone();
+            let result = client.request_stream(&[system, user], &mut |delta| {
+                let (content_delta, reasoning_delta) = match delta {
+                    khaslana::StreamDelta::Content(text) => (Some(text), None),
+                    khaslana::StreamDelta::Reasoning(text) => (None, Some(text)),
+                };
+                crate::send_ui_event(
+                    &tx,
+                    crate::UiEvent::AiReviewDelta {
+                        content_delta,
+                        reasoning_delta,
+                    },
+                );
+            });
+            match result {
                 Ok(result) => {
                     let review = AiReviewResult {
                         content: result.content,
@@ -376,18 +406,72 @@ impl RepositoryView {
             );
 
         let body = if loading {
+            // 流式生成时实时显示缓冲内容（正文 + 可选思考链）。
+            let content = self.ai_review_buffer.clone();
+            let reasoning = (!self.ai_review_reasoning_buffer.is_empty())
+                .then(|| self.ai_review_reasoning_buffer.clone());
+            let has_output = !content.is_empty() || reasoning.is_some();
+            let content_view = div()
+                .px_3()
+                .py_2()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(rgb(if has_output {
+                    ui_theme::TEXT
+                } else {
+                    ui_theme::TEXT_FAINT
+                }))
+                .child(if has_output {
+                    String::new()
+                } else {
+                    "正在等待 AI 返回评审结果...".to_string()
+                })
+                .when(has_output, |this| {
+                    this.child(div().child(content.clone())).when_some(
+                        reasoning,
+                        |this, reasoning| {
+                            this.child(
+                                div()
+                                    .mt_2()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .child(
+                                        div().font_weight(gpui::FontWeight::BOLD).child("思考链："),
+                                    )
+                                    .child(div().child(reasoning)),
+                            )
+                        },
+                    )
+                });
+            let handle = self.scroll_handle("ai-review-scroll");
             Some(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
-                    .child("正在等待 AI 返回评审结果...")
-                    .into_any_element(),
+                scrollable_frame_when(
+                    "ai-review-scroll",
+                    ScrollbarMode::Vertical,
+                    content_view.into_any_element(),
+                    handle,
+                    has_output,
+                    cx,
+                )
+                .into_any_element(),
             )
         } else if let Some(review) = review {
             if expanded {
-                Some(render_review_content(&review))
+                let handle = self.scroll_handle("ai-review-scroll");
+                Some(
+                    scrollable_frame_when(
+                        "ai-review-scroll",
+                        ScrollbarMode::Vertical,
+                        render_review_content(&review),
+                        handle,
+                        true,
+                        cx,
+                    )
+                    .into_any_element(),
+                )
             } else {
                 Some(
                     div()
@@ -408,12 +492,15 @@ impl RepositoryView {
             .flex()
             .flex_col()
             .flex_none()
-            .max_h(px(280.0))
+            .max_h(px(360.0))
+            .min_h(px(0.0))
             .border_t_1()
             .border_color(rgb(ui_theme::BORDER_MUTED))
             .bg(rgb(ui_theme::PANEL_BG))
             .child(header)
-            .when_some(body, |this, body| this.child(body))
+            .when_some(body, |this, body| {
+                this.child(div().flex_1().min_h(px(0.0)).child(body))
+            })
     }
 }
 

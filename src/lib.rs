@@ -33,6 +33,7 @@ pub use workflow::{
 
 pub use ai::{
     AiApiType, AiProviderSettings, AiReviewResult, ChatClient, ChatMessage, ChatResult, ChatRole,
+    StreamDelta,
 };
 
 // 浏览模式领域类型已在 types::* 中重新导出（BrowseTarget / BrowseEntry / BrowseEntryKind / BrowseFileContent）。

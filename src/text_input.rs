@@ -32,6 +32,8 @@ pub(crate) struct TextEditState {
     pub(crate) last_bounds: Option<Bounds<Pixels>>,
     pub(crate) last_multiline_layout: Vec<TextLineLayout>,
     pub(crate) is_selecting: bool,
+    /// 上一次 prepaint 计算出的视觉行数（含自动换行），供下次 request_layout 复用。
+    pub(crate) last_wrapped_line_count: usize,
 }
 
 impl TextEditState {
@@ -46,6 +48,7 @@ impl TextEditState {
             last_bounds: None,
             last_multiline_layout: Vec::new(),
             is_selecting: false,
+            last_wrapped_line_count: MULTILINE_MIN_LINES,
         }
     }
 
@@ -61,6 +64,7 @@ impl TextEditState {
             last_bounds: None,
             last_multiline_layout: Vec::new(),
             is_selecting: false,
+            last_wrapped_line_count: MULTILINE_MIN_LINES,
         }
     }
 
@@ -800,18 +804,13 @@ impl Element for MultiLineInputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self
-            .entity
-            .read(cx)
-            .field(self.field_id)
-            .value
-            .is_empty()
-            .then_some(MULTILINE_MIN_LINES)
-            .unwrap_or_else(|| {
-                logical_line_ranges(&self.entity.read(cx).field(self.field_id).value)
-                    .len()
-                    .max(MULTILINE_MIN_LINES)
-            });
+        let field = self.entity.read(cx).field(self.field_id);
+        // 视觉行数优先用上一次 prepaint 算出的自动换行行数；首次渲染时按逻辑行数估算，
+        // 至少保留 MIN_LINES 的高度。换行宽度变化后 prepaint 会更新该值并触发重排。
+        let logical = logical_line_ranges(&field.value)
+            .len()
+            .max(MULTILINE_MIN_LINES);
+        let line_count = field.last_wrapped_line_count.max(logical);
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
         style.size.height = px(MULTILINE_LINE_HEIGHT * line_count as f32).into();
@@ -864,63 +863,100 @@ impl Element for MultiLineInputElement {
         let mut lines = Vec::new();
         let mut selections = Vec::new();
         let mut cursor = None;
-        for (line_index, range) in logical_line_ranges(&field.value).into_iter().enumerate() {
-            let text = &field.value[range.clone()];
-            let display_text: SharedString = text.to_string().into();
-            let runs = multiline_text_runs(field, &style, &range, display_text.len());
-            let shaped = window
-                .text_system()
-                .shape_line(display_text, font_size, &runs, None);
-            let top = bounds.top() + px(MULTILINE_LINE_HEIGHT * line_index as f32);
-            let line_bounds = Bounds::new(
-                point(bounds.left(), top),
-                size(bounds.size.width, line_height),
-            );
+        let wrap_width = bounds.size.width.max(px(1.0));
+        // 用 shape_text 一次性把完整文本（含 \n）按 wrap_width 做自动换行，
+        // 得到每个逻辑行对应的 WrappedLine（含换行边界）。
+        let value = &field.value;
+        let wrapped_lines = window
+            .text_system()
+            .shape_text(
+                SharedString::from(value.clone()),
+                font_size,
+                &multiline_text_runs(field, &style, &(0..value.len()), value.len()),
+                Some(wrap_width),
+                None,
+            )
+            .unwrap_or_default();
 
-            if let Some(selection) = field.selected_range()
-                && let Some(overlap) = range_overlap(&selection, &range)
-            {
-                let start = overlap.start.saturating_sub(range.start);
-                let end = overlap.end.saturating_sub(range.start);
-                selections.push(fill(
-                    Bounds::from_corners(
-                        point(
-                            line_bounds.left() + shaped.x_for_index(start),
-                            line_bounds.top(),
-                        ),
-                        point(
-                            line_bounds.left() + shaped.x_for_index(end),
-                            line_bounds.bottom(),
-                        ),
-                    ),
-                    rgba(ui_theme::INPUT_SELECTION),
-                ));
+        let mut visual_line_index = 0usize;
+        // shape_text 内部按 \n 拆分逻辑行；这里需要重建每个逻辑行在 value 中的字节起点。
+        let logical_ranges = logical_line_ranges(value);
+        for (logical_idx, wrapped_line) in wrapped_lines.iter().enumerate() {
+            let logical_range = logical_ranges.get(logical_idx).cloned().unwrap_or(0..0);
+            let boundaries = wrapped_line.wrap_boundaries();
+            // 每个视觉行覆盖 [seg_start, seg_end) 字节区间（相对于完整 value）。
+            let mut seg_starts: Vec<usize> = vec![logical_range.start];
+            for boundary in boundaries {
+                let glyph_index = wrapped_line.unwrapped_layout.runs[boundary.run_ix].glyphs
+                    [boundary.glyph_ix]
+                    .index;
+                seg_starts.push(logical_range.start + glyph_index);
             }
+            let seg_ends: Vec<usize> = seg_starts[1..]
+                .iter()
+                .copied()
+                .chain([logical_range.end])
+                .collect();
 
-            if focused
-                && field.selected_range().is_none()
-                && field.caret >= range.start
-                && field.caret <= range.end
-            {
-                let local = field.caret.saturating_sub(range.start);
-                cursor = Some(fill(
-                    Bounds::new(
-                        point(
-                            line_bounds.left() + shaped.x_for_index(local),
-                            line_bounds.top(),
+            for (&seg_start, &seg_end) in seg_starts.iter().zip(seg_ends.iter()) {
+                let seg_text: SharedString = value[seg_start..seg_end].to_string().into();
+                let seg_range = seg_start..seg_end;
+                let seg_runs = multiline_text_runs(field, &style, &seg_range, seg_text.len());
+                let shaped = window
+                    .text_system()
+                    .shape_line(seg_text, font_size, &seg_runs, None);
+                let top = bounds.top() + px(MULTILINE_LINE_HEIGHT * visual_line_index as f32);
+                let line_bounds = Bounds::new(
+                    point(bounds.left(), top),
+                    size(bounds.size.width, line_height),
+                );
+
+                if let Some(selection) = field.selected_range()
+                    && let Some(overlap) = range_overlap(&selection, &seg_range)
+                {
+                    let start = overlap.start.saturating_sub(seg_range.start);
+                    let end = overlap.end.saturating_sub(seg_range.start);
+                    selections.push(fill(
+                        Bounds::from_corners(
+                            point(
+                                line_bounds.left() + shaped.x_for_index(start),
+                                line_bounds.top(),
+                            ),
+                            point(
+                                line_bounds.left() + shaped.x_for_index(end),
+                                line_bounds.bottom(),
+                            ),
                         ),
-                        size(px(1.5), line_height),
-                    ),
-                    rgb(ui_theme::INPUT_CARET),
-                ));
-            }
+                        rgba(ui_theme::INPUT_SELECTION),
+                    ));
+                }
 
-            lines.push(TextLineLayout {
-                start: range.start,
-                end: range.end,
-                line: shaped,
-                bounds: line_bounds,
-            });
+                if focused
+                    && field.selected_range().is_none()
+                    && field.caret >= seg_range.start
+                    && field.caret <= seg_range.end
+                {
+                    let local = field.caret.saturating_sub(seg_range.start);
+                    cursor = Some(fill(
+                        Bounds::new(
+                            point(
+                                line_bounds.left() + shaped.x_for_index(local),
+                                line_bounds.top(),
+                            ),
+                            size(px(1.5), line_height),
+                        ),
+                        rgb(ui_theme::INPUT_CARET),
+                    ));
+                }
+
+                lines.push(TextLineLayout {
+                    start: seg_start,
+                    end: seg_end,
+                    line: shaped,
+                    bounds: line_bounds,
+                });
+                visual_line_index += 1;
+            }
         }
 
         MultiLineInputPrepaint {
@@ -965,7 +1001,14 @@ impl Element for MultiLineInputElement {
             let field = view.field_mut(self.field_id);
             field.last_layout = None;
             field.last_bounds = Some(bounds);
+            let prev_count = field.last_wrapped_line_count;
+            let new_count = prepaint.lines.len().max(MULTILINE_MIN_LINES);
+            field.last_wrapped_line_count = new_count;
             field.last_multiline_layout = prepaint.lines.clone();
+            // 换行行数变化后请求重排，让布局高度匹配实际内容。
+            if prev_count != new_count {
+                window.refresh();
+            }
         });
     }
 }

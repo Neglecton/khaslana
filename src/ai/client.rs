@@ -1,8 +1,13 @@
 // OpenAI Chat Completions 兼容 HTTP 客户端。
 //
-// 第一版只支持 `AiApiType::ChatCompletions`，用 ureq 同步阻塞调用，
-// 适合在 rayon 后台线程中执行。响应解析时通用剥离思考链
-// （`reasoning_content` 字段或 `<think>` 标签），作为可选展示，非任何模型专用兼容。
+// 支持一次性请求（`request`，连接测试用）和流式 SSE 请求（`request_stream`，
+// commit/review 用，避免长输出超时）。流式时逐 chunk 通过回调增量推送，
+// 同时在本地累积完整文本，结束时统一剥离 `<think>` 思考链。
+//
+// 响应解析时通用剥离思考链（`reasoning_content` 字段或 `<think>` 标签），
+// 作为可选展示，非任何模型专用兼容。
+
+use std::io::{BufRead, BufReader};
 
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +151,20 @@ impl ChatClient {
         }
     }
 
+    /// 流式发送聊天请求；每个增量 chunk 通过 `on_delta` 回调推送，
+    /// 全部读完后返回剥离思考链后的最终结果。
+    pub fn request_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_delta: &mut impl FnMut(StreamDelta),
+    ) -> KhaslanaResult<ChatResult> {
+        match self.settings.api_type {
+            crate::ai::config::AiApiType::ChatCompletions => {
+                self.request_chat_completions_stream(messages, on_delta)
+            }
+        }
+    }
+
     fn request_chat_completions(&self, messages: &[ChatMessage]) -> KhaslanaResult<ChatResult> {
         let url = format!(
             "{}{}",
@@ -222,6 +241,107 @@ impl ChatClient {
         Ok(ChatResult { content, reasoning })
     }
 
+    fn request_chat_completions_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_delta: &mut impl FnMut(StreamDelta),
+    ) -> KhaslanaResult<ChatResult> {
+        let url = format!(
+            "{}{}",
+            self.settings.normalized_base_url(),
+            self.settings.api_type.endpoint_path()
+        );
+
+        let req_messages: Vec<RequestMessage<'_>> = messages
+            .iter()
+            .map(|msg| RequestMessage {
+                role: msg.role.as_str(),
+                content: &msg.content,
+            })
+            .collect();
+
+        let body = ChatCompletionsRequest {
+            model: &self.settings.model,
+            messages: req_messages,
+            temperature: self.settings.temperature,
+            max_tokens: self.settings.max_tokens,
+            stream: true,
+        };
+
+        let agent = self.build_streaming_agent();
+        let body_value = serde_json::to_value(&body)
+            .map_err(|err| GitError::Message(format!("AI 请求体序列化失败：{err}")))?;
+        let response = agent
+            .post(&url)
+            .set(
+                "Authorization",
+                &format!("Bearer {}", self.settings.api_key),
+            )
+            .set("Content-Type", "application/json")
+            .send_json(body_value)
+            .map_err(|err| GitError::Message(format!("AI 请求失败：{err}")))?;
+
+        // 逐行读取 SSE 流，累积完整 content 与 reasoning_content。
+        let reader = BufReader::new(response.into_reader());
+        let mut full_content = String::new();
+        let mut full_reasoning = String::new();
+        for line in reader.lines() {
+            let line = line.map_err(|err| GitError::Message(format!("AI 流读取失败：{err}")))?;
+            match parse_sse_line(&line) {
+                Some(SseLineResult::Chunk(chunk)) => {
+                    for choice in chunk.choices {
+                        if let Some(text) = choice.delta.content {
+                            if !text.is_empty() {
+                                full_content.push_str(&text);
+                                on_delta(StreamDelta::Content(text));
+                            }
+                        }
+                        if let Some(text) = choice.delta.reasoning_content {
+                            if !text.is_empty() {
+                                full_reasoning.push_str(&text);
+                                on_delta(StreamDelta::Reasoning(text));
+                            }
+                        }
+                    }
+                }
+                Some(SseLineResult::Done) => break,
+                None => {}
+            }
+        }
+
+        // 结束后统一剥离 `<think>`，与非流式逻辑一致。
+        let (content, extra_reasoning) = split_reasoning(&full_content);
+        let reasoning = merge_reasoning(
+            (!full_reasoning.trim().is_empty()).then(|| full_reasoning.trim().to_string()),
+            extra_reasoning,
+        );
+
+        let content = content.trim().to_string();
+        if content.is_empty() && reasoning.is_none() {
+            return Err(GitError::Message("AI 返回了空内容".into()));
+        }
+
+        Ok(ChatResult { content, reasoning })
+    }
+
+    fn build_streaming_agent(&self) -> ureq::Agent {
+        // 流式场景不设整体超时：把 request_timeout_secs 当作读空闲超时，
+        // 长输出只要持续有数据就不算超时。
+        let mut builder = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(30))
+            .timeout_read(std::time::Duration::from_secs(
+                self.settings.request_timeout_secs.max(1),
+            ));
+        if let Some(proxy_url) = self.proxy_url.as_deref() {
+            if !proxy_url.trim().is_empty() {
+                if let Ok(proxy) = ureq::Proxy::new(proxy_url) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+        }
+        builder.build()
+    }
+
     fn build_agent(&self) -> ureq::Agent {
         let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(
             self.settings.request_timeout_secs.max(1),
@@ -234,6 +354,67 @@ impl ChatClient {
             }
         }
         builder.build()
+    }
+}
+
+/// 流式增量 chunk 的种类。
+#[derive(Clone, Debug)]
+pub enum StreamDelta {
+    /// 正文增量。
+    Content(String),
+    /// 思考链增量（DeepSeek 等 reasoning 模型原生流式字段）。
+    Reasoning(String),
+}
+
+/// 单行 SSE 解析结果。
+#[derive(Debug)]
+enum SseLineResult {
+    /// 一个包含 choices 的数据事件。
+    Chunk(StreamChunk),
+    /// `data: [DONE]` 结束标记。
+    Done,
+}
+
+#[derive(Deserialize, Debug)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize, Debug)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDeltaJson,
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct StreamDeltaJson {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+/// 解析单行 SSE：`data: {...}` → Chunk，`data: [DONE]` → Done，
+/// 其余（空行、非 data 前缀、JSON 解析失败）返回 None 容错跳过。
+fn parse_sse_line(line: &str) -> Option<SseLineResult> {
+    let trimmed = line.trim();
+    let payload = trimmed.strip_prefix("data: ")?;
+    if payload.trim() == "[DONE]" {
+        return Some(SseLineResult::Done);
+    }
+    serde_json::from_str::<StreamChunk>(payload)
+        .ok()
+        .map(SseLineResult::Chunk)
+}
+
+/// 合并原生 reasoning_content 与从 `<think>` 剥离出的额外思考链，
+/// 与非流式 `request` 的处理保持一致。
+fn merge_reasoning(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
     }
 }
 
@@ -286,5 +467,71 @@ mod tests {
         let (body, reasoning) = split_reasoning(content);
         assert_eq!(body, "正文结尾");
         assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn parse_sse_line_done_marker() {
+        assert!(matches!(
+            parse_sse_line("data: [DONE]"),
+            Some(SseLineResult::Done)
+        ));
+        assert!(matches!(
+            parse_sse_line("  data: [DONE]  "),
+            Some(SseLineResult::Done)
+        ));
+    }
+
+    #[test]
+    fn parse_sse_line_content_chunk() {
+        let line = r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#;
+        match parse_sse_line(line) {
+            Some(SseLineResult::Chunk(chunk)) => {
+                assert_eq!(chunk.choices.len(), 1);
+                assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+                assert!(chunk.choices[0].delta.reasoning_content.is_none());
+            }
+            other => panic!("expected Chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_reasoning_chunk() {
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}"#;
+        match parse_sse_line(line) {
+            Some(SseLineResult::Chunk(chunk)) => {
+                assert_eq!(
+                    chunk.choices[0].delta.reasoning_content.as_deref(),
+                    Some("思考")
+                );
+                assert!(chunk.choices[0].delta.content.is_none());
+            }
+            other => panic!("expected Chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_skips_non_data_lines() {
+        assert!(parse_sse_line("").is_none());
+        assert!(parse_sse_line(": comment").is_none());
+        assert!(parse_sse_line("event: ping").is_none());
+        // 坏 JSON 容错跳过，不 panic。
+        assert!(parse_sse_line("data: {broken").is_none());
+    }
+
+    #[test]
+    fn merge_reasoning_combines_and_filters() {
+        assert_eq!(
+            merge_reasoning(Some("a".into()), Some("b".into())).as_deref(),
+            Some("a\n\nb")
+        );
+        assert_eq!(
+            merge_reasoning(Some("a".into()), None).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            merge_reasoning(None, Some("b".into())).as_deref(),
+            Some("b")
+        );
+        assert!(merge_reasoning(None, None).is_none());
     }
 }
