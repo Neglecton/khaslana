@@ -1093,11 +1093,10 @@ fn next_record_timestamp(records: &[CredentialRecord]) -> i64 {
 }
 
 fn new_record_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{nanos:x}")
+    // 用 UUID v4 而非纳秒时间戳：时间戳在批量导入 / 快速连续保存（同一纳秒）
+    // 时会碰撞，导致 credential_records.id 主键冲突或后记录覆盖前记录。
+    // UUID v4 基于密码学随机源，碰撞概率可忽略。
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn normalize_display_name(name: &str) -> Option<String> {
@@ -1184,6 +1183,40 @@ mod tests {
             updated_at: 1,
             last_used: Some(1),
         }
+    }
+
+    #[test]
+    fn new_record_id_is_unique_under_burst() {
+        // 旧实现用纳秒时间戳，快速连续调用会落在同一纳秒导致碰撞；
+        // UUID v4 应在大量并发调用下仍保持唯一。
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(ids.insert(new_record_id()));
+        }
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn new_record_id_is_uuid_v4_format() {
+        // UUID v4 标准格式：8-4-4-4-12 十六进制，第三段以 '4' 开头。
+        let id = new_record_id();
+        assert_eq!(id.len(), 36);
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[2].len(), 4);
+        assert!(
+            parts[2].starts_with('4'),
+            "UUID version nibble should be 4, got {}",
+            parts[2]
+        );
+    }
+
+    #[test]
+    fn new_record_id_differs_from_legacy_hex_nanos() {
+        // 旧格式是纯十六进制无连字符；新格式必须能与之区分，
+        // 确保新旧 ID 在 credential_records 表中不会因格式误判而冲突。
+        let id = new_record_id();
+        assert!(id.contains('-'), "uuid id should contain dashes");
     }
 
     #[test]

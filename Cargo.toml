@@ -31,6 +31,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # AI 功能用的轻量同步 HTTP 客户端；后台线程阻塞调用，避免引入 async runtime。
 ureq = { version = "2", features = ["json"] }
 unicode-segmentation = "1"
+# 凭据记录 ID 等需要唯一性的标识符。已在传递依赖树中，无新增体积。
+uuid = { version = "1", features = ["v4"] }
 yororen_ui = "0.2"
 
 [dev-dependencies]

@@ -25,7 +25,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 语言：Rust 2024 edition
 - UI：`gpui-ce = 0.3`
 - Git：`git2 = 0.21`，启用 `https` 和 `ssh`
-- 凭据：`keyring = 4`、`keyring-core = 1`
+- 凭据：`keyring = 4`、`keyring-core = 1`、`uuid`（凭据记录 ID）
 - 异步/事件：`async-channel` + `std::thread`
 - 序列化：`serde`、`serde_json`
 - 错误：`thiserror`
@@ -163,6 +163,8 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 仓库远端到凭据策略的绑定。
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
 - 凭据记录索引等非密元数据。
+
+数据库连接统一通过 `storage::configure_pragmas` 启用 `journal_mode = WAL`、`synchronous = NORMAL`、`busy_timeout = 5000`，以降低每次刷新都写 session/credential 记录时的 fsync 成本。WAL 模式会在配置目录额外生成 `khaslana.sqlite3-wal` 与 `khaslana.sqlite3-shm` 边车文件，删除主库时一并清理即可（`recreate_default_after_failure` 已覆盖）。
 
 凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入。
 

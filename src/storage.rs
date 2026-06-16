@@ -215,6 +215,9 @@ pub fn legacy_storage_paths(config_dir: &Path) -> LegacyStoragePaths {
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {
+    // 先配置 PRAGMA：这些影响后续建表与每次写事务的 I/O 特性。
+    configure_pragmas(conn)?;
+
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
@@ -288,6 +291,30 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
         params![SCHEMA_VERSION.to_string()],
     )
     .map_err(storage_error)?;
+    Ok(())
+}
+
+/// 配置 SQLite 连接级 PRAGMA，优化频繁小写的写吞吐。
+///
+/// - `journal_mode = WAL`：写先追加到 `-wal` 文件，读不阻塞写、写不阻塞读；
+///   默认的 `DELETE` 模式每次写事务都全量回滚 + fsync。内存数据库（`open_in_memory`）
+///   上 WAL 无效（SQLite 会保持 `memory` 模式），调用不会报错。
+/// - `synchronous = NORMAL`：WAL 下仍保证事务耐久性，但减少 fsync 频次；
+///   默认 `FULL` 每次提交都 fsync，对小写密集场景（每次刷新都 save_session_state /
+///   save_credential_records）偏重。
+/// - `busy_timeout = 5000`：遇到锁时最多等 5s 再报 `SQLITE_BUSY`。
+///   当前所有访问走单个 `Mutex<Connection>` 无写竞争，但迁移工具或外部进程偶发
+///   持锁时，这能避免立即失败。
+///
+/// 注意：`journal_mode` 等 PRAGMA 会返回结果行，不能用 `execute_batch`（rusqlite
+/// 会以「statement returns rows」报错），故用 `pragma_update` 单条设置。
+fn configure_pragmas(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(storage_error)?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(storage_error)?;
+    conn.pragma_update(None, "busy_timeout", 5000_i64)
+        .map_err(storage_error)?;
     Ok(())
 }
 
@@ -941,5 +968,84 @@ mod tests {
             storage.load_proxy_settings().unwrap().mode,
             NetworkProxyMode::System
         );
+    }
+
+    #[test]
+    fn pragmas_enable_wal_on_file_database() {
+        // 文件数据库应启用 WAL：显著降低频繁小写的 fsync 成本。
+        let (_temp, storage) = temp_storage();
+        let conn = storage.lock_conn().unwrap();
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap();
+        assert_eq!(
+            journal_mode.to_ascii_lowercase(),
+            "wal",
+            "file database should run in WAL mode after configure_pragmas"
+        );
+    }
+
+    #[test]
+    fn pragmas_set_synchronous_normal_and_busy_timeout() {
+        let (_temp, storage) = temp_storage();
+        let conn = storage.lock_conn().unwrap();
+        // synchronous 在 WAL 下推荐 NORMAL（FULL 会每次提交 fsync）。
+        let synchronous: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "synchronous should be NORMAL (=1)");
+
+        // busy_timeout 应为 5000ms，锁竞争时给 5s 缓冲而非立即失败。
+        let busy_timeout: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+    }
+
+    #[test]
+    fn pragmas_do_not_error_on_in_memory_database() {
+        // 内存数据库上 journal_mode=WAL 无效（SQLite 保持 memory 模式），
+        // 但 configure_pragmas 不应报错，保证 open_in_memory 路径可用。
+        let storage = AppStorage::open_in_memory().unwrap();
+        let conn = storage.lock_conn().unwrap();
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "memory");
+    }
+
+    #[test]
+    fn credential_records_coexist_legacy_hex_and_uuid_ids() {
+        // 迁移期可能存在历史纳秒 ID（纯十六进制无连字符）与新生成的 UUID v4 ID
+        // 混存于同一张 credential_records 表。两者的字符集/格式完全不同，作为
+        // TEXT PRIMARY KEY 不应冲突。此测试锁定该共存场景，防止 ID 生成策略
+        // 改动时主键意外碰撞。
+
+        let record_with_id = |id: &str| CredentialRecord {
+            id: id.to_string(),
+            display_name: None,
+            scope: CredentialScope::Host,
+            kind: StoredCredentialKind::HttpsUserPass,
+            host: "github.com".to_string(),
+            remote_url: "https://github.com/team/repo.git".to_string(),
+            username: "git".to_string(),
+            key_path: None,
+            created_at: 1,
+            updated_at: 1,
+            last_used: Some(1),
+        };
+        let storage = AppStorage::open_in_memory().unwrap();
+        // 旧式 ID：模拟 new_record_id 改造前的输出（纳秒时间戳的十六进制）。
+        let legacy = record_with_id("18f3a5b2c1d0e");
+        // 新式 ID：UUID v4 标准格式（含连字符）。
+        let uuid = record_with_id("7a3f2c1d-4b5e-6a7b-8c9d-0e1f2a3b4c5d");
+        storage
+            .save_credential_records(&[legacy.clone(), uuid.clone()])
+            .unwrap();
+        let loaded = storage.load_credential_records().unwrap();
+        assert_eq!(loaded.len(), 2, "both legacy and uuid ids must persist");
+        let ids: Vec<String> = loaded.iter().map(|r| r.id.clone()).collect();
+        assert!(ids.contains(&legacy.id));
+        assert!(ids.contains(&uuid.id));
     }
 }

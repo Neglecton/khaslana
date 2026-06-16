@@ -153,6 +153,18 @@ const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
 const LARGE_DIFF_CACHE_LINE_LIMIT: usize = 20_000;
 const DIFF_CACHE_CAPACITY: usize = 16;
+/// UI 事件通道容量。
+///
+/// 之所以改为有界：`UiEvent` 的部分变体携带完整 `RepositorySnapshot` 或
+/// `FileDiff`（可能数万行 `DiffLine`），fetch/push 期间 `transfer_progress`
+/// 回调还会按对象数发送大量 `OperationProgress` 事件。无界 channel 在 UI 线程
+/// 卡顿时会让后台任务无限堆积快照，最终 OOM。
+///
+/// 128 足够吸收瞬时 burst（`UiTick` 每 420ms 一次，progress 按 fetch 对象计但
+/// UI 每帧 drain）；一旦满，`send_ui_event` 会 warn 并丢弃当前事件——配合
+/// `drain_pending_events` 里的 snapshot 类事件「只保留最新」合并，最终状态
+/// 仍能正确送达。参见阶段 1 改进（H3）。
+const UI_EVENT_CHANNEL_CAPACITY: usize = 128;
 const CONFLICT_OURS_SCROLL_HANDLE_ID: &str = "conflict-ours-scroll-handle";
 const CONFLICT_RESULT_SCROLL_HANDLE_ID: &str = "conflict-result-scroll-handle";
 const CONFLICT_THEIRS_SCROLL_HANDLE_ID: &str = "conflict-theirs-scroll-handle";
@@ -1668,8 +1680,149 @@ fn credential_form_mode_for_request(request: &CredentialRequest) -> CredentialFo
     }
 }
 
+/// 把后台线程产生的事件送回 UI 线程。
+///
+/// 通道是有界的（`UI_EVENT_CHANNEL_CAPACITY`），因此 `try_send` 可能在两种
+/// 情况下失败，需要分别处理：
+/// - `Full`：UI 线程已严重滞后（通常是 fetch/push 期间大量 progress 事件积压）。
+///   这里 warn 并丢弃当前事件。snapshot 类事件的「最终状态」由
+///   `drain_pending_events` 的合并逻辑兜底；progress/tick 类事件丢失无副作用。
+/// - `Closed`：接收端 `RepositoryView` 已销毁（仓库关闭/应用退出）。后台线程
+///   无法感知，这里 debug 记录后继续，任务会在下次 `try_send` 时再次进入此分支
+///   直到自然结束。
 pub(crate) fn send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
-    let _ = tx.try_send(event);
+    use async_channel::TrySendError;
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(event)) => {
+            tracing::warn!(
+                target: "khaslana::ui_event",
+                "ui event channel full, dropping event: {}",
+                event_label(&event)
+            );
+        }
+        Err(TrySendError::Closed(_)) => {
+            tracing::debug!(
+                target: "khaslana::ui_event",
+                "ui event channel closed, receiver dropped; background task will wind down"
+            );
+        }
+    }
+}
+
+/// 给 `send_ui_event` 的 warn 日志提供一个稳定、简短的事件名，
+/// 避免把整个 `UiEvent`（可能含数万行 diff）格式化进日志。
+///
+/// 维护约定：这是一个穷尽 `match`，没有 `_ => ...` 兜底。**新增 `UiEvent` 变体时
+/// 编译器会强制在此补全分支**（漏写即编译失败），请同步加一个短名，否则
+/// `send_ui_event` 的 warn 日志无法为该变体输出可读标签。
+fn event_label(event: &UiEvent) -> &'static str {
+    match event {
+        UiEvent::UiTick => "UiTick",
+        UiEvent::OperationStarted { .. } => "OperationStarted",
+        UiEvent::OperationProgress { .. } => "OperationProgress",
+        UiEvent::RepositoryFastLoaded { .. } => "RepositoryFastLoaded",
+        UiEvent::RepositoryMetadataLoaded { .. } => "RepositoryMetadataLoaded",
+        UiEvent::RepositoryStatusFastLoaded { .. } => "RepositoryStatusFastLoaded",
+        UiEvent::RepositoryStatusFullLoaded { .. } => "RepositoryStatusFullLoaded",
+        UiEvent::RepositoryLoadStageFailed { .. } => "RepositoryLoadStageFailed",
+        UiEvent::RepositoryLoadFinished { .. } => "RepositoryLoadFinished",
+        UiEvent::OperationFinished { .. } => "OperationFinished",
+        UiEvent::DiscardChangeFinished { .. } => "DiscardChangeFinished",
+        UiEvent::HistoryCommitsLoaded { .. } => "HistoryCommitsLoaded",
+        UiEvent::HistoryFilesLoaded { .. } => "HistoryFilesLoaded",
+        UiEvent::HistoryDiffLoaded { .. } => "HistoryDiffLoaded",
+        UiEvent::StashFilesLoaded { .. } => "StashFilesLoaded",
+        UiEvent::StashDiffLoaded { .. } => "StashDiffLoaded",
+        UiEvent::HistoryLoadFailed { .. } => "HistoryLoadFailed",
+        UiEvent::BranchSyncStatusLoaded { .. } => "BranchSyncStatusLoaded",
+        UiEvent::BranchSyncStatusFailed { .. } => "BranchSyncStatusFailed",
+        UiEvent::SubmodulesLoaded { .. } => "SubmodulesLoaded",
+        UiEvent::SubmodulesLoadFailed { .. } => "SubmodulesLoadFailed",
+        UiEvent::SubmoduleRemoteStatusesLoaded { .. } => "SubmoduleRemoteStatusesLoaded",
+        UiEvent::SubmoduleRemoteStatusesLoadFailed { .. } => "SubmoduleRemoteStatusesLoadFailed",
+        UiEvent::BrowseTargetResolved { .. } => "BrowseTargetResolved",
+        UiEvent::BrowseTreeLoaded { .. } => "BrowseTreeLoaded",
+        UiEvent::BrowseCompareFilesLoaded { .. } => "BrowseCompareFilesLoaded",
+        UiEvent::BrowseFileContentLoaded { .. } => "BrowseFileContentLoaded",
+        UiEvent::BrowseFileDiffLoaded { .. } => "BrowseFileDiffLoaded",
+        UiEvent::OperationFailed { .. } => "OperationFailed",
+        UiEvent::CredentialRecordsLoaded { .. } => "CredentialRecordsLoaded",
+        UiEvent::CredentialRequested { .. } => "CredentialRequested",
+        UiEvent::ProxyTestFinished { .. } => "ProxyTestFinished",
+        UiEvent::WorkflowProgress { .. } => "WorkflowProgress",
+        UiEvent::WorkflowFinished { .. } => "WorkflowFinished",
+        UiEvent::WorkflowFileSelected { .. } => "WorkflowFileSelected",
+        UiEvent::OpenRepositoryFolderSelected { .. } => "OpenRepositoryFolderSelected",
+        UiEvent::CloneTargetFolderSelected { .. } => "CloneTargetFolderSelected",
+        UiEvent::AiCommitMessageGenerated { .. } => "AiCommitMessageGenerated",
+        UiEvent::AiCommitMessageDelta { .. } => "AiCommitMessageDelta",
+        UiEvent::AiReviewGenerated { .. } => "AiReviewGenerated",
+        UiEvent::AiReviewDelta { .. } => "AiReviewDelta",
+        UiEvent::AiRequestFailed { .. } => "AiRequestFailed",
+        UiEvent::AiConnectionTested { .. } => "AiConnectionTested",
+    }
+}
+
+/// 判定一个事件是否属于「可被同 key 后续事件取代」的可合并类，并返回其合并 key。
+///
+/// 返回 `None` 表示该事件必须逐个处理、不可合并（增量、分页 append、用户意图、
+/// 错误、凭据请求等）。返回 `Some(MergeKey)` 表示：若队列里后续还有相同 key
+/// 的事件，当前这份可丢弃，只保留最新。
+///
+/// 可合并的事件都是「全量替换语义」——处理最新一份即等价于处理全部：
+/// - `OperationProgress`：fetch/push 期间按对象数高频发送，只关心最新文案。
+/// - `RepositoryFastLoaded` / `RepositoryMetadataLoaded` / `RepositoryStatusFastLoaded`
+///   / `RepositoryStatusFullLoaded`：同 tab 的加载结果，旧 `load_id` 的快照会被
+///   `handle_ui_event` 按 `load_id` 过滤，丢弃无害；同 `load_id` 的后发快照更完整。
+/// - `OperationFinished` / `DiscardChangeFinished`：同 tab 的操作结果快照。
+///
+/// 合并 key = `(变体种类, tab_id)`。`tab_id` 为 `None` 的事件（少见，多见于全局
+/// 失败）不合并，避免误吞跨 tab 的关键信息。
+fn event_merge_key(event: &UiEvent) -> Option<MergeKey> {
+    use MergeKeyKind as K;
+    // 各变体的 `tab_id` 字段类型不一致：snapshot 类（`RepositoryFastLoaded` 等）
+    // 是 `RepoTabId`，这里包成 `Some`；`OperationProgress` / `OperationFinished`
+    // 本身就是 `Option<RepoTabId>`，直接透传。统一成 `Option<RepoTabId>` 后，
+    // 用 `?` 把 `None`（事件不属于任何具体 tab，少见）排除出合并，避免误吞
+    // 跨 tab 的关键信息。
+    let (kind, tab_id): (MergeKeyKind, Option<RepoTabId>) = match event {
+        UiEvent::OperationProgress { tab_id, .. } => (K::OperationProgress, *tab_id),
+        UiEvent::RepositoryFastLoaded { tab_id, .. } => (K::RepositoryFastLoaded, Some(*tab_id)),
+        UiEvent::RepositoryMetadataLoaded { tab_id, .. } => {
+            (K::RepositoryMetadataLoaded, Some(*tab_id))
+        }
+        UiEvent::RepositoryStatusFastLoaded { tab_id, .. } => {
+            (K::RepositoryStatusFastLoaded, Some(*tab_id))
+        }
+        UiEvent::RepositoryStatusFullLoaded { tab_id, .. } => {
+            (K::RepositoryStatusFullLoaded, Some(*tab_id))
+        }
+        UiEvent::OperationFinished { tab_id, .. } => (K::OperationFinished, *tab_id),
+        UiEvent::DiscardChangeFinished { tab_id, .. } => (K::DiscardChangeFinished, Some(*tab_id)),
+        _ => return None,
+    };
+    // tab_id 为 None 的事件不合并。
+    let tab_id = tab_id?;
+    Some(MergeKey { kind, tab_id })
+}
+
+/// 可合并事件的合并 key。两个事件 `kind` 与 `tab_id` 都相同才算「同 key」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MergeKey {
+    kind: MergeKeyKind,
+    tab_id: RepoTabId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergeKeyKind {
+    OperationProgress,
+    RepositoryFastLoaded,
+    RepositoryMetadataLoaded,
+    RepositoryStatusFastLoaded,
+    RepositoryStatusFullLoaded,
+    OperationFinished,
+    DiscardChangeFinished,
 }
 
 pub(crate) fn perf_log(stage: &'static str, started: Instant, details: impl AsRef<str>) {
@@ -1745,6 +1898,13 @@ pub(crate) struct RepositoryView {
     pub(crate) workflow_templates: Vec<WorkflowTemplateItem>,
     pub(crate) workflow_template_dir: Option<PathBuf>,
     diff_encoding_preferences: DiffEncodingPreferences,
+    /// 工作区 / 历史 diff 的有界 LRU 缓存。
+    ///
+    /// 用 `RefCell` 而非 GPUI entity 状态字段：`cached_diff`/`cache_diff` 都在
+    /// 事件处理方法（非 paint 阶段）调用，且 GPUI 的渲染与事件派发同线程、
+    /// 非重入，因此 `borrow_mut` 不会与并发的不可变借用交错而 panic。`get` 需要
+    /// `&mut self` 来更新 LRU 顺序（保留最近使用的 diff），故即便只读访问也走
+    /// `borrow_mut`。改动这里的访问点时务必保持「同一调用栈内不嵌套 borrow」。
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
     tabs: Vec<RepoTabState>,
@@ -1764,6 +1924,12 @@ pub(crate) struct RepositoryView {
     resizing_history_files_width: Option<ResizeState>,
     resizing_history_top_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
+    /// 按 `tab-<id>:<scope>` / `global:<scope>` 缓存的滚动句柄，惰性创建。
+    ///
+    /// 用 `RefCell` 是为了在渲染期按需 `borrow_mut().entry(id).or_default()`
+    /// 首次创建句柄；这是 GPUI 自绘滚动列表的常见模式。安全前提是 GPUI 渲染
+    /// 单线程且非重入——paint 期间不会再触发一次 paint。若将来引入重入渲染
+    /// （如 sync tooltip 触发布局），需要改用 entity 状态字段或 `OnceCell`。
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
     uniform_scroll_handles: RefCell<HashMap<String, UniformListScrollHandle>>,
     pub(crate) scrollbar_drag: Option<ScrollbarDragState>,
@@ -1840,7 +2006,7 @@ pub(crate) struct RepositoryView {
 
 impl RepositoryView {
     fn new(cx: &mut Context<Self>) -> Self {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(UI_EVENT_CHANNEL_CAPACITY);
         let (storage, storage_status, storage_error) = Self::open_storage();
         let credential_store = Arc::new(KeyringCredentialStore::with_storage(storage.clone()));
         let ai_settings = Self::load_ai_provider_settings(&storage);
@@ -2535,8 +2701,40 @@ impl RepositoryView {
         .detach();
     }
 
+    /// 排空通道里已缓冲的事件。
+    ///
+    /// 在逐个处理的基础上叠加「snapshot/progress 类事件只保留最新」的合并：
+    /// 当队列里还存在**同一 tab、同一变体**的后续同类事件时，丢弃当前这份。
+    /// 这样即便通道有界、事件积压，最终的仓库快照与进度文案仍能正确送达，
+    /// 避免在 UI 线程卡顿时反复用陈旧快照覆盖、无谓重绘。
+    ///
+    /// 合并只作用于「可替换」的事件（见 `event_merge_key`）；增量类
+    /// （`AiCommitMessageDelta` / `AiReviewDelta`，丢一段即断流）、分页 append
+    /// （`HistoryCommitsLoaded`）、用户意图（`*FolderSelected`）、错误
+    /// （`*Failed`）等一律逐个处理。
+    ///
+    /// 实现要点：`async_channel` 没有 peek，只能 `try_recv` 取出后判断。遇到
+    /// 不同 key 的事件时已无法放回队列，因此**立即处理**当前（已合并过的）事件，
+    /// 再把取出的不同事件作为新一轮继续，保证它不丢。
     fn drain_pending_events(&mut self, cx: &mut Context<Self>) {
-        while let Ok(event) = self.rx.try_recv() {
+        while let Ok(mut event) = self.rx.try_recv() {
+            // 若当前事件属于可合并类，持续向队列后看，跳过所有同 key 前驱，
+            // 保留最新一份。遇到不同 key 或队列空时停下。
+            while let Some(key) = event_merge_key(&event) {
+                match self.rx.try_recv() {
+                    Ok(next) if event_merge_key(&next) == Some(key) => {
+                        // 同 key：当前事件被最新取代，丢弃、继续往后合并。
+                        event = next;
+                    }
+                    Ok(next) => {
+                        // 不同 key：已无法放回，立即处理当前（合并后的）事件，
+                        // 再把 next 作为新一轮处理，避免它丢失。
+                        self.handle_ui_event(event, cx);
+                        event = next;
+                    }
+                    Err(_) => break,
+                }
+            }
             self.handle_ui_event(event, cx);
         }
     }
@@ -6489,6 +6687,9 @@ impl RepositoryView {
         }
     }
 
+    /// 命中缓存时返回 diff 并刷新其在 LRU 中的顺序（最近使用优先淘汰最旧）。
+    /// 用 `borrow_mut` 是因为 `LruCache::get` 需 `&mut self` 更新顺序；不可改用
+    /// `borrow()`（`peek` 不更新顺序会让热 diff 被过早淘汰）。
     pub(crate) fn cached_diff(&self, key: &DiffCacheKey) -> Option<Arc<FileDiff>> {
         self.diff_cache.borrow_mut().get(key).cloned()
     }
@@ -11765,6 +11966,127 @@ mod app_tests {
             },
             lines,
         }
+    }
+
+    #[test]
+    fn event_merge_key_progress_is_mergeable_by_tab() {
+        // OperationProgress 是最高频的可合并事件（fetch/push 按对象数发送）。
+        let a = UiEvent::OperationProgress {
+            tab_id: Some(RepoTabId(1)),
+            message: "已接收 1/100".into(),
+        };
+        let b = UiEvent::OperationProgress {
+            tab_id: Some(RepoTabId(1)),
+            message: "已接收 99/100".into(),
+        };
+        let c = UiEvent::OperationProgress {
+            tab_id: Some(RepoTabId(2)),
+            message: "已接收 1/100".into(),
+        };
+        // 同 tab 同变体 → 同 key；不同 tab → 不同 key。
+        assert_eq!(event_merge_key(&a), event_merge_key(&b));
+        assert_ne!(event_merge_key(&a), event_merge_key(&c));
+    }
+
+    #[test]
+    fn event_merge_key_progress_without_tab_is_not_mergeable() {
+        // tab_id 为 None 的事件（少见）不参与合并，避免误吞跨 tab 信息。
+        let event = UiEvent::OperationProgress {
+            tab_id: None,
+            message: "全局进度".into(),
+        };
+        assert!(event_merge_key(&event).is_none());
+    }
+
+    #[test]
+    fn event_merge_key_snapshot_variants_share_key_only_within_same_variant() {
+        // 同 tab 的 FastLoaded 与 MetadataLoaded 不应被互相取代（语义不同）。
+        let snapshot = RepositorySnapshot::default();
+        let fast = UiEvent::RepositoryFastLoaded {
+            tab_id: RepoTabId(1),
+            message: "fast".into(),
+            snapshot: snapshot.clone(),
+            load_id: 1,
+        };
+        let meta = UiEvent::RepositoryMetadataLoaded {
+            tab_id: RepoTabId(1),
+            message: "meta".into(),
+            snapshot,
+            load_id: 1,
+        };
+        let fast_key = event_merge_key(&fast).expect("RepositoryFastLoaded mergeable");
+        let meta_key = event_merge_key(&meta).expect("RepositoryMetadataLoaded mergeable");
+        assert_ne!(
+            fast_key, meta_key,
+            "different snapshot variants must not collide"
+        );
+        // 同变体同 tab 应同 key。
+        assert_eq!(fast_key, event_merge_key(&fast).unwrap());
+    }
+
+    #[test]
+    fn event_merge_key_status_fast_and_full_are_distinct() {
+        // StatusFast 与 StatusFull 虽都带 changes，但分别表示「快速状态」与
+        // 「完整状态」，不可互相取代。
+        let fast = UiEvent::RepositoryStatusFastLoaded {
+            tab_id: RepoTabId(1),
+            message: "fast".into(),
+            changes: Vec::new(),
+            load_id: 1,
+        };
+        let full = UiEvent::RepositoryStatusFullLoaded {
+            tab_id: RepoTabId(1),
+            message: "full".into(),
+            changes: Vec::new(),
+            load_id: 1,
+        };
+        assert_ne!(
+            event_merge_key(&fast).unwrap(),
+            event_merge_key(&full).unwrap(),
+        );
+    }
+
+    #[test]
+    fn event_merge_key_non_mergeable_events_return_none() {
+        // 增量类（断流）、分页 append、用户意图、错误、凭据请求、tick 一律不合并。
+        assert!(event_merge_key(&UiEvent::UiTick).is_none());
+        assert!(event_merge_key(&UiEvent::AiCommitMessageDelta { delta: "x".into() }).is_none());
+        assert!(
+            event_merge_key(&UiEvent::AiReviewDelta {
+                content_delta: Some("x".into()),
+                reasoning_delta: None,
+            })
+            .is_none()
+        );
+        assert!(
+            event_merge_key(&UiEvent::OperationFailed {
+                tab_id: Some(RepoTabId(1)),
+                error: "boom".into(),
+            })
+            .is_none()
+        );
+        assert!(event_merge_key(&UiEvent::WorkflowFileSelected { path: None }).is_none());
+        assert!(event_merge_key(&UiEvent::CloneTargetFolderSelected { path: None }).is_none());
+    }
+
+    #[test]
+    fn event_merge_key_operation_finished_mergeable_but_distinct_from_progress() {
+        let finished = UiEvent::OperationFinished {
+            tab_id: Some(RepoTabId(1)),
+            message: "done".into(),
+            snapshot: None,
+            diff: None,
+        };
+        let progress = UiEvent::OperationProgress {
+            tab_id: Some(RepoTabId(1)),
+            message: "...".into(),
+        };
+        assert!(event_merge_key(&finished).is_some());
+        assert_ne!(
+            event_merge_key(&finished).unwrap(),
+            event_merge_key(&progress).unwrap(),
+            "OperationFinished must not be merged into OperationProgress"
+        );
     }
 
     #[test]

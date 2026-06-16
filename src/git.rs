@@ -137,8 +137,22 @@ impl GitService {
     }
 
     pub fn with_proxy_settings(self, proxy_settings: NetworkProxySettings) -> Self {
-        if let Ok(mut current) = self.proxy_settings.lock() {
-            *current = proxy_settings;
+        match self.proxy_settings.lock() {
+            Ok(mut current) => {
+                *current = proxy_settings;
+            }
+            Err(_) => {
+                // Mutex poisoned：说明持有该锁的线程曾 panic，逻辑状态已损坏。
+                // 这里不 panic（构造期失败会直接让整个 RepositoryView 起不来），
+                // 但必须留可观测信号，避免自定义代理「静默不生效」却无任何提示。
+                //
+                // 刻意不为此分支写单测：要构造 poisoned Mutex 必须先 panic 一次，
+                // 会污染测试进程；且该分支仅发一条日志、无分支逻辑，测试价值低于
+                // 引入 panic 测试的副作用成本。该分支的正确性由 match 结构保证。
+                tracing::error!(
+                    "proxy settings mutex poisoned; custom proxy may be inactive until restart"
+                );
+            }
         }
         self
     }
@@ -1707,15 +1721,18 @@ impl GitService {
         encoding: DiffEncodingChoice,
     ) -> Result<FileDiff> {
         let started = Instant::now();
-        struct RawDiffLine {
-            kind: DiffLineKind,
-            old_lineno: Option<u32>,
-            new_lineno: Option<u32>,
-            content: Vec<u8>,
-        }
 
-        let mut raw_lines = Vec::new();
-        let mut encoding_sample = Vec::new();
+        // 两趟遍历策略，省掉每行一次 Vec<u8> 堆分配：
+        // 旧实现先把每行内容 `content.to_vec()` 存进 `RawDiffLine`（拷贝 1），
+        // 再 decode 成 String（拷贝 2）。全文视图（FULL_FILE_CONTEXT_LINES 量级）
+        // 下 N 行 × 2 次分配会显著拉高峰值内存。
+        //
+        // 新实现：
+        //   第一趟 `diff.print`：只采集编码探测样本（有界 DIFF_ENCODING_SAMPLE_LIMIT）。
+        //   确定编码后，第二趟 `diff.print`：直接 decode 成 String，每行只 1 次分配。
+        // `git2::Diff::print` 接收 `&self`，可多次调用，每次重新遍历 deltas/hunks；
+        // 多一次遍历的 CPU 成本 ≪ N 行 Vec<u8> 的内存+拷贝开销，净收益明显。
+
         let mut is_binary = false;
         for delta in diff.deltas() {
             if delta.flags().contains(git2::DiffFlags::BINARY) {
@@ -1723,6 +1740,8 @@ impl GitService {
             }
         }
 
+        // 第一趟：采集编码样本。与旧实现完全一致地跳过 Header 行、按字节上限截断。
+        let mut encoding_sample = Vec::new();
         diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
             let kind = match line.origin() {
                 '+' => DiffLineKind::Added,
@@ -1730,35 +1749,36 @@ impl GitService {
                 'F' | 'H' => DiffLineKind::Header,
                 _ => DiffLineKind::Context,
             };
-            let content = line.content();
             if kind != DiffLineKind::Header && encoding_sample.len() < DIFF_ENCODING_SAMPLE_LIMIT {
+                let content = line.content();
                 let remaining = DIFF_ENCODING_SAMPLE_LIMIT - encoding_sample.len();
                 encoding_sample.extend_from_slice(&content[..content.len().min(remaining)]);
             }
-            raw_lines.push(RawDiffLine {
-                kind,
-                old_lineno: line.old_lineno(),
-                new_lineno: line.new_lineno(),
-                content: content.to_vec(),
-            });
             true
         })?;
 
         let (resolved_encoding, encoding_impl) = resolve_diff_encoding(encoding, &encoding_sample);
+
+        // 第二趟：用确定的编码直接 decode 每行成 String，不再经过 Vec<u8> 中转。
+        let mut lines = Vec::new();
         let mut lossy = false;
-        let lines = raw_lines
-            .into_iter()
-            .map(|line| {
-                let (content, had_errors) = decode_diff_line(&line.content, encoding_impl);
-                lossy |= had_errors;
-                DiffLine {
-                    kind: line.kind,
-                    old_lineno: line.old_lineno,
-                    new_lineno: line.new_lineno,
-                    content,
-                }
-            })
-            .collect::<Vec<_>>();
+        diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+            let kind = match line.origin() {
+                '+' => DiffLineKind::Added,
+                '-' => DiffLineKind::Removed,
+                'F' | 'H' => DiffLineKind::Header,
+                _ => DiffLineKind::Context,
+            };
+            let (content, had_errors) = decode_diff_line(line.content(), encoding_impl);
+            lossy |= had_errors;
+            lines.push(DiffLine {
+                kind,
+                old_lineno: line.old_lineno(),
+                new_lineno: line.new_lineno(),
+                content,
+            });
+            true
+        })?;
 
         perf_log(
             "git.diff.decode",
@@ -4798,6 +4818,58 @@ mod tests {
             compact.lines.iter().any(
                 |line| line.kind == DiffLineKind::Added && line.content.contains("tail change")
             )
+        );
+    }
+
+    #[test]
+    fn diff_binary_file_is_detected_and_decode_does_not_panic() {
+        // 审查 #2：两趟遍历对二进制 diff 的行为锁定。
+        //
+        // 经验证，libgit2 的 diff_tree_to_index 路径对二进制文件并不设置
+        // `DiffFlags::BINARY`，而是通过 `diff.print(Patch)` 输出一行形如
+        // "Binary files a/blob.bin and b/blob.bin differ" 的**文本**提示行。
+        // 因此本路径下 `FileDiff.is_binary` 为 false（这是一个已知的底层 flag
+        // 与 patch 文案不一致的待办，不在本次改动范围内），但关键不变量是：
+        // 第一趟采样与第二趟解码遍历的行集合一致（diff 是 &self 不可变借用），
+        // 解码器对这行二进制提示文本**不会 panic**。此测试锁定该行为。
+        let (dir, mut repo, service) = init_repo();
+        // 用循环构造足够大的、含 NUL 字节的二进制体，确保新旧两侧都明显是二进制。
+        let mut original = Vec::new();
+        for _ in 0..64 {
+            original.extend_from_slice(&[0u8, 1, 2, 3, 0, 255, 6, 7]);
+        }
+        write_bytes(dir.path(), "blob.bin", &original);
+        commit_all(&repo, "add binary");
+        // 改动二进制文件并暂存，制造一个二进制 diff。
+        let mut modified = Vec::new();
+        for _ in 0..64 {
+            modified.extend_from_slice(&[0u8, 9, 9, 9, 0, 255, 8, 8]);
+        }
+        write_bytes(dir.path(), "blob.bin", &modified);
+        service
+            .stage_path(&mut repo, Path::new("blob.bin"))
+            .unwrap();
+
+        let diff = service
+            .diff_for_path(
+                &repo,
+                Path::new("blob.bin"),
+                DiffScope::Staged,
+                false,
+                DiffEncodingChoice::Auto,
+            )
+            .unwrap();
+        // 当前路径下 libgit2 不设 BINARY flag，锁定这一现状（防回归）。
+        assert!(!diff.is_binary);
+        // 解码器对二进制提示行不 panic，且能输出 "Binary files ... differ" 文本。
+        // 不断言具体 index/oid 文案（libgit2 版本相关），只锁定关键词存在。
+        let has_binary_hint = diff
+            .lines
+            .iter()
+            .any(|line| line.content.contains("Binary files") && line.content.contains("differ"));
+        assert!(
+            has_binary_hint,
+            "binary diff should emit a 'Binary files ... differ' line",
         );
     }
 

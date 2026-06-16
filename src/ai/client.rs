@@ -395,11 +395,20 @@ struct StreamDeltaJson {
     reasoning_content: Option<String>,
 }
 
-/// 解析单行 SSE：`data: {...}` → Chunk，`data: [DONE]` → Done，
+/// 解析单行 SSE：`data:{...}` → Chunk，`data:[DONE]` → Done，
 /// 其余（空行、非 data 前缀、JSON 解析失败）返回 None 容错跳过。
+///
+/// 按 HTML5 Server-Sent Events 规范（§9.2），字段名后的冒号是必须的，
+/// 但冒号后的空格是**可选的**：`data:{...}`（无空格）与 `data: {...}`
+///（一个空格）以及 `data:  {...}`（多个空格）都是合法格式。部分兼容
+/// 服务端（含某些 OpenAI 兼容网关）恰好发送无空格的 `data:`，因此这里
+/// 用 `strip_prefix("data:")` 后 `trim_start()` 兼容所有变体，避免静默
+/// 丢弃合法事件导致流式输出残缺。
 fn parse_sse_line(line: &str) -> Option<SseLineResult> {
     let trimmed = line.trim();
-    let payload = trimmed.strip_prefix("data: ")?;
+    let payload = trimmed.strip_prefix("data:")?.trim_start();
+    // 外层 `trimmed` 已去掉行尾空白，理论上 payload 无尾部空白；这里仍用
+    // `trim()` 比较是防御性的（零成本），避免个别服务端在 [DONE] 后带不可见字符。
     if payload.trim() == "[DONE]" {
         return Some(SseLineResult::Done);
     }
@@ -516,6 +525,51 @@ mod tests {
         assert!(parse_sse_line("event: ping").is_none());
         // 坏 JSON 容错跳过，不 panic。
         assert!(parse_sse_line("data: {broken").is_none());
+    }
+
+    #[test]
+    fn parse_sse_line_accepts_no_space_after_colon() {
+        // 规范允许 `data:` 后无空格；部分兼容服务端正是此格式。
+        // 改动前这里会返回 None（静默丢事件），改动后应解析为 Chunk。
+        let line = r#"data:{"choices":[{"delta":{"content":"hello"}}]}"#;
+        match parse_sse_line(line) {
+            Some(SseLineResult::Chunk(chunk)) => {
+                assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+            }
+            other => panic!("expected Chunk for no-space data line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_accepts_multiple_spaces_after_colon() {
+        // 规范允许冒号后任意个空格（多余空格属于 value 的一部分被丢弃）。
+        let line = r#"data:   {"choices":[{"delta":{"content":"hi"}}]}"#;
+        match parse_sse_line(line) {
+            Some(SseLineResult::Chunk(chunk)) => {
+                assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+            }
+            other => panic!("expected Chunk for multi-space data line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_done_marker_without_space() {
+        // `data:[DONE]`（无空格）也应识别为结束标记。
+        assert!(matches!(
+            parse_sse_line("data:[DONE]"),
+            Some(SseLineResult::Done)
+        ));
+    }
+
+    #[test]
+    fn parse_sse_line_value_with_leading_space_is_preserved_when_single() {
+        // 单个空格按规范应被剥离；但 value 本身的前导空格（JSON 外）无意义，
+        // 这里只断言 JSON 仍能正确解析（payload 被 trim_start 后为合法 JSON）。
+        let line = r#"data: {"choices":[]}"#;
+        match parse_sse_line(line) {
+            Some(SseLineResult::Chunk(chunk)) => assert!(chunk.choices.is_empty()),
+            other => panic!("expected Chunk, got {other:?}"),
+        }
     }
 
     #[test]
