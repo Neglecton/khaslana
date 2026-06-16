@@ -333,6 +333,7 @@ impl RepositoryView {
 
     /// 渲染右侧内容区域（内容/差异切换 + 视图）。
     fn render_browse_content_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_ai_review = self.browse.list_mode == BrowseListMode::Compare;
         div()
             .flex()
             .flex_col()
@@ -344,6 +345,9 @@ impl RepositoryView {
             .child(match self.browse.view_mode {
                 BrowseViewMode::Content => self.render_browse_content_view(cx).into_any_element(),
                 BrowseViewMode::Diff => self.render_browse_diff_view(cx).into_any_element(),
+            })
+            .when(show_ai_review, |this| {
+                this.child(self.render_ai_review_panel(cx))
             })
             // 编码选择下拉菜单
             .child(self.render_encoding_dropdown(EncodingMenuTarget::Browse, cx))

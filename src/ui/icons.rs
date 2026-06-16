@@ -16,6 +16,7 @@ pub(crate) enum ToolbarIcon {
     Stash,
     Submodule,
     More,
+    Ai,
     Search,
     Close,
     Plus,
@@ -38,6 +39,7 @@ impl ToolbarIcon {
             Self::Stash => "icons/stash.svg",
             Self::Submodule => "icons/submodule.svg",
             Self::More => "icons/more.svg",
+            Self::Ai => "icons/ai.svg",
             Self::Search => "icons/search.svg",
             Self::Close => "icons/close.svg",
             Self::Plus => "icons/plus.svg",
@@ -75,6 +77,7 @@ mod tests {
         assert_eq!(ToolbarIcon::History.path(), "icons/history.svg");
         assert_eq!(ToolbarIcon::Stash.path(), "icons/stash.svg");
         assert_eq!(ToolbarIcon::More.path(), "icons/more.svg");
+        assert_eq!(ToolbarIcon::Ai.path(), "icons/ai.svg");
         assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
         assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
         assert_eq!(ToolbarIcon::Plus.path(), "icons/plus.svg");
@@ -97,6 +100,7 @@ mod tests {
             ToolbarIcon::Stash,
             ToolbarIcon::Submodule,
             ToolbarIcon::More,
+            ToolbarIcon::Ai,
             ToolbarIcon::Search,
             ToolbarIcon::Close,
             ToolbarIcon::Plus,

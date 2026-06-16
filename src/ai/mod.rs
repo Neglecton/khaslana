@@ -15,5 +15,5 @@ pub mod review;
 
 pub use client::{ChatClient, ChatResult, split_reasoning};
 pub use config::{AiApiType, AiProviderSettings};
-pub use prompt::{ChatMessage, ChatRole};
+pub use prompt::{ChatMessage, ChatRole, commit_message_prompts, review_prompts};
 pub use review::AiReviewResult;

@@ -59,7 +59,6 @@ pub fn split_reasoning(content: &str) -> (String, Option<String>) {
                     None => {
                         // 未闭合：把剩余全部当作思考链。
                         reasoning_parts.push(after_open.to_string());
-                        rest = "";
                         break;
                     }
                 }

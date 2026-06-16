@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod ai_view;
 mod assets;
 mod browse_compare_view;
 mod browse_view;
@@ -41,18 +42,19 @@ use gpui::{
     uniform_list,
 };
 use khaslana::{
-    BranchKind, BranchName, BranchSyncStatus, BrowseCompareFile, BrowseEntry, BrowseFileContent,
-    BrowseListMode, BrowseRefKind, BrowseTarget, ChangeState, CommitFileChange, CommitInfo,
-    CommitMessage, ConflictBlockResolution, ConflictFileKind, ConflictFileView, CredentialProvider,
-    CredentialRecord, CredentialRequest, CredentialScope, CredentialStore, CustomProxySettings,
-    DiffEncodingChoice, DiffEncodingInfo, DiffEncodingPreferences, DiffLineKind, DiffScope,
-    FileDiff, GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
-    NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
-    RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
-    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, SubmoduleInfo,
-    SubmoduleRemoteSyncStatus, TagName, credential_display_target, credential_key_filename,
-    credential_kind_label, credential_record_is_compatible_with_url, credential_record_label,
-    credential_record_matches_remote_url, credential_scope_label, test_credential_connection,
+    AiProviderSettings, AiReviewResult, BranchKind, BranchName, BranchSyncStatus,
+    BrowseCompareFile, BrowseEntry, BrowseFileContent, BrowseListMode, BrowseRefKind, BrowseTarget,
+    ChangeState, CommitFileChange, CommitInfo, CommitMessage, ConflictBlockResolution,
+    ConflictFileKind, ConflictFileView, CredentialProvider, CredentialRecord, CredentialRequest,
+    CredentialScope, CredentialStore, CustomProxySettings, DiffEncodingChoice, DiffEncodingInfo,
+    DiffEncodingPreferences, DiffLineKind, DiffScope, FileDiff, GitCredential, GitService,
+    HistoryRefsCache, HistoryScope, KeyringCredentialStore, NetworkProxyMode, NetworkProxySettings,
+    OperationEvent, ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings,
+    RemoteCredentialPolicy, RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode,
+    SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, credential_display_target,
+    credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
+    credential_record_label, credential_record_matches_remote_url, credential_scope_label,
+    test_credential_connection,
 };
 use lru::LruCache;
 use operation_blocker_view::OperationBlocker;
@@ -178,6 +180,9 @@ enum FieldId {
     ProxyHttpUrl,
     ProxyHttpsUrl,
     ProxySocks5Url,
+    AiBaseUrl,
+    AiApiKey,
+    AiModel,
     StashMessage,
     WorkflowInput(usize),
 }
@@ -248,6 +253,7 @@ pub(crate) enum DialogState {
         label: String,
     },
     NetworkProxySettings,
+    AiProviderSettings,
     StashForm,
     ConfirmDropStash {
         index: usize,
@@ -552,6 +558,7 @@ enum ToolbarMoreAction {
     Submodule,
     Credentials,
     Proxy,
+    AiSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -571,7 +578,9 @@ struct ToolbarMoreMenu {
 fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy: bool) -> bool {
     match action {
         ToolbarMoreAction::Stash | ToolbarMoreAction::Submodule => repo_open && !busy,
-        ToolbarMoreAction::Credentials | ToolbarMoreAction::Proxy => !busy,
+        ToolbarMoreAction::Credentials
+        | ToolbarMoreAction::Proxy
+        | ToolbarMoreAction::AiSettings => !busy,
     }
 }
 
@@ -1342,6 +1351,18 @@ pub(crate) enum UiEvent {
     CloneTargetFolderSelected {
         path: Option<PathBuf>,
     },
+    AiCommitMessageGenerated {
+        message: String,
+    },
+    AiReviewGenerated {
+        review: AiReviewResult,
+    },
+    AiRequestFailed {
+        error: String,
+    },
+    AiConnectionTested {
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1793,6 +1814,15 @@ pub(crate) struct RepositoryView {
     proxy_http_url: TextFieldState,
     proxy_https_url: TextFieldState,
     proxy_socks5_url: TextFieldState,
+    pub(crate) ai_settings: AiProviderSettings,
+    pub(crate) ai_enabled_form: bool,
+    ai_base_url: TextFieldState,
+    ai_api_key: TextFieldState,
+    ai_model: TextFieldState,
+    pub(crate) ai_commit_loading: bool,
+    pub(crate) ai_review: Option<Arc<AiReviewResult>>,
+    pub(crate) ai_review_loading: bool,
+    pub(crate) ai_review_expanded: bool,
 }
 
 impl RepositoryView {
@@ -1800,6 +1830,7 @@ impl RepositoryView {
         let (tx, rx) = async_channel::unbounded();
         let (storage, storage_status, storage_error) = Self::open_storage();
         let credential_store = Arc::new(KeyringCredentialStore::with_storage(storage.clone()));
+        let ai_settings = Self::load_ai_provider_settings(&storage);
         let remote_credential_bindings =
             Arc::new(Mutex::new(Self::load_remote_credential_bindings(&storage)));
         let proxy_settings = Self::load_proxy_settings(&storage);
@@ -1902,6 +1933,15 @@ impl RepositoryView {
             sidebar_remote_branch_search_open: false,
             remote_branch_operation: RemoteBranchOperationState::default(),
             proxy_mode: proxy_settings.mode,
+            ai_enabled_form: ai_settings.enabled,
+            ai_settings,
+            ai_base_url: TextFieldState::new(cx, "Base URL，例如 https://api.openai.com/v1"),
+            ai_api_key: TextFieldState::new(cx, "API Key").secret(),
+            ai_model: TextFieldState::new(cx, "模型名称，例如 gpt-4o-mini"),
+            ai_commit_loading: false,
+            ai_review: None,
+            ai_review_loading: false,
+            ai_review_expanded: false,
             proxy_http_url: TextFieldState::new(cx, "HTTP 代理 URL")
                 .with_value(proxy_custom.http_proxy),
             proxy_https_url: TextFieldState::new(cx, "HTTPS 代理 URL")
@@ -2161,6 +2201,13 @@ impl RepositoryView {
             .unwrap_or_default()
     }
 
+    fn load_ai_provider_settings(storage: &khaslana::AppStorage) -> AiProviderSettings {
+        storage
+            .load_ai_provider_settings()
+            .inspect_err(|err| tracing::warn!("ai provider settings load skipped: {err}"))
+            .unwrap_or_default()
+    }
+
     fn save_diff_encoding_preferences(&self) {
         if let Err(err) = self
             .storage
@@ -2177,6 +2224,12 @@ impl RepositoryView {
         };
         if let Err(err) = self.storage.save_remote_credential_bindings(&bindings) {
             tracing::warn!("remote credential bindings write skipped: {err}");
+        }
+    }
+
+    pub(crate) fn save_ai_provider_settings(&self) {
+        if let Err(err) = self.storage.save_ai_provider_settings(&self.ai_settings) {
+            tracing::warn!("ai provider settings write skipped: {err}");
         }
     }
 
@@ -3277,6 +3330,29 @@ impl RepositoryView {
                     self.last_error = None;
                 }
             }
+            UiEvent::AiCommitMessageGenerated { message } => {
+                self.ai_commit_loading = false;
+                self.commit_message.set_value(message);
+                self.status = "AI 已生成提交信息".into();
+                self.last_error = None;
+            }
+            UiEvent::AiReviewGenerated { review } => {
+                self.ai_review_loading = false;
+                self.ai_review = Some(Arc::new(review));
+                self.status = "AI 评审已生成".into();
+                self.last_error = None;
+            }
+            UiEvent::AiRequestFailed { error } => {
+                self.ai_commit_loading = false;
+                self.ai_review_loading = false;
+                self.last_error = Some(error);
+            }
+            UiEvent::AiConnectionTested { message } => {
+                self.busy = false;
+                self.status = message.clone();
+                self.last_error = None;
+                self.notify_completion(&message, cx);
+            }
         }
         cx.notify();
     }
@@ -3680,6 +3756,13 @@ impl RepositoryView {
             }
         } else if matches!(
             field,
+            FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel
+        ) {
+            if self.active_dialog == Some(DialogState::AiProviderSettings) {
+                self.save_ai_provider_settings_from_form();
+            }
+        } else if matches!(
+            field,
             FieldId::CredentialSecret
                 | FieldId::CredentialPassphrase
                 | FieldId::CredentialUsername
@@ -3898,6 +3981,13 @@ impl RepositoryView {
             {
                 self.save_network_proxy_settings();
                 cx.notify();
+            } else if matches!(
+                field,
+                FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel
+            ) && self.active_dialog == Some(DialogState::AiProviderSettings)
+            {
+                self.save_ai_provider_settings_from_form();
+                cx.notify();
             }
         }
     }
@@ -3953,6 +4043,9 @@ impl RepositoryView {
             (FieldId::ProxyHttpUrl, &self.proxy_http_url),
             (FieldId::ProxyHttpsUrl, &self.proxy_https_url),
             (FieldId::ProxySocks5Url, &self.proxy_socks5_url),
+            (FieldId::AiBaseUrl, &self.ai_base_url),
+            (FieldId::AiApiKey, &self.ai_api_key),
+            (FieldId::AiModel, &self.ai_model),
         ]
         .into_iter()
         .find_map(|(id, field)| field.focus.is_focused(window).then_some(id))
@@ -3983,6 +4076,9 @@ impl RepositoryView {
             FieldId::ProxyHttpUrl => &self.proxy_http_url,
             FieldId::ProxyHttpsUrl => &self.proxy_https_url,
             FieldId::ProxySocks5Url => &self.proxy_socks5_url,
+            FieldId::AiBaseUrl => &self.ai_base_url,
+            FieldId::AiApiKey => &self.ai_api_key,
+            FieldId::AiModel => &self.ai_model,
             FieldId::WorkflowInput(index) => self.workflow_input_field(index),
         }
     }
@@ -4011,6 +4107,9 @@ impl RepositoryView {
             FieldId::ProxyHttpUrl => &mut self.proxy_http_url,
             FieldId::ProxyHttpsUrl => &mut self.proxy_https_url,
             FieldId::ProxySocks5Url => &mut self.proxy_socks5_url,
+            FieldId::AiBaseUrl => &mut self.ai_base_url,
+            FieldId::AiApiKey => &mut self.ai_api_key,
+            FieldId::AiModel => &mut self.ai_model,
             FieldId::WorkflowInput(index) => self.workflow_input_field_mut(index),
         }
     }
@@ -4190,6 +4289,55 @@ impl RepositoryView {
 
     pub(crate) fn save_network_proxy_settings_and_close(&mut self) {
         self.save_network_proxy_settings();
+        if self.last_error.is_none() {
+            self.active_dialog = None;
+        }
+    }
+
+    pub(crate) fn open_ai_provider_settings(&mut self) {
+        self.close_popups();
+        self.reset_ai_form_from_settings();
+        self.active_dialog = Some(DialogState::AiProviderSettings);
+        self.status = "AI 设置已打开".into();
+        self.last_error = None;
+    }
+
+    pub(crate) fn reset_ai_form_from_settings(&mut self) {
+        self.ai_enabled_form = self.ai_settings.enabled;
+        self.ai_base_url
+            .set_value(self.ai_settings.base_url.clone());
+        self.ai_api_key.set_value(self.ai_settings.api_key.clone());
+        self.ai_model.set_value(self.ai_settings.model.clone());
+    }
+
+    pub(crate) fn ai_form_settings(&self) -> AiProviderSettings {
+        let mut settings = self.ai_settings.clone();
+        settings.enabled = self.ai_enabled_form;
+        settings.base_url = self.ai_base_url.value.trim().to_string();
+        settings.api_key = self.ai_api_key.value.trim().to_string();
+        settings.model = self.ai_model.value.trim().to_string();
+        settings
+    }
+
+    pub(crate) fn set_ai_enabled_form(&mut self, enabled: bool) {
+        self.ai_enabled_form = enabled;
+        self.last_error = None;
+    }
+
+    pub(crate) fn save_ai_provider_settings_from_form(&mut self) {
+        let settings = self.ai_form_settings();
+        if let Err(err) = settings.validate() {
+            self.last_error = Some(err.to_string());
+            return;
+        }
+        self.ai_settings = settings;
+        self.save_ai_provider_settings();
+        self.status = "AI 设置已保存".into();
+        self.last_error = None;
+    }
+
+    pub(crate) fn save_ai_provider_settings_from_form_and_close(&mut self) {
+        self.save_ai_provider_settings_from_form();
         if self.last_error.is_none() {
             self.active_dialog = None;
         }
@@ -7908,6 +8056,17 @@ impl RepositoryView {
                             |this, _, _| this.open_network_proxy_settings(),
                             cx,
                         ))
+                        .child(self.toolbar_button(
+                            "AI 设置",
+                            ToolbarIcon::Ai,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::AiSettings,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_ai_provider_settings(),
+                            cx,
+                        ))
                     })
                     .when(layout_mode == ToolbarLayoutMode::Compact, |this| {
                         this.child(self.render_toolbar_more_button(cx))
@@ -8060,6 +8219,13 @@ impl RepositoryView {
                 ToolbarIcon::Proxy,
                 toolbar_more_action_enabled(ToolbarMoreAction::Proxy, repo_open, self.busy),
                 |this, _, _| this.open_network_proxy_settings(),
+                cx,
+            ))
+            .child(self.toolbar_more_menu_item(
+                "AI 设置",
+                ToolbarIcon::Ai,
+                toolbar_more_action_enabled(ToolbarMoreAction::AiSettings, repo_open, self.busy),
+                |this, _, _| this.open_ai_provider_settings(),
                 cx,
             ))
             .into_any_element()
@@ -9397,24 +9563,30 @@ impl RepositoryView {
             .bg(rgba(ui_theme::GLASS_BG))
             .child(self.input(FieldId::CommitMessage, false, window, cx))
             .child(
-                div().flex().items_center().justify_end().gap_2().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(self.primary_button(
-                            "提交",
-                            can_commit,
-                            |this, _, _| this.commit(),
-                            cx,
-                        ))
-                        .child(self.primary_button(
-                            "提交并推送",
-                            can_commit_and_push,
-                            |this, _, _| this.commit_and_push(),
-                            cx,
-                        )),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(self.render_ai_commit_button(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.primary_button(
+                                "提交",
+                                can_commit,
+                                |this, _, _| this.commit(),
+                                cx,
+                            ))
+                            .child(self.primary_button(
+                                "提交并推送",
+                                can_commit_and_push,
+                                |this, _, _| this.commit_and_push(),
+                                cx,
+                            )),
+                    ),
             )
     }
 
@@ -9668,6 +9840,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::NetworkProxySettings => self
                 .render_network_proxy_settings_dialog(window, cx)
+                .into_any_element(),
+            DialogState::AiProviderSettings => self
+                .render_ai_provider_settings_dialog(window, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
