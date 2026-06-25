@@ -237,14 +237,14 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child("当前本地分支"),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::TEXT))
+                                    .text_color(rgb(ui_theme::FOREGROUND))
                                     .truncate()
                                     .child(local_branch_label),
                             ),
@@ -259,7 +259,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(kind.help()),
             )
             .child(self.remote_selector(remotes, selected_remote.clone(), cx))
@@ -271,7 +271,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child("远程分支"),
                     )
                     .child(self.remote_branch_editable_selector(
@@ -283,7 +283,7 @@ impl RepositoryView {
                         this.child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::DANGER_STRONG))
+                                .text_color(rgb(ui_theme::DESTRUCTIVE))
                                 .child(hint),
                         )
                     }),
@@ -311,7 +311,7 @@ impl RepositoryView {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::TEXT_MUTED))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                 .child("用变基代替合并"),
                         ),
                 )
@@ -355,7 +355,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("远端"),
             )
             .child(
@@ -381,7 +381,7 @@ impl RepositoryView {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_FAINT))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .truncate()
                         .child(url),
                 )
@@ -422,12 +422,12 @@ impl RepositoryView {
                     .items_center()
                     .justify_center()
                     .border_l_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgba(ui_theme::INPUT_BG))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::INPUT_BG))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .when(!disabled, |this| {
                         this.cursor_pointer()
-                            .hover(|this| this.bg(rgb(ui_theme::SURFACE_HOVER)))
+                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     })
                     .when(disabled, |this| this.opacity(0.55).cursor_not_allowed())
                     .on_mouse_down(
@@ -451,7 +451,7 @@ impl RepositoryView {
                     .child(
                         icon(IconName::Arrow(ArrowDirection::Down))
                             .size(px(12.0))
-                            .color(rgb(ui_theme::TEXT_MUTED)),
+                            .color(rgb(ui_theme::MUTED_FOREGROUND)),
                     ),
             )
             .when(dropdown_open, |this| {
@@ -508,7 +508,7 @@ impl RepositoryView {
                         .px_3()
                         .py_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_FAINT))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .child("暂无远端分支，请点击刷新获取"),
                 )
             })
@@ -575,7 +575,7 @@ impl RepositoryView {
                     .px_2()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .border_color(rgb(ui_theme::BORDER))
                     .child(self.input(FieldId::RemoteBranchSearch, false, window, cx)),
             )
             .child(

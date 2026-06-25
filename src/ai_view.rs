@@ -39,7 +39,7 @@ impl RepositoryView {
                 div()
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("接口类型：{}", AiApiType::ChatCompletions.label())),
             )
             .child(
@@ -57,11 +57,11 @@ impl RepositoryView {
                     .py_2()
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::PANEL_TINT))
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 800 / 60s）。"),
             )
             // 测试连接期间的进度/结果状态行：在弹窗内部展示，避免被弹窗遮挡。
@@ -69,7 +69,7 @@ impl RepositoryView {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_MUTED))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .child(self.status.clone()),
                 )
             })
@@ -77,7 +77,7 @@ impl RepositoryView {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::DANGER_STRONG))
+                        .text_color(rgb(ui_theme::DESTRUCTIVE))
                         .truncate()
                         .child(self.last_error.clone().unwrap_or_default()),
                 )
@@ -355,8 +355,8 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 div()
                     .flex()
@@ -366,14 +366,14 @@ impl RepositoryView {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::ACCENT_STRONG))
+                            .text_color(rgb(ui_theme::PRIMARY))
                             .child("AI 评审"),
                     )
                     .when(loading, |this| {
                         this.child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(rgb(ui_theme::TEXT_FAINT))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                 .child("生成中..."),
                         )
                     }),
@@ -417,9 +417,9 @@ impl RepositoryView {
                 .text_size(px(12.0))
                 .line_height(px(18.0))
                 .text_color(rgb(if has_output {
-                    ui_theme::TEXT
+                    ui_theme::FOREGROUND
                 } else {
-                    ui_theme::TEXT_FAINT
+                    ui_theme::MUTED_FOREGROUND
                 }))
                 .child(if has_output {
                     String::new()
@@ -435,9 +435,9 @@ impl RepositoryView {
                                     .mt_2()
                                     .pt_2()
                                     .border_t_1()
-                                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                                    .border_color(rgb(ui_theme::BORDER))
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child(
                                         div().font_weight(gpui::FontWeight::BOLD).child("思考链："),
                                     )
@@ -478,7 +478,7 @@ impl RepositoryView {
                         .px_3()
                         .py_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_MUTED))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .truncate()
                         .child(review.content.chars().take(80).collect::<String>())
                         .into_any_element(),
@@ -495,8 +495,8 @@ impl RepositoryView {
             .max_h(px(360.0))
             .min_h(px(0.0))
             .border_t_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(header)
             .when_some(body, |this, body| {
                 this.child(div().flex_1().min_h(px(0.0)).child(body))
@@ -543,7 +543,7 @@ fn render_review_content(review: &Arc<AiReviewResult>) -> gpui::AnyElement {
         .py_2()
         .text_size(px(12.0))
         .line_height(px(18.0))
-        .text_color(rgb(ui_theme::TEXT))
+        .text_color(rgb(ui_theme::FOREGROUND))
         .child(div().child(review.content.clone()))
         .when_some(review.reasoning.clone(), |this, reasoning| {
             this.child(
@@ -551,9 +551,9 @@ fn render_review_content(review: &Arc<AiReviewResult>) -> gpui::AnyElement {
                     .mt_2()
                     .pt_2()
                     .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .border_color(rgb(ui_theme::BORDER))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(div().font_weight(gpui::FontWeight::BOLD).child("思考链："))
                     .child(div().child(reasoning)),
             )

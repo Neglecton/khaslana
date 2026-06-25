@@ -133,7 +133,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     "browse-tree-list",
@@ -190,8 +190,8 @@ impl RepositoryView {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::HEADER_BG))
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
                     .child(
                         div()
                             .flex()
@@ -202,7 +202,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                                    .text_color(rgb(ui_theme::PRIMARY))
                                     .truncate()
                                     .child(target_display),
                             )
@@ -211,7 +211,7 @@ impl RepositoryView {
                                     .flex_none()
                                     .text_size(px(10.0))
                                     .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child(short_oid),
                             ),
                     )
@@ -265,9 +265,9 @@ impl RepositoryView {
         };
 
         let name_color = if is_submodule {
-            ui_theme::TEXT_FAINT
+            ui_theme::MUTED_FOREGROUND
         } else {
-            ui_theme::TEXT
+            ui_theme::FOREGROUND
         };
 
         div()
@@ -286,17 +286,17 @@ impl RepositoryView {
             .cursor_pointer()
             .overflow_hidden()
             .bg(if is_selected {
-                rgb(ui_theme::ACCENT_SOFT)
+                rgb(ui_theme::ACCENT)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .border_1()
             .border_color(if is_selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::BORDER)
             })
-            .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 if is_dir {
                     this.toggle_browse_dir(path_for_click.clone());
@@ -310,7 +310,7 @@ impl RepositoryView {
                     .flex_none()
                     .w(px(14.0))
                     .text_size(px(10.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(caret),
             )
             .child(
@@ -379,14 +379,14 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 div().flex().items_center().gap_2().min_w(px(0.0)).child(
                     div()
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(ui_theme::ACCENT_STRONG))
+                        .text_color(rgb(ui_theme::PRIMARY))
                         .truncate()
                         .child(format!("{mode_label}: {selected_path}")),
                 ),
@@ -404,7 +404,7 @@ impl RepositoryView {
                             .items_center()
                             .gap_1()
                             .rounded_sm()
-                            .bg(rgb(ui_theme::SEGMENT_BG))
+                            .bg(rgb(ui_theme::ACCENT))
                             .p_1()
                             .child(self.browse_mode_segment(BrowseViewMode::Content, "内容", cx))
                             .child(self.browse_mode_segment(BrowseViewMode::Diff, "差异", cx)),
@@ -446,11 +446,11 @@ impl RepositoryView {
             .rounded_sm()
             .border_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgba(ui_theme::GLASS_BG))
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .bg(rgb(ui_theme::CARD))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .text_size(px(11.0))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -514,7 +514,7 @@ impl RepositoryView {
             .p_2()
             .font_family("Consolas, monospace")
             .text_size(px(12.0))
-            .bg(rgb(ui_theme::SURFACE))
+            .bg(rgb(ui_theme::CARD))
             .on_action(cx.listener(Self::on_browse_content_copy))
             .on_action(cx.listener(Self::on_browse_content_select_all))
             .on_mouse_down(
@@ -636,13 +636,13 @@ impl RepositoryView {
             .items_start()
             .gap_2()
             .h(px(BROWSE_ROW_HEIGHT))
-            .when(selected, |this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .when(selected, |this| this.bg(rgb(ui_theme::ACCENT)))
             .child(
                 div()
                     .flex_none()
                     .w(px(40.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .text_align(gpui::TextAlign::Right)
                     .child((index + 1).to_string()),
             )
@@ -653,7 +653,7 @@ impl RepositoryView {
                     .line_height(px(BROWSE_ROW_HEIGHT))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(text),
             )
     }

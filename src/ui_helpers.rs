@@ -7,14 +7,14 @@ use khaslana::{ChangeState, DiffLineKind, DiffScope};
 
 use crate::{DiffHeaderTarget, RepositoryView, ui::theme as ui_theme};
 
-pub(crate) use crate::ui::theme::ACCENT_SOFT as COLOR_BLUE_SOFT;
+pub(crate) use crate::ui::theme::ACCENT as COLOR_BLUE_SOFT;
 pub(crate) use crate::ui::theme::BORDER as COLOR_BORDER;
-pub(crate) use crate::ui::theme::HEADER_BG as COLOR_HEADER_BG;
-pub(crate) use crate::ui::theme::PANEL_BG as COLOR_PANEL_BG;
-pub(crate) use crate::ui::theme::SURFACE as COLOR_SURFACE;
-pub(crate) use crate::ui::theme::TEXT as COLOR_TEXT;
-pub(crate) use crate::ui::theme::TEXT_FAINT as COLOR_TEXT_FAINT;
-pub(crate) use crate::ui::theme::TEXT_MUTED as COLOR_TEXT_MUTED;
+pub(crate) use crate::ui::theme::CARD as COLOR_HEADER_BG;
+pub(crate) use crate::ui::theme::CARD as COLOR_PANEL_BG;
+pub(crate) use crate::ui::theme::CARD as COLOR_SURFACE;
+pub(crate) use crate::ui::theme::FOREGROUND as COLOR_TEXT;
+pub(crate) use crate::ui::theme::MUTED_FOREGROUND as COLOR_TEXT_FAINT;
+pub(crate) use crate::ui::theme::MUTED_FOREGROUND as COLOR_TEXT_MUTED;
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MARGIN: f32 = 2.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
@@ -496,11 +496,11 @@ pub(crate) fn section_header(label: impl Into<SharedString>) -> impl IntoElement
         .px_3()
         .py_2()
         .border_b_1()
-        .border_color(rgb(ui_theme::BORDER_MUTED))
+        .border_color(rgb(ui_theme::BORDER))
         .bg(rgb(COLOR_HEADER_BG))
         .text_size(px(12.0))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(ui_theme::TEXT))
+        .text_color(rgb(ui_theme::FOREGROUND))
         .child(label.into())
 }
 
@@ -517,13 +517,13 @@ pub(crate) fn section_header_action(
         .px_3()
         .py_2()
         .border_b_1()
-        .border_color(rgb(ui_theme::BORDER_MUTED))
+        .border_color(rgb(ui_theme::BORDER))
         .bg(rgb(COLOR_HEADER_BG))
         .child(
             div()
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(ui_theme::TEXT))
+                .text_color(rgb(ui_theme::FOREGROUND))
                 .child(label.into()),
         );
     if let Some(action) = action {
@@ -547,23 +547,23 @@ pub(crate) fn history_scope_button(
         .rounded_sm()
         .border_1()
         .border_color(if selected {
-            rgb(ui_theme::SEGMENT_SELECTED_BG)
+            rgb(ui_theme::ACCENT)
         } else {
             rgb(COLOR_BORDER)
         })
         .bg(if selected {
-            rgb(ui_theme::SEGMENT_SELECTED_BG)
+            rgb(ui_theme::ACCENT)
         } else {
-            rgba(ui_theme::GLASS_BG)
+            rgb(ui_theme::CARD)
         })
         .text_size(px(11.0))
         .text_color(if selected {
-            rgb(ui_theme::SEGMENT_SELECTED_TEXT)
+            rgb(ui_theme::PRIMARY)
         } else {
-            rgb(ui_theme::TEXT_MUTED)
+            rgb(ui_theme::MUTED_FOREGROUND)
         })
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             action(this);
             cx.notify();
@@ -583,11 +583,9 @@ pub(crate) fn nav_list(
         .id(id)
         .flex()
         .flex_col()
-        .flex_1()
-        .gap_1()
+        .gap(px(2.0))
         .min_w(px(0.0))
         .min_h(px(0.0))
-        .p_2()
         .overflow_y_scroll()
         .track_scroll(&handle)
         .children(rows)
@@ -622,17 +620,17 @@ pub(crate) fn nav_row(
         .rounded_sm()
         .cursor_pointer()
         .bg(if selected {
-            rgb(ui_theme::ROW_SELECTED)
+            rgb(ui_theme::ACCENT)
         } else if emphasized {
-            rgb(ui_theme::ACCENT_SOFT)
+            rgb(ui_theme::ACCENT)
         } else {
-            rgba(ui_theme::GLASS_BG)
+            rgb(ui_theme::CARD)
         })
         .border_1()
         .border_color(if selected {
-            rgb(ui_theme::ROW_SELECTED_BORDER)
+            rgb(ui_theme::PRIMARY)
         } else if emphasized {
-            rgb(ui_theme::BORDER_STRONG)
+            rgb(ui_theme::PRIMARY)
         } else {
             rgb(COLOR_BORDER)
         })
@@ -648,8 +646,8 @@ pub(crate) fn placeholder_row(text: &'static str) -> impl IntoElement {
         .py_2()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(ui_theme::BORDER_MUTED))
-        .bg(rgba(ui_theme::GLASS_BG))
+        .border_color(rgb(ui_theme::BORDER))
+        .bg(rgb(ui_theme::CARD))
         .text_size(px(12.0))
         .text_color(rgb(COLOR_TEXT_FAINT))
         .line_height(px(18.0))
@@ -718,12 +716,25 @@ pub(crate) fn diff_scope_id(scope: &DiffScope) -> &'static str {
 
 pub(crate) fn change_state_color(state: &ChangeState) -> u32 {
     match state {
-        ChangeState::Added => ui_theme::SUCCESS,
-        ChangeState::Modified => ui_theme::WARNING_ACCENT_TEXT,
-        ChangeState::Deleted | ChangeState::Conflicted => ui_theme::DANGER_STRONG,
-        ChangeState::Renamed => ui_theme::ACCENT_STRONG,
-        ChangeState::Typechange => ui_theme::TYPECHANGE,
-        ChangeState::Untracked => ui_theme::TEXT_FAINT,
+        ChangeState::Added => ui_theme::GIT_ADDED,
+        ChangeState::Modified => ui_theme::COLOR_WARNING_FOREGROUND,
+        ChangeState::Deleted | ChangeState::Conflicted => ui_theme::DESTRUCTIVE,
+        ChangeState::Renamed => ui_theme::PRIMARY,
+        ChangeState::Typechange => ui_theme::PRIMARY,
+        ChangeState::Untracked => ui_theme::MUTED_FOREGROUND,
+    }
+}
+
+/// 设计图：变更行状态字母 badge 的背景色
+/// M → PRIMARY, A → GIT_ADDED, ? → GIT_UNTRACKED, D → DESTRUCTIVE
+pub(crate) fn change_state_badge_bg(state: &ChangeState) -> u32 {
+    match state {
+        ChangeState::Modified => ui_theme::PRIMARY,
+        ChangeState::Added => ui_theme::GIT_ADDED,
+        ChangeState::Deleted | ChangeState::Conflicted => ui_theme::DESTRUCTIVE,
+        ChangeState::Renamed => ui_theme::PRIMARY,
+        ChangeState::Typechange => ui_theme::PRIMARY,
+        ChangeState::Untracked => ui_theme::GIT_UNTRACKED,
     }
 }
 
@@ -742,10 +753,10 @@ pub(crate) fn context_menu_item(
         } else {
             rgb(COLOR_TEXT_FAINT)
         })
-        .bg(rgba(ui_theme::GLASS_BG))
+        .bg(rgb(ui_theme::CARD))
         .cursor_pointer()
         .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
         })
         .on_click(cx.listener(move |this, _event, _window, cx| {
             cx.stop_propagation();
@@ -772,10 +783,10 @@ pub(crate) fn context_menu_item_with_context(
         } else {
             rgb(COLOR_TEXT_FAINT)
         })
-        .bg(rgba(ui_theme::GLASS_BG))
+        .bg(rgb(ui_theme::CARD))
         .cursor_pointer()
         .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
         })
         .on_click(cx.listener(move |this, _event, _window, cx| {
             cx.stop_propagation();
@@ -788,11 +799,7 @@ pub(crate) fn context_menu_item_with_context(
 }
 
 pub(crate) fn menu_separator() -> impl IntoElement {
-    div()
-        .h(px(1.0))
-        .mx_1()
-        .my_1()
-        .bg(rgb(ui_theme::BORDER_MUTED))
+    div().h(px(1.0)).mx_1().my_1().bg(rgb(ui_theme::BORDER))
 }
 
 pub(crate) fn diff_header_toggle(
@@ -898,22 +905,22 @@ mod tests {
 
     #[test]
     fn change_state_color_uses_semantic_status_colors() {
-        assert_eq!(change_state_color(&ChangeState::Added), ui_theme::SUCCESS);
+        assert_eq!(change_state_color(&ChangeState::Added), ui_theme::GIT_ADDED);
         assert_eq!(
             change_state_color(&ChangeState::Modified),
-            ui_theme::WARNING_ACCENT_TEXT
+            ui_theme::COLOR_WARNING_FOREGROUND
         );
         assert_eq!(
             change_state_color(&ChangeState::Deleted),
-            ui_theme::DANGER_STRONG
+            ui_theme::DESTRUCTIVE
         );
         assert_eq!(
             change_state_color(&ChangeState::Conflicted),
-            ui_theme::DANGER_STRONG
+            ui_theme::DESTRUCTIVE
         );
         assert_eq!(
             change_state_color(&ChangeState::Untracked),
-            ui_theme::TEXT_FAINT
+            ui_theme::MUTED_FOREGROUND
         );
     }
 }

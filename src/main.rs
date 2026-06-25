@@ -74,16 +74,16 @@ use ui::{
         AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
         dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
-        inline_error_bubble, input_frame, list_row_surface, operation_loading_bar,
+        inline_error_bubble, input_frame, list_row_surface, mode_pill, operation_loading_bar,
         segmented_button, status_pill, toggle_box, tooltip_text,
     },
-    icons::ToolbarIcon,
+    icons::{ToolbarIcon, toolbar_icon},
     theme as ui_theme,
 };
 use ui_helpers::*;
-use workflow_view::{WorkflowInputFieldState, WorkflowTemplateItem};
+use workflow_view::{WorkflowInputFieldState, WorkflowTemplateItem, workflow_templates_dir};
 use yororen_ui::{
-    component::init as init_yororen_components,
+    component::{init as init_yororen_components},
     i18n::{I18n, Locale},
     theme::GlobalTheme,
 };
@@ -113,7 +113,7 @@ actions!(
 
 actions!(browse_content, [BrowseContentCopy, BrowseContentSelectAll,]);
 
-const DEFAULT_SIDEBAR_WIDTH: f32 = 330.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
 const DEFAULT_CHANGES_WIDTH: f32 = 330.0;
 const MIN_COLUMN_WIDTH: f32 = 240.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
@@ -1083,7 +1083,7 @@ impl Default for SidebarSectionState {
     fn default() -> Self {
         Self {
             local_branches: true,
-            remotes: true,
+            remotes: false,
             remote_branches: false,
             tags: false,
             stashes: false,
@@ -1861,7 +1861,7 @@ impl RepositoryView {
             remote_credential_bindings,
             credential_records: Vec::new(),
             workflow_templates: Vec::new(),
-            workflow_template_dir: None,
+            workflow_template_dir: workflow_templates_dir(),
             diff_encoding_preferences: Self::load_diff_encoding_preferences(&storage),
             diff_cache: RefCell::new(LruCache::new(
                 NonZeroUsize::new(DIFF_CACHE_CAPACITY)
@@ -2108,9 +2108,13 @@ impl RepositoryView {
             tab.submodule_dialog.invalidate();
         }
         self.active_tab = Some(tab_id);
+        // 切换仓库后默认打开提交记录
+        self.main_mode = MainMode::History;
         self.ensure_history_loaded();
         self.sync_conflict_mode_with_snapshot();
         self.save_session();
+        // 切换仓库后自动本地刷新
+        self.refresh();
     }
 
     fn close_tab(&mut self, tab_id: RepoTabId) {
@@ -5856,6 +5860,26 @@ impl RepositoryView {
         self.last_error = None;
     }
 
+    /// 丢弃全部未暂存变更 — 先弹出确认弹窗
+    fn confirm_discard_all(&mut self) {
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            let paths = self
+                .change_indexes
+                .unstaged
+                .iter()
+                .filter_map(|i| snapshot.changes.get(*i))
+                .map(|c| c.path.clone())
+                .collect::<Vec<_>>();
+            if !paths.is_empty() {
+                self.open_discard_change_confirm_dialog(
+                    paths,
+                    DiffScope::Unstaged,
+                    DiscardTarget::All,
+                );
+            }
+        }
+    }
+
     fn reset_to_commit(&mut self, oid: String, mode: ResetMode) {
         self.with_repo_blocking("分支已重置", move |service, repo| {
             service.reset_to_commit(repo, &oid, mode)
@@ -7550,9 +7574,9 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let selected = self.main_mode == mode;
         let icon_color = if selected {
-            ui_theme::SEGMENT_SELECTED_TEXT
+            ui_theme::PRIMARY
         } else {
-            ui_theme::TEXT_MUTED
+            ui_theme::MUTED_FOREGROUND
         };
         segmented_button(format!("mode-{label}"), selected, true)
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -7626,7 +7650,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(label),
             )
     }
@@ -7980,175 +8004,219 @@ impl RepositoryView {
             })
     }
 
-    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repo_open = self.repo_path.is_some();
         let remote_open = !self.loading.remote() && self.current_remote().is_some();
-        let viewport_width = f32::from(window.viewport_size().width);
-        let layout_mode = toolbar_layout_mode(viewport_width);
-        let pull_badge = self
+        let behind_count = self
             .branch_sync_status
             .as_ref()
-            .and_then(|status| (status.behind > 0).then_some(status.behind));
-        let push_badge = self
+            .map(|s| s.behind)
+            .unwrap_or(0);
+        let ahead_count = self
             .branch_sync_status
             .as_ref()
-            .and_then(|status| (status.ahead > 0).then_some(status.ahead));
+            .map(|s| s.ahead)
+            .unwrap_or(0);
+
+        // 新版工具栏布局：左=Logo+名称 | 中=5操作按钮 | 右=模式切换药丸
         hero_toolbar()
-            .id("repo-tab-bar")
             .flex()
             .items_center()
-            .gap_3()
-            .px_4()
-            .py_3()
+            .justify_between()
+            .px(px(16.0))
+            .h(px(52.0))
+            // ── 中间：操作按钮（打开/克隆 + 刷新/获取/拉取/推送 + 更多）──
             .child(
                 div()
-                    .flex_none()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap_2()
-                    .relative()
-                    .child(self.toolbar_button(
-                        "打开仓库",
+                    .gap(px(2.0))
+                    .child(self.render_toolbar_action_button(
+                        "打开",
                         ToolbarIcon::Open,
+                        None,
                         !self.busy,
                         |this, _, _| this.browse_open(),
                         cx,
                     ))
-                    .child(self.toolbar_button(
-                        "克隆仓库",
+                    .child(self.render_toolbar_action_button(
+                        "克隆",
                         ToolbarIcon::Clone,
+                        None,
                         !self.busy,
-                        |this, window, _| this.open_clone_dialog(window),
+                        |this, window, _cx| this.open_clone_dialog(window),
                         cx,
                     ))
-                    .child(self.toolbar_button(
+                    .child(self.render_toolbar_action_button(
                         "刷新",
                         ToolbarIcon::Refresh,
+                        None,
                         repo_open && !self.busy,
                         |this, _, _| this.refresh(),
                         cx,
                     ))
-                    .child(self.toolbar_button(
+                    .child(self.render_toolbar_action_button(
                         "获取",
                         ToolbarIcon::Fetch,
+                        None,
                         repo_open && remote_open && !self.busy,
                         |this, _, _| this.fetch(),
                         cx,
                     ))
-                    .child(self.toolbar_button_with_badge(
+                    .child(self.render_toolbar_action_button(
                         "拉取",
                         ToolbarIcon::Pull,
-                        pull_badge,
+                        if behind_count > 0 {
+                            Some(format!("↓{}", behind_count))
+                        } else {
+                            None
+                        },
                         repo_open && remote_open && !self.busy,
                         |this, _, _| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Pull)
                         },
                         cx,
                     ))
-                    .child(self.toolbar_button_with_badge(
+                    .child(self.render_toolbar_action_button(
                         "推送",
                         ToolbarIcon::Push,
-                        push_badge,
+                        if ahead_count > 0 {
+                            Some(format!("↑{}", ahead_count))
+                        } else {
+                            None
+                        },
                         repo_open && remote_open && !self.busy,
                         |this, _, _| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Push)
                         },
                         cx,
                     ))
-                    .when(layout_mode == ToolbarLayoutMode::Full, |this| {
-                        this.child(self.toolbar_button(
-                            "贮藏",
-                            ToolbarIcon::Stash,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Stash,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_stash_dialog(),
-                            cx,
-                        ))
-                        .child(self.toolbar_button(
-                            "子模块",
-                            ToolbarIcon::Submodule,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Submodule,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_submodule_manager(),
-                            cx,
-                        ))
-                        .child(self.toolbar_button(
-                            "凭据管理",
-                            ToolbarIcon::Credentials,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Credentials,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_credential_manager(),
-                            cx,
-                        ))
-                        .child(self.toolbar_button(
-                            "代理设置",
-                            ToolbarIcon::Proxy,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Proxy,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_network_proxy_settings(),
-                            cx,
-                        ))
-                        .child(self.toolbar_button(
-                            "AI 设置",
-                            ToolbarIcon::Ai,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::AiSettings,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_ai_provider_settings(),
-                            cx,
-                        ))
-                    })
-                    .when(layout_mode == ToolbarLayoutMode::Compact, |this| {
-                        this.child(self.render_toolbar_more_button(cx))
-                    }),
+                    .child(self.render_toolbar_more_button(cx)),
             )
-            .child(self.render_toolbar_path_pill(cx))
+            // ── 右侧：模式切换药丸 ──
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap_1()
-                    .relative()
-                    .child(self.mode_button_with_icon(
-                        "工作区",
-                        MainMode::Worktree,
-                        Some(ToolbarIcon::Worktree),
-                        cx,
-                    ))
+                    .gap(px(4.0))
+                    .child(
+                        mode_pill(
+                            "mode-worktree".into(),
+                            "工作区",
+                            self.main_mode == MainMode::Worktree,
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.set_main_mode(MainMode::Worktree);
+                                cx.notify();
+                            },
+                        )),
+                    )
                     .when(
                         self.snapshot
                             .as_ref()
                             .is_some_and(|snapshot| !snapshot.conflicts.is_empty()),
-                        |this| this.child(self.mode_button("冲突处理", MainMode::Conflict, cx)),
+                        |this| {
+                            this.child(
+                                mode_pill(
+                                    "mode-conflict".into(),
+                                    "冲突处理",
+                                    self.main_mode == MainMode::Conflict,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _event, _window, cx| {
+                                        this.set_main_mode(MainMode::Conflict);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                        },
                     )
-                    .child(self.mode_button_with_icon(
-                        "提交记录",
-                        MainMode::History,
-                        Some(ToolbarIcon::History),
-                        cx,
-                    ))
-                    .child(self.mode_button_with_icon(
-                        "工作流",
-                        MainMode::Workflow,
-                        Some(ToolbarIcon::Workflow),
-                        cx,
-                    )),
+                    .child(
+                        mode_pill(
+                            "mode-history".into(),
+                            "提交记录",
+                            self.main_mode == MainMode::History,
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.set_main_mode(MainMode::History);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        mode_pill(
+                            "mode-workflow".into(),
+                            "工作流",
+                            self.main_mode == MainMode::Workflow,
+                        )
+                        .on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.set_main_mode(MainMode::Workflow);
+                                cx.notify();
+                            },
+                        )),
+                    ),
             )
+    }
+
+    /// 工具栏操作按钮：图标 + 中文标签 + 可选差异数角标
+    fn render_toolbar_action_button(
+        &self,
+        label: &'static str,
+        icon_kind: ToolbarIcon,
+        sync_label: Option<String>,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let text_color = if enabled {
+            ui_theme::FOREGROUND
+        } else {
+            ui_theme::MUTED_FOREGROUND
+        };
+        div()
+            .id(label)
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(5.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .when(enabled, |this| this.cursor_pointer())
+            .when(!enabled, |this| this.cursor_not_allowed())
+            .when(enabled, |this| {
+                this.hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.opacity(0.5))
+            .text_color(rgb(text_color))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(icon_kind, text_color))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(label),
+            )
+            .when_some(sync_label, |this, label| {
+                this.child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .child(label),
+                )
+            })
     }
 
     fn render_toolbar_path_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8168,15 +8236,15 @@ impl RepositoryView {
                 .py_1()
                 .rounded_full()
                 .border_1()
-                .border_color(rgb(ui_theme::GLASS_BORDER))
-                .bg(rgba(ui_theme::GLASS_BG))
+                .border_color(rgb(ui_theme::BORDER))
+                .bg(rgb(ui_theme::CARD))
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(ui_theme::TEXT))
+                .text_color(rgb(ui_theme::FOREGROUND))
                 .truncate()
                 .when(repo_open, |this| {
                     this.cursor_pointer()
-                        .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+                        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                         .tooltip(|_window, cx| tooltip_text("点击打开仓库目录", cx))
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.open_repo_in_file_manager(cx);
@@ -8188,11 +8256,33 @@ impl RepositoryView {
     }
 
     fn render_toolbar_more_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().relative().child(self.toolbar_button_with_click_event(
-            "更多",
-            ToolbarIcon::More,
-            !self.busy,
-            |this, event: &ClickEvent, window, cx| {
+        let enabled = !self.busy;
+        let text_color = if enabled {
+            ui_theme::FOREGROUND
+        } else {
+            ui_theme::MUTED_FOREGROUND
+        };
+        div()
+            .id("更多")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(5.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .when(enabled, |this| this.cursor_pointer())
+            .when(!enabled, |this| this.cursor_not_allowed())
+            .when(enabled, |this| {
+                this.hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.opacity(0.5))
+            .text_color(rgb(text_color))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !enabled {
+                    return;
+                }
                 if this.toolbar_more_menu.is_some() {
                     this.toolbar_more_menu = None;
                     cx.stop_propagation();
@@ -8219,9 +8309,14 @@ impl RepositoryView {
                 });
                 cx.stop_propagation();
                 cx.notify();
-            },
-            cx,
-        ))
+            }))
+            .child(toolbar_icon(ToolbarIcon::More, text_color))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("更多"),
+            )
     }
 
     fn render_toolbar_more_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8292,9 +8387,9 @@ impl RepositoryView {
             .py_2()
             .text_size(px(12.0))
             .text_color(rgb(if enabled {
-                ui_theme::TEXT
+                ui_theme::FOREGROUND
             } else {
-                ui_theme::TEXT_FAINT
+                ui_theme::MUTED_FOREGROUND
             }))
             .cursor(if enabled {
                 CursorStyle::PointingHand
@@ -8302,7 +8397,7 @@ impl RepositoryView {
                 CursorStyle::Arrow
             })
             .when(enabled, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+                this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         this.toolbar_more_menu = None;
                         on_click(this, window, cx);
@@ -8312,9 +8407,9 @@ impl RepositoryView {
             .child(ui::icons::toolbar_icon(
                 icon,
                 if enabled {
-                    ui_theme::TEXT_MUTED
+                    ui_theme::MUTED_FOREGROUND
                 } else {
-                    ui_theme::TEXT_FAINT
+                    ui_theme::MUTED_FOREGROUND
                 },
             ))
             .child(label)
@@ -8336,8 +8431,8 @@ impl RepositoryView {
             .px_2()
             .py_1()
             .border_b_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .overflow_x_scroll()
             .track_scroll(&handle)
             .children(
@@ -8382,21 +8477,21 @@ impl RepositoryView {
             .rounded_sm()
             .border_1()
             .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::BORDER)
             })
             .bg(if selected {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             } else {
-                rgb(ui_theme::SURFACE_MUTED)
+                rgb(ui_theme::ACCENT)
             })
             .cursor_pointer()
             .hover(|this| {
                 if selected {
-                    this.bg(rgb(ui_theme::SURFACE))
+                    this.bg(rgb(ui_theme::CARD))
                 } else {
-                    this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT))
+                    this.bg(rgb(ui_theme::SECONDARY))
                 }
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -8409,9 +8504,9 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(12.0))
                     .text_color(if selected {
-                        rgb(ui_theme::TEXT)
+                        rgb(ui_theme::FOREGROUND)
                     } else {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .truncate()
                     .child(format!("{title}{status_dot}")),
@@ -8423,12 +8518,12 @@ impl RepositoryView {
                     .px_1()
                     .text_size(px(12.0))
                     .text_color(if selected {
-                        rgb(ui_theme::TEXT_FAINT)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     } else {
-                        rgb(ui_theme::TEXT_FAINT)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .cursor_pointer()
-                    .hover(|this| this.text_color(rgb(ui_theme::DANGER_TEXT)))
+                    .hover(|this| this.text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -8678,7 +8773,7 @@ impl RepositoryView {
                     .px_3()
                     .py_1()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("提交 {}", menu.short_oid)),
             )
             .child(menu_separator())
@@ -8831,14 +8926,14 @@ impl RepositoryView {
             .px_3()
             .py_1()
             .text_color(if enabled {
-                rgb(ui_theme::TEXT)
+                rgb(ui_theme::FOREGROUND)
             } else {
-                rgb(ui_theme::TEXT_FAINT)
+                rgb(ui_theme::MUTED_FOREGROUND)
             })
-            .bg(rgba(ui_theme::GLASS_BG))
+            .bg(rgb(ui_theme::CARD))
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
@@ -8855,10 +8950,10 @@ impl RepositoryView {
             .id("context-menu-copy-commit-sha")
             .px_3()
             .py_1()
-            .text_color(rgb(ui_theme::TEXT))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .text_color(rgb(ui_theme::FOREGROUND))
+            .bg(rgb(ui_theme::CARD))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 this.copy_commit_sha(oid.clone(), cx);
@@ -8905,7 +9000,7 @@ impl RepositoryView {
                     .px_3()
                     .py_1()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(title),
             )
             .child(menu_separator())
@@ -8933,17 +9028,17 @@ impl RepositoryView {
             .px_3()
             .py_1()
             .text_color(if selected {
-                rgb(ui_theme::ACCENT_STRONG)
+                rgb(ui_theme::PRIMARY)
             } else {
-                rgb(ui_theme::TEXT)
+                rgb(ui_theme::FOREGROUND)
             })
             .bg(if selected {
-                rgb(ui_theme::ACCENT_SOFT)
+                rgb(ui_theme::PRIMARY_SUBTLE)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 this.choose_diff_encoding(choice);
@@ -8984,6 +9079,8 @@ impl RepositoryView {
         let has_unstaged_selection = !self.change_selection.unstaged.is_empty();
         let has_staged = !staged_rows.is_empty();
         let has_unstaged = !unstaged_rows.is_empty();
+        let staged_count = staged_rows.len();
+        let unstaged_count = unstaged_rows.len();
 
         app_panel()
             .flex()
@@ -8992,27 +9089,26 @@ impl RepositoryView {
             .w(px(self.changes_width))
             .min_w(px(self.changes_width))
             .h_full()
+            .border_r_1()
+            .border_color(rgb(ui_theme::BORDER))
             .when_some(self.render_rebase_banner(cx), |this, banner| {
                 this.child(banner)
             })
             .child(self.render_conflict_section(cx))
             .child(self.render_change_section(
-                "暂存区",
+                "已暂存变更",
                 "staged-change-list",
                 "暂存区加载中...",
                 self.loading.staged(),
                 staged_rows,
                 has_staged || self.loading.staged(),
+                staged_count,
+                true,
                 vec![
-                        self.button(
-                            "取消暂存选定文件",
-                            has_staged_selection && !self.busy,
-                            |this, _, _| this.unstage_selected(),
-                            cx,
-                        )
-                        .into_any_element(),
-                        self.button(
-                            "取消暂存所有文件",
+                        // 设计图：minus 图标按钮 22×22，取消暂存全部
+                        self.change_icon_button(
+                            "取消暂存全部",
+                            ToolbarIcon::Minus,
                             has_staged && !self.busy,
                             |this, _, _| this.unstage_all(),
                             cx,
@@ -9021,26 +9117,30 @@ impl RepositoryView {
                     ],
                 cx,
             ))
-            .child(div().flex_none().h(px(1.0)).bg(rgb(ui_theme::BORDER)))
             .child(self.render_change_section(
-                "修改区",
+                "未暂存变更",
                 "unstaged-change-list",
                 "修改区加载中...",
                 self.loading.unstaged(),
                 unstaged_rows,
                 has_unstaged || self.loading.unstaged(),
+                unstaged_count,
+                false,
                 vec![
-                        self.button(
-                            "暂存选定文件",
-                            has_unstaged_selection && !self.busy,
-                            |this, _, _| this.stage_selected(),
+                        // 设计图：plus 图标按钮 22×22，暂存全部
+                        self.change_icon_button(
+                            "暂存全部",
+                            ToolbarIcon::Plus,
+                            has_unstaged && !self.busy,
+                            |this, _, _| this.stage_all(),
                             cx,
                         )
                         .into_any_element(),
-                        self.button(
-                            "暂存所有文件",
+                        // 设计图：trash 图标按钮 22×22，丢弃全部（DESTRUCTIVE 色）
+                        self.change_destructive_icon_button(
+                            "丢弃全部",
                             has_unstaged && !self.busy,
-                            |this, _, _| this.stage_all(),
+                            |this, _, _| this.confirm_discard_all(),
                             cx,
                         )
                         .into_any_element(),
@@ -9057,6 +9157,8 @@ impl RepositoryView {
         loading: bool,
         rows: Vec<gpui::AnyElement>,
         content_present: bool,
+        count: usize,
+        is_staged: bool,
         actions: Vec<gpui::AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -9066,36 +9168,77 @@ impl RepositoryView {
             rows
         };
 
+        // 设计图：
+        // 未暂存变更标题 + 计数 badge（SECONDARY bg / SECONDARY_FOREGROUND fg）
+        // 已暂存变更标题 + 计数 badge（PRIMARY bg / PRIMARY_FOREGROUND fg）
+        let badge_bg = if is_staged {
+            ui_theme::PRIMARY
+        } else {
+            ui_theme::SECONDARY
+        };
+        let badge_fg = if is_staged {
+            ui_theme::PRIMARY_FOREGROUND
+        } else {
+            ui_theme::SECONDARY_FOREGROUND
+        };
+        let count_badge = if count > 0 {
+            Some(
+                div()
+                    .flex_none()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(ui_theme::RADIUS_PILL))
+                    .bg(rgb(badge_bg))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(badge_fg))
+                    .child(count.to_string())
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // 设计图：已暂存标题上下都有 border（分割线），未暂存标题只有下 border
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .when(is_staged, |this| {
+                this.border_t_1().border_color(rgb(ui_theme::BORDER))
+            })
             .child(
                 div()
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
+                    .px(px(16.0))
+                    .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::HEADER_BG))
+                    .bg(rgb(ui_theme::CARD))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::TEXT))
-                            .child(title),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child(title),
+                            )
+                            .when_some(count_badge, |this, badge| this.child(badge)),
                     )
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
-                            .justify_end()
-                            .gap_1()
+                            .items_center()
+                            .gap(px(4.0))
                             .children(actions),
                     ),
             )
@@ -9106,10 +9249,9 @@ impl RepositoryView {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .gap_1()
+                    .gap(px(2.0))
                     .min_w(px(0.0))
                     .min_h(px(0.0))
-                    .p_2()
                     .overflow_scroll()
                     .track_scroll(&handle)
                     .children(rows)
@@ -9150,11 +9292,11 @@ impl RepositoryView {
                 CursorStyle::ResizeColumn
             })
             .bg(if active {
-                rgb(ui_theme::ACCENT_SOFT)
+                rgb(ui_theme::PRIMARY)
             } else {
-                rgb(ui_theme::PANEL_BG)
+                rgb(ui_theme::CARD)
             })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseUpEvent, _window, cx| {
@@ -9172,7 +9314,7 @@ impl RepositoryView {
                     .top(px(3.0))
                     .h(px(1.0))
                     .bg(if active {
-                        rgb(ui_theme::ACCENT)
+                        rgb(ui_theme::PRIMARY)
                     } else {
                         rgb(ui_theme::BORDER)
                     })
@@ -9185,7 +9327,7 @@ impl RepositoryView {
                     .bottom(px(0.0))
                     .w(px(1.0))
                     .bg(if active {
-                        rgb(ui_theme::ACCENT)
+                        rgb(ui_theme::PRIMARY)
                     } else {
                         rgb(ui_theme::BORDER)
                     })
@@ -9291,10 +9433,43 @@ impl RepositoryView {
             DiffScope::Unstaged => change.unstaged.as_ref(),
         };
         let state_label = state.map(|state| state.label()).unwrap_or(" ");
-        let state_color = state
-            .map(change_state_color)
-            .unwrap_or(ui_theme::TEXT_FAINT);
+        // 设计图：状态 badge 背景色
+        // M → PRIMARY, A → GIT_ADDED, ? → GIT_UNTRACKED, D → DESTRUCTIVE
+        let badge_bg = state
+            .map(change_state_badge_bg)
+            .unwrap_or(ui_theme::MUTED_FOREGROUND);
+        let is_staged = scope == DiffScope::Staged;
 
+        // 行内图标按钮：plus（暂存）或 minus（取消暂存）
+        let row_action_icon = if is_staged {
+            ToolbarIcon::Minus
+        } else {
+            ToolbarIcon::Plus
+        };
+        let row_action_label = if is_staged {
+            "取消暂存此文件"
+        } else {
+            "暂存此文件"
+        };
+        let row_action_enabled = !self.busy;
+        let row_action_click: std::sync::Arc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)> =
+            if is_staged {
+                std::sync::Arc::new({
+                    let path = path.clone();
+                    move |this: &mut Self, _window: &mut Window, _cx: &mut Context<Self>| {
+                        this.unstage_paths(vec![path.clone()], "取消暂存");
+                    }
+                })
+            } else {
+                std::sync::Arc::new({
+                    let path = path.clone();
+                    move |this: &mut Self, _window: &mut Window, _cx: &mut Context<Self>| {
+                        this.stage_paths(vec![path.clone()], "暂存");
+                    }
+                })
+            };
+
+        // 设计图：已暂存行 bg ACCENT，未暂存行无背景
         list_row_surface(
             format!("change-{}-{}", diff_scope_id(&scope), change.path),
             selected,
@@ -9302,12 +9477,12 @@ impl RepositoryView {
         .flex()
         .flex_none()
         .items_center()
-        .gap_1()
-        .h(px(CHANGE_ROW_HEIGHT))
-        .px_2()
-        .py_1()
+        .gap(px(8.0))
+        .px(px(16.0))
+        .py(px(8.0))
         .overflow_hidden()
         .cursor_pointer()
+        .when(is_staged && !selected, |this| this.bg(rgb(ui_theme::ACCENT)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener({
@@ -9327,13 +9502,18 @@ impl RepositoryView {
                 cx.notify();
             }),
         )
+        // 设计图：状态字母 badge — 圆角 pill，白字，状态色背景
         .child(
             div()
                 .flex_none()
-                .w(px(24.0))
-                .text_size(px(11.0))
-                .font_family("monospace")
-                .text_color(rgb(state_color))
+                .px(px(5.0))
+                .py(px(1.0))
+                .rounded(px(ui_theme::RADIUS_XS))
+                .bg(rgb(badge_bg))
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                .justify_center()
                 .child(state_label),
         )
         .child(
@@ -9341,9 +9521,26 @@ impl RepositoryView {
                 .flex_1()
                 .min_w(px(0.0))
                 .text_size(px(12.0))
-                .text_color(rgb(ui_theme::TEXT))
+                .text_color(rgb(ui_theme::FOREGROUND))
                 .truncate()
                 .child(change.path),
+        )
+        // 设计图：行内图标按钮 20×20
+        .child(
+            self.change_row_icon_button(
+                row_action_label,
+                row_action_icon,
+                ui_theme::MUTED_FOREGROUND,
+                row_action_enabled,
+                {
+                    let click = row_action_click;
+                    move |this, _window, cx| {
+                        click(this, _window, cx);
+                        cx.notify();
+                    }
+                },
+                cx,
+            ),
         )
     }
 
@@ -9420,7 +9617,7 @@ impl RepositoryView {
             .p_2()
             .font_family("Consolas, monospace")
             .text_size(px(12.0))
-            .bg(rgb(ui_theme::SURFACE))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     scroll_id,
@@ -9533,14 +9730,14 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 div()
                     .min_w(px(0.0))
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                    .text_color(rgb(ui_theme::PRIMARY))
                     .truncate()
                     .child(title),
             )
@@ -9573,16 +9770,14 @@ impl RepositoryView {
             })
             .relative()
             .flex_none()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgba(ui_theme::GLASS_BG))
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .bg(rgb(ui_theme::ACCENT))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .text_size(px(11.0))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -9603,8 +9798,8 @@ impl RepositoryView {
             .gap_2()
             .p_3()
             .border_t_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(self.input(FieldId::CommitMessage, false, window, cx))
             .child(
                 div()
@@ -9643,8 +9838,8 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_t_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .text_size(px(12.0))
             .child(status_pill(status_label, self.busy))
             .child(
@@ -9653,9 +9848,9 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .truncate()
                     .text_color(if self.busy {
-                        rgb(ui_theme::ACCENT_STRONG)
+                        rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .child(if self.busy {
                         format!("{}...", self.status)
@@ -9722,8 +9917,8 @@ impl RepositoryView {
             .p_3()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG_STRONG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -9734,13 +9929,13 @@ impl RepositoryView {
                 div()
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child("需要凭据"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("远端：{}", pending.request.url)),
             )
             .child(self.input(FieldId::CredentialUsername, true, window, cx))
@@ -9788,7 +9983,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child("复用范围"),
                     )
                     .child(self.credential_scope_button(
@@ -9930,9 +10125,9 @@ impl RepositoryView {
                     .px_2()
                     .text_size(px(12.0))
                     .text_color(rgb(if preview.is_some() {
-                        ui_theme::TEXT_MUTED
+                        ui_theme::MUTED_FOREGROUND
                     } else {
-                        ui_theme::TEXT_FAINT
+                        ui_theme::MUTED_FOREGROUND
                     }))
                     .child(preview.unwrap_or_else(|| {
                         "填写远程仓库 URL 和父文件夹后显示最终代码路径".to_string()
@@ -10005,7 +10200,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("当前分支：{branch}")),
             )
             .child(self.input(FieldId::BranchRename, false, window, cx))
@@ -10037,13 +10232,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("目标提交：{} {}", short_oid(&oid), summary)),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("将当前分支重置到该提交。{mode_label}：{mode_help}")),
             )
             .when(mode == ResetMode::Hard, |this| {
@@ -10076,13 +10271,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("目标提交：{} {}", short_oid(&oid), summary)),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("确认后会创建一个新的提交，用于撤销该提交引入的修改。"),
             )
             .child(
@@ -10110,19 +10305,19 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("目标提交：{} {}", short_oid(&oid), summary)),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("确认后会创建一个新的提交，用于撤销这次合并相对主线引入的修改。"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("该操作不会删除原合并提交，也不会重写分支历史；若产生冲突，请在冲突解决中心处理后手动提交。"),
             )
             .child(danger_callout(
@@ -10153,19 +10348,19 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("目标提交：{} {}", short_oid(&oid), summary)),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("确认后会撤销该提交记录，并把该提交引入的修改保留在暂存区。"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("该操作只支持当前分支最新且尚未推送的普通提交。"),
             )
             .child(
@@ -10212,19 +10407,19 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(target_label),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(preview),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(help),
             )
             .child(
@@ -10259,13 +10454,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(path),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!(
                         "还有 {unresolved_count} 个代码块未处理，是否继续标记已解决？"
                     )),
@@ -10312,8 +10507,8 @@ impl RepositoryView {
             .p_4()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG_STRONG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -10341,7 +10536,7 @@ impl RepositoryView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .child("远端管理"),
                     )
                     .child(self.primary_button(
@@ -10354,7 +10549,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("远端地址会同时作为 fetch 和 push URL；凭据只从已保存凭据中选择。"),
             )
             .child(
@@ -10411,10 +10606,10 @@ impl RepositoryView {
             .py_2()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .bg(rgb(ui_theme::CARD))
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(div().flex_none().w(px(104.0)).child("名称"))
             .child(div().flex_1().min_w(px(0.0)).child("地址"))
             .child(div().flex_none().w(px(180.0)).child("凭据"))
@@ -10456,13 +10651,13 @@ impl RepositoryView {
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
             .text_size(px(12.0))
-            .bg(rgba(ui_theme::GLASS_BG))
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .bg(rgb(ui_theme::CARD))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .child(
                 div()
                     .flex_none()
                     .w(px(104.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(remote.name),
             )
@@ -10470,7 +10665,7 @@ impl RepositoryView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .truncate()
                     .child(remote.url),
             )
@@ -10478,7 +10673,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(180.0))
-                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                    .text_color(rgb(ui_theme::PRIMARY))
                     .truncate()
                     .child(credential_label),
             )
@@ -10526,7 +10721,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child("绑定凭据"),
                     )
                     .child(self.remote_credential_picker(cx)),
@@ -10616,7 +10811,7 @@ impl RepositoryView {
             .border_1()
             .border_color(rgb(ui_theme::BORDER))
             .rounded_sm()
-            .bg(rgba(ui_theme::GLASS_BG))
+            .bg(rgb(ui_theme::CARD))
             .children(rows)
     }
 
@@ -10643,19 +10838,21 @@ impl RepositoryView {
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
             .bg(if selected {
-                rgb(ui_theme::ROW_SELECTED)
+                rgb(ui_theme::PRIMARY_SUBTLE)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .text_size(px(12.0))
-            .text_color(if enabled {
-                rgb(ui_theme::TEXT)
+            .text_color(if !enabled {
+                rgb(ui_theme::MUTED_FOREGROUND)
+            } else if selected {
+                rgb(ui_theme::PRIMARY)
             } else {
-                rgb(ui_theme::TEXT_FAINT)
+                rgb(ui_theme::FOREGROUND)
             })
             .cursor_pointer()
             .when(enabled, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+                this.hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             })
             .child(
                 div()
@@ -10664,14 +10861,14 @@ impl RepositoryView {
                     .rounded_full()
                     .border_1()
                     .border_color(if selected {
-                        rgb(ui_theme::ACCENT_STRONG)
+                        rgb(ui_theme::PRIMARY)
                     } else {
                         rgb(ui_theme::BORDER)
                     })
                     .bg(if selected {
-                        rgb(ui_theme::ACCENT)
+                        rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::SURFACE)
+                        rgb(ui_theme::CARD)
                     }),
             )
             .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
@@ -10692,13 +10889,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("确认删除远端：{name}")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("这只会删除当前仓库的远端配置，不会删除任何已保存凭据。"),
             )
             .child(
@@ -10734,13 +10931,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("确认删除远端分支：{full_name}")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(
                         "这会删除远端仓库上的分支，并刷新本地远端分支列表；不会删除同名本地分支。",
                     ),
@@ -10776,7 +10973,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child("类型"),
                     )
                     .child(self.credential_kind_button("HTTPS", CredentialFormMode::Https, cx))
@@ -10818,7 +11015,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child("复用范围"),
                     )
                     .child(self.credential_scope_button(
@@ -10871,8 +11068,8 @@ impl RepositoryView {
             .p_4()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG_STRONG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -10895,7 +11092,7 @@ impl RepositoryView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .child("凭据管理"),
                     )
                     .child(
@@ -10919,7 +11116,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(
                         "密文仅保存在系统凭据管理器；这里不显示、不复制密码、PAT 或 SSH 密码短语。",
                     ),
@@ -10993,7 +11190,7 @@ impl RepositoryView {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_MUTED))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .child("凭据记录不存在，可能已经被删除。"),
                 )
                 .child(div().flex().justify_end().child(self.button(
@@ -11047,7 +11244,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("密码、PAT 和 SSH 密码短语不会在这里显示。"),
             )
             .child(div().flex().justify_end().child(self.button(
@@ -11067,14 +11264,14 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(96.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(label),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(value),
             )
     }
@@ -11091,10 +11288,10 @@ impl RepositoryView {
             .py_2()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .bg(rgb(ui_theme::CARD))
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(div().flex_none().w(px(112.0)).truncate().child("名称"))
             .child(div().flex_none().w(px(88.0)).truncate().child("类型"))
             .child(div().flex_none().w(px(64.0)).truncate().child("范围"))
@@ -11138,9 +11335,9 @@ impl RepositoryView {
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
             .text_size(px(12.0))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .bg(rgb(ui_theme::CARD))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_credential_details(detail_id.clone());
                 cx.notify();
@@ -11158,7 +11355,7 @@ impl RepositoryView {
                     .id(format!("credential-record-actions-{actions_id}"))
                     .flex_none()
                     .w(px(112.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(display_name),
             )
@@ -11166,7 +11363,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(88.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(credential_kind_label(record.kind)),
             )
@@ -11174,7 +11371,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(64.0))
-                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                    .text_color(rgb(ui_theme::PRIMARY))
                     .truncate()
                     .child(credential_scope_label(record.scope)),
             )
@@ -11182,7 +11379,7 @@ impl RepositoryView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(target),
             )
@@ -11190,7 +11387,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(72.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .truncate()
                     .child(record.username),
             )
@@ -11198,7 +11395,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(68.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .truncate()
                     .child(key_file),
             )
@@ -11206,7 +11403,7 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(108.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .truncate()
                     .child(timestamp_label(record.updated_at)),
             )
@@ -11254,13 +11451,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("确认删除凭据：{label}")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("删除会同时移除非敏感索引和系统凭据管理器中的密文。"),
             )
             .child(
@@ -11321,7 +11518,7 @@ impl Render for RepositoryView {
             .relative()
             .flex()
             .flex_col()
-            .text_color(rgb(ui_theme::TEXT))
+            .text_color(rgb(ui_theme::FOREGROUND))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 this.encoding_menu_closed_by_capture = None;
                 if this.mouse_down_inside_context_menu(event) {

@@ -36,7 +36,7 @@ impl RepositoryView {
                 div()
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(proxy_mode_help(self.proxy_mode)),
             )
             .when(custom_enabled, |this| {
@@ -52,7 +52,7 @@ impl RepositoryView {
                             div()
                                 .text_size(px(12.0))
                                 .line_height(px(18.0))
-                                .text_color(rgb(ui_theme::TEXT_FAINT))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                 .child("代理认证第一版请写在 URL 中，例如 http://user:pass@127.0.0.1:7890。"),
                         ),
                 )
@@ -63,11 +63,11 @@ impl RepositoryView {
                     .py_2()
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::PANEL_TINT))
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(remote_label),
             )
             .child(

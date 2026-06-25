@@ -7,7 +7,7 @@
 //! 当文件体积超过 `FULL_FILE_MAX_BYTES` 时，GitService 层在分配逐行 String 之前
 //! 就会返回 `FULL_FILE_TOO_LARGE_MESSAGE` 错误，UI 据此自动回退到紧凑差异。
 
-use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, div, prelude::*, px, rgb, rgba};
+use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, div, prelude::*, px, rgb};
 
 use crate::{EncodingMenuTarget, MainMode, RepositoryView, ui::theme as ui_theme};
 
@@ -30,22 +30,20 @@ impl RepositoryView {
                 EncodingMenuTarget::Browse => "browse-full-file-toggle",
             })
             .flex_none()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .when(active, |this| {
-                this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT))
-                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                this.bg(rgb(ui_theme::ACCENT))
+                    .text_color(rgb(ui_theme::PRIMARY))
             })
             .when(!active, |this| {
-                this.bg(rgba(ui_theme::GLASS_BG))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                this.bg(rgb(ui_theme::ACCENT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             })
             .text_size(px(11.0))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {

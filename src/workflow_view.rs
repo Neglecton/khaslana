@@ -87,16 +87,19 @@ impl RepositoryView {
     }
 
     pub(crate) fn refresh_workflow_templates(&mut self) {
+        self.workflow_template_dir = workflow_templates_dir();
         match load_workflow_templates() {
             Ok(templates) => {
+                let count = templates.len();
                 self.workflow_templates = templates;
-                self.workflow_template_dir = workflow_templates_dir();
                 self.last_error = None;
+                self.status = format!("已刷新，共 {count} 个工作流模板");
             }
             Err(err) => {
                 self.workflow_templates.clear();
-                self.workflow_template_dir = workflow_templates_dir();
-                self.last_error = Some(err);
+                // 目录读取失败不作为严重错误上报，仅记录状态；
+                // 用户可通过"打开目录"或"选择文件"验证目录是否可用
+                self.status = err;
             }
         }
     }
@@ -253,7 +256,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(self.render_workflow_template_column(cx))
             .child(self.render_column_splitter(ResizeTarget::WorkflowTemplates, cx))
             .child(self.render_workflow_detail(window, cx))
@@ -308,11 +311,11 @@ impl RepositoryView {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .border_color(rgb(ui_theme::BORDER))
                     .text_size(px(12.0))
                     .child(
                         div()
-                            .text_color(rgb(ui_theme::ACCENT_STRONG))
+                            .text_color(rgb(ui_theme::PRIMARY))
                             .font_weight(gpui::FontWeight::BOLD)
                             .truncate()
                             .child(workflow_name),
@@ -320,7 +323,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .mt_1()
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .truncate()
                             .child(file_label),
                     ),
@@ -379,7 +382,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .border_r_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(section_header_action(
                 "工作流模板",
                 Some(
@@ -388,12 +391,37 @@ impl RepositoryView {
                         .flex_none()
                         .items_center()
                         .gap_1()
-                        .child(self.button(
-                            "刷新",
-                            !self.busy,
-                            |this, _, _| this.refresh_workflow_templates(),
-                            cx,
-                        ))
+                        .child({
+                            let enabled = !self.busy;
+                            div()
+                                .id("workflow-refresh-templates")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_none()
+                                .min_h(px(28.0))
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(ui_theme::BORDER))
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .bg(rgb(ui_theme::ACCENT))
+                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .text_size(px(12.0))
+                                .when(enabled, |el| el.cursor_pointer())
+                                .when(!enabled, |el| el.cursor_not_allowed().opacity(0.78))
+                                .when(enabled, |el| {
+                                    el.hover(|el| el.bg(rgb(ui_theme::SECONDARY)))
+                                        .active(|el| el.opacity(0.82))
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if enabled {
+                                        this.refresh_workflow_templates();
+                                        cx.notify();
+                                    }
+                                }))
+                                .child("刷新")
+                        })
                         .child(self.button(
                             "目录",
                             !self.busy,
@@ -409,9 +437,9 @@ impl RepositoryView {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .border_color(rgb(ui_theme::BORDER))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .truncate()
                     .child(dir_label),
             )
@@ -460,17 +488,17 @@ impl RepositoryView {
             .py_2()
             .border_b_1()
             .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::BORDER)
             })
             .bg(if selected {
-                rgb(ui_theme::ROW_SELECTED)
+                rgb(ui_theme::ACCENT)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 this.workflow_state.selected_template_path = Some(click_path.clone());
                 if event.standard_click() && event.click_count() >= 2 && !this.busy {
@@ -489,9 +517,9 @@ impl RepositoryView {
                         gpui::FontWeight::NORMAL
                     })
                     .text_color(if has_error {
-                        rgb(ui_theme::DANGER_STRONG)
+                        rgb(ui_theme::DESTRUCTIVE)
                     } else {
-                        rgb(ui_theme::TEXT)
+                        rgb(ui_theme::FOREGROUND)
                     })
                     .child(template.display_name.clone()),
             )
@@ -500,7 +528,7 @@ impl RepositoryView {
                     .w_full()
                     .min_w(px(0.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!(
                         "{} · {}{}",
                         template.file_name,
@@ -655,13 +683,11 @@ impl RepositoryView {
                                     .items_center()
                                     .gap_1()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child(input.label.clone())
                                     .when(input.required, |this| {
                                         this.child(
-                                            div()
-                                                .text_color(rgb(ui_theme::DANGER_STRONG))
-                                                .child("*"),
+                                            div().text_color(rgb(ui_theme::DESTRUCTIVE)).child("*"),
                                         )
                                     }),
                             )
@@ -670,7 +696,7 @@ impl RepositoryView {
                                 this.child(
                                     div()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::TEXT_FAINT))
+                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                         .child(description),
                                 )
                             })
@@ -700,27 +726,27 @@ impl RepositoryView {
                             .py_2()
                             .border_b_1()
                             .border_color(rgb(ui_theme::BORDER))
-                            .bg(rgb(ui_theme::SURFACE))
+                            .bg(rgb(ui_theme::CARD))
                             .text_size(px(12.0))
                             .child(
                                 div()
                                     .flex_none()
                                     .w(px(46.0))
-                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child(format!("#{}", step.index + 1)),
                             )
                             .child(
                                 div()
                                     .flex_none()
                                     .w(px(110.0))
-                                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                                    .text_color(rgb(ui_theme::PRIMARY))
                                     .child(step.op),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .text_color(rgb(ui_theme::TEXT))
+                                    .text_color(rgb(ui_theme::FOREGROUND))
                                     .truncate()
                                     .child(step.summary.clone()),
                             )
@@ -782,8 +808,8 @@ impl RepositoryView {
                         .border_b_1()
                         .border_color(rgb(ui_theme::BORDER))
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::TEXT_MUTED))
-                        .bg(rgb(ui_theme::SURFACE))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .bg(rgb(ui_theme::CARD))
                         .child(line.clone())
                         .into_any_element()
                 })
@@ -845,7 +871,7 @@ fn workflow_progress_message(event: &WorkflowProgressEvent) -> String {
     }
 }
 
-fn workflow_templates_dir() -> Option<PathBuf> {
+pub(crate) fn workflow_templates_dir() -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| workflow_templates_dir_from_home(dirs.home_dir()))
 }
 

@@ -86,11 +86,11 @@ impl RepositoryView {
                 .py_2()
                 .border_b_1()
                 .border_color(rgb(ui_theme::BORDER))
-                .bg(rgb(ui_theme::WARNING_SOFT))
+                .bg(rgb(ui_theme::COLOR_WARNING))
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::WARNING_TEXT))
+                        .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
                         .child(message),
                 )
                 .child(

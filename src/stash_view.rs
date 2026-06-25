@@ -268,7 +268,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(self.render_stash_preview_header())
             .child(
                 div()
@@ -303,8 +303,8 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 div()
                     .flex()
@@ -314,13 +314,13 @@ impl RepositoryView {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::ACCENT_STRONG))
+                            .text_color(rgb(ui_theme::PRIMARY))
                             .child(title),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .truncate()
                             .child(message),
                     ),
@@ -340,7 +340,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     "stash-file-list",
@@ -422,17 +422,17 @@ impl RepositoryView {
             .cursor_pointer()
             .overflow_hidden()
             .bg(if selected {
-                rgb(ui_theme::ACCENT_SOFT)
+                rgb(ui_theme::ACCENT)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .border_1()
             .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::BORDER)
             })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.select_stash_file(path.clone(), false);
                 cx.notify();
@@ -451,7 +451,7 @@ impl RepositoryView {
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(path_label),
             )
@@ -500,7 +500,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("创建贮藏后，当前工作区会回到干净状态，后续可从左侧贮藏区应用或弹出。"),
             )
             .child(self.input(FieldId::StashMessage, false, window, cx))
@@ -540,19 +540,19 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .child(format!("确认删除 stash@{{{index}}}？")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(message),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::DANGER_TEXT))
+                    .text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND))
                     .child("删除后无法从贮藏列表恢复。"),
             )
             .child(

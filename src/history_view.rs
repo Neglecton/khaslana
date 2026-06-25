@@ -37,7 +37,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(self.render_commit_history(cx))
             .child(self.render_column_splitter(ResizeTarget::HistoryTop, cx))
             .child(
@@ -69,7 +69,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     "commit-history-list",
@@ -211,21 +211,21 @@ impl RepositoryView {
             .rounded_sm()
             .cursor_pointer()
             .bg(if selected {
-                rgb(ui_theme::ROW_SELECTED)
+                rgb(ui_theme::ACCENT)
             } else if unpushed {
-                rgb(ui_theme::WARNING_SOFT)
+                rgb(ui_theme::COLOR_WARNING)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .border_1()
             .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else if unpushed {
-                rgb(ui_theme::WARNING)
+                rgb(ui_theme::COLOR_WARNING)
             } else {
                 rgb(ui_theme::BORDER)
             })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .when(unpushed, |this| {
                 this.child(
                     div()
@@ -236,7 +236,7 @@ impl RepositoryView {
                         .flex_none()
                         .w(px(3.0))
                         .rounded_sm()
-                        .bg(rgb(ui_theme::WARNING)),
+                        .bg(rgb(ui_theme::COLOR_WARNING)),
                 )
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -265,10 +265,10 @@ impl RepositoryView {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(rgb(ui_theme::HASH_BG))
+                    .bg(rgb(ui_theme::ACCENT))
                     .font_family("Consolas, monospace")
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                    .text_color(rgb(ui_theme::PRIMARY))
                     .text_align(gpui::TextAlign::Center)
                     .child(row_short_oid.clone()),
             )
@@ -286,9 +286,9 @@ impl RepositoryView {
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(if selected {
-                                rgb(ui_theme::TEXT)
+                                rgb(ui_theme::FOREGROUND)
                             } else {
-                                rgb(ui_theme::TEXT)
+                                rgb(ui_theme::FOREGROUND)
                             })
                             .truncate()
                             .child(commit.summary),
@@ -305,11 +305,11 @@ impl RepositoryView {
                                 .py(px(1.0))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(rgb(ui_theme::WARNING))
-                                .bg(rgb(ui_theme::WARNING_BADGE_BG))
+                                .border_color(rgb(ui_theme::COLOR_WARNING))
+                                .bg(rgb(ui_theme::COLOR_WARNING))
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(ui_theme::WARNING_TEXT))
+                                .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
                                 .child("未推送"),
                         )
                     }),
@@ -321,9 +321,9 @@ impl RepositoryView {
                     .w(px(118.0))
                     .text_size(px(11.0))
                     .text_color(if selected {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     } else {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .truncate()
                     .child(author),
@@ -334,9 +334,9 @@ impl RepositoryView {
                     .w(px(142.0))
                     .text_size(px(11.0))
                     .text_color(if selected {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     } else {
-                        rgb(ui_theme::TEXT_MUTED)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .child(time),
             )
@@ -345,9 +345,9 @@ impl RepositoryView {
                     .flex_none()
                     .text_size(px(16.0))
                     .text_color(if selected {
-                        rgb(ui_theme::ACCENT_STRONG)
+                        rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::TEXT_FAINT)
+                        rgb(ui_theme::MUTED_FOREGROUND)
                     })
                     .child(">"),
             )
@@ -366,7 +366,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     "commit-file-list",
@@ -447,17 +447,17 @@ impl RepositoryView {
             .cursor_pointer()
             .overflow_hidden()
             .bg(if selected {
-                rgb(ui_theme::ACCENT_SOFT)
+                rgb(ui_theme::ACCENT)
             } else {
-                rgb(ui_theme::SURFACE)
+                rgb(ui_theme::CARD)
             })
             .border_1()
             .border_color(if selected {
-                rgb(ui_theme::ROW_SELECTED_BORDER)
+                rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::BORDER)
             })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_SOFT)))
+            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.select_history_file(path.clone());
                 cx.notify();
@@ -476,7 +476,7 @@ impl RepositoryView {
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT))
+                    .text_color(rgb(ui_theme::FOREGROUND))
                     .truncate()
                     .child(path_label),
             )
@@ -657,7 +657,7 @@ fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
                     .top(px(15.0))
                     .text_size(px(10.0))
                     .font_family("Consolas, monospace")
-                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("..."),
             )
         })
@@ -690,7 +690,7 @@ fn paint_graph_line(
 fn paint_graph_dot(window: &mut gpui::Window, x: gpui::Pixels, y: gpui::Pixels, color: u32) {
     let outer = px(5.0);
     let inner = px(4.0);
-    paint_graph_circle(window, x, y, outer, ui_theme::PANEL_BG);
+    paint_graph_circle(window, x, y, outer, ui_theme::CARD);
     paint_graph_circle(window, x, y, inner, color);
 }
 
@@ -790,7 +790,7 @@ fn commit_ref_overflow_label(
 ) -> impl IntoElement {
     let count = hidden_refs.len();
     let tooltip = hidden_commit_refs_tooltip(&hidden_refs);
-    metric_badge(format!("+{count}"), ui_theme::ACCENT_VIVID)
+    metric_badge(format!("+{count}"), ui_theme::PRIMARY)
         .id(format!("commit-ref-overflow-{row_short_oid}"))
         .tooltip(move |_window, cx| tooltip_text(tooltip.clone(), cx))
 }

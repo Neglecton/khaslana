@@ -1,4 +1,4 @@
-use gpui::{IntoElement, ParentElement, Styled, div, px, rgb, svg};
+use gpui::{IntoElement, ParentElement, Radians, Styled, Transformation, div, px, rgb, svg};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolbarIcon {
@@ -20,6 +20,10 @@ pub(crate) enum ToolbarIcon {
     Search,
     Close,
     Plus,
+    Minus,
+    Trash,
+    Globe,
+    ChevronRight,
 }
 
 impl ToolbarIcon {
@@ -43,12 +47,37 @@ impl ToolbarIcon {
             Self::Search => "icons/search.svg",
             Self::Close => "icons/close.svg",
             Self::Plus => "icons/plus.svg",
+            Self::Minus => "icons/minus.svg",
+            Self::Trash => "icons/trash.svg",
+            Self::Globe => "icons/globe.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
         }
     }
 }
 
 pub(crate) fn toolbar_icon(icon: ToolbarIcon, color: u32) -> impl IntoElement {
-    // GPUI 会把 SVG 渲染为 alpha mask 后统一着色，外层固定槽位避免按钮布局压缩图标。
+    toolbar_icon_with_size(icon, color, 15.0, 16.0)
+}
+
+/// 可指定图标和槽位大小的版本，用于行内按钮等小尺寸场景
+pub(crate) fn toolbar_icon_with_size(icon: ToolbarIcon, color: u32, icon_size: f32, slot_size: f32) -> impl IntoElement {
+    div()
+        .flex_none()
+        .size(px(slot_size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            svg()
+                .path(icon.path())
+                .size(px(icon_size))
+                .text_color(rgb(color))
+                .flex_none(),
+        )
+}
+
+/// 带旋转角度的图标渲染，用于展开/收起 chevron 等场景
+pub(crate) fn toolbar_icon_rotated(icon: ToolbarIcon, color: u32, rotation_degrees: f32) -> impl IntoElement {
     div()
         .flex_none()
         .size(px(16.0))
@@ -60,7 +89,8 @@ pub(crate) fn toolbar_icon(icon: ToolbarIcon, color: u32) -> impl IntoElement {
                 .path(icon.path())
                 .size(px(15.0))
                 .text_color(rgb(color))
-                .flex_none(),
+                .flex_none()
+                .with_transformation(Transformation::rotate(Radians(rotation_degrees * std::f32::consts::PI / 180.0))),
         )
 }
 
@@ -81,6 +111,8 @@ mod tests {
         assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
         assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
         assert_eq!(ToolbarIcon::Plus.path(), "icons/plus.svg");
+        assert_eq!(ToolbarIcon::Globe.path(), "icons/globe.svg");
+        assert_eq!(ToolbarIcon::ChevronRight.path(), "icons/chevron-right.svg");
     }
 
     #[test]
@@ -104,6 +136,8 @@ mod tests {
             ToolbarIcon::Search,
             ToolbarIcon::Close,
             ToolbarIcon::Plus,
+            ToolbarIcon::Globe,
+            ToolbarIcon::ChevronRight,
         ] {
             let asset_path = format!("assets/{}", icon.path());
             let svg = fs::read_to_string(&asset_path).unwrap_or_else(|err| {

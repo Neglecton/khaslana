@@ -1,18 +1,17 @@
 use gpui::{
-    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb, rgba,
+    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb,
 };
 use khaslana::{BranchInfo, BranchKind, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
-    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, NAV_ROW_HEIGHT,
+    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId,
     REMOTE_MENU_HEIGHT, REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT,
     STASH_MENU_WIDTH, SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH,
     TagContextMenu, clamped_menu_position, context_menu_item, context_menu_item_with_context,
-    menu_separator, nav_list, nav_row, placeholder_row,
+    menu_separator, nav_list, placeholder_row,
     ui::{
-        components::glass_menu,
-        icons::{ToolbarIcon, toolbar_icon},
+        components::{glass_menu, tooltip_text},
+        icons::{ToolbarIcon, toolbar_icon, toolbar_icon_rotated},
         theme as ui_theme,
     },
 };
@@ -42,6 +41,15 @@ fn sidebar_branch_matches_query(branch: &BranchInfo, query: &str) -> bool {
             .upstream
             .as_deref()
             .is_some_and(|upstream| upstream.to_lowercase().contains(&query))
+}
+
+/// 从 upstream 全名中去掉 refs/remotes/ 前缀，返回简短显示名。
+/// 例如 "refs/remotes/origin/main" → "origin/main"
+fn strip_remote_prefix(upstream: &str) -> String {
+    upstream
+        .strip_prefix("refs/remotes/")
+        .unwrap_or(upstream)
+        .to_string()
 }
 
 const SIDEBAR_LOCAL_BRANCH_CREATE_ID: &str = "sidebar-local-branch-create";
@@ -148,6 +156,84 @@ impl RepositoryView {
             cx,
         );
 
+        // 设计图：远端区域右侧「管理」药丸按钮
+        // cornerRadius $--radius-pill, stroke $--sidebar-border, padding [2,8]
+        let manage_pill = {
+            let enabled = self.repo_path.is_some() && !self.busy;
+            div()
+                .id("sidebar-remote-manage")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(ui_theme::RADIUS_PILL))
+                .border_1()
+                .border_color(rgb(ui_theme::SIDEBAR_BORDER))
+                .bg(rgb(ui_theme::WHITE))
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::NORMAL)
+                .text_color(rgb(ui_theme::SIDEBAR_FOREGROUND))
+                .when(enabled, |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                })
+                .when(!enabled, |this| this.opacity(0.62))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.open_remote_manager();
+                    cx.notify();
+                }))
+                .child("管理")
+                .into_any_element()
+        };
+
+        // 设计图：标签区域右侧计数 badge
+        let tag_count = tag_rows.len();
+        let tag_action = if tag_count > 0 {
+            Some(
+                div()
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(tag_count.to_string())
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // 设计图：贮藏区域右侧计数 badge
+        let stash_count = stash_rows.len();
+        let stash_action = if stash_count > 0 {
+            Some(
+                div()
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(stash_count.to_string())
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // 设计图：分割线 — 1px $--sidebar-border, 左右 padding 16px
+        let sidebar_divider = || {
+            div()
+                .flex_none()
+                .px(px(16.0))
+                .py(px(8.0))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(1.0))
+                        .bg(rgb(ui_theme::SIDEBAR_BORDER)),
+                )
+        };
+
         let mut sidebar = div()
             .relative()
             .overflow_hidden()
@@ -157,23 +243,9 @@ impl RepositoryView {
             .w(px(self.sidebar_width))
             .min_w(px(self.sidebar_width))
             .h_full()
-            .border_r_1()
-            .border_color(rgba(ui_theme::GLASS_BORDER))
-            // 使用 GPUI 原生线性渐变，避免上下色块模拟造成明显分界线。
-            .bg(linear_gradient(
-                180.0,
-                linear_color_stop(rgba(ui_theme::SIDEBAR_GRADIENT_TOP), 0.0),
-                linear_color_stop(rgba(ui_theme::SIDEBAR_GRADIENT_BOTTOM), 1.0),
-            ))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .bottom(px(0.0))
-                    .bg(rgba(ui_theme::SIDEBAR_GRADIENT_SOFTEN)),
-            )
+            // 扁平纯色背景，与工具栏保持一致。
+            .bg(rgb(ui_theme::CARD))
+            .pt(px(12.0))
             .child(self.render_nav_section(
                 "本地分支",
                 "local-branch-list",
@@ -185,6 +257,7 @@ impl RepositoryView {
                 Some(local_branch_action),
                 cx,
             ))
+            .child(sidebar_divider())
             .child(
                 self.render_nav_section(
                     "远端",
@@ -194,18 +267,11 @@ impl RepositoryView {
                     self.loading.remote().then_some("远端加载中..."),
                     None,
                     2.0,
-                    Some(
-                        self.button(
-                            "管理",
-                            self.repo_path.is_some() && !self.busy,
-                            |this, _, _| this.open_remote_manager(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    ),
+                    Some(manage_pill),
                     cx,
                 ),
             )
+            .child(sidebar_divider())
             .child(self.render_nav_section(
                 "远端分支",
                 "remote-branch-list",
@@ -219,7 +285,7 @@ impl RepositoryView {
             ));
 
         if !tag_rows.is_empty() {
-            sidebar = sidebar.child(self.render_nav_section(
+            sidebar = sidebar.child(sidebar_divider()).child(self.render_nav_section(
                 "标签",
                 "tag-list",
                 SidebarSection::Tags,
@@ -227,12 +293,12 @@ impl RepositoryView {
                 None,
                 None,
                 2.0,
-                None,
+                tag_action,
                 cx,
             ));
         }
         if !stash_rows.is_empty() {
-            sidebar = sidebar.child(self.render_nav_section(
+            sidebar = sidebar.child(sidebar_divider()).child(self.render_nav_section(
                 "贮藏",
                 "stash-list",
                 SidebarSection::Stashes,
@@ -240,7 +306,7 @@ impl RepositoryView {
                 None,
                 None,
                 2.0,
-                None,
+                stash_action,
                 cx,
             ));
         }
@@ -275,8 +341,8 @@ impl RepositoryView {
             .flex_col()
             .when(expanded, |this| this.flex_1().min_h(px(96.0)))
             .when(!expanded, |this| this.flex_none())
-            .border_t_1()
-            .border_color(rgb(ui_theme::BORDER))
+            // 设计图：区域间用分割线隔开，不用 border-top
+            // 分割线由 render_sidebar 中的 sidebar_divider() 单独渲染
             .when(expanded, |this| {
                 let mut this = this;
                 this.style().flex_grow = Some(weight);
@@ -300,8 +366,8 @@ impl RepositoryView {
             .px_2()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgba(ui_theme::GLASS_BG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             // 复用统一输入框，确保侧边栏搜索也支持现有 IME、选区和光标逻辑。
             .child(self.input(field, true, window, cx))
     }
@@ -347,35 +413,31 @@ impl RepositoryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // 设计图：20×20 圆角方块，$--radius-xs，无描边
+        // icon 14px，$--sidebar-foreground 色
         let icon_color = if !enabled {
-            ui_theme::TEXT_FAINT
+            ui_theme::MUTED_FOREGROUND
         } else if active {
-            ui_theme::ACCENT_STRONG
+            ui_theme::PRIMARY
         } else {
-            ui_theme::TEXT_MUTED
+            ui_theme::SIDEBAR_FOREGROUND
         };
         div()
             .id(id)
             .flex_none()
-            .size(px(24.0))
-            .rounded_sm()
+            .size(px(20.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .flex()
             .items_center()
             .justify_center()
-            .border_1()
-            .border_color(rgb(if active {
-                ui_theme::ROW_SELECTED_BORDER
-            } else {
-                ui_theme::BORDER
-            }))
             .bg(rgb(if active {
-                ui_theme::ACCENT_SOFT
+                ui_theme::ACCENT
             } else {
-                ui_theme::SURFACE
+                ui_theme::WHITE
             }))
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
@@ -428,57 +490,108 @@ impl RepositoryView {
         action: Option<gpui::AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let toggle_label = if expanded { "∧" } else { "∨" };
-        let toggle = div()
-            .id(format!("sidebar-section-toggle-{title}"))
-            .flex_none()
-            .size(px(24.0))
-            .rounded_sm()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::SURFACE))
-            .text_size(px(13.0))
-            .text_color(rgb(ui_theme::TEXT_MUTED))
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.toggle_sidebar_section(section);
-                cx.notify();
-            }))
-            .child(toggle_label)
-            .into_any_element();
+        // 设计图：区域标题 Funnel Sans 风格
+        // fontSize 11, fontWeight 600, letterSpacing 0.5, $--sidebar-foreground 色
+        let is_collapsible = matches!(
+            section,
+            SidebarSection::Remotes | SidebarSection::Tags | SidebarSection::Stashes | SidebarSection::RemoteBranches
+        );
 
+        let title_el = div()
+            .min_w(px(0.0))
+            .text_size(px(11.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(ui_theme::SIDEBAR_FOREGROUND))
+            .truncate()
+            .child(title);
+
+        // 折叠区域折叠状态：chevron-right + 标题 + action(计数badge/管理药丸)
+        if is_collapsible && !expanded {
+            let chevron = div()
+                .id(format!("sidebar-section-toggle-{title}"))
+                .flex_none()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.toggle_sidebar_section(section);
+                    cx.notify();
+                }))
+                .child(toolbar_icon(
+                    ToolbarIcon::ChevronRight,
+                    ui_theme::SIDEBAR_FOREGROUND,
+                ))
+                .into_any_element();
+
+            return div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(16.0))
+                .py(px(8.0))
+                .child(chevron)
+                .child(title_el)
+                .when_some(action, |this, action| this.child(action));
+        }
+
+        // 可折叠区域展开状态：chevron-down + 标题 + 右侧操作按钮
+        if is_collapsible && expanded {
+            let chevron = div()
+                .id(format!("sidebar-section-toggle-{title}"))
+                .flex_none()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.toggle_sidebar_section(section);
+                    cx.notify();
+                }))
+                .child(toolbar_icon_rotated(
+                    ToolbarIcon::ChevronRight,
+                    ui_theme::SIDEBAR_FOREGROUND,
+                    90.0,
+                ))
+                .into_any_element();
+
+            let actions = div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .when_some(action, |this, action| this.child(action));
+
+            return div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(16.0))
+                .py(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w(px(0.0))
+                        .child(chevron)
+                        .child(title_el),
+                )
+                .child(actions);
+        }
+
+        // 非折叠区域（本地分支）：标题 + 右侧操作按钮（space_between 布局）
         let actions = div()
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
-            .when_some(action, |this, action| this.child(action))
-            .child(toggle);
+            .gap(px(4.0))
+            .when_some(action, |this, action| this.child(action));
 
         div()
             .flex_none()
             .flex()
             .items_center()
             .justify_between()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::HEADER_BG))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::TEXT))
-                    .truncate()
-                    .child(title),
-            )
+            .px(px(16.0))
+            .py(px(8.0))
+            .child(title_el)
             .child(actions)
     }
 
@@ -487,36 +600,43 @@ impl RepositoryView {
         let name = remote.name.clone();
         let right_click_name = remote.name.clone();
 
-        nav_row(format!("remote-{}", remote.name), false, selected)
+        // 设计图：globe icon 14px + 名称 fontWeight 500, padding [6,16,6,24]
+        let name_color = if selected {
+            ui_theme::PRIMARY
+        } else {
+            ui_theme::SIDEBAR_ACCENT_FOREGROUND
+        };
+
+        div()
+            .id(format!("remote-{}", remote.name))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pl(px(24.0))
+            .py(px(4.0))
+            .bg(if selected {
+                rgb(ui_theme::SIDEBAR_ACCENT)
+            } else {
+                rgb(ui_theme::WHITE)
+            })
             .hover(move |this| {
                 if selected {
-                    this.bg(rgb(ui_theme::ACCENT_SOFT))
+                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
                 } else {
-                    this.bg(rgb(ui_theme::ROW_HOVER))
+                    this.bg(rgb(ui_theme::ACCENT))
                 }
             })
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(3.0))
-                    .h(px(18.0))
-                    .rounded_sm()
-                    .bg(if selected {
-                        rgb(ui_theme::ACCENT)
-                    } else {
-                        rgb(ui_theme::BORDER)
-                    }),
-            )
+            .cursor_pointer()
+            // globe icon 14px, $--sidebar-foreground 色
+            .child(toolbar_icon(ToolbarIcon::Globe, ui_theme::SIDEBAR_FOREGROUND))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::ACCENT_STRONG)
-                    } else {
-                        rgb(ui_theme::TEXT)
-                    })
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(name_color))
                     .truncate()
                     .child(remote.name),
             )
@@ -580,13 +700,25 @@ impl RepositoryView {
         let name = tag.name.clone();
         let right_click_name = tag.name.clone();
 
-        nav_row(format!("tag-{}", tag.name), false, false)
+        // 设计图：与分支行一致的样式，$--sidebar-accent-foreground 色
+        div()
+            .id(format!("tag-{}", tag.name))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pl(px(24.0))
+            .py(px(4.0))
+            .bg(rgb(ui_theme::WHITE))
+            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .cursor_pointer()
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgb(ui_theme::SIDEBAR_ACCENT_FOREGROUND))
                     .truncate()
                     .child(name),
             )
@@ -615,13 +747,25 @@ impl RepositoryView {
         let index = stash.index;
         let label = format!("stash@{{{}}} {}", stash.index, stash.message);
 
-        nav_row(format!("stash-{}", stash.index), false, false)
+        // 设计图：与分支行一致的样式
+        div()
+            .id(format!("stash-{}", stash.index))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .pl(px(24.0))
+            .py(px(4.0))
+            .bg(rgb(ui_theme::WHITE))
+            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .cursor_pointer()
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgb(ui_theme::SIDEBAR_ACCENT_FOREGROUND))
                     .truncate()
                     .child(label),
             )
@@ -652,79 +796,89 @@ impl RepositoryView {
         let right_click_name = branch.name.clone();
         let right_click_kind = branch.kind.clone();
         let right_click_is_head = branch.is_head;
-        let marker = if branch.is_head { "* " } else { "" };
         let selected = self.selected_branch.as_deref() == Some(&branch.name);
-        let label = match branch.kind {
-            BranchKind::Local => format!("{marker}{}", branch.name),
-            BranchKind::Remote => format!("  {}", branch.name),
-        };
+        let upstream = branch.upstream.clone();
+
+        // 设计图：
+        // 活跃分支：bg $--sidebar-accent, 左侧 HEAD 圆点 6×6 $--primary,
+        //   名称 fontWeight 600 $--sidebar-primary-foreground, upstream 小字 $--muted-foreground
+        // 非活跃分支：bg 透明, 左侧空 24px, 名称 normal weight $--sidebar-accent-foreground
+        // 远端分支：名称 $--muted-foreground
         let row_bg = if is_current {
-            ui_theme::ROW_SELECTED
+            ui_theme::SIDEBAR_ACCENT
         } else if selected {
-            ui_theme::ROW_SELECTED
+            ui_theme::SIDEBAR_ACCENT
         } else {
-            ui_theme::SURFACE
-        };
-        let row_border = if is_current {
-            ui_theme::ROW_SELECTED_BORDER
-        } else if selected {
-            ui_theme::ROW_SELECTED_BORDER
-        } else {
-            ui_theme::BORDER
-        };
-        let marker_bg = if is_current {
-            ui_theme::ACCENT
-        } else if selected {
-            ui_theme::ROW_SELECTED_BORDER
-        } else {
-            ui_theme::BORDER_MUTED
+            ui_theme::WHITE
         };
 
-        div()
+        let leading = if is_current {
+            // HEAD 指示圆点 6×6, $--primary
+            div()
+                .flex_none()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(3.0))
+                .bg(rgb(ui_theme::PRIMARY))
+                .into_any_element()
+        } else {
+            // 空白占位，对齐 HEAD 行（24px = 16px left padding + 6px dot + 8px gap）
+            div().flex_none().w(px(6.0)).into_any_element()
+        };
+
+        // 分支名颜色：选中不再变蓝，仅当前分支用深色加粗
+        let name_color = if is_current {
+            ui_theme::SIDEBAR_PRIMARY_FOREGROUND
+        } else if is_local {
+            ui_theme::SIDEBAR_ACCENT_FOREGROUND
+        } else {
+            ui_theme::MUTED_FOREGROUND
+        };
+        let name_weight = if is_current {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        };
+
+        let name_el = div()
+            .flex_1()
+            .min_w(px(120.0))
+            .text_size(px(12.0))
+            .font_weight(name_weight)
+            .text_color(rgb(name_color))
+            .truncate()
+            .child(branch.name.clone());
+
+        // upstream 改为 hover tooltip，不再内联显示，避免遮挡分支名
+        let row = div()
             .id(format!("branch-{}", branch.name))
             .flex()
-            .h(px(NAV_ROW_HEIGHT))
-            .min_h(px(NAV_ROW_HEIGHT))
             .items_center()
-            .justify_between()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_sm()
+            .gap(px(6.0))
+            .px(px(16.0))
+            .py(px(2.0))
+            .pl(px(22.0))
             .bg(rgb(row_bg))
-            .border_1()
-            .border_color(rgb(row_border))
             .hover(move |this| {
                 if is_current {
-                    this.bg(rgb(ui_theme::ACCENT_SOFT))
+                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
                 } else {
-                    this.bg(rgb(ui_theme::ROW_HOVER))
+                    this.bg(rgb(ui_theme::ACCENT))
                 }
             })
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(3.0))
-                    .h(px(18.0))
-                    .rounded_sm()
-                    .bg(rgb(marker_bg)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(if is_current {
-                        rgb(ui_theme::ACCENT_STRONG)
-                    } else if is_local {
-                        rgb(ui_theme::TEXT)
-                    } else {
-                        rgb(ui_theme::TEXT_MUTED)
-                    })
-                    .truncate()
-                    .child(label),
-            )
             .cursor_pointer()
+            .child(leading)
+            .child(name_el);
+
+        // 鼠标悬停时显示 upstream tooltip（仅当前分支有 upstream 时）
+        let row = if let Some(up) = upstream.filter(|_| is_current) {
+            let upstream_label = format!("→{}", strip_remote_prefix(&up));
+            row.tooltip(move |_window, cx| tooltip_text(upstream_label.clone(), cx))
+        } else {
+            row
+        };
+
+        row
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 this.selected_branch = Some(name.clone());
                 this.branch_context_menu = None;

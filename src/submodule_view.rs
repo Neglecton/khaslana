@@ -244,8 +244,8 @@ impl RepositoryView {
             .p_4()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::GLASS_BORDER))
-            .bg(rgba(ui_theme::GLASS_BG_STRONG))
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -265,7 +265,7 @@ impl RepositoryView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .child("子模块"),
                     )
                     .child(
@@ -296,7 +296,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(if state.remote_loading {
                         "列表仅在打开弹窗时读取；正在后台检查子模块相对远端分支的超前/落后状态。"
                     } else {
@@ -353,7 +353,7 @@ impl RepositoryView {
             .px_3()
             .py_4()
             .text_size(px(12.0))
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(text)
             .into_any_element()
     }
@@ -368,10 +368,10 @@ impl RepositoryView {
             .py_2()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::HEADER_BG))
+            .bg(rgb(ui_theme::CARD))
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(ui_theme::TEXT_MUTED))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(
                 div()
                     .flex_1()
@@ -437,8 +437,8 @@ impl RepositoryView {
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
             .text_size(px(12.0))
-            .bg(rgba(ui_theme::GLASS_BG))
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT_VIVID_SOFT)))
+            .bg(rgb(ui_theme::CARD))
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .child(
                 div()
                     .flex_1()
@@ -450,14 +450,14 @@ impl RepositoryView {
                         div()
                             .truncate()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .child(module.path.display().to_string()),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::TEXT_MUTED))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child(module.name.clone()),
                     ),
             )
@@ -471,7 +471,7 @@ impl RepositoryView {
                     .flex_none()
                     .w(px(86.0))
                     .truncate()
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(target.to_string()),
             )
             .child(
@@ -479,7 +479,7 @@ impl RepositoryView {
                     .flex_none()
                     .w(px(86.0))
                     .truncate()
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(current.to_string()),
             )
             .child(
@@ -487,7 +487,7 @@ impl RepositoryView {
                     .flex_1()
                     .min_w(px(0.0))
                     .truncate()
-                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(url.to_string()),
             )
             .child(div().flex_none().w(px(92.0)).child(self.button(
@@ -564,29 +564,29 @@ fn submodule_local_issue_label(status: &SubmoduleState) -> Option<&'static str> 
 fn submodule_status_pill(label: String, tone: SubmoduleStatusTone) -> impl IntoElement {
     let (bg, border, text) = match tone {
         SubmoduleStatusTone::Ready => (
-            ui_theme::SUCCESS_SOFT,
+            ui_theme::COLOR_SUCCESS,
             ui_theme::FEEDBACK_SUCCESS_BORDER,
             ui_theme::FEEDBACK_SUCCESS_TEXT,
         ),
         SubmoduleStatusTone::Info => (
-            ui_theme::ACCENT_SOFT,
+            ui_theme::ACCENT,
             ui_theme::FEEDBACK_INFO_BORDER,
-            ui_theme::ACCENT_STRONG,
+            ui_theme::PRIMARY,
         ),
         SubmoduleStatusTone::Warning => (
-            ui_theme::WARNING_SOFT,
+            ui_theme::COLOR_WARNING,
             ui_theme::FEEDBACK_WARNING_BORDER,
-            ui_theme::WARNING_TEXT,
+            ui_theme::COLOR_WARNING_FOREGROUND,
         ),
         SubmoduleStatusTone::Danger => (
-            ui_theme::DANGER_SOFT,
-            ui_theme::DANGER_BORDER_SOFT,
-            ui_theme::DANGER_TEXT,
+            ui_theme::COLOR_ERROR,
+            ui_theme::DESTRUCTIVE,
+            ui_theme::COLOR_ERROR_FOREGROUND,
         ),
         SubmoduleStatusTone::Muted => (
-            ui_theme::SURFACE_MUTED,
+            ui_theme::ACCENT,
             ui_theme::BORDER,
-            ui_theme::TEXT_MUTED,
+            ui_theme::MUTED_FOREGROUND,
         ),
     };
     div()

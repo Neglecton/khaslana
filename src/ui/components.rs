@@ -121,11 +121,11 @@ impl Render for TextTooltip {
             .max_w(px(280.0))
             .px_2()
             .py_1()
-            .rounded_sm()
+            .rounded(px(theme::RADIUS_XS))
             .border_1()
             .border_color(rgb(theme::TOOLTIP_BORDER))
             .bg(rgb(theme::TOOLTIP_BG))
-            .text_color(rgb(theme::SURFACE))
+            .text_color(rgb(theme::WHITE))
             .text_size(px(12.0))
             .line_height(px(18.0))
             .shadow_lg()
@@ -141,33 +141,112 @@ pub(crate) fn tooltip_text(text: impl Into<gpui::SharedString>, cx: &mut App) ->
 fn app_button_palette(tone: ButtonTone, enabled: bool) -> ButtonPalette {
     if !enabled {
         return ButtonPalette {
-            bg: theme::SURFACE_MUTED,
-            hover_bg: theme::SURFACE_MUTED,
-            fg: theme::TEXT_FAINT,
+            bg: theme::ACCENT,
+            hover_bg: theme::ACCENT,
+            fg: theme::MUTED_FOREGROUND,
             border: theme::BORDER,
         };
     }
 
     match tone {
         ButtonTone::Neutral => ButtonPalette {
-            bg: theme::SURFACE_MUTED,
-            hover_bg: theme::ACCENT_VIVID_SOFT,
-            fg: theme::TEXT,
+            bg: theme::ACCENT,
+            hover_bg: theme::SECONDARY,
+            fg: theme::FOREGROUND,
             border: theme::BORDER,
         },
         ButtonTone::Primary => ButtonPalette {
-            bg: theme::ACCENT,
-            hover_bg: theme::ACCENT_STRONG,
-            fg: theme::SURFACE,
-            border: theme::ACCENT,
+            bg: theme::PRIMARY,
+            hover_bg: theme::PRIMARY,
+            fg: theme::PRIMARY_FOREGROUND,
+            border: theme::PRIMARY,
         },
         ButtonTone::Danger => ButtonPalette {
-            bg: theme::DANGER,
-            hover_bg: theme::DANGER_STRONG,
-            fg: theme::SURFACE,
-            border: theme::DANGER_BORDER,
+            bg: theme::DESTRUCTIVE,
+            hover_bg: theme::DESTRUCTIVE,
+            fg: theme::DESTRUCTIVE_FOREGROUND,
+            border: theme::DESTRUCTIVE,
         },
     }
+}
+
+/// 区域标题 — Funnel Sans 风格小标题（侧边栏、面板区头等）
+pub(crate) fn section_label(title: &'static str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .px(px(16.0))
+        .py(px(8.0))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(theme::SIDEBAR_FOREGROUND))
+        .child(title)
+}
+
+/// 小圆角药丸徽标（如变更计数 "4"、状态字母 "M"）
+pub(crate) fn pill_badge(
+    text: impl Into<gpui::SharedString>,
+    bg: u32,
+    fg: u32,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .rounded(px(theme::RADIUS_XS))
+        .bg(rgb(bg))
+        .px(px(6.0))
+        .py(px(1.0))
+        .justify_center()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(rgb(fg))
+        .child(text.into())
+}
+
+/// 模式切换药丸按钮（工作区/提交记录/工作流）
+pub(crate) fn mode_pill(id: String, label: &'static str, active: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .rounded(px(theme::RADIUS_PILL))
+        .px(px(14.0))
+        .py(px(6.0))
+        .justify_center()
+        .cursor_pointer()
+        .bg(if active {
+            rgb(theme::PRIMARY)
+        } else {
+            rgb(theme::WHITE)
+        })
+        .text_color(if active {
+            rgb(theme::PRIMARY_FOREGROUND)
+        } else {
+            rgb(theme::MUTED_FOREGROUND)
+        })
+        .text_size(px(13.0))
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::MEDIUM
+        })
+        .child(label)
+}
+
+/// 状态 pill — 如 diff 标题中的"已修改"
+pub(crate) fn status_pill_badge(
+    text: impl Into<gpui::SharedString>,
+    bg: u32,
+    fg: u32,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .rounded(px(theme::RADIUS_PILL))
+        .bg(rgb(bg))
+        .px(px(8.0))
+        .py(px(2.0))
+        .justify_center()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(fg))
+        .child(text.into())
 }
 
 pub(crate) fn section_title(title: &'static str) -> impl IntoElement {
@@ -176,89 +255,48 @@ pub(crate) fn section_title(title: &'static str) -> impl IntoElement {
         .px_2()
         .py_2()
         .border_b_1()
-        .border_color(rgb(theme::BORDER_MUTED))
-        .bg(rgb(theme::HEADER_BG))
+        .border_color(rgb(theme::BORDER))
+        .bg(rgb(theme::CARD))
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(theme::TEXT_MUTED))
+        .text_color(rgb(theme::MUTED_FOREGROUND))
         .child(title)
 }
 
+/// 应用面板 — 扁平无装饰纯色容器
 pub(crate) fn app_panel() -> Div {
     flat_panel()
 }
 
+/// 应用外壳 — 纯色背景，去掉旧版渐变和玻璃态装饰
 pub(crate) fn app_shell_surface() -> Div {
-    div()
-        .relative()
-        .size_full()
-        .bg(rgb(theme::APP_BG))
-        .child(
-            div()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .h(px(148.0))
-                .bg(rgb(theme::APP_BG_ALT)),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .h(px(1.0))
-                .bg(rgba(theme::GLASS_BORDER)),
-        )
+    div().relative().size_full().bg(rgb(theme::BACKGROUND))
 }
 
+/// 工具栏 — 扁平边框条，去掉旧版阴影、玻璃态、内部高亮线
 pub(crate) fn hero_toolbar() -> Div {
     div()
-        .relative()
-        .overflow_hidden()
         .border_b_1()
-        .border_color(rgb(theme::GLASS_BORDER))
-        .bg(rgba(theme::GLASS_BG_STRONG))
-        .shadow_sm()
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .right(px(0.0))
-                .h(px(1.0))
-                .bg(rgba(theme::GLASS_BORDER)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .w(px(1.0))
-                .bg(rgba(theme::GLASS_BORDER)),
-        )
+        .border_color(rgb(theme::BORDER))
+        .bg(rgb(theme::CARD))
 }
 
+/// 扁平面板 — 无装饰纯色容器，无边框无阴影
 pub(crate) fn flat_panel() -> Div {
     div()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgba(theme::GLASS_BORDER))
-        .bg(rgba(theme::GLASS_BG))
-        .shadow_sm()
 }
 
+/// 玻璃面板 — 保留给弹窗/上下文菜单等需要浮层效果的场景
 pub(crate) fn glass_panel() -> Div {
     div()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::GLASS_BORDER))
-        .bg(rgba(theme::GLASS_BG))
+        .border_color(rgb(theme::BORDER))
+        .bg(rgb(theme::CARD))
         .shadow_lg()
 }
 
+/// 菜单容器 — 弹出菜单使用
 pub(crate) fn glass_menu() -> Div {
     glass_panel()
         .py_1()
@@ -268,6 +306,7 @@ pub(crate) fn glass_menu() -> Div {
         .occlude()
 }
 
+/// 计数徽标 — 旧版 metric_badge，保留接口但更新配色
 pub(crate) fn metric_badge(label: impl Into<gpui::SharedString>, tone: u32) -> Div {
     div()
         .flex_none()
@@ -276,13 +315,14 @@ pub(crate) fn metric_badge(label: impl Into<gpui::SharedString>, tone: u32) -> D
         .rounded_full()
         .border_1()
         .border_color(rgb(tone))
-        .bg(rgba(theme::GLASS_BG))
+        .bg(rgb(theme::ACCENT))
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(rgb(tone))
         .child(label.into())
 }
 
+/// 对话框遮罩层
 pub(crate) fn dialog_overlay() -> Div {
     div()
         .absolute()
@@ -298,15 +338,16 @@ pub(crate) fn dialog_overlay() -> Div {
         .occlude()
 }
 
+/// 对话框面板
 pub(crate) fn dialog_panel(title: &'static str) -> Stateful<Div> {
     div()
         .id(format!("dialog-{title}"))
         .w(px(480.0))
         .p_4()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::GLASS_BORDER))
-        .bg(rgba(theme::GLASS_BG_STRONG))
+        .border_color(rgb(theme::BORDER))
+        .bg(rgb(theme::CARD))
         .shadow_lg()
         .flex()
         .flex_col()
@@ -324,19 +365,20 @@ pub(crate) fn dialog_panel(title: &'static str) -> Stateful<Div> {
                 .gap_3()
                 .pb_1()
                 .border_b_1()
-                .border_color(rgb(theme::BORDER_MUTED))
+                .border_color(rgb(theme::BORDER))
                 .child(
                     div()
                         .min_w(px(0.0))
                         .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(theme::TEXT))
+                        .text_color(rgb(theme::FOREGROUND))
                         .truncate()
                         .child(title),
                 ),
         )
 }
 
+/// 对话框底部操作行
 pub(crate) fn dialog_actions() -> Div {
     div()
         .flex()
@@ -345,23 +387,25 @@ pub(crate) fn dialog_actions() -> Div {
         .gap_2()
         .pt_2()
         .border_t_1()
-        .border_color(rgb(theme::BORDER_MUTED))
+        .border_color(rgb(theme::BORDER))
 }
 
+/// 危险操作提示框
 pub(crate) fn danger_callout(message: impl Into<gpui::SharedString>) -> impl IntoElement {
     div()
         .px_3()
         .py_2()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::DANGER_BORDER_SOFT))
-        .bg(rgb(theme::DANGER_SOFT))
+        .border_color(rgb(theme::DESTRUCTIVE))
+        .bg(rgb(theme::COLOR_ERROR))
         .text_size(px(12.0))
         .line_height(px(18.0))
-        .text_color(rgb(theme::DANGER_TEXT))
+        .text_color(rgb(theme::COLOR_ERROR_FOREGROUND))
         .child(message.into())
 }
 
+/// 输入框外壳
 pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> Stateful<Div> {
     let height = match size {
         InputFrameSize::Compact => px(28.0),
@@ -373,7 +417,7 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
         .relative()
         .w_full()
         .min_h(height)
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(if focused {
             rgb(theme::INPUT_BORDER_FOCUSED)
@@ -381,15 +425,15 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
             rgb(theme::INPUT_BORDER)
         })
         .bg(if focused {
-            rgba(theme::INPUT_BG_FOCUSED)
+            rgb(theme::INPUT_BG_FOCUSED)
         } else {
-            rgba(theme::INPUT_BG)
+            rgb(theme::INPUT_BG)
         })
         .text_size(px(12.0))
         .line_height(px(18.0))
         .cursor(CursorStyle::IBeam)
         .when(!focused, |this| {
-            this.hover(|this| this.bg(rgb(theme::SURFACE_HOVER)))
+            this.hover(|this| this.bg(rgb(theme::ACCENT)))
         })
         .when(focused, |this| {
             this.shadow_sm()
@@ -397,6 +441,7 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
         })
 }
 
+/// 分段按钮 — 旧版 segmented_button，保留接口但更新配色
 pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -404,25 +449,25 @@ pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Sta
         .min_h(px(28.0))
         .px_2()
         .py_1()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(if selected {
-            rgb(theme::FOCUS_RING)
+            rgb(theme::PRIMARY)
         } else {
             rgb(theme::BORDER)
         })
         .bg(if selected {
-            rgb(theme::SEGMENT_SELECTED_BG)
+            rgb(theme::ACCENT)
         } else {
-            rgb(theme::SEGMENT_BG)
+            rgb(theme::CARD)
         })
         .text_size(px(12.0))
         .text_color(if selected {
-            rgb(theme::SEGMENT_SELECTED_TEXT)
+            rgb(theme::PRIMARY)
         } else if enabled {
-            rgb(theme::TEXT_MUTED)
+            rgb(theme::MUTED_FOREGROUND)
         } else {
-            rgb(theme::TEXT_FAINT)
+            rgb(theme::BORDER)
         })
         .font_weight(if selected {
             gpui::FontWeight::BOLD
@@ -433,24 +478,25 @@ pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Sta
         .when(enabled, |this| this.cursor_pointer())
         .when(!enabled, |this| this.cursor_not_allowed().opacity(0.68))
         .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(theme::ACCENT_VIVID_SOFT)))
+            this.hover(|this| this.bg(rgb(theme::SECONDARY)))
         })
 }
 
+/// 复选框
 pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
     div()
         .size(px(14.0))
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(if checked {
-            rgb(theme::ACCENT)
+            rgb(theme::PRIMARY)
         } else {
             rgb(theme::BORDER)
         })
         .bg(if checked {
-            rgb(theme::ACCENT)
+            rgb(theme::PRIMARY)
         } else {
-            rgb(theme::SURFACE)
+            rgb(theme::CARD)
         })
         .child(
             div()
@@ -459,30 +505,32 @@ pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
                 .when(checked, |this| this.child("✓"))
                 .items_center()
                 .justify_center()
-                .text_color(rgb(theme::SURFACE))
+                .text_color(rgb(theme::PRIMARY_FOREGROUND))
                 .text_size(px(10.0)),
         )
 }
 
+/// 列表行表面 — 选中/未选中
 pub(crate) fn list_row_surface(id: String, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(if selected {
-            rgb(theme::ROW_SELECTED_BORDER)
+            rgb(theme::PRIMARY)
         } else {
             rgb(theme::BORDER)
         })
         .bg(if selected {
-            rgb(theme::ROW_SELECTED)
+            rgb(theme::ACCENT)
         } else {
-            rgba(theme::GLASS_BG)
+            rgb(theme::CARD)
         })
         .shadow_sm()
-        .hover(|this| this.bg(rgb(theme::ROW_HOVER)))
+        .hover(|this| this.bg(rgb(theme::SECONDARY)))
 }
 
+/// 状态药丸
 pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement {
     div()
         .flex_none()
@@ -492,24 +540,25 @@ pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement
         .rounded_full()
         .border_1()
         .border_color(if active {
-            rgb(theme::FOCUS_RING)
+            rgb(theme::PRIMARY)
         } else {
             rgb(theme::BORDER)
         })
         .bg(if active {
-            rgb(theme::ACCENT_SOFT)
+            rgb(theme::ACCENT)
         } else {
-            rgba(theme::GLASS_BG)
+            rgb(theme::CARD)
         })
         .text_color(if active {
-            rgb(theme::ACCENT_STRONG)
+            rgb(theme::PRIMARY)
         } else {
-            rgb(theme::TEXT_MUTED)
+            rgb(theme::MUTED_FOREGROUND)
         })
         .font_weight(gpui::FontWeight::BOLD)
         .child(label)
 }
 
+/// Toast 容器定位
 pub(crate) fn feedback_stack(important: bool) -> Div {
     div()
         .absolute()
@@ -566,10 +615,10 @@ pub(crate) fn feedback_bubble(
         .w_full()
         .px_3()
         .py_2()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(rgb(border))
-        .bg(rgba(theme::FEEDBACK_BG))
+        .bg(rgb(theme::CARD))
         .shadow_lg()
         .flex()
         .gap_3()
@@ -591,7 +640,7 @@ pub(crate) fn feedback_bubble(
                     div()
                         .text_size(px(12.0))
                         .line_height(px(18.0))
-                        .text_color(rgb(theme::TEXT))
+                        .text_color(rgb(theme::FOREGROUND))
                         .child(feedback.message.clone()),
                 ),
         )
@@ -600,13 +649,13 @@ pub(crate) fn feedback_bubble(
                 .id(format!("feedback-close-{}", feedback.id))
                 .flex_none()
                 .size(px(22.0))
-                .rounded_sm()
+                .rounded(px(theme::RADIUS_XS))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .text_color(rgb(theme::TEXT_MUTED))
-                .hover(|this| this.bg(rgb(theme::SURFACE_HOVER)))
+                .text_color(rgb(theme::MUTED_FOREGROUND))
+                .hover(|this| this.bg(rgb(theme::ACCENT)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     cx.stop_propagation();
                     this.feedbacks.retain(|feedback| feedback.id != feedback_id);
@@ -616,6 +665,7 @@ pub(crate) fn feedback_bubble(
         )
 }
 
+/// 内联错误气泡
 pub(crate) fn inline_error_bubble(message: impl Into<gpui::SharedString>) -> impl IntoElement {
     div()
         .flex_none()
@@ -625,12 +675,13 @@ pub(crate) fn inline_error_bubble(message: impl Into<gpui::SharedString>) -> imp
         .rounded_full()
         .border_1()
         .border_color(rgb(theme::FEEDBACK_ERROR_BORDER))
-        .bg(rgba(theme::FEEDBACK_BG))
+        .bg(rgb(theme::CARD))
         .text_color(rgb(theme::FEEDBACK_ERROR_TEXT))
         .truncate()
         .child(message.into())
 }
 
+/// 底部进度条
 pub(crate) fn bottom_progress_bar(phase: u64) -> impl IntoElement {
     let offset = ((phase % 7) as f32 - 2.0) * 72.0;
     div()
@@ -653,6 +704,7 @@ pub(crate) fn bottom_progress_bar(phase: u64) -> impl IntoElement {
         )
 }
 
+/// 操作加载条
 pub(crate) fn operation_loading_bar(message: impl Into<gpui::SharedString>) -> impl IntoElement {
     div()
         .absolute()
@@ -661,16 +713,16 @@ pub(crate) fn operation_loading_bar(message: impl Into<gpui::SharedString>) -> i
         .bottom(px(46.0))
         .h(px(34.0))
         .px_3()
-        .rounded_sm()
+        .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(rgb(theme::FEEDBACK_INFO_BORDER))
-        .bg(rgba(theme::FEEDBACK_BG))
+        .bg(rgb(theme::CARD))
         .shadow_lg()
         .flex()
         .items_center()
         .gap_2()
         .text_size(px(12.0))
-        .text_color(rgb(theme::ACCENT_STRONG))
+        .text_color(rgb(theme::PRIMARY))
         .child(
             div()
                 .size(px(8.0))
@@ -688,6 +740,7 @@ fn format_badge_count(count: usize) -> String {
     }
 }
 
+/// 工具栏角标徽标 — 紫色主色调
 fn button_badge(count: usize) -> impl IntoElement {
     div()
         .flex()
@@ -698,13 +751,21 @@ fn button_badge(count: usize) -> impl IntoElement {
         .h(px(16.0))
         .px_1()
         .rounded_full()
-        .border_1()
-        .border_color(rgb(theme::BADGE_BORDER))
-        .bg(rgb(theme::BADGE_BG))
-        .text_color(rgb(theme::SURFACE))
+        .bg(rgb(theme::PRIMARY))
+        .text_color(rgb(theme::PRIMARY_FOREGROUND))
         .text_size(px(10.0))
         .line_height(px(14.0))
         .child(format_badge_count(count))
+}
+
+/// 拉取/推送差异数角标 — 用于工具栏按钮旁的 ↓N / ↑N 标识
+pub(crate) fn sync_badge(label: &'static str, count: usize) -> impl IntoElement {
+    div()
+        .flex_none()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(theme::PRIMARY))
+        .child(format!("{}{}", label, count))
 }
 
 impl RepositoryView {
@@ -849,6 +910,110 @@ impl RepositoryView {
         )
     }
 
+    /// 变更区域图标按钮 — 设计图：22×22 圆角方块，纯图标，无边框
+    /// hover 显示 ACCENT 背景，icon 14px MUTED_FOREGROUND 色
+    pub(crate) fn change_icon_button(
+        &self,
+        label: &'static str,
+        icon: ToolbarIcon,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let icon_color = if enabled {
+            theme::MUTED_FOREGROUND
+        } else {
+            theme::MUTED_FOREGROUND
+        };
+        div()
+            .id(label)
+            .flex_none()
+            .size(px(22.0))
+            .rounded(px(theme::RADIUS_XS))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(icon, icon_color))
+    }
+
+    /// 变更区域危险图标按钮 — 设计图：22×22 圆角方块，DESTRUCTIVE 色图标
+    pub(crate) fn change_destructive_icon_button(
+        &self,
+        label: &'static str,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // 设计图用 trash-2 图标，DESTRUCTIVE 色
+        div()
+            .id(label)
+            .flex_none()
+            .size(px(22.0))
+            .rounded(px(theme::RADIUS_XS))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(ToolbarIcon::Trash, theme::DESTRUCTIVE))
+    }
+
+    /// 变更行内图标按钮 — 设计图：20×20 圆角方块，纯图标 12px，无边框
+    /// hover 显示 ACCENT 背景
+    pub(crate) fn change_row_icon_button(
+        &self,
+        label: &'static str,
+        icon: ToolbarIcon,
+        icon_color: u32,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(label)
+            .flex_none()
+            .size(px(20.0))
+            .rounded(px(theme::RADIUS_XS))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .active(|this| this.opacity(0.82))
+            })
+            .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(icon, icon_color))
+    }
+
     pub(crate) fn primary_button(
         &self,
         label: &'static str,
@@ -910,15 +1075,11 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let palette = app_button_palette(tone, enabled);
         let disabled_reason = self.disabled_reason(enabled, "当前状态不可用");
-        let enabled_color = if enabled {
-            palette.bg
-        } else {
-            theme::SURFACE_MUTED
-        };
+        let bg_color = if enabled { palette.bg } else { theme::ACCENT };
         let text_color = if enabled {
             palette.fg
         } else {
-            theme::TEXT_FAINT
+            theme::MUTED_FOREGROUND
         };
         div()
             .id(label)
@@ -932,8 +1093,8 @@ impl RepositoryView {
             .py_1()
             .border_1()
             .border_color(rgb(palette.border))
-            .rounded_sm()
-            .bg(rgb(enabled_color))
+            .rounded(px(theme::RADIUS_XS))
+            .bg(rgb(bg_color))
             .text_color(rgb(text_color))
             .text_size(px(12.0))
             .font_weight(if tone == ButtonTone::Primary {
@@ -941,7 +1102,6 @@ impl RepositoryView {
             } else {
                 gpui::FontWeight::NORMAL
             })
-            .shadow_sm()
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.78))
             .when(enabled, |this| {

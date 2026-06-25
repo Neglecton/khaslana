@@ -226,7 +226,7 @@ impl RepositoryView {
             .pl_2()
             .py_2()
             .pr(px(10.0))
-            .bg(rgb(ui_theme::PANEL_BG))
+            .bg(rgb(ui_theme::CARD))
             .child(
                 uniform_list(
                     "browse-compare-list",
@@ -291,8 +291,8 @@ impl RepositoryView {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::HEADER_BG))
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
                     .child(
                         div()
                             .flex()
@@ -303,7 +303,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::ACCENT_STRONG))
+                                    .text_color(rgb(ui_theme::PRIMARY))
                                     .truncate()
                                     .child(format!("比较：{target_display}")),
                             )
@@ -312,7 +312,7 @@ impl RepositoryView {
                                     .flex_none()
                                     .text_size(px(10.0))
                                     .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                                     .child(short_oid),
                             ),
                     )
@@ -357,8 +357,8 @@ impl RepositoryView {
                     .rounded_sm()
                     .cursor_pointer()
                     .overflow_hidden()
-                    .bg(rgb(ui_theme::SURFACE))
-                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .bg(rgb(ui_theme::CARD))
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -371,7 +371,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(14.0))
                             .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                             .child(caret),
                     )
                     .child(
@@ -386,7 +386,7 @@ impl RepositoryView {
                             .flex_1()
                             .min_w(px(0.0))
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .truncate()
                             .child(row.name),
                     )
@@ -422,16 +422,16 @@ impl RepositoryView {
                     .rounded_sm()
                     .border_1()
                     .border_color(if selected {
-                        rgb(ui_theme::ROW_SELECTED_BORDER)
+                        rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::BORDER_MUTED)
+                        rgb(ui_theme::BORDER)
                     })
                     .bg(if selected {
-                        rgb(ui_theme::ROW_SELECTED)
+                        rgb(ui_theme::ACCENT)
                     } else {
-                        rgb(ui_theme::SURFACE)
+                        rgb(ui_theme::CARD)
                     })
-                    .hover(|this| this.bg(rgb(ui_theme::ROW_HOVER)))
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -466,7 +466,7 @@ impl RepositoryView {
                             .flex_1()
                             .min_w(px(0.0))
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::FOREGROUND))
                             .truncate()
                             .child(display),
                     )
