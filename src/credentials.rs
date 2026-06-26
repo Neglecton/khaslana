@@ -317,7 +317,7 @@ impl CredentialStore for MemoryCredentialStore {
             record.scope == credential.scope()
                 && record.kind == credential.kind()
                 && record.host == metadata.host_key
-                && record.remote_url == request.url
+                && normalize_remote_url(&record.remote_url) == normalize_remote_url(&request.url)
                 && record.username == credential.username()
                 && record.key_path.as_deref() == credential.key_path()
         }) {
@@ -355,7 +355,7 @@ impl CredentialStore for MemoryCredentialStore {
             .lock()
             .map_err(|_| GitError::Credential("凭据缓存状态异常".to_string()))?
             .iter()
-            .filter(|record| record.remote_url == request.url && record.username == username)
+            .filter(|record| normalize_remote_url(&record.remote_url) == normalize_remote_url(&request.url) && record.username == username)
             .map(|record| record.id.clone())
             .collect::<Vec<_>>();
         for id in ids {
@@ -612,7 +612,7 @@ impl CredentialStore for KeyringCredentialStore {
             record.scope == credential.scope()
                 && record.kind == credential.kind()
                 && record.host == metadata.host_key
-                && record.remote_url == request.url
+                && normalize_remote_url(&record.remote_url) == normalize_remote_url(&request.url)
                 && record.username == credential.username()
                 && record.key_path.as_deref() == credential.key_path()
         }) {
@@ -653,7 +653,7 @@ impl CredentialStore for KeyringCredentialStore {
         let ids = index
             .records
             .iter()
-            .filter(|record| record.remote_url == request.url && record.username == username)
+            .filter(|record| normalize_remote_url(&record.remote_url) == normalize_remote_url(&request.url) && record.username == username)
             .map(|record| record.id.clone())
             .collect::<Vec<_>>();
         for id in ids {
@@ -1067,8 +1067,22 @@ fn remote_metadata(url: &str) -> Option<RemoteMetadata> {
     None
 }
 
-fn normalize_remote_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_ascii_lowercase()
+pub fn normalize_remote_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        if let Some(scheme_end) = trimmed.find("://") {
+            let scheme = &lower[..scheme_end];
+            let rest = &trimmed[scheme_end + 3..];
+            let (authority, path) = rest
+                .find(['/', '?', '#'])
+                .map(|index| (&rest[..index], &rest[index..]))
+                .unwrap_or((rest, ""));
+            let authority = authority.rsplit('@').next().unwrap_or(authority);
+            return format!("{scheme}://{}{}", authority.to_ascii_lowercase(), path.to_ascii_lowercase());
+        }
+    }
+    lower
 }
 
 fn new_keyring_service(record_id: &str) -> String {
@@ -1204,6 +1218,31 @@ mod tests {
             .unwrap();
 
         let credential = store.get(&req).unwrap().unwrap();
+        assert!(matches!(
+            credential,
+            GitCredential::UserPass { secret, .. } if secret == "remote"
+        ));
+    }
+
+    #[test]
+    fn remote_url_scope_ignores_username_in_callback_url() {
+        let store = MemoryCredentialStore::new();
+        let saved_req = request(
+            "https://example.com/team/repo.git",
+            CredentialType::USER_PASS_PLAINTEXT,
+        );
+        let callback_req = request(
+            "https://git@example.com/team/repo.git",
+            CredentialType::USER_PASS_PLAINTEXT,
+        );
+        store
+            .save(
+                &saved_req,
+                &https_credential(CredentialScope::RemoteUrl, "remote"),
+            )
+            .unwrap();
+
+        let credential = store.get(&callback_req).unwrap().unwrap();
         assert!(matches!(
             credential,
             GitCredential::UserPass { secret, .. } if secret == "remote"

@@ -54,6 +54,7 @@ use khaslana::{
     SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, credential_display_target,
     credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
+    normalize_remote_url,
     test_credential_connection,
 };
 use lru::LruCache;
@@ -866,6 +867,8 @@ struct RepoTabState {
     pub(crate) history_diff: Option<Arc<FileDiff>>,
     pub(crate) history_diff_headers_expanded: bool,
     pub(crate) history_loading: HistoryLoading,
+    /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
+    pub(crate) history_refreshing: bool,
     pub(crate) history_scope: HistoryScope,
     pub(crate) history_refs_cache: Option<HistoryRefsCache>,
     pub(crate) history_graph_rows: Vec<history_view::CommitGraphRow>,
@@ -913,6 +916,7 @@ impl RepoTabState {
             history_diff: None,
             history_diff_headers_expanded: false,
             history_loading: HistoryLoading::default(),
+            history_refreshing: false,
             history_scope: HistoryScope::default(),
             history_refs_cache: None,
             history_graph_rows: Vec::new(),
@@ -1409,6 +1413,8 @@ struct TabCredentialProvider {
     tab_id: RepoTabId,
 }
 
+const STORED_CREDENTIAL_REUSE_LIMIT_PER_OPERATION: usize = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredCredentialAttempt {
     url: String,
@@ -1416,6 +1422,7 @@ struct StoredCredentialAttempt {
     operation_id: Option<u64>,
     repo_path: Option<PathBuf>,
     remote_name: Option<String>,
+    use_count: usize,
 }
 
 impl StoredCredentialAttempt {
@@ -1426,6 +1433,7 @@ impl StoredCredentialAttempt {
             operation_id: request.operation_id,
             repo_path: request.repo_path.clone(),
             remote_name: request.remote_name.clone(),
+            use_count: 1,
         }
     }
 
@@ -1435,6 +1443,10 @@ impl StoredCredentialAttempt {
             && self.url == request.url
             && self.repo_path == request.repo_path
             && self.remote_name == request.remote_name
+    }
+
+    fn mark_used_again(&mut self) {
+        self.use_count = self.use_count.saturating_add(1);
     }
 }
 
@@ -1466,6 +1478,7 @@ impl CredentialProvider for TabCredentialProvider {
         if let Ok(mut last) = self.last_stored_attempt.lock()
             && let Some(attempt) = last.clone()
             && attempt.is_retry_for(&request)
+            && attempt.use_count >= STORED_CREDENTIAL_REUSE_LIMIT_PER_OPERATION
         {
             if let Ok(mut rejected) = self.rejected_record_ids.lock()
                 && !rejected.contains(&attempt.record_id)
@@ -1514,10 +1527,17 @@ impl CredentialProvider for TabCredentialProvider {
         match stored {
             Ok(Some(stored)) => {
                 if let Ok(mut last) = self.last_stored_attempt.lock() {
-                    *last = Some(StoredCredentialAttempt::from_request(
-                        &request,
-                        stored.record.id.clone(),
-                    ));
+                    if let Some(attempt) = last.as_mut()
+                        && attempt.is_retry_for(&request)
+                        && attempt.record_id == stored.record.id
+                    {
+                        attempt.mark_used_again();
+                    } else {
+                        *last = Some(StoredCredentialAttempt::from_request(
+                            &request,
+                            stored.record.id.clone(),
+                        ));
+                    }
                 }
                 return Ok(Some(stored.credential));
             }
@@ -1543,6 +1563,9 @@ impl CredentialProvider for TabCredentialProvider {
             if credential.should_save() {
                 match self.store.save_record(&request, &credential) {
                     Ok(record) => {
+                        if let Ok(mut rejected) = self.rejected_record_ids.lock() {
+                            rejected.retain(|record_id| record_id != &record.id);
+                        }
                         if let Ok(mut last) = self.last_stored_attempt.lock() {
                             *last = Some(StoredCredentialAttempt::from_request(
                                 &request,
@@ -1602,7 +1625,7 @@ fn remote_binding_for_request(
                 .find(|binding| {
                     binding.repo_path == repo_key
                         && binding.remote_name == remote_key
-                        && binding.remote_url == request.url
+                        && normalize_remote_url(&binding.remote_url) == normalize_remote_url(&request.url)
                 })
                 .map(|binding| binding.policy.clone())
         })
@@ -2591,7 +2614,7 @@ impl RepositoryView {
                         this.diff = None;
                         this.branch_sync_status = None;
                         this.branch_sync_loading = false;
-                        this.clear_history();
+                        this.refresh_history();
                         this.change_selection.clear();
                         this.repo_path = Some(snapshot.path.clone());
                         this.sync_selected_remote(&snapshot);
@@ -2719,7 +2742,7 @@ impl RepositoryView {
                         this.prune_stash_preview();
                         this.prune_change_selection();
                         this.sync_conflict_mode_with_snapshot();
-                        this.clear_history();
+                        this.refresh_history();
                         this.scroll_local_branch_to_current();
                         this.reload_history_if_active();
                         if let Some(tab_id) = tab_id {
@@ -2790,7 +2813,7 @@ impl RepositoryView {
                         this.diff = None;
                         this.diff_headers_expanded = false;
                         this.reset_uniform_scroll("diff-scroll");
-                        this.clear_history();
+                        this.refresh_history();
                         this.scroll_local_branch_to_current();
                         this.reload_history_if_active();
                     }
@@ -2829,10 +2852,30 @@ impl RepositoryView {
                             this.history_commits.extend(commits);
                         } else {
                             this.history_commits = commits;
-                            this.history_selected_commit = None;
-                            this.history_files.clear();
-                            this.history_selected_file = None;
-                            this.history_diff = None;
+                            let was_refreshing = this.history_refreshing;
+                            if was_refreshing {
+                                // 刷新时保留选中提交（若仍存在于新列表）
+                                let still_exists = this
+                                    .history_selected_commit
+                                    .as_ref()
+                                    .is_some_and(|oid| {
+                                        this.history_commits.iter().any(|c| c.oid == oid.as_str())
+                                    });
+                                if !still_exists {
+                                    this.history_selected_commit = None;
+                                }
+                                // 详情可能已过时，清空以重新加载
+                                this.history_files.clear();
+                                this.history_selected_file = None;
+                                this.history_diff = None;
+                            } else {
+                                // 非刷新（scope 切换/初始加载）：全部重置
+                                this.history_selected_commit = None;
+                                this.history_files.clear();
+                                this.history_selected_file = None;
+                                this.history_diff = None;
+                            }
+                            this.history_refreshing = false;
                         }
                         this.history_graph_rows =
                             history_view::commit_graph_rows(&this.history_commits);
@@ -2969,6 +3012,7 @@ impl RepositoryView {
                 self.with_tab_context(tab_id, |this| {
                     if load_id == this.repository_load_id {
                         this.history_loading = HistoryLoading::default();
+                        this.history_refreshing = false;
                         this.stash_preview.loading_files = false;
                         this.stash_preview.loading_diff = false;
                         this.status = if this.main_mode == MainMode::Stash {
@@ -3306,7 +3350,7 @@ impl RepositoryView {
                     this.diff = None;
                     this.diff_headers_expanded = false;
                     this.reset_uniform_scroll("diff-scroll");
-                    this.clear_history();
+                    this.refresh_history();
                     this.scroll_local_branch_to_current();
                     this.reload_history_if_active();
                     full_status_request = this
@@ -4902,7 +4946,7 @@ impl RepositoryView {
                     .find(|binding| {
                         binding.repo_path == repo_key
                             && binding.remote_name == remote_key
-                            && binding.remote_url == remote_url
+                            && normalize_remote_url(&binding.remote_url) == normalize_remote_url(remote_url)
                     })
                     .map(|binding| binding.policy.clone())
             })
@@ -6501,6 +6545,19 @@ impl RepositoryView {
         self.history_loading = HistoryLoading::default();
         self.history_refs_cache = None;
         self.history_graph_rows.clear();
+        self.history_refreshing = false;
+    }
+
+    /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
+    fn refresh_history(&mut self) {
+        // 保留：commits、graph_rows、has_more、refs_cache、selected_commit
+        // 清空详情（操作后可能已过时）
+        self.history_files.clear();
+        self.history_selected_file = None;
+        self.history_diff = None;
+        self.history_diff_headers_expanded = false;
+        self.history_refreshing = true;
+        self.history_loading = HistoryLoading::default();
     }
 
     pub(crate) fn diff_cache_key(&self, kind: DiffCacheKind, repo_path: &Path) -> DiffCacheKey {
@@ -12388,7 +12445,28 @@ mod app_tests {
     }
 
     #[test]
-    fn same_remote_operation_retry_rejects_last_stored_record_without_deleting_it() {
+    fn stored_credential_is_reused_for_repeated_callbacks_in_same_remote_operation() {
+        let store = Arc::new(MemoryCredentialStore::new());
+        save_host_credential(&store);
+        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
+        let (provider, rx) = credential_provider_with_store(store, bindings);
+
+        let first = provider
+            .credential_for(credential_request(Some(1)))
+            .unwrap()
+            .unwrap();
+        let second = provider
+            .credential_for(credential_request(Some(1)))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.username(), "user@example.com");
+        assert_eq!(second.username(), "user@example.com");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn repeated_remote_operation_retry_rejects_last_stored_record_without_deleting_it() {
         let store = Arc::new(MemoryCredentialStore::new());
         let record_id = save_host_credential(&store);
         let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
@@ -12399,6 +12477,11 @@ mod app_tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.username(), "user@example.com");
+        let second = provider
+            .credential_for(credential_request(Some(1)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.username(), "user@example.com");
 
         let retry = provider.clone();
         let handle = thread::spawn(move || retry.credential_for(credential_request(Some(1))));

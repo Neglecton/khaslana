@@ -12,6 +12,7 @@ pub use credentials::{
     RemoteCredentialPolicy, StoredCredentialKind, credential_display_target,
     credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
+    normalize_remote_url,
     test_credential_connection,
 };
 pub use git::{

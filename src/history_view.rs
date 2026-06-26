@@ -55,6 +55,9 @@ impl RepositoryView {
     fn render_commit_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let row_count = if self.history_commits.is_empty() {
             1
+        } else if self.history_refreshing {
+            // 刷新期间 has_more 可能过时，不渲染"加载更多"行
+            self.history_commits.len()
         } else {
             self.history_commits.len() + usize::from(self.history_has_more)
         };
@@ -88,6 +91,10 @@ impl RepositoryView {
                                     .into_any_element();
                                 }
                                 if index == this.history_commits.len() {
+                                    // 刷新期间隐藏"加载更多"按钮
+                                    if this.history_refreshing {
+                                        return placeholder_row("").into_any_element();
+                                    }
                                     return div()
                                         .flex_none()
                                         .w_full()
