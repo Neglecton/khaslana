@@ -339,9 +339,11 @@ pub(crate) fn dialog_overlay() -> Div {
 }
 
 /// 对话框面板
-pub(crate) fn dialog_panel(title: &'static str) -> Stateful<Div> {
+pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div> {
+    let title: gpui::SharedString = title.into();
+    let id_suffix: String = title.to_string();
     div()
-        .id(format!("dialog-{title}"))
+        .id(format!("dialog-{id_suffix}"))
         .w(px(480.0))
         .p_4()
         .rounded(px(theme::RADIUS_XS))

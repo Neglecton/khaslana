@@ -24,6 +24,7 @@ pub(crate) enum ToolbarIcon {
     Trash,
     Globe,
     ChevronRight,
+    Update,
 }
 
 impl ToolbarIcon {
@@ -51,6 +52,7 @@ impl ToolbarIcon {
             Self::Trash => "icons/trash.svg",
             Self::Globe => "icons/globe.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
+            Self::Update => "icons/update.svg",
         }
     }
 }
@@ -60,7 +62,12 @@ pub(crate) fn toolbar_icon(icon: ToolbarIcon, color: u32) -> impl IntoElement {
 }
 
 /// 可指定图标和槽位大小的版本，用于行内按钮等小尺寸场景
-pub(crate) fn toolbar_icon_with_size(icon: ToolbarIcon, color: u32, icon_size: f32, slot_size: f32) -> impl IntoElement {
+pub(crate) fn toolbar_icon_with_size(
+    icon: ToolbarIcon,
+    color: u32,
+    icon_size: f32,
+    slot_size: f32,
+) -> impl IntoElement {
     div()
         .flex_none()
         .size(px(slot_size))
@@ -77,7 +84,11 @@ pub(crate) fn toolbar_icon_with_size(icon: ToolbarIcon, color: u32, icon_size: f
 }
 
 /// 带旋转角度的图标渲染，用于展开/收起 chevron 等场景
-pub(crate) fn toolbar_icon_rotated(icon: ToolbarIcon, color: u32, rotation_degrees: f32) -> impl IntoElement {
+pub(crate) fn toolbar_icon_rotated(
+    icon: ToolbarIcon,
+    color: u32,
+    rotation_degrees: f32,
+) -> impl IntoElement {
     div()
         .flex_none()
         .size(px(16.0))
@@ -90,68 +101,12 @@ pub(crate) fn toolbar_icon_rotated(icon: ToolbarIcon, color: u32, rotation_degre
                 .size(px(15.0))
                 .text_color(rgb(color))
                 .flex_none()
-                .with_transformation(Transformation::rotate(Radians(rotation_degrees * std::f32::consts::PI / 180.0))),
+                .with_transformation(Transformation::rotate(Radians(
+                    rotation_degrees * std::f32::consts::PI / 180.0,
+                ))),
         )
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::ToolbarIcon;
-
-    #[test]
-    fn toolbar_icon_paths_match_embedded_asset_root() {
-        assert_eq!(ToolbarIcon::Open.path(), "icons/open.svg");
-        assert_eq!(ToolbarIcon::Worktree.path(), "icons/worktree.svg");
-        assert_eq!(ToolbarIcon::History.path(), "icons/history.svg");
-        assert_eq!(ToolbarIcon::Stash.path(), "icons/stash.svg");
-        assert_eq!(ToolbarIcon::More.path(), "icons/more.svg");
-        assert_eq!(ToolbarIcon::Ai.path(), "icons/ai.svg");
-        assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
-        assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
-        assert_eq!(ToolbarIcon::Plus.path(), "icons/plus.svg");
-        assert_eq!(ToolbarIcon::Globe.path(), "icons/globe.svg");
-        assert_eq!(ToolbarIcon::ChevronRight.path(), "icons/chevron-right.svg");
-    }
-
-    #[test]
-    fn toolbar_svgs_use_monochrome_mask_shapes() {
-        for icon in [
-            ToolbarIcon::Open,
-            ToolbarIcon::Clone,
-            ToolbarIcon::Refresh,
-            ToolbarIcon::Fetch,
-            ToolbarIcon::Pull,
-            ToolbarIcon::Push,
-            ToolbarIcon::Credentials,
-            ToolbarIcon::Proxy,
-            ToolbarIcon::Workflow,
-            ToolbarIcon::Worktree,
-            ToolbarIcon::History,
-            ToolbarIcon::Stash,
-            ToolbarIcon::Submodule,
-            ToolbarIcon::More,
-            ToolbarIcon::Ai,
-            ToolbarIcon::Search,
-            ToolbarIcon::Close,
-            ToolbarIcon::Plus,
-            ToolbarIcon::Globe,
-            ToolbarIcon::ChevronRight,
-        ] {
-            let asset_path = format!("assets/{}", icon.path());
-            let svg = fs::read_to_string(&asset_path).unwrap_or_else(|err| {
-                panic!("failed to read {asset_path}: {err}");
-            });
-
-            assert!(
-                !svg.contains("currentColor"),
-                "{asset_path} should not depend on currentColor; GPUI tints SVG alpha masks"
-            );
-            assert!(
-                svg.contains("#000000"),
-                "{asset_path} should provide an opaque monochrome mask"
-            );
-        }
-    }
-}
+#[path = "../tests/ui/icons.rs"]
+mod tests;

@@ -68,6 +68,8 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
 - `src/browse_compare_view.rs`：分支比较模式左侧差异文件树 UI，包括把扁平差异文件构造为目录嵌套文件树的 `flatten_compare_files`、默认全展开的 `all_compare_dirs`、文件名级重命名展示、差异文件状态徽标和列表空状态。
 - `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像等辅助渲染。
+- `src/tests/`：测试代码目录，存放所有从源文件通过 `#[path]` 属性外移的单元测试模块。目录结构映射源文件结构，例如 `src/tests/git/browse.rs` 对应 `src/git/browse.rs` 的测试、`src/tests/ai/client.rs` 对应 `src/ai/client.rs` 的测试。外移的测试模块通过 `use super::*` 仍可访问源文件的私有项。
+- `src/git/test_support.rs`：Git 测试共享辅助模块，提供 `service()`、`init_repo()`、`configure_user()`、`write_file()`、`write_bytes()`、`assert_file_text()`、`commit_all()`、`path_url()` 等公共 fixture 函数，供 `git`、`workflow` 等模块的测试复用，消除各 `mod tests` 中的重复定义。
 
 ## 4. 核心架构
 
@@ -278,13 +280,15 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 项目已有较多单元测试，重点覆盖：
 
-- `src/git.rs`：Git 操作、分支、远端、stage/unstage/discard、提交、历史、reset/revert、编码、冲突保护等。
-- `src/credentials.rs`：凭据匹配、Keyring/内存存储逻辑、URL 规范化、记录排序、兼容性判断等。
-- `src/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
-- `src/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
-- `src/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
+- `src/tests/git.rs`：Git 操作、分支、远端、stage/unstage/discard、提交、历史、reset/revert、编码、冲突保护等（对应源文件 `src/git.rs`）。
+- `src/tests/credentials.rs`：凭据匹配、Keyring/内存存储逻辑、URL 规范化、记录排序、兼容性判断等。
+- `src/tests/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
+- `src/tests/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
+- `src/tests/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
 
-新增 Git 业务能力时，优先在 `src/git.rs` 增加基于 `tempfile` 的仓库级单元测试。新增纯 UI 状态逻辑时，优先拆成可测试的小函数，放在 `main.rs` 或对应 view 模块的 `#[cfg(test)]` 中测试。
+测试代码组织方式：所有单元测试通过 `#[cfg(test)] #[path = "..."] mod tests;` 外移到 `src/tests/` 目录，目录结构映射源文件结构。外移的测试模块通过 `use super::*` 仍可访问源文件的私有项。Git 相关测试共享 `src/git/test_support.rs` 中的 fixture 函数（`init_repo()`、`service()`、`commit_all()` 等），通过 `use crate::git::test_support::git_test_support as git_support;` 引用。
+
+新增 Git 业务能力时，优先在 `src/tests/git.rs` 增加基于 `tempfile` 的仓库级单元测试，使用 `git_support::init_repo()` 等共享 fixture。新增纯 UI 状态逻辑时，优先拆成可测试的小函数，测试放在 `src/tests/` 对应文件中。
 
 ## 8. 编码和设计约定
 

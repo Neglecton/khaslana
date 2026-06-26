@@ -4,6 +4,7 @@ pub mod git;
 pub mod proxy;
 pub mod storage;
 pub mod types;
+pub mod update;
 pub mod workflow;
 
 pub use credentials::{
@@ -12,8 +13,7 @@ pub use credentials::{
     RemoteCredentialPolicy, StoredCredentialKind, credential_display_target,
     credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
-    normalize_remote_url,
-    test_credential_connection,
+    normalize_remote_url, test_credential_connection,
 };
 pub use git::{
     BrowseRefKind, FULL_FILE_TOO_LARGE_MESSAGE, GitService, HistoryRefsCache, NoopProgress,
@@ -22,8 +22,8 @@ pub use git::{
 pub use proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 pub use storage::{
     AppStorage, DiffEncodingPreferences, LegacyImportSummary, LegacyStoragePaths,
-    RemoteCredentialBinding, RemoteCredentialBindings, SessionState, default_database_path,
-    default_legacy_storage_paths, legacy_storage_paths,
+    RemoteCredentialBinding, RemoteCredentialBindings, SessionState, UpdatePreferences,
+    default_database_path, default_legacy_storage_paths, legacy_storage_paths,
 };
 pub use types::*;
 pub use workflow::{

@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release --bin khaslana --bin khaslana_updater
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION_TAG#v}"
+          ZIP="khaslana-v${VERSION}-windows-x86_64"
+          mkdir -p dist/package
+          cp target/release/khaslana.exe dist/package/
+          cp target/release/khaslana_updater.exe dist/package/
+          cp LICENSE dist/package/ || true
+          cp README.md dist/package/ || true
+          cd dist/package
+          7z a "../${ZIP}.zip" .
+          cd ../..
+          cd dist
+          sha256sum "${ZIP}.zip" > "${ZIP}.zip.sha256"
+          SHA=$(cut -d' ' -f1 "${ZIP}.zip.sha256")
+          SIZE=$(wc -c < "${ZIP}.zip")
+          cat > khaslana-update.json <<EOFJ
+          {
+            "schema": 1,
+            "channel": "stable",
+            "version": "${VERSION}",
+            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "notes": "Release ${VERSION_TAG}",
+            "platforms": {
+              "windows-x86_64": {
+                "archive_url": "https://cnb.cool/suhoan/khaslana-release/-/raw/master/releases/v${VERSION}/${ZIP}.zip",
+                "fallback_archive_url": "https://github.com/FuturePrayer/khaslana/releases/download/${VERSION_TAG}/${ZIP}.zip",
+                "sha256": "${SHA}",
+                "size": ${SIZE}
+              }
+            }
+          }
+          EOFJ
+          cd ..
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/khaslana-update.json
+
+      - name: Publish to CNB
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION_TAG#v}"
+          ZIP="khaslana-v${VERSION}-windows-x86_64.zip"
+          git clone "https://cnb:${CNB_TOKEN}@cnb.cool/suhoan/khaslana-release.git" cnb-release
+          mkdir -p "cnb-release/releases/v${VERSION}"
+          cp "dist/${ZIP}" "cnb-release/releases/v${VERSION}/${ZIP}"
+          cp "dist/${ZIP}.sha256" "cnb-release/releases/v${VERSION}/${ZIP}.sha256"
+          cp "dist/khaslana-update.json" "cnb-release/khaslana-update.json"
+          cd cnb-release
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "release: v${VERSION}" || exit 0
+          git push

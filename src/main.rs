@@ -27,6 +27,7 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,11 +52,12 @@ use khaslana::{
     HistoryRefsCache, HistoryScope, KeyringCredentialStore, NetworkProxyMode, NetworkProxySettings,
     OperationEvent, ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings,
     RemoteCredentialPolicy, RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode,
-    SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, credential_display_target,
-    credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
-    credential_record_label, credential_record_matches_remote_url, credential_scope_label,
-    normalize_remote_url,
+    SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, UpdatePreferences,
+    credential_display_target, credential_key_filename, credential_kind_label,
+    credential_record_is_compatible_with_url, credential_record_label,
+    credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
     test_credential_connection,
+    update::{self, UpdateCheckResult, UpdateManifest, UpdatePlatformAsset},
 };
 use lru::LruCache;
 use operation_blocker_view::OperationBlocker;
@@ -84,7 +86,7 @@ use ui::{
 use ui_helpers::*;
 use workflow_view::{WorkflowInputFieldState, WorkflowTemplateItem, workflow_templates_dir};
 use yororen_ui::{
-    component::{init as init_yororen_components},
+    component::init as init_yororen_components,
     i18n::{I18n, Locale},
     theme::GlobalTheme,
 };
@@ -148,7 +150,7 @@ const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
 const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1540.0;
 const TOOLBAR_MORE_MENU_WIDTH: f32 = 190.0;
-const TOOLBAR_MORE_MENU_HEIGHT: f32 = 156.0;
+const TOOLBAR_MORE_MENU_HEIGHT: f32 = 196.0;
 const TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH: f32 = 76.0;
 const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
@@ -264,6 +266,20 @@ pub(crate) enum DialogState {
         kind: RemoteBranchOperationKind,
     },
     ConfirmConflictResolve,
+    // ── 更新对话框 ──
+    UpdateSettings,
+    NewVersionAvailable {
+        version: String,
+        notes: String,
+        published_at: String,
+        size: u64,
+    },
+    ConfirmInstallUpdate {
+        version: String,
+    },
+    UpdateNoWritePermission {
+        version: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -560,6 +576,7 @@ enum ToolbarMoreAction {
     Credentials,
     Proxy,
     AiSettings,
+    UpdateSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -581,7 +598,8 @@ fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy:
         ToolbarMoreAction::Stash | ToolbarMoreAction::Submodule => repo_open && !busy,
         ToolbarMoreAction::Credentials
         | ToolbarMoreAction::Proxy
-        | ToolbarMoreAction::AiSettings => !busy,
+        | ToolbarMoreAction::AiSettings
+        | ToolbarMoreAction::UpdateSettings => !busy,
     }
 }
 
@@ -1374,6 +1392,25 @@ pub(crate) enum UiEvent {
     AiConnectionTested {
         message: String,
     },
+    // ── 更新事件 ──
+    UpdateCheckFinished {
+        manifest: Arc<UpdateManifest>,
+        asset: UpdatePlatformAsset,
+    },
+    UpdateCheckFailed {
+        error: String,
+    },
+    UpdateDownloadProgress {
+        downloaded: u64,
+        total: u64,
+    },
+    UpdateReadyToInstall {
+        staging_dir: PathBuf,
+        manifest: Arc<UpdateManifest>,
+    },
+    UpdateInstallFailed {
+        error: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1625,7 +1662,8 @@ fn remote_binding_for_request(
                 .find(|binding| {
                     binding.repo_path == repo_key
                         && binding.remote_name == remote_key
-                        && normalize_remote_url(&binding.remote_url) == normalize_remote_url(&request.url)
+                        && normalize_remote_url(&binding.remote_url)
+                            == normalize_remote_url(&request.url)
                 })
                 .map(|binding| binding.policy.clone())
         })
@@ -1693,6 +1731,18 @@ fn credential_form_mode_for_request(request: &CredentialRequest) -> CredentialFo
 
 pub(crate) fn send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
     let _ = tx.try_send(event);
+}
+
+/// 在系统默认浏览器中打开 URL。
+fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", url])
+        .spawn();
+    #[cfg(not(target_os = "windows"))]
+    let _ = std::process::Command::new("open")
+        .arg(url)
+        .spawn();
 }
 
 pub(crate) fn perf_log(stage: &'static str, started: Instant, details: impl AsRef<str>) {
@@ -1859,6 +1909,14 @@ pub(crate) struct RepositoryView {
     /// review 流式生成时的实时思考链缓冲。
     pub(crate) ai_review_reasoning_buffer: String,
     pub(crate) ai_review_expanded: bool,
+    // ── 更新状态 ──
+    pub(crate) update_preferences: UpdatePreferences,
+    pub(crate) update_checking: bool,
+    pub(crate) update_downloading: bool,
+    pub(crate) available_update: Option<Arc<UpdateManifest>>,
+    pub(crate) update_download_progress: Option<String>,
+    pub(crate) update_error: Option<String>,
+    pub(crate) staging_dir_for_install: Option<PathBuf>,
 }
 
 impl RepositoryView {
@@ -1981,6 +2039,14 @@ impl RepositoryView {
             ai_review_buffer: String::new(),
             ai_review_reasoning_buffer: String::new(),
             ai_review_expanded: false,
+            // ── 更新状态 ──
+            update_preferences: Self::load_update_preferences(&storage),
+            update_checking: false,
+            update_downloading: false,
+            available_update: None,
+            update_download_progress: None,
+            update_error: None,
+            staging_dir_for_install: None,
             proxy_http_url: TextFieldState::new(cx, "HTTP 代理 URL")
                 .with_value(proxy_custom.http_proxy),
             proxy_https_url: TextFieldState::new(cx, "HTTPS 代理 URL")
@@ -2004,6 +2070,10 @@ impl RepositoryView {
     fn new_with_session(cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.restore_session();
+        // 启动时自动检查更新
+        if view.update_preferences.auto_check {
+            view.start_update_check();
+        }
         view
     }
 
@@ -2248,6 +2318,13 @@ impl RepositoryView {
         storage
             .load_ai_provider_settings()
             .inspect_err(|err| tracing::warn!("ai provider settings load skipped: {err}"))
+            .unwrap_or_default()
+    }
+
+    fn load_update_preferences(storage: &khaslana::AppStorage) -> UpdatePreferences {
+        storage
+            .load_update_preferences()
+            .inspect_err(|err| tracing::warn!("update preferences load skipped: {err}"))
             .unwrap_or_default()
     }
 
@@ -2855,10 +2932,8 @@ impl RepositoryView {
                             let was_refreshing = this.history_refreshing;
                             if was_refreshing {
                                 // 刷新时保留选中提交（若仍存在于新列表）
-                                let still_exists = this
-                                    .history_selected_commit
-                                    .as_ref()
-                                    .is_some_and(|oid| {
+                                let still_exists =
+                                    this.history_selected_commit.as_ref().is_some_and(|oid| {
                                         this.history_commits.iter().any(|c| c.oid == oid.as_str())
                                     });
                                 if !still_exists {
@@ -3444,6 +3519,51 @@ impl RepositoryView {
                 self.status = message.clone();
                 self.last_error = None;
                 self.notify_completion(&message, cx);
+            }
+            // ── 更新事件 ──
+            UiEvent::UpdateCheckFinished { manifest, asset } => {
+                self.update_checking = false;
+                self.available_update = Some(manifest.clone());
+                self.status = format!("发现新版本 v{}", manifest.version);
+                self.last_error = None;
+                self.active_dialog = Some(DialogState::NewVersionAvailable {
+                    version: manifest.version.clone(),
+                    notes: manifest.notes.clone(),
+                    published_at: manifest.published_at.clone(),
+                    size: asset.size,
+                });
+            }
+            UiEvent::UpdateCheckFailed { error } => {
+                self.update_checking = false;
+                if !error.is_empty() {
+                    self.update_error = Some(error.clone());
+                    self.status = error.clone();
+                    self.notify_toast(AppToastKind::Info, format!("检查更新：{error}"), cx);
+                }
+            }
+            UiEvent::UpdateDownloadProgress { downloaded, total } => {
+                let mb_down = downloaded as f64 / 1_048_576.0;
+                let mb_total = total as f64 / 1_048_576.0;
+                self.update_download_progress = Some(format!("{:.1} MB / {:.1} MB", mb_down, mb_total));
+            }
+            UiEvent::UpdateReadyToInstall { staging_dir, manifest } => {
+                self.update_downloading = false;
+                self.update_download_progress = None;
+                self.status = format!("更新 v{} 已准备就绪", manifest.version);
+                self.last_error = None;
+                self.active_dialog = Some(DialogState::ConfirmInstallUpdate {
+                    version: manifest.version.clone(),
+                });
+                // 保存 staging_dir 以便安装
+                self.available_update = Some(manifest);
+                self.staging_dir_for_install = Some(staging_dir);
+            }
+            UiEvent::UpdateInstallFailed { error } => {
+                self.update_downloading = false;
+                self.update_download_progress = None;
+                self.update_error = Some(error.clone());
+                self.status = "更新失败".into();
+                self.notify_toast(AppToastKind::Error, format!("更新失败：{error}"), cx);
             }
         }
         cx.notify();
@@ -4394,6 +4514,178 @@ impl RepositoryView {
         self.last_error = None;
     }
 
+    // ── 更新方法 ──────────────────────────────────────────────────────────
+
+    pub(crate) fn open_update_settings(&mut self) {
+        self.close_popups();
+        self.active_dialog = Some(DialogState::UpdateSettings);
+        self.last_error = None;
+    }
+
+    pub(crate) fn start_update_check(&mut self) {
+        if self.update_checking { return; }
+        self.update_checking = true;
+        self.update_error = None;
+        self.status = "检查更新中".into();
+
+        let tx = self.tx.clone();
+        let preferences = self.update_preferences.clone();
+        let proxy_settings = self.proxy_settings.clone();
+        self.tasks.spawn(TaskKind::Long, move || {
+            let sources = update::default_manifest_sources();
+            match update::check_for_update(&sources, &preferences, &proxy_settings) {
+                Ok(UpdateCheckResult::UpdateAvailable { manifest, asset }) => {
+                    send_ui_event(&tx, UiEvent::UpdateCheckFinished {
+                        manifest: Arc::new(manifest),
+                        asset,
+                    });
+                }
+                Ok(UpdateCheckResult::UpToDate) => {
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: "当前已是最新版本".into(),
+                    });
+                }
+                Ok(UpdateCheckResult::SkippedVersion) => {
+                    // 用户跳过了此版本，静默忽略
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: String::new(),
+                    });
+                }
+                Err(err) => {
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    pub(crate) fn start_update_download(&mut self) {
+        let Some(manifest) = self.available_update.clone() else { return; };
+        let asset = manifest.platforms.get("windows-x86_64").cloned();
+        let Some(asset) = asset else {
+            self.update_error = Some("缺少下载信息".into());
+            return;
+        };
+        self.update_downloading = true;
+        self.update_download_progress = None;
+        self.update_error = None;
+        self.status = "下载更新中".into();
+
+        let tx = self.tx.clone();
+        let config_dir = khaslana::default_database_path()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let proxy_settings = self.proxy_settings.clone();
+
+        self.tasks.spawn(TaskKind::Long, move || {
+            // 进度回调：发送 UpdateDownloadProgress 事件
+            let on_progress = |downloaded: u64, total: u64| {
+                let _ = tx.try_send(UiEvent::UpdateDownloadProgress { downloaded, total });
+            };
+
+            // 下载
+            match update::download_update(&asset, &config_dir, &proxy_settings, Some(&on_progress)) {
+                Ok((zip_path, computed_sha256)) => {
+                    // SHA-256 校验
+                    if computed_sha256 != asset.sha256 {
+                        send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                            error: "更新包 SHA-256 校验失败，文件可能被篡改".into(),
+                        });
+                        return;
+                    }
+                    // 解压 staging
+                    let version = manifest.version.clone();
+                    match update::prepare_staging(&zip_path, &version, &config_dir) {
+                        Ok(staging_dir) => {
+                            send_ui_event(&tx, UiEvent::UpdateReadyToInstall {
+                                staging_dir,
+                                manifest,
+                            });
+                        }
+                        Err(err) => {
+                            send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                                error: format!("更新包解压失败：{err}"),
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                        error: format!("更新包下载失败：{err}"),
+                    });
+                }
+            }
+        });
+    }
+
+    pub(crate) fn install_update(&mut self, staging_dir: &Path, _version: &str) {
+        // 检查写入权限
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("khaslana.exe"));
+        let exe_dir = current_exe.parent().unwrap_or_else(|| Path::as_ref(Path::new(".")));
+
+        // 尝试在 exe 目录创建临时文件来验证写入权限
+        let test_file = exe_dir.join(".khaslana_update_test");
+        let writable = fs::File::create(&test_file).is_ok();
+        let _ = fs::remove_file(&test_file);
+
+        if !writable {
+            let version = self.available_update
+                .as_ref()
+                .map(|m| m.version.clone())
+                .unwrap_or_default();
+            self.active_dialog = Some(DialogState::UpdateNoWritePermission { version });
+            return;
+        }
+
+        // 构造 updater 命令
+        let new_exe = staging_dir.join("khaslana.exe");
+        let new_updater = staging_dir.join("khaslana_updater.exe");
+        let config_dir = khaslana::default_database_path()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let backup_dir = config_dir.join("updates").join("backup");
+        let pid = std::process::id();
+
+        // 先转为字符串，避免 Command::new move PathBuf 后无法引用
+        let new_exe_str = new_exe.to_string_lossy().to_string();
+        let new_updater_str = new_updater.to_string_lossy().to_string();
+        let current_exe_str = current_exe.to_string_lossy().to_string();
+        let backup_dir_str = backup_dir.to_string_lossy().to_string();
+        let pid_str = pid.to_string();
+
+        let _ = Command::new(&new_updater_str)
+            .args([
+                "--pid", &pid_str,
+                "--target-exe", &current_exe_str,
+                "--new-exe", &new_exe_str,
+                "--new-updater", &new_updater_str,
+                "--backup-dir", &backup_dir_str,
+                "--restart",
+            ])
+            .spawn();
+
+        std::process::exit(0);
+    }
+
+    pub(crate) fn skip_version(&mut self, version: &str) {
+        self.update_preferences.skipped_version = Some(version.to_string());
+        self.save_update_preferences();
+        self.active_dialog = None;
+    }
+
+    pub(crate) fn clear_skipped_version(&mut self) {
+        self.update_preferences.skipped_version = None;
+        self.save_update_preferences();
+        self.status = "已清除跳过版本".into();
+    }
+
+    fn save_update_preferences(&self) {
+        if let Err(err) = self.storage.save_update_preferences(&self.update_preferences) {
+            tracing::warn!("update preferences write skipped: {err}");
+        }
+    }
+
     pub(crate) fn reset_ai_form_from_settings(&mut self) {
         self.ai_enabled_form = self.ai_settings.enabled;
         self.ai_base_url
@@ -4946,7 +5238,8 @@ impl RepositoryView {
                     .find(|binding| {
                         binding.repo_path == repo_key
                             && binding.remote_name == remote_key
-                            && normalize_remote_url(&binding.remote_url) == normalize_remote_url(remote_url)
+                            && normalize_remote_url(&binding.remote_url)
+                                == normalize_remote_url(remote_url)
                     })
                     .map(|binding| binding.policy.clone())
             })
@@ -8424,6 +8717,13 @@ impl RepositoryView {
                 |this, _, _| this.open_ai_provider_settings(),
                 cx,
             ))
+            .child(self.toolbar_more_menu_item(
+                "更新设置",
+                ToolbarIcon::Update,
+                toolbar_more_action_enabled(ToolbarMoreAction::UpdateSettings, repo_open, self.busy),
+                |this, _, _| this.open_update_settings(),
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -9291,13 +9591,7 @@ impl RepositoryView {
                             )
                             .when_some(count_badge, |this, badge| this.child(badge)),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .children(actions),
-                    ),
+                    .child(div().flex().items_center().gap(px(4.0)).children(actions)),
             )
             .child({
                 let handle = self.scroll_handle(id);
@@ -9539,7 +9833,9 @@ impl RepositoryView {
         .py(px(8.0))
         .overflow_hidden()
         .cursor_pointer()
-        .when(is_staged && !selected, |this| this.bg(rgb(ui_theme::ACCENT)))
+        .when(is_staged && !selected, |this| {
+            this.bg(rgb(ui_theme::ACCENT))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener({
@@ -9583,22 +9879,20 @@ impl RepositoryView {
                 .child(change.path),
         )
         // 设计图：行内图标按钮 20×20
-        .child(
-            self.change_row_icon_button(
-                row_action_label,
-                row_action_icon,
-                ui_theme::MUTED_FOREGROUND,
-                row_action_enabled,
-                {
-                    let click = row_action_click;
-                    move |this, _window, cx| {
-                        click(this, _window, cx);
-                        cx.notify();
-                    }
-                },
-                cx,
-            ),
-        )
+        .child(self.change_row_icon_button(
+            row_action_label,
+            row_action_icon,
+            ui_theme::MUTED_FOREGROUND,
+            row_action_enabled,
+            {
+                let click = row_action_click;
+                move |this, _window, cx| {
+                    click(this, _window, cx);
+                    cx.notify();
+                }
+            },
+            cx,
+        ))
     }
 
     fn render_diff_and_commit(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -9918,6 +10212,13 @@ impl RepositoryView {
             .when_some(self.last_error.clone(), |this, error| {
                 this.child(inline_error_bubble(format!("错误：{error}")))
             })
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+            )
     }
 
     fn active_loading_message(&self) -> Option<String> {
@@ -10149,6 +10450,19 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ConfirmConflictResolve => self
                 .render_confirm_conflict_resolve_dialog(cx)
+                .into_any_element(),
+            // ── 更新对话框 ──
+            DialogState::UpdateSettings => self
+                .render_update_settings_dialog(cx)
+                .into_any_element(),
+            DialogState::NewVersionAvailable { version, notes, published_at, size } => self
+                .render_new_version_dialog(&version, &notes, &published_at, size, cx)
+                .into_any_element(),
+            DialogState::ConfirmInstallUpdate { version } => self
+                .render_confirm_install_dialog(&version, cx)
+                .into_any_element(),
+            DialogState::UpdateNoWritePermission { version } => self
+                .render_no_write_permission_dialog(&version, cx)
                 .into_any_element(),
         };
 
@@ -10539,6 +10853,197 @@ impl RepositoryView {
                         |this, _, _| this.confirm_pending_conflict_resolve(),
                         cx,
                     )),
+            )
+    }
+
+    // ── 更新对话框渲染 ──────────────────────────────────────────────────
+
+    fn render_update_settings_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let auto_check = self.update_preferences.auto_check;
+        let skipped = self.update_preferences.skipped_version.clone();
+
+        self.dialog_panel("更新设置", cx)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(12.0))
+                    .child(
+                        div()
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("当前版本"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("auto_check_update")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.update_preferences.auto_check = !this.update_preferences.auto_check;
+                        this.save_update_preferences();
+                        cx.notify();
+                    }))
+                    .child(toggle_box(auto_check))
+                    .child(
+                        div()
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("自动检查更新"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(12.0))
+                    .child(
+                        div()
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("已跳过版本"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(skipped.map(|v| format!("v{v}")).unwrap_or_else(|| "无".to_string())),
+                    ),
+            )
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即检查",
+                    !self.update_checking && !self.busy,
+                    |this, _, _| this.start_update_check(),
+                    cx,
+                ))
+                .child(self.button(
+                    "清除跳过",
+                    self.update_preferences.skipped_version.is_some(),
+                    |this, _, _| this.clear_skipped_version(),
+                    cx,
+                ))
+                .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx))
+            )
+    }
+
+    fn render_new_version_dialog(
+        &self,
+        version: &str,
+        notes: &str,
+        published_at: &str,
+        size: u64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let size_mb = size as f64 / 1_048_576.0;
+        let version_owned = version.to_string();
+
+        self.dialog_panel(format!("发现新版本 v{version}"), cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!("发布于 {published_at}")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .max_h(px(120.0))
+                    .overflow_hidden()
+                    .child(notes.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!("包大小：{:.1} MB", size_mb)),
+            )
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即更新",
+                    !self.update_downloading && !self.busy,
+                    |this, _, _| {
+                        this.active_dialog = None;
+                        this.start_update_download();
+                    },
+                    cx,
+                ))
+                .child(self.button(
+                    "跳过此版本",
+                    !self.update_downloading,
+                    move |this, _, _| this.skip_version(&version_owned),
+                    cx,
+                ))
+                .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx))
+            )
+    }
+
+    fn render_confirm_install_dialog(
+        &self,
+        version: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let staging_dir = self.staging_dir_for_install.clone();
+        let version_owned = version.to_string();
+
+        self.dialog_panel("更新准备就绪", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(format!("版本 v{version} 已下载并校验通过，应用将重启以完成安装。")),
+            )
+            .child(danger_callout("安装过程中应用会自动退出并重启，请确保没有未保存的工作。"))
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即重启",
+                    true,
+                    move |this, _, _| {
+                        if let Some(dir) = staging_dir.clone() {
+                            this.install_update(&dir, &version_owned);
+                        } else {
+                            this.update_error = Some("staging 目录丢失".into());
+                        }
+                    },
+                    cx,
+                ))
+                .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx))
+            )
+    }
+
+    fn render_no_write_permission_dialog(
+        &self,
+        version: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("无法自动更新", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("当前目录没有写入权限，无法自动安装新版本。请手动下载新版本："),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.button("打开 CNB 下载页", true, |_, _, _| {
+                        open_url("https://cnb.cool/FuturePrayer/khaslana-release");
+                    }, cx))
+                    .child(self.button("打开 GitHub Release", true, |_, _, _| {
+                        open_url("https://github.com/FuturePrayer/khaslana/releases");
+                    }, cx)),
+            )
+            .child(dialog_actions()
+                .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx))
             )
     }
 
@@ -11541,7 +12046,7 @@ impl RepositoryView {
 
     pub(crate) fn dialog_panel(
         &self,
-        title: &'static str,
+        title: impl Into<gpui::SharedString>,
         _cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         ui_dialog_panel(title)
@@ -11936,884 +12441,8 @@ fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
-mod app_tests {
-    use super::*;
-    use khaslana::MemoryCredentialStore;
-
-    fn credential_request(operation_id: Option<u64>) -> CredentialRequest {
-        CredentialRequest {
-            url: "https://gitee.com/team/repo.git".into(),
-            username_from_url: None,
-            allowed_types: git2::CredentialType::USER_PASS_PLAINTEXT,
-            repo_path: Some(PathBuf::from("C:/work/repo")),
-            remote_name: Some("origin".into()),
-            operation_id,
-        }
-    }
-
-    fn host_credential(secret: &str) -> GitCredential {
-        GitCredential::UserPass {
-            username: "user@example.com".into(),
-            secret: secret.into(),
-            display_name: Some("gitee".into()),
-            save_to_keyring: true,
-            scope: CredentialScope::Host,
-        }
-    }
-
-    fn credential_provider_with_store(
-        store: Arc<MemoryCredentialStore>,
-        bindings: Arc<Mutex<RemoteCredentialBindings>>,
-    ) -> (TabCredentialProvider, Receiver<UiEvent>) {
-        let (tx, rx) = async_channel::unbounded();
-        let storage = Arc::new(khaslana::AppStorage::open_in_memory().unwrap());
-        (
-            TabCredentialProvider::new(store, storage, bindings, tx, RepoTabId(7)),
-            rx,
-        )
-    }
-
-    fn save_host_credential(store: &MemoryCredentialStore) -> String {
-        let record = store
-            .save_record(&credential_request(None), &host_credential("token"))
-            .unwrap();
-        record.id
-    }
-
-    fn expect_credential_prompt_cancelled(rx: &Receiver<UiEvent>) {
-        let event = rx.recv_blocking().expect("credential prompt requested");
-        match event {
-            UiEvent::CredentialRequested { response_tx, .. } => {
-                let tx = response_tx
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .expect("credential response channel");
-                tx.send(Err(khaslana::GitError::Credential(
-                    "测试取消凭据输入".into(),
-                )))
-                .unwrap();
-            }
-            _ => panic!("expected credential request"),
-        }
-    }
-
-    fn make_diff_line(kind: DiffLineKind, content: &str) -> khaslana::DiffLine {
-        khaslana::DiffLine {
-            kind,
-            old_lineno: None,
-            new_lineno: None,
-            content: content.into(),
-        }
-    }
-
-    fn make_sample_diff(lines: Vec<khaslana::DiffLine>) -> FileDiff {
-        FileDiff {
-            path: "a.txt".into(),
-            scope: DiffScope::Unstaged,
-            is_binary: false,
-            encoding: khaslana::DiffEncodingInfo {
-                requested: DiffEncodingChoice::Auto,
-                resolved: DiffEncodingChoice::Utf8,
-                lossy: false,
-            },
-            lines,
-        }
-    }
-
-    #[test]
-    fn display_columns_counts_ascii_and_wide_chars() {
-        assert_eq!(display_columns(""), 0);
-        assert_eq!(display_columns("abc"), 3);
-        // 中日韩等非 ASCII 字符按 2 列计
-        assert_eq!(display_columns("中a文"), 5);
-        assert_eq!(display_columns("你好"), 4);
-    }
-
-    #[test]
-    fn widest_diff_row_index_picks_the_longest_line() {
-        let diff = make_sample_diff(vec![
-            make_diff_line(DiffLineKind::Context, "short"),
-            make_diff_line(
-                DiffLineKind::Added,
-                "this is a much longer line than the others",
-            ),
-            make_diff_line(DiffLineKind::Removed, "mid length"),
-        ]);
-        let model = diff_render_model_for(Some(&diff), false);
-        // 无 header，行号一一对应，最宽行是第 1 行（索引 1）
-        assert_eq!(widest_diff_row_index(Some(&diff), &model), Some(1));
-    }
-
-    #[test]
-    fn widest_diff_row_index_returns_none_without_diff() {
-        let model = diff_render_model_for(None, false);
-        assert_eq!(widest_diff_row_index(None, &model), None);
-    }
-
-    #[test]
-    fn widest_diff_row_index_prefers_wide_cjk_line() {
-        // 6 个中文字符 = 12 列，多于 8 个 ASCII = 8 列
-        let diff = make_sample_diff(vec![
-            make_diff_line(DiffLineKind::Context, "abcdefgh"),
-            make_diff_line(DiffLineKind::Added, "你好你好你好"),
-        ]);
-        let model = diff_render_model_for(Some(&diff), false);
-        assert_eq!(widest_diff_row_index(Some(&diff), &model), Some(1));
-    }
-
-    #[test]
-    fn widest_diff_row_index_skips_collapsed_headers() {
-        // 折叠头部时，header 行映射为 HeaderToggle，不参与宽度测量
-        let diff = make_sample_diff(vec![
-            make_diff_line(DiffLineKind::Header, "diff --git a/x b/x"),
-            make_diff_line(DiffLineKind::Context, "short"),
-            make_diff_line(DiffLineKind::Added, "longer content line here"),
-        ]);
-        let model = diff_render_model_for(Some(&diff), false);
-        // row0=HeaderToggle，row1=short，row2=longer content line here
-        assert_eq!(widest_diff_row_index(Some(&diff), &model), Some(2));
-    }
-
-    #[test]
-    fn session_json_round_trips_multiple_repositories() {
-        let state = SessionState {
-            repo_paths: vec![PathBuf::from("C:/work/a"), PathBuf::from("C:/work/b")],
-            active_repo_path: Some(PathBuf::from("C:/work/b")),
-        };
-
-        let json = serde_json::to_string(&state).expect("encode session");
-        let decoded: SessionState = serde_json::from_str(&json).expect("decode session");
-
-        assert_eq!(decoded.repo_paths, state.repo_paths);
-        assert_eq!(decoded.active_repo_path, state.active_repo_path);
-    }
-
-    #[test]
-    fn session_paths_are_deduped_in_original_order() {
-        let paths = dedupe_repo_paths(vec![
-            PathBuf::from("C:/work/a"),
-            PathBuf::from("C:/work/b"),
-            PathBuf::from("C:/work/a"),
-        ]);
-
-        assert_eq!(
-            paths,
-            vec![PathBuf::from("C:/work/a"), PathBuf::from("C:/work/b")]
-        );
-    }
-
-    #[test]
-    fn clone_dialog_defaults_to_recursive_submodules() {
-        assert!(default_clone_recursive_submodules());
-    }
-
-    #[test]
-    fn toolbar_more_menu_actions_keep_original_enabled_rules() {
-        assert!(toolbar_more_action_enabled(
-            ToolbarMoreAction::Stash,
-            true,
-            false
-        ));
-        assert!(!toolbar_more_action_enabled(
-            ToolbarMoreAction::Stash,
-            false,
-            false
-        ));
-        assert!(toolbar_more_action_enabled(
-            ToolbarMoreAction::Submodule,
-            true,
-            false
-        ));
-        assert!(!toolbar_more_action_enabled(
-            ToolbarMoreAction::Submodule,
-            true,
-            true
-        ));
-        assert!(toolbar_more_action_enabled(
-            ToolbarMoreAction::Credentials,
-            false,
-            false
-        ));
-        assert!(toolbar_more_action_enabled(
-            ToolbarMoreAction::Proxy,
-            false,
-            false
-        ));
-        assert!(!toolbar_more_action_enabled(
-            ToolbarMoreAction::Credentials,
-            true,
-            true
-        ));
-    }
-
-    #[test]
-    fn toolbar_layout_switches_hidden_actions_by_width() {
-        assert_eq!(
-            toolbar_layout_mode(TOOLBAR_FULL_LAYOUT_MIN_WIDTH - 1.0),
-            ToolbarLayoutMode::Compact
-        );
-        assert_eq!(
-            toolbar_layout_mode(TOOLBAR_FULL_LAYOUT_MIN_WIDTH),
-            ToolbarLayoutMode::Full
-        );
-        assert_eq!(toolbar_layout_mode(1920.0), ToolbarLayoutMode::Full);
-    }
-
-    #[test]
-    fn toolbar_more_menu_position_stays_inside_viewport() {
-        assert_eq!(
-            toolbar_more_menu_position(700.0, 58.0, 1280.0, 720.0),
-            (548.0, 78.0)
-        );
-        assert_eq!(
-            toolbar_more_menu_position(1268.0, 58.0, 1280.0, 720.0),
-            (
-                1280.0 - TOOLBAR_MORE_MENU_WIDTH - MENU_VIEWPORT_MARGIN,
-                78.0
-            )
-        );
-    }
-
-    #[test]
-    fn toolbar_more_menu_hit_test_includes_menu_and_button_anchor() {
-        let menu = ToolbarMoreMenu {
-            x: 548.0,
-            y: 78.0,
-            button_x: 662.0,
-            button_y: 36.0,
-        };
-
-        assert!(point_in_toolbar_more_menu(560.0, 90.0, &menu));
-        assert!(point_in_toolbar_more_menu(700.0, 58.0, &menu));
-        assert!(!point_in_toolbar_more_menu(500.0, 58.0, &menu));
-    }
-
-    #[test]
-    fn stale_submodule_requests_do_not_match_current_state() {
-        let mut state = SubmoduleDialogState::default();
-        state.request_id = 8;
-
-        assert!(submodule_request_matches(&state, 3, 3, 8));
-        assert!(!submodule_request_matches(&state, 3, 2, 8));
-        assert!(!submodule_request_matches(&state, 3, 3, 7));
-    }
-
-    #[test]
-    fn stale_submodule_remote_status_requests_do_not_match_current_state() {
-        let mut state = SubmoduleDialogState::default();
-        state.remote_request_id = 12;
-
-        assert!(submodule_remote_request_matches(&state, 3, 3, 12));
-        assert!(!submodule_remote_request_matches(&state, 3, 2, 12));
-        assert!(!submodule_remote_request_matches(&state, 3, 3, 11));
-    }
-
-    #[test]
-    fn submodule_dialog_refreshes_after_all_update_modes() {
-        assert!(operation_refreshes_submodule_dialog("子模块已同步记录版本"));
-        assert!(operation_refreshes_submodule_dialog(
-            "子模块已更新到远端最新"
-        ));
-        assert!(operation_refreshes_submodule_dialog(
-            "子模块 deps/core 已更新到远端最新"
-        ));
-        assert!(!operation_refreshes_submodule_dialog("已获取 origin"));
-    }
-
-    #[test]
-    fn column_splitter_mouse_events_are_blocked_while_dialog_is_open() {
-        assert!(column_splitter_accepts_mouse_events(false));
-        assert!(!column_splitter_accepts_mouse_events(true));
-    }
-
-    #[test]
-    fn column_splitter_clears_active_resize_when_dialog_opens() {
-        assert!(column_splitter_should_clear_resize(true, true));
-        assert!(!column_splitter_should_clear_resize(true, false));
-        assert!(!column_splitter_should_clear_resize(false, true));
-    }
-
-    #[test]
-    fn dialog_parent_only_stops_mouse_down() {
-        assert!(dialog_parent_should_stop_mouse_event("mouse_down"));
-        assert!(!dialog_parent_should_stop_mouse_event("mouse_move"));
-        assert!(!dialog_parent_should_stop_mouse_event("mouse_up"));
-        assert!(!dialog_parent_should_stop_mouse_event("mouse_up_out"));
-    }
-
-    #[test]
-    fn submodule_state_labels_cover_common_states() {
-        let ready = khaslana::SubmoduleState {
-            initialized: true,
-            checked_out: true,
-            head_matches_index: true,
-            workdir_modified: false,
-            workdir_untracked: false,
-        };
-        let dirty = khaslana::SubmoduleState {
-            workdir_modified: true,
-            ..ready.clone()
-        };
-        let missing = khaslana::SubmoduleState {
-            initialized: false,
-            checked_out: false,
-            head_matches_index: false,
-            workdir_modified: false,
-            workdir_untracked: false,
-        };
-
-        assert_eq!(ready.label(), "已同步");
-        assert_eq!(dirty.label(), "有改动");
-        assert_eq!(missing.label(), "未初始化");
-    }
-
-    #[test]
-    fn worktree_diff_load_completion_does_not_emit_toast() {
-        assert!(!should_notify_operation_finished("差异已加载", false, true));
-        assert!(should_notify_operation_finished("差异已加载", true, true));
-        assert!(should_notify_operation_finished("拉取完成", true, false));
-        assert!(should_notify_operation_finished(
-            "提交已还原到暂存区",
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn context_menu_position_opens_from_cursor_when_space_allows() {
-        assert_eq!(
-            context_menu_position(120.0, 160.0, 800.0, 600.0, 170.0, 110.0),
-            (120.0, 160.0)
-        );
-    }
-
-    #[test]
-    fn context_menu_position_flips_left_near_right_edge() {
-        assert_eq!(
-            context_menu_position(760.0, 160.0, 800.0, 600.0, 170.0, 110.0),
-            (590.0, 160.0)
-        );
-    }
-
-    #[test]
-    fn context_menu_position_clamps_to_bottom_near_bottom_edge() {
-        assert_eq!(
-            context_menu_position(120.0, 570.0, 800.0, 600.0, 170.0, 110.0),
-            (120.0, 482.0)
-        );
-    }
-
-    #[test]
-    fn context_menu_position_flips_left_and_clamps_bottom_near_bottom_right() {
-        assert_eq!(
-            context_menu_position(790.0, 590.0, 800.0, 600.0, 170.0, 110.0),
-            (620.0, 482.0)
-        );
-    }
-
-    #[test]
-    fn context_menu_position_uses_viewport_bounds_for_bottom_clamp() {
-        assert_eq!(
-            context_menu_position(280.0, 510.0, 900.0, 540.0, 170.0, 110.0),
-            (280.0, 422.0)
-        );
-    }
-
-    #[test]
-    fn diff_encoding_preferences_round_trip() {
-        let mut preferences = DiffEncodingPreferences::default();
-        preferences
-            .repositories
-            .insert("c:/work/a".to_string(), DiffEncodingChoice::Gb18030);
-        preferences
-            .repositories
-            .insert("c:/work/b".to_string(), DiffEncodingChoice::Big5);
-
-        let json = serde_json::to_string(&preferences).expect("encode preferences");
-        let decoded: DiffEncodingPreferences =
-            serde_json::from_str(&json).expect("decode preferences");
-
-        assert_eq!(
-            decoded.repositories.get("c:/work/a"),
-            Some(&DiffEncodingChoice::Gb18030)
-        );
-        assert_eq!(
-            decoded.repositories.get("c:/work/b"),
-            Some(&DiffEncodingChoice::Big5)
-        );
-        assert_eq!(DiffEncodingChoice::default(), DiffEncodingChoice::Auto);
-    }
-
-    #[test]
-    fn remote_credential_bindings_round_trip() {
-        let bindings = RemoteCredentialBindings {
-            remotes: vec![
-                RemoteCredentialBinding {
-                    repo_path: "c:/work/a".to_string(),
-                    remote_name: "origin".to_string(),
-                    remote_url: "https://example.com/a.git".to_string(),
-                    policy: RemoteCredentialPolicy::NoCredential,
-                },
-                RemoteCredentialBinding {
-                    repo_path: "c:/work/b".to_string(),
-                    remote_name: "upstream".to_string(),
-                    remote_url: "git@example.com:b.git".to_string(),
-                    policy: RemoteCredentialPolicy::Record("record-1".to_string()),
-                },
-            ],
-        };
-
-        let json = serde_json::to_string(&bindings).expect("encode bindings");
-        let decoded: RemoteCredentialBindings =
-            serde_json::from_str(&json).expect("decode bindings");
-
-        assert_eq!(decoded.remotes, bindings.remotes);
-    }
-
-    #[test]
-    fn remote_binding_for_request_defaults_to_auto_match() {
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        let request = CredentialRequest {
-            url: "https://example.com/a.git".into(),
-            username_from_url: None,
-            allowed_types: git2::CredentialType::USER_PASS_PLAINTEXT,
-            repo_path: Some(PathBuf::from("C:/work/a")),
-            remote_name: Some("origin".into()),
-            operation_id: None,
-        };
-
-        assert_eq!(
-            remote_binding_for_request(&bindings, &request),
-            RemoteCredentialPolicy::AutoMatch
-        );
-    }
-
-    #[test]
-    fn remote_binding_for_request_matches_repo_remote_and_url() {
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        let request = CredentialRequest {
-            url: "https://example.com/a.git".into(),
-            username_from_url: None,
-            allowed_types: git2::CredentialType::USER_PASS_PLAINTEXT,
-            repo_path: Some(PathBuf::from("C:/work/a")),
-            remote_name: Some("origin".into()),
-            operation_id: None,
-        };
-
-        set_remote_binding_for_request(
-            &bindings,
-            &request,
-            RemoteCredentialPolicy::Record("record-1".into()),
-        );
-
-        assert_eq!(
-            remote_binding_for_request(&bindings, &request),
-            RemoteCredentialPolicy::Record("record-1".into())
-        );
-
-        let changed_url = CredentialRequest {
-            url: "https://example.com/renamed.git".into(),
-            ..request
-        };
-        assert_eq!(
-            remote_binding_for_request(&bindings, &changed_url),
-            RemoteCredentialPolicy::AutoMatch
-        );
-    }
-
-    #[test]
-    fn stored_host_credential_is_reused_across_workflow_remote_steps() {
-        let store = Arc::new(MemoryCredentialStore::new());
-        save_host_credential(&store);
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        let (provider, rx) = credential_provider_with_store(store.clone(), bindings);
-
-        let first = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-        let second = provider
-            .credential_for(credential_request(Some(2)))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(first.username(), "user@example.com");
-        assert_eq!(second.username(), "user@example.com");
-        assert!(rx.try_recv().is_err());
-        assert_eq!(store.list_records().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn stored_credential_is_reused_for_repeated_callbacks_in_same_remote_operation() {
-        let store = Arc::new(MemoryCredentialStore::new());
-        save_host_credential(&store);
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        let (provider, rx) = credential_provider_with_store(store, bindings);
-
-        let first = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-        let second = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(first.username(), "user@example.com");
-        assert_eq!(second.username(), "user@example.com");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn repeated_remote_operation_retry_rejects_last_stored_record_without_deleting_it() {
-        let store = Arc::new(MemoryCredentialStore::new());
-        let record_id = save_host_credential(&store);
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        let (provider, rx) = credential_provider_with_store(store.clone(), bindings);
-
-        let first = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.username(), "user@example.com");
-        let second = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-        assert_eq!(second.username(), "user@example.com");
-
-        let retry = provider.clone();
-        let handle = thread::spawn(move || retry.credential_for(credential_request(Some(1))));
-        expect_credential_prompt_cancelled(&rx);
-        assert!(handle.join().unwrap().is_err());
-        assert!(store.credential_for_record(&record_id).unwrap().is_some());
-    }
-
-    #[test]
-    fn no_credential_binding_still_skips_saved_credentials_for_workflow() {
-        let store = Arc::new(MemoryCredentialStore::new());
-        save_host_credential(&store);
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        set_remote_binding_for_request(
-            &bindings,
-            &credential_request(Some(1)),
-            RemoteCredentialPolicy::NoCredential,
-        );
-        let (provider, rx) = credential_provider_with_store(store, bindings);
-
-        let handle = thread::spawn(move || provider.credential_for(credential_request(Some(1))));
-        expect_credential_prompt_cancelled(&rx);
-        assert!(handle.join().unwrap().is_err());
-    }
-
-    #[test]
-    fn record_binding_is_reused_across_workflow_remote_steps() {
-        let store = Arc::new(MemoryCredentialStore::new());
-        let record_id = save_host_credential(&store);
-        let bindings = Arc::new(Mutex::new(RemoteCredentialBindings::default()));
-        set_remote_binding_for_request(
-            &bindings,
-            &credential_request(Some(1)),
-            RemoteCredentialPolicy::Record(record_id),
-        );
-        let (provider, rx) = credential_provider_with_store(store, bindings);
-
-        let first = provider
-            .credential_for(credential_request(Some(1)))
-            .unwrap()
-            .unwrap();
-        let second = provider
-            .credential_for(credential_request(Some(2)))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(first.username(), "user@example.com");
-        assert_eq!(second.username(), "user@example.com");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn clone_directory_name_is_inferred_from_remote_url() {
-        assert_eq!(
-            infer_clone_directory_name("https://github.com/FuturePrayer/khaslana.git"),
-            Some("khaslana".to_string())
-        );
-        assert_eq!(
-            infer_clone_directory_name("https://example.invalid/team/repo/"),
-            Some("repo".to_string())
-        );
-        assert_eq!(
-            infer_clone_directory_name("git@github.com:FuturePrayer/khaslana.git"),
-            Some("khaslana".to_string())
-        );
-        assert_eq!(
-            infer_clone_directory_name("https://example.invalid/team/repo.git?ref=main"),
-            Some("repo".to_string())
-        );
-        assert_eq!(infer_clone_directory_name(""), None);
-        assert_eq!(infer_clone_directory_name("https://example.invalid/"), None);
-    }
-
-    #[test]
-    fn clone_target_path_uses_selected_parent_directory() {
-        assert_eq!(
-            infer_clone_target_path("https://github.com/example/abc", "D:/dev"),
-            Some(PathBuf::from("D:/dev").join("abc"))
-        );
-        assert_eq!(
-            infer_clone_target_path("https://github.com/example/abc.git", "D:/dev/"),
-            Some(PathBuf::from("D:/dev/").join("abc"))
-        );
-        assert_eq!(infer_clone_target_path("", "D:/dev"), None);
-        assert_eq!(
-            infer_clone_target_path("https://github.com/example/abc", ""),
-            None
-        );
-    }
-
-    #[test]
-    fn repo_tab_workflow_state_is_isolated_per_tab() {
-        let mut left = RepoTabState::new(RepoTabId(1), Some(PathBuf::from("C:/repos/left")));
-        let right = RepoTabState::new(RepoTabId(2), Some(PathBuf::from("C:/repos/right")));
-
-        left.workflow_state.file_path =
-            Some(PathBuf::from("C:/Users/test/.khaslana/workflows/a.json5"));
-        left.workflow_state.selected_template_path =
-            Some(PathBuf::from("C:/Users/test/.khaslana/workflows/a.json5"));
-        left.workflow_state.log.push("left workflow".into());
-
-        assert!(right.workflow_state.file_path.is_none());
-        assert!(right.workflow_state.selected_template_path.is_none());
-        assert!(right.workflow_state.log.is_empty());
-    }
-
-    fn sample_conflict_view(path: &str) -> ConflictFileView {
-        ConflictFileView {
-            path: path.to_string(),
-            kind: ConflictFileKind::Text,
-            draft: "main\n".to_string(),
-            ours_text: "main\n".to_string(),
-            theirs_text: "feature\n".to_string(),
-            blocks: vec![khaslana::ConflictBlock {
-                base: Some("base\n".to_string()),
-                ours: "main\n".to_string(),
-                theirs: "feature\n".to_string(),
-                start: 0,
-                end: 5,
-                ours_start: 0,
-                ours_end: 5,
-                theirs_start: 0,
-                theirs_end: 8,
-                status: khaslana::ConflictBlockStatus::Unresolved,
-                has_manual_edits: false,
-            }],
-            draft_status: khaslana::ConflictDraftStatus::Dirty,
-            fallback_reason: None,
-        }
-    }
-
-    #[test]
-    fn conflict_state_enters_conflict_mode_and_selects_first_path() {
-        let mut mode = MainMode::Worktree;
-        let mut state = ConflictWorkbenchState::default();
-        let paths = vec!["b.txt".to_string(), "a.txt".to_string()];
-
-        sync_conflict_state_from_paths(&mut mode, &mut state, &paths);
-
-        assert_eq!(mode, MainMode::Conflict);
-        assert_eq!(state.selected_path.as_deref(), Some("b.txt"));
-        assert_eq!(state.selected_block, 0);
-    }
-
-    #[test]
-    fn conflict_state_returns_to_worktree_when_last_conflict_disappears() {
-        let mut mode = MainMode::Conflict;
-        let mut state = ConflictWorkbenchState {
-            selected_path: Some("a.txt".into()),
-            selected_block: 1,
-            show_base: true,
-            pending_resolve: Some(PendingConflictResolve {
-                path: "a.txt".into(),
-                unresolved_count: 1,
-            }),
-            files: BTreeMap::from([(String::from("a.txt"), sample_conflict_view("a.txt"))]),
-        };
-
-        sync_conflict_state_from_paths(&mut mode, &mut state, &[]);
-
-        assert_eq!(mode, MainMode::Worktree);
-        assert!(state.selected_path.is_none());
-        assert!(state.pending_resolve.is_none());
-        assert!(state.files.is_empty());
-    }
-
-    #[test]
-    fn conflict_state_prunes_removed_files_and_keeps_existing_drafts() {
-        let mut mode = MainMode::Conflict;
-        let mut state = ConflictWorkbenchState {
-            selected_path: Some("b.txt".into()),
-            selected_block: 0,
-            show_base: false,
-            pending_resolve: Some(PendingConflictResolve {
-                path: "a.txt".into(),
-                unresolved_count: 1,
-            }),
-            files: BTreeMap::from([
-                (String::from("a.txt"), sample_conflict_view("a.txt")),
-                (String::from("b.txt"), sample_conflict_view("b.txt")),
-            ]),
-        };
-
-        sync_conflict_state_from_paths(&mut mode, &mut state, &["b.txt".into()]);
-
-        assert_eq!(mode, MainMode::Conflict);
-        assert_eq!(state.selected_path.as_deref(), Some("b.txt"));
-        assert_eq!(
-            state.files.get("b.txt").map(|view| view.draft.as_str()),
-            Some("main\n")
-        );
-        assert!(state.pending_resolve.is_none());
-        assert!(!state.files.contains_key("a.txt"));
-    }
-
-    #[test]
-    fn conflict_state_requests_resolve_confirmation_only_for_unresolved_blocks() {
-        let mut state = ConflictWorkbenchState::default();
-        let unresolved = sample_conflict_view("a.txt");
-        assert!(state.request_resolve_confirmation(
-            unresolved.path.clone(),
-            unresolved.unresolved_block_count()
-        ));
-        assert_eq!(
-            state.pending_resolve,
-            Some(PendingConflictResolve {
-                path: "a.txt".into(),
-                unresolved_count: 1,
-            })
-        );
-
-        let mut resolved = sample_conflict_view("b.txt");
-        resolved.blocks[0].status =
-            khaslana::ConflictBlockStatus::Resolved(khaslana::ConflictBlockResolution::Ours);
-        resolved.draft = "main\n".into();
-        state.pending_resolve = None;
-
-        assert!(!state.request_resolve_confirmation(
-            resolved.path.clone(),
-            resolved.unresolved_block_count()
-        ));
-        assert!(state.pending_resolve.is_none());
-    }
-
-    #[test]
-    fn conflict_workbench_uses_distinct_scroll_handles_per_pane() {
-        let handles = conflict_workbench_scroll_handle_ids();
-        let unique = handles
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-
-        assert_eq!(unique.len(), 3);
-    }
-
-    #[test]
-    fn conflict_result_pane_uses_document_view_instead_of_editor() {
-        assert!(!conflict_result_pane_uses_editor());
-    }
-
-    #[test]
-    fn conflict_editor_does_not_store_text_conflict_draft_when_result_is_document() {
-        assert!(!conflict_editor_should_store_draft(ConflictFileKind::Text));
-    }
-
-    #[test]
-    fn conflict_editor_always_uses_scrollable_multiline_viewport() {
-        assert!(multiline_input_should_scroll(
-            FieldId::ConflictEditor,
-            "short"
-        ));
-        assert!(!multiline_input_should_scroll(
-            FieldId::CommitMessage,
-            "short"
-        ));
-    }
-
-    #[test]
-    fn conflict_editor_multiline_frame_expands_to_allow_scroll_viewport() {
-        assert!(!multiline_input_uses_input_frame(FieldId::ConflictEditor));
-        assert!(multiline_input_uses_input_frame(FieldId::CommitMessage));
-    }
-
-    fn test_diff(lines: Vec<khaslana::DiffLine>, is_binary: bool) -> FileDiff {
-        FileDiff {
-            path: "file.txt".to_string(),
-            scope: DiffScope::Unstaged,
-            is_binary,
-            encoding: khaslana::DiffEncodingInfo {
-                requested: DiffEncodingChoice::Utf8,
-                resolved: DiffEncodingChoice::Utf8,
-                lossy: false,
-            },
-            lines,
-        }
-    }
-
-    fn test_line(kind: DiffLineKind, content: &str) -> khaslana::DiffLine {
-        khaslana::DiffLine {
-            kind,
-            old_lineno: None,
-            new_lineno: None,
-            content: content.to_string(),
-        }
-    }
-
-    #[test]
-    fn diff_render_rows_track_headers_and_empty_states() {
-        let diff = test_diff(
-            vec![
-                test_line(DiffLineKind::Header, "diff --git a/file.txt b/file.txt"),
-                test_line(DiffLineKind::Header, "index 0000000..1111111"),
-                test_line(DiffLineKind::Removed, "-old"),
-                test_line(DiffLineKind::Added, "+new"),
-            ],
-            false,
-        );
-
-        assert_eq!(
-            diff_render_rows_for(Some(&diff), false),
-            vec![
-                DiffRenderRow::HeaderToggle,
-                DiffRenderRow::DiffLine(2),
-                DiffRenderRow::DiffLine(3),
-            ]
-        );
-        assert_eq!(
-            diff_render_rows_for(Some(&diff), true),
-            vec![
-                DiffRenderRow::HeaderToggle,
-                DiffRenderRow::DiffLine(0),
-                DiffRenderRow::DiffLine(1),
-                DiffRenderRow::DiffLine(2),
-                DiffRenderRow::DiffLine(3),
-            ]
-        );
-
-        let empty_text_diff = test_diff(Vec::new(), false);
-        let empty_binary_diff = test_diff(Vec::new(), true);
-        assert_eq!(
-            diff_render_rows_for(Some(&empty_text_diff), false),
-            vec![DiffRenderRow::Empty]
-        );
-        assert_eq!(
-            diff_render_rows_for(Some(&empty_binary_diff), false),
-            vec![DiffRenderRow::Empty]
-        );
-        assert_eq!(
-            diff_render_rows_for(None, false),
-            vec![DiffRenderRow::Empty]
-        );
-    }
-}
+#[path = "tests/main.rs"]
+mod app_tests;
 
 fn main() {
     tracing_subscriber::fmt()

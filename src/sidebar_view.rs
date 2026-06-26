@@ -4,11 +4,11 @@ use gpui::{
 use khaslana::{BranchInfo, BranchKind, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
-    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId,
-    REMOTE_MENU_HEIGHT, REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT,
-    STASH_MENU_WIDTH, SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH,
-    TagContextMenu, clamped_menu_position, context_menu_item, context_menu_item_with_context,
-    menu_separator, nav_list, placeholder_row,
+    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, REMOTE_MENU_HEIGHT,
+    REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT, STASH_MENU_WIDTH,
+    SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH, TagContextMenu,
+    clamped_menu_position, context_menu_item, context_menu_item_with_context, menu_separator,
+    nav_list, placeholder_row,
     ui::{
         components::{glass_menu, tooltip_text},
         icons::{ToolbarIcon, toolbar_icon, toolbar_icon_rotated},
@@ -226,12 +226,7 @@ impl RepositoryView {
                 .flex_none()
                 .px(px(16.0))
                 .py(px(8.0))
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(1.0))
-                        .bg(rgb(ui_theme::SIDEBAR_BORDER)),
-                )
+                .child(div().w_full().h(px(1.0)).bg(rgb(ui_theme::SIDEBAR_BORDER)))
         };
 
         let mut sidebar = div()
@@ -258,19 +253,17 @@ impl RepositoryView {
                 cx,
             ))
             .child(sidebar_divider())
-            .child(
-                self.render_nav_section(
-                    "远端",
-                    "remote-list",
-                    SidebarSection::Remotes,
-                    remote_rows,
-                    self.loading.remote().then_some("远端加载中..."),
-                    None,
-                    2.0,
-                    Some(manage_pill),
-                    cx,
-                ),
-            )
+            .child(self.render_nav_section(
+                "远端",
+                "remote-list",
+                SidebarSection::Remotes,
+                remote_rows,
+                self.loading.remote().then_some("远端加载中..."),
+                None,
+                2.0,
+                Some(manage_pill),
+                cx,
+            ))
             .child(sidebar_divider())
             .child(self.render_nav_section(
                 "远端分支",
@@ -285,30 +278,34 @@ impl RepositoryView {
             ));
 
         if !tag_rows.is_empty() {
-            sidebar = sidebar.child(sidebar_divider()).child(self.render_nav_section(
-                "标签",
-                "tag-list",
-                SidebarSection::Tags,
-                tag_rows,
-                None,
-                None,
-                2.0,
-                tag_action,
-                cx,
-            ));
+            sidebar = sidebar
+                .child(sidebar_divider())
+                .child(self.render_nav_section(
+                    "标签",
+                    "tag-list",
+                    SidebarSection::Tags,
+                    tag_rows,
+                    None,
+                    None,
+                    2.0,
+                    tag_action,
+                    cx,
+                ));
         }
         if !stash_rows.is_empty() {
-            sidebar = sidebar.child(sidebar_divider()).child(self.render_nav_section(
-                "贮藏",
-                "stash-list",
-                SidebarSection::Stashes,
-                stash_rows,
-                None,
-                None,
-                2.0,
-                stash_action,
-                cx,
-            ));
+            sidebar = sidebar
+                .child(sidebar_divider())
+                .child(self.render_nav_section(
+                    "贮藏",
+                    "stash-list",
+                    SidebarSection::Stashes,
+                    stash_rows,
+                    None,
+                    None,
+                    2.0,
+                    stash_action,
+                    cx,
+                ));
         }
 
         sidebar
@@ -494,7 +491,10 @@ impl RepositoryView {
         // fontSize 11, fontWeight 600, letterSpacing 0.5, $--sidebar-foreground 色
         let is_collapsible = matches!(
             section,
-            SidebarSection::Remotes | SidebarSection::Tags | SidebarSection::Stashes | SidebarSection::RemoteBranches
+            SidebarSection::Remotes
+                | SidebarSection::Tags
+                | SidebarSection::Stashes
+                | SidebarSection::RemoteBranches
         );
 
         let title_el = div()
@@ -629,7 +629,10 @@ impl RepositoryView {
             })
             .cursor_pointer()
             // globe icon 14px, $--sidebar-foreground 色
-            .child(toolbar_icon(ToolbarIcon::Globe, ui_theme::SIDEBAR_FOREGROUND))
+            .child(toolbar_icon(
+                ToolbarIcon::Globe,
+                ui_theme::SIDEBAR_FOREGROUND,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -878,46 +881,45 @@ impl RepositoryView {
             row
         };
 
-        row
-            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
-                this.selected_branch = Some(name.clone());
-                this.branch_context_menu = None;
+        row.on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+            this.selected_branch = Some(name.clone());
+            this.branch_context_menu = None;
+            this.change_context_menu = None;
+            this.commit_context_menu = None;
+            this.encoding_menu_target = None;
+            if event.standard_click() && event.click_count() >= 2 && !this.busy {
+                match click_kind {
+                    BranchKind::Local if !click_is_head => this.checkout(click_name.clone()),
+                    BranchKind::Remote if !this.has_local_branch_for_remote(&click_name) => {
+                        this.checkout_remote_branch(click_name.clone())
+                    }
+                    _ => {}
+                }
+            }
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.selected_branch = Some(right_click_name.clone());
+                this.active_dialog = None;
+                let (x, y) =
+                    clamped_menu_position(event, window, BRANCH_MENU_WIDTH, BRANCH_MENU_HEIGHT);
+                this.branch_context_menu = Some(BranchContextMenu {
+                    branch: right_click_name.clone(),
+                    kind: right_click_kind.clone(),
+                    is_head: right_click_is_head,
+                    x,
+                    y,
+                });
+                this.tag_context_menu = None;
+                this.stash_context_menu = None;
                 this.change_context_menu = None;
                 this.commit_context_menu = None;
                 this.encoding_menu_target = None;
-                if event.standard_click() && event.click_count() >= 2 && !this.busy {
-                    match click_kind {
-                        BranchKind::Local if !click_is_head => this.checkout(click_name.clone()),
-                        BranchKind::Remote if !this.has_local_branch_for_remote(&click_name) => {
-                            this.checkout_remote_branch(click_name.clone())
-                        }
-                        _ => {}
-                    }
-                }
                 cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.selected_branch = Some(right_click_name.clone());
-                    this.active_dialog = None;
-                    let (x, y) =
-                        clamped_menu_position(event, window, BRANCH_MENU_WIDTH, BRANCH_MENU_HEIGHT);
-                    this.branch_context_menu = Some(BranchContextMenu {
-                        branch: right_click_name.clone(),
-                        kind: right_click_kind.clone(),
-                        is_head: right_click_is_head,
-                        x,
-                        y,
-                    });
-                    this.tag_context_menu = None;
-                    this.stash_context_menu = None;
-                    this.change_context_menu = None;
-                    this.commit_context_menu = None;
-                    this.encoding_menu_target = None;
-                    cx.notify();
-                }),
-            )
+            }),
+        )
     }
 
     pub(crate) fn render_branch_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1051,133 +1053,5 @@ impl RepositoryView {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn branch(name: &str, kind: BranchKind, upstream: Option<&str>) -> BranchInfo {
-        BranchInfo {
-            name: name.to_string(),
-            kind,
-            is_head: false,
-            upstream: upstream.map(str::to_string),
-        }
-    }
-
-    fn branch_names(branches: Vec<BranchInfo>) -> Vec<String> {
-        branches.into_iter().map(|branch| branch.name).collect()
-    }
-
-    #[test]
-    fn sidebar_branch_search_empty_query_returns_only_requested_kind() {
-        let branches = vec![
-            branch("main", BranchKind::Local, None),
-            branch("feature/a", BranchKind::Local, None),
-            branch("origin/main", BranchKind::Remote, None),
-        ];
-
-        assert_eq!(
-            branch_names(filter_sidebar_branches(&branches, BranchKind::Local, "")),
-            vec!["main", "feature/a"]
-        );
-        assert_eq!(
-            branch_names(filter_sidebar_branches(&branches, BranchKind::Remote, "")),
-            vec!["origin/main"]
-        );
-    }
-
-    #[test]
-    fn sidebar_branch_search_is_case_insensitive() {
-        let branches = vec![
-            branch("Feature/Login", BranchKind::Local, None),
-            branch("bugfix/logout", BranchKind::Local, None),
-        ];
-
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Local,
-                "feature",
-            )),
-            vec!["Feature/Login"]
-        );
-    }
-
-    #[test]
-    fn sidebar_branch_search_keeps_local_and_remote_groups_separate() {
-        let branches = vec![
-            branch("feature/a", BranchKind::Local, None),
-            branch("origin/feature/a", BranchKind::Remote, None),
-        ];
-
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Local,
-                "feature",
-            )),
-            vec!["feature/a"]
-        );
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Remote,
-                "feature",
-            )),
-            vec!["origin/feature/a"]
-        );
-    }
-
-    #[test]
-    fn sidebar_remote_branch_search_matches_full_or_partial_name() {
-        let branches = vec![
-            branch("origin/feature/a", BranchKind::Remote, None),
-            branch("upstream/release", BranchKind::Remote, None),
-        ];
-
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Remote,
-                "origin/feature",
-            )),
-            vec!["origin/feature/a"]
-        );
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Remote,
-                "release",
-            )),
-            vec!["upstream/release"]
-        );
-    }
-
-    #[test]
-    fn sidebar_branch_action_button_ids_keep_actions_distinct() {
-        assert_ne!(
-            sidebar_branch_search_button_id(SidebarSection::LocalBranches),
-            sidebar_branch_search_button_id(SidebarSection::RemoteBranches),
-        );
-        assert_ne!(
-            SIDEBAR_LOCAL_BRANCH_CREATE_ID,
-            sidebar_branch_search_button_id(SidebarSection::LocalBranches),
-        );
-    }
-
-    #[test]
-    fn sidebar_local_branch_search_matches_upstream() {
-        let branches = vec![
-            branch("main", BranchKind::Local, Some("origin/trunk")),
-            branch("feature/a", BranchKind::Local, Some("origin/feature/a")),
-        ];
-
-        assert_eq!(
-            branch_names(filter_sidebar_branches(
-                &branches,
-                BranchKind::Local,
-                "origin/trunk",
-            )),
-            vec!["main"]
-        );
-    }
-}
+#[path = "tests/sidebar_view.rs"]
+mod tests;
