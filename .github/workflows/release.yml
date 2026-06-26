@@ -53,7 +53,7 @@ jobs:
             "notes": "Release ${VERSION_TAG}",
             "platforms": {
               "windows-x86_64": {
-                "archive_url": "https://cnb.cool/suhoan/khaslana-release/-/raw/master/releases/v${VERSION}/${ZIP}.zip",
+                "archive_url": "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/releases/v${VERSION}/${ZIP}.zip",
                 "fallback_archive_url": "https://github.com/FuturePrayer/khaslana/releases/download/${VERSION_TAG}/${ZIP}.zip",
                 "sha256": "${SHA}",
                 "size": ${SIZE}

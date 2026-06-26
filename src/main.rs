@@ -11036,7 +11036,7 @@ impl RepositoryView {
                     .flex()
                     .gap_2()
                     .child(self.button("打开 CNB 下载页", true, |_, _, _| {
-                        open_url("https://cnb.cool/FuturePrayer/khaslana-release");
+                        open_url("https://cnb.cool/suhoan/khaslana-release");
                     }, cx))
                     .child(self.button("打开 GitHub Release", true, |_, _, _| {
                         open_url("https://github.com/FuturePrayer/khaslana/releases");

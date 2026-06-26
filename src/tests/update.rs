@@ -16,6 +16,8 @@ fn current_version_is_valid_semver() {
 fn default_sources_cnb_before_github() {
     let sources = default_manifest_sources();
     assert!(sources[0].contains("cnb.cool"));
+    assert!(sources[0].contains("/-/git/raw/"));
+    assert!(!sources[0].contains("/-/raw/"));
     assert!(sources[1].contains("github.com"));
 }
 

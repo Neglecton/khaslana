@@ -68,7 +68,7 @@ pub fn current_version() -> Version {
 /// 默认 manifest 下载源列表，CNB 优先，GitHub 兜底。
 pub fn default_manifest_sources() -> Vec<String> {
     vec![
-        "https://cnb.cool/suhoan/khaslana-release/-/raw/master/khaslana-update.json".to_string(),
+        "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/khaslana-update.json".to_string(),
         "https://github.com/FuturePrayer/khaslana/releases/latest/download/khaslana-update.json".to_string(),
     ]
 }
