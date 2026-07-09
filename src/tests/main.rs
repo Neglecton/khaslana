@@ -342,6 +342,13 @@ fn worktree_diff_load_completion_does_not_emit_toast() {
 }
 
 #[test]
+fn update_check_result_stays_in_status_bar_without_toast() {
+    assert_eq!(update_check_toast_message("当前已是最新版本"), None);
+    assert_eq!(update_check_toast_message("更新检查失败"), None);
+    assert_eq!(update_check_toast_message(""), None);
+}
+
+#[test]
 fn context_menu_position_opens_from_cursor_when_space_allows() {
     assert_eq!(
         context_menu_position(120.0, 160.0, 800.0, 600.0, 170.0, 110.0),

@@ -3581,7 +3581,9 @@ impl RepositoryView {
                 if !error.is_empty() {
                     self.update_error = Some(error.clone());
                     self.status = error.clone();
-                    self.notify_toast(AppToastKind::Info, format!("检查更新：{error}"), cx);
+                    if let Some(message) = update_check_toast_message(&error) {
+                        self.notify_toast(AppToastKind::Info, message, cx);
+                    }
                 }
             }
             UiEvent::UpdateDownloadProgress { downloaded, total } => {
@@ -12572,6 +12574,10 @@ fn point_in_menu(x: f32, y: f32, menu_x: f32, menu_y: f32, width: f32, height: f
 
 fn should_notify_operation_finished(message: &str, has_snapshot: bool, has_diff: bool) -> bool {
     !(message == "差异已加载" && !has_snapshot && has_diff)
+}
+
+fn update_check_toast_message(_error: &str) -> Option<String> {
+    None
 }
 
 fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
