@@ -1,4 +1,6 @@
 use std::fs;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use git2::Repository;
 use tempfile::TempDir;
@@ -6,6 +8,103 @@ use tempfile::TempDir;
 use super::*;
 use crate::git::test_support::git_test_support as git_support;
 use crate::{BranchName, CommitMessage, GitError};
+
+static IDEA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct IdeaEnvGuard {
+    _guard: MutexGuard<'static, ()>,
+    previous: Option<String>,
+}
+
+impl IdeaEnvGuard {
+    fn set(path: &Path) -> Self {
+        let guard = IDEA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KHASLANA_IDEA_PATH").ok();
+        // 测试串行持有锁，避免进程级环境变量影响其它外部合并测试。
+        unsafe {
+            std::env::set_var("KHASLANA_IDEA_PATH", path);
+        }
+        Self {
+            _guard: guard,
+            previous,
+        }
+    }
+}
+
+impl Drop for IdeaEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var("KHASLANA_IDEA_PATH", previous);
+            } else {
+                std::env::remove_var("KHASLANA_IDEA_PATH");
+            }
+        }
+    }
+}
+
+fn fake_idea_tool(dir: &Path, behavior: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{behavior}.cmd"));
+        let body = match behavior {
+            "copy_theirs" => {
+                "@echo off\r\nif not \"%~1\"==\"merge\" exit /b 9\r\ntype \"%~3\" > \"%~5\"\r\n"
+            }
+            "no_result" => "@echo off\r\nexit /b 0\r\n",
+            "fail" => "@echo off\r\nexit /b 7\r\n",
+            _ => unreachable!(),
+        };
+        fs::write(&path, body).unwrap();
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(behavior);
+        let body = match behavior {
+            "copy_theirs" => "#!/bin/sh\n[ \"$1\" = \"merge\" ] || exit 9\ncat \"$3\" > \"$5\"\n",
+            "no_result" => "#!/bin/sh\nexit 0\n",
+            "fail" => "#!/bin/sh\nexit 7\n",
+            _ => unreachable!(),
+        };
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+}
+
+fn create_named_text_conflict(path: &str) -> (TempDir, Repository, GitService) {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), path, "base\n");
+    git_support::commit_all(&repo, "initial");
+
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(dir.path(), path, "feature\n");
+    git_support::commit_all(&repo, "feature");
+
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), path, "main\n");
+    git_support::commit_all(&repo, "main");
+
+    let err = service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap_err();
+    assert!(matches!(err, GitError::Conflicts(paths) if paths == vec![path]));
+    (dir, repo, service)
+}
 
 fn create_text_conflict() -> (TempDir, Repository, GitService) {
     let (dir, mut repo, service) = git_support::init_repo();
@@ -321,4 +420,80 @@ fn mark_conflict_file_with_missing_side_as_unsupported() {
     assert_eq!(view.kind, crate::ConflictFileKind::Unsupported);
     assert!(view.blocks.is_empty());
     assert!(view.fallback_reason.is_some());
+}
+
+#[test]
+fn intellij_external_merge_writes_result_and_clears_conflict() {
+    let (dir, mut repo, service) = create_text_conflict();
+    let tool = fake_idea_tool(dir.path(), "copy_theirs");
+    let _env = IdeaEnvGuard::set(&tool);
+
+    let snapshot = service
+        .resolve_conflict_with_intellij_idea(&mut repo, Path::new("same.txt"))
+        .unwrap();
+
+    assert!(snapshot.conflicts.is_empty());
+    git_support::assert_file_text(dir.path(), "same.txt", "feature\n");
+    service
+        .commit(&mut repo, &CommitMessage::new("resolve with intellij"))
+        .unwrap();
+}
+
+#[test]
+fn intellij_external_merge_errors_when_result_file_is_missing() {
+    let (dir, mut repo, service) = create_text_conflict();
+    let tool = fake_idea_tool(dir.path(), "no_result");
+    let _env = IdeaEnvGuard::set(&tool);
+
+    let error = service
+        .resolve_conflict_with_intellij_idea(&mut repo, Path::new("same.txt"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("IntelliJ IDEA 合并未生成结果文件"));
+    assert_eq!(service.conflicts(&repo).unwrap(), vec!["same.txt"]);
+}
+
+#[test]
+fn intellij_external_merge_errors_when_tool_exits_with_failure() {
+    let (dir, mut repo, service) = create_text_conflict();
+    let tool = fake_idea_tool(dir.path(), "fail");
+    let _env = IdeaEnvGuard::set(&tool);
+
+    let error = service
+        .resolve_conflict_with_intellij_idea(&mut repo, Path::new("same.txt"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("IntelliJ IDEA 合并工具退出失败"));
+    assert_eq!(service.conflicts(&repo).unwrap(), vec!["same.txt"]);
+}
+
+#[test]
+fn intellij_external_merge_rejects_modify_delete_conflict() {
+    let (dir, mut repo, service) = create_modify_delete_conflict();
+    let tool = fake_idea_tool(dir.path(), "copy_theirs");
+    let _env = IdeaEnvGuard::set(&tool);
+
+    let error = service
+        .resolve_conflict_with_intellij_idea(&mut repo, Path::new("same.txt"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("暂不能用 IntelliJ IDEA 三方合并"));
+    assert_eq!(service.conflicts(&repo).unwrap(), vec!["same.txt"]);
+}
+
+#[test]
+fn intellij_external_merge_handles_chinese_paths() {
+    let (dir, mut repo, service) = create_named_text_conflict("目录/同名.txt");
+    let tool = fake_idea_tool(dir.path(), "copy_theirs");
+    let _env = IdeaEnvGuard::set(&tool);
+
+    let snapshot = service
+        .resolve_conflict_with_intellij_idea(&mut repo, Path::new("目录/同名.txt"))
+        .unwrap();
+
+    assert!(snapshot.conflicts.is_empty());
+    git_support::assert_file_text(dir.path(), "目录/同名.txt", "feature\n");
 }

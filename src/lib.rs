@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod credentials;
+pub mod external_merge;
 pub mod git;
 pub mod proxy;
 pub mod storage;

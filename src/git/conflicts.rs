@@ -8,7 +8,7 @@ use git2::{ErrorCode, MergeFileOptions, Repository};
 use super::{GitService, ensure_worktree_relative_path, path_to_git, remove_worktree_path};
 use crate::{
     ConflictBlock, ConflictBlockStatus, ConflictDraftStatus, ConflictFileKind, ConflictFileView,
-    ConflictResolutionSide, GitError, OperationEvent, RepositorySnapshot, Result,
+    ConflictResolutionSide, GitError, OperationEvent, RepositorySnapshot, Result, external_merge,
 };
 
 impl GitService {
@@ -105,6 +105,25 @@ impl GitService {
         let snapshot = self.mark_conflict_resolved_inner(repo, path)?;
         self.progress
             .emit(OperationEvent::Finished("冲突结果已应用并标记解决".into()));
+        Ok(snapshot)
+    }
+
+    pub fn resolve_conflict_with_intellij_idea(
+        &self,
+        repo: &mut Repository,
+        path: &Path,
+    ) -> Result<RepositorySnapshot> {
+        ensure_worktree_relative_path(path, "不能使用 IntelliJ IDEA 解决冲突")?;
+        self.progress.emit(OperationEvent::Started(
+            "正在等待 IntelliJ IDEA 合并完成".into(),
+        ));
+        conflict_for_path(&repo.index()?, path)?;
+        let result = external_merge::run_intellij_idea_merge(repo, path)?;
+        write_conflict_result_bytes(repo, path, &result)?;
+        let snapshot = self.mark_conflict_resolved_inner(repo, path)?;
+        self.progress.emit(OperationEvent::Finished(
+            "IntelliJ IDEA 合并结果已应用".into(),
+        ));
         Ok(snapshot)
     }
 
@@ -221,6 +240,10 @@ fn conflict_for_path(index: &git2::Index, path: &Path) -> Result<git2::IndexConf
 }
 
 fn write_conflict_draft(repo: &Repository, path: &Path, draft: &str) -> Result<()> {
+    write_conflict_result_bytes(repo, path, draft.as_bytes())
+}
+
+fn write_conflict_result_bytes(repo: &Repository, path: &Path, result: &[u8]) -> Result<()> {
     let workdir = repo
         .workdir()
         .ok_or_else(|| GitError::Message("裸仓库没有工作区，不能写入冲突结果".into()))?;
@@ -228,7 +251,7 @@ fn write_conflict_draft(repo: &Repository, path: &Path, draft: &str) -> Result<(
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(full_path, draft)?;
+    fs::write(full_path, result)?;
     Ok(())
 }
 

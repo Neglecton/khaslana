@@ -521,6 +521,12 @@ impl RepositoryView {
                         |this, _, _| this.apply_selected_conflict_draft(false),
                         cx,
                     ))
+                    .child(self.button(
+                        "用 IntelliJ IDEA 解决",
+                        view.is_some() && !self.busy,
+                        |this, _, _| this.resolve_selected_conflict_with_intellij_idea(),
+                        cx,
+                    ))
                     .child(self.primary_button(
                         "应用并标记已解决",
                         view.is_some_and(|view| view.kind == ConflictFileKind::Text) && !self.busy,
@@ -1042,6 +1048,23 @@ impl RepositoryView {
         self.with_repo("冲突已标记为解决", move |service, repo| {
             service.mark_conflict_resolved(repo, Path::new(&path))
         });
+    }
+
+    fn resolve_selected_conflict_with_intellij_idea(&mut self) {
+        let Some(path) = self.conflict_workbench.selected_path.clone() else {
+            self.last_error = Some("请先选择一个冲突文件".into());
+            return;
+        };
+        self.diff = None;
+        self.diff_headers_expanded = false;
+        self.reset_uniform_scroll("diff-scroll");
+        self.conflict_workbench.files.remove(&path);
+        self.with_repo_blocking(
+            "IntelliJ IDEA 合并结果已应用",
+            move |service, repo| {
+                service.resolve_conflict_with_intellij_idea(repo, Path::new(&path))
+            },
+        );
     }
 
     fn render_conflict_summary(&self, count: usize) -> impl IntoElement {

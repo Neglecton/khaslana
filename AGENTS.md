@@ -56,6 +56,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗等。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
+- `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
 - `src/proxy_view.rs`：网络代理设置弹窗，包括模式切换、自定义代理输入、保存和测试代理入口。
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
@@ -194,6 +195,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
 - 提交信息输入和 commit
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
+- 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决
 
 ### 5.3 分支、远端、标签、贮藏
 
@@ -330,7 +332,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 ### 9.2 冲突处理需要持续完善
 
-底层能识别 `conflicts`，部分危险操作会拒绝冲突文件，UI 已有冲突工作台、三栏文本预览、块级接受/忽略、应用草稿和标记解决流程。文本冲突视图使用虚拟列表渲染，避免几千行冲突文件卡顿。变基冲突复用同一套冲突工作台：`RebaseOutcome::Conflicts` 转换为 `Err(GitError::Conflicts(...))` 后由 `with_repo` 自动展示冲突工作台，解决后通过变基状态条继续。后续仍需继续完善更细粒度编辑体验、复杂冲突类型和外部编辑器协作。
+底层能识别 `conflicts`，部分危险操作会拒绝冲突文件，UI 已有冲突工作台、三栏文本预览、块级接受/忽略、应用草稿、标记解决和 IntelliJ IDEA 外部合并流程。文本冲突视图使用虚拟列表渲染，避免几千行冲突文件卡顿。变基冲突复用同一套冲突工作台：`RebaseOutcome::Conflicts` 转换为 `Err(GitError::Conflicts(...))` 后由 `with_repo` 自动展示冲突工作台，解决后通过变基状态条继续。后续仍需继续完善更细粒度编辑体验、复杂冲突类型和外部编辑器协作。
 
 ### 9.3 历史探索能力仍偏基础
 

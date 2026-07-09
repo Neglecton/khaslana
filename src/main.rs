@@ -1790,6 +1790,7 @@ fn started_message_for_label(label: &'static str) -> &'static str {
         "远端已删除" => "正在删除远端",
         "远端已刷新" => "正在刷新远端",
         "冲突已标记为解决" => "正在标记冲突解决",
+        "IntelliJ IDEA 合并结果已应用" => "正在等待 IntelliJ IDEA 合并完成",
         "子模块已同步记录版本" => "正在同步子模块记录版本",
         "子模块已更新到远端最新" => "正在更新子模块到远端最新",
         _ => label,
