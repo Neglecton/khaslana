@@ -6,10 +6,10 @@ use crate::storage::UpdatePreferences;
 #[test]
 fn current_version_is_valid_semver() {
     let v = current_version();
-    // 当前 Cargo.toml version = "0.1.0"
+    // 当前 Cargo.toml version = "0.1.1"
     assert_eq!(v.major, 0);
     assert_eq!(v.minor, 1);
-    assert_eq!(v.patch, 0);
+    assert_eq!(v.patch, 1);
 }
 
 #[test]
