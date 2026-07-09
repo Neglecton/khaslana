@@ -12,11 +12,12 @@ use crate::ai::AiProviderSettings;
 use crate::credentials::{
     CredentialRecord, CredentialScope, RemoteCredentialPolicy, StoredCredentialKind,
 };
+use crate::external_merge::ExternalMergeSettings;
 use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RemoteCredentialBindings {
@@ -183,6 +184,18 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn load_external_merge_settings(&self) -> Result<ExternalMergeSettings> {
+        let conn = self.lock_conn()?;
+        load_external_merge_settings_from_conn(&conn)
+    }
+
+    pub fn save_external_merge_settings(&self, settings: &ExternalMergeSettings) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_external_merge_settings_tx(&tx, settings)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn load_credential_records(&self) -> Result<Vec<CredentialRecord>> {
         let conn = self.lock_conn()?;
         load_credential_records_from_conn(&conn)
@@ -315,6 +328,13 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             auto_check INTEGER NOT NULL,
             skipped_version TEXT,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS external_merge_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL,
+            payload TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
         "#,
@@ -641,6 +661,44 @@ fn save_ai_provider_settings_tx(tx: &Transaction<'_>, settings: &AiProviderSetti
         .map_err(|err| GitError::Message(format!("AI 配置序列化失败：{err}")))?;
     tx.execute(
         "INSERT OR REPLACE INTO ai_provider_settings (id, enabled, payload, updated_at)
+         VALUES (1, ?1, ?2, ?3)",
+        params![if settings.enabled { 1 } else { 0 }, payload, now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_external_merge_settings_from_conn(conn: &Connection) -> Result<ExternalMergeSettings> {
+    // 外部合并配置整体存为 JSON payload，便于后续支持更多工具类型。
+    conn.query_row(
+        "SELECT payload FROM external_merge_settings WHERE id = 1",
+        [],
+        |row| {
+            let payload: String = row.get(0)?;
+            serde_json::from_str::<ExternalMergeSettings>(&payload).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(format!(
+                        "外部合并工具配置解析失败：{err}"
+                    ))),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|settings| settings.unwrap_or_default())
+}
+
+fn save_external_merge_settings_tx(
+    tx: &Transaction<'_>,
+    settings: &ExternalMergeSettings,
+) -> Result<()> {
+    let payload = serde_json::to_string(settings)
+        .map_err(|err| GitError::Message(format!("外部合并工具配置序列化失败：{err}")))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO external_merge_settings (id, enabled, payload, updated_at)
          VALUES (1, ?1, ?2, ?3)",
         params![if settings.enabled { 1 } else { 0 }, payload, now_seconds()],
     )

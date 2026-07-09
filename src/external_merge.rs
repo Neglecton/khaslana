@@ -5,10 +5,41 @@ use std::process::{Command, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use git2::Repository;
+use serde::{Deserialize, Serialize};
 
 use crate::{GitError, Result};
 
 const IDEA_NOT_FOUND_MESSAGE: &str = "未找到 IntelliJ IDEA 命令，请确认 idea64 或 idea 已加入 PATH";
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExternalMergeSettings {
+    #[serde(default = "default_external_merge_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_open_intellij: bool,
+    #[serde(default)]
+    pub intellij_path: String,
+}
+
+impl Default for ExternalMergeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_open_intellij: false,
+            intellij_path: String::new(),
+        }
+    }
+}
+
+impl ExternalMergeSettings {
+    pub fn normalized_intellij_path(&self) -> String {
+        self.intellij_path.trim().to_string()
+    }
+}
+
+fn default_external_merge_enabled() -> bool {
+    true
+}
 
 pub fn resolve_intellij_idea_command() -> Result<PathBuf> {
     let env_path = std::env::var_os("KHASLANA_IDEA_PATH")
@@ -20,9 +51,52 @@ pub fn resolve_intellij_idea_command() -> Result<PathBuf> {
     resolve_intellij_idea_command_from_env_and_path(env_path.as_deref(), &path_dirs)
 }
 
+pub fn resolve_intellij_idea_command_with_settings(
+    settings: &ExternalMergeSettings,
+) -> Result<PathBuf> {
+    let env_path = std::env::var_os("KHASLANA_IDEA_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let path_dirs = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    resolve_intellij_idea_command_for_settings(settings, env_path.as_deref(), &path_dirs)
+}
+
 pub fn run_intellij_idea_merge(repo: &Repository, path: &Path) -> Result<Vec<u8>> {
     let command = resolve_intellij_idea_command()?;
     run_intellij_idea_merge_with_command(repo, path, &command)
+}
+
+pub fn run_intellij_idea_merge_with_settings(
+    repo: &Repository,
+    path: &Path,
+    settings: &ExternalMergeSettings,
+) -> Result<Vec<u8>> {
+    if !settings.enabled {
+        return Err(GitError::Message("外部合并工具未启用".into()));
+    }
+    let command = resolve_intellij_idea_command_with_settings(settings)?;
+    run_intellij_idea_merge_with_command(repo, path, &command)
+}
+
+pub(crate) fn resolve_intellij_idea_command_for_settings(
+    settings: &ExternalMergeSettings,
+    env_path: Option<&Path>,
+    path_dirs: &[PathBuf],
+) -> Result<PathBuf> {
+    let configured = settings.normalized_intellij_path();
+    if !configured.is_empty() {
+        let path = PathBuf::from(configured);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(GitError::Message(format!(
+            "IntelliJ IDEA 命令不存在：{}",
+            path.display()
+        )));
+    }
+    resolve_intellij_idea_command_from_env_and_path(env_path, path_dirs)
 }
 
 pub(crate) fn resolve_intellij_idea_command_from_env_and_path(

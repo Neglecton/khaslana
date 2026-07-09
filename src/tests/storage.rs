@@ -81,6 +81,25 @@ fn ai_provider_settings_replace_overwrites_previous() {
 }
 
 #[test]
+fn external_merge_settings_round_trip() {
+    let (_temp, storage) = temp_storage();
+    assert_eq!(
+        storage.load_external_merge_settings().unwrap(),
+        ExternalMergeSettings::default()
+    );
+
+    let settings = ExternalMergeSettings {
+        enabled: true,
+        auto_open_intellij: true,
+        intellij_path: "D:/Tools/idea64.exe".into(),
+    };
+
+    storage.save_external_merge_settings(&settings).unwrap();
+
+    assert_eq!(storage.load_external_merge_settings().unwrap(), settings);
+}
+
+#[test]
 fn remote_credential_bindings_round_trip() {
     let (_temp, storage) = temp_storage();
     let bindings = RemoteCredentialBindings {

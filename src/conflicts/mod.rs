@@ -523,7 +523,7 @@ impl RepositoryView {
                     ))
                     .child(self.button(
                         "用 IntelliJ IDEA 解决",
-                        view.is_some() && !self.busy,
+                        view.is_some() && self.external_merge_settings.enabled && !self.busy,
                         |this, _, _| this.resolve_selected_conflict_with_intellij_idea(),
                         cx,
                     ))
@@ -1055,6 +1055,15 @@ impl RepositoryView {
             self.last_error = Some("请先选择一个冲突文件".into());
             return;
         };
+        self.resolve_conflict_with_intellij_idea_path(path);
+    }
+
+    fn resolve_conflict_with_intellij_idea_path(&mut self, path: String) {
+        if !self.external_merge_settings.enabled {
+            self.last_error = Some("外部合并工具未启用".into());
+            return;
+        }
+        let settings = self.external_merge_settings.clone();
         self.diff = None;
         self.diff_headers_expanded = false;
         self.reset_uniform_scroll("diff-scroll");
@@ -1062,9 +1071,34 @@ impl RepositoryView {
         self.with_repo_blocking(
             "IntelliJ IDEA 合并结果已应用",
             move |service, repo| {
-                service.resolve_conflict_with_intellij_idea(repo, Path::new(&path))
+                service.resolve_conflict_with_intellij_idea_settings(
+                    repo,
+                    Path::new(&path),
+                    &settings,
+                )
             },
         );
+    }
+
+    pub(crate) fn maybe_auto_open_external_merge_for_selected_conflict(&mut self) {
+        if self.busy
+            || !self.external_merge_settings.enabled
+            || !self.external_merge_settings.auto_open_intellij
+        {
+            return;
+        }
+        let Some(path) = self.conflict_workbench.selected_path.clone() else {
+            return;
+        };
+        if !self.conflict_workbench.files.contains_key(&path) {
+            return;
+        }
+        if self
+            .conflict_workbench
+            .mark_external_merge_auto_opened(path.clone())
+        {
+            self.resolve_conflict_with_intellij_idea_path(path);
+        }
     }
 
     fn render_conflict_summary(&self, count: usize) -> impl IntoElement {

@@ -16,6 +16,7 @@ pub use credentials::{
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
     normalize_remote_url, test_credential_connection,
 };
+pub use external_merge::ExternalMergeSettings;
 pub use git::{
     BrowseRefKind, FULL_FILE_TOO_LARGE_MESSAGE, GitService, HistoryRefsCache, NoopProgress,
     ProgressEmitter,

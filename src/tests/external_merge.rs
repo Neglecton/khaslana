@@ -30,6 +30,48 @@ fn idea_env_path_wins_over_path_commands() {
 }
 
 #[test]
+fn persisted_intellij_path_wins_over_environment_and_path_commands() {
+    let temp = TempDir::new().unwrap();
+    let configured = temp.path().join("configured-idea");
+    let env_tool = temp.path().join("env-idea");
+    let path_tool = candidate_path(temp.path(), "idea64");
+    touch_executable(&configured);
+    touch_executable(&env_tool);
+    touch_executable(&path_tool);
+
+    let settings = ExternalMergeSettings {
+        enabled: true,
+        auto_open_intellij: false,
+        intellij_path: configured.to_string_lossy().to_string(),
+    };
+
+    let resolved = resolve_intellij_idea_command_for_settings(
+        &settings,
+        Some(&env_tool),
+        &[temp.path().into()],
+    )
+    .unwrap();
+
+    assert_eq!(resolved, configured);
+}
+
+#[test]
+fn disabled_external_merge_settings_reject_merge() {
+    let (_dir, repo, _service) = crate::git::test_support::git_test_support::init_repo();
+    let settings = ExternalMergeSettings {
+        enabled: false,
+        auto_open_intellij: true,
+        intellij_path: String::new(),
+    };
+
+    let error = run_intellij_idea_merge_with_settings(&repo, Path::new("same.txt"), &settings)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("外部合并工具未启用"));
+}
+
+#[test]
 fn idea64_wins_over_idea_from_path() {
     let temp = TempDir::new().unwrap();
     let idea64 = candidate_path(temp.path(), "idea64");

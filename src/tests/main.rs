@@ -697,6 +697,7 @@ fn conflict_state_returns_to_worktree_when_last_conflict_disappears() {
             unresolved_count: 1,
         }),
         files: BTreeMap::from([(String::from("a.txt"), sample_conflict_view("a.txt"))]),
+        external_merge_auto_opened: BTreeSet::new(),
     };
 
     sync_conflict_state_from_paths(&mut mode, &mut state, &[]);
@@ -722,6 +723,7 @@ fn conflict_state_prunes_removed_files_and_keeps_existing_drafts() {
             (String::from("a.txt"), sample_conflict_view("a.txt")),
             (String::from("b.txt"), sample_conflict_view("b.txt")),
         ]),
+        external_merge_auto_opened: BTreeSet::new(),
     };
 
     sync_conflict_state_from_paths(&mut mode, &mut state, &["b.txt".into()]);
@@ -734,6 +736,20 @@ fn conflict_state_prunes_removed_files_and_keeps_existing_drafts() {
     );
     assert!(state.pending_resolve.is_none());
     assert!(!state.files.contains_key("a.txt"));
+}
+
+#[test]
+fn conflict_state_tracks_auto_open_once_per_conflict_path() {
+    let mut state = ConflictWorkbenchState::default();
+
+    assert!(state.mark_external_merge_auto_opened("a.txt"));
+    assert!(!state.mark_external_merge_auto_opened("a.txt"));
+    assert!(state.mark_external_merge_auto_opened("b.txt"));
+
+    state.prune_external_merge_auto_opened(&["b.txt".into()]);
+
+    assert!(state.mark_external_merge_auto_opened("a.txt"));
+    assert!(!state.mark_external_merge_auto_opened("b.txt"));
 }
 
 #[test]

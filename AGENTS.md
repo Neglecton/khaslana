@@ -56,7 +56,8 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗等。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
-- `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
+- `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
+- `src/external_merge_view.rs`：外部合并工具设置弹窗，支持启用/禁用 IntelliJ IDEA 外部合并、配置 IDEA 命令路径、检测命令以及开启选中冲突文件后自动打开 IDEA。
 - `src/proxy_view.rs`：网络代理设置弹窗，包括模式切换、自定义代理输入、保存和测试代理入口。
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
@@ -163,6 +164,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 每个仓库的 diff 编码偏好。
 - 仓库远端到凭据策略的绑定。
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
+- 外部合并工具设置，包括是否启用 IntelliJ IDEA、是否选中冲突文件后自动打开以及可选 IDEA 命令路径。
 - 凭据记录索引等非密元数据。
 
 凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入。
@@ -195,7 +197,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
 - 提交信息输入和 commit
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
-- 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决
+- 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；更多菜单的「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
 
 ### 5.3 分支、远端、标签、贮藏
 

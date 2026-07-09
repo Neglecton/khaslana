@@ -8,7 +8,8 @@ use git2::{ErrorCode, MergeFileOptions, Repository};
 use super::{GitService, ensure_worktree_relative_path, path_to_git, remove_worktree_path};
 use crate::{
     ConflictBlock, ConflictBlockStatus, ConflictDraftStatus, ConflictFileKind, ConflictFileView,
-    ConflictResolutionSide, GitError, OperationEvent, RepositorySnapshot, Result, external_merge,
+    ConflictResolutionSide, ExternalMergeSettings, GitError, OperationEvent, RepositorySnapshot,
+    Result, external_merge,
 };
 
 impl GitService {
@@ -113,12 +114,25 @@ impl GitService {
         repo: &mut Repository,
         path: &Path,
     ) -> Result<RepositorySnapshot> {
+        self.resolve_conflict_with_intellij_idea_settings(
+            repo,
+            path,
+            &ExternalMergeSettings::default(),
+        )
+    }
+
+    pub fn resolve_conflict_with_intellij_idea_settings(
+        &self,
+        repo: &mut Repository,
+        path: &Path,
+        settings: &ExternalMergeSettings,
+    ) -> Result<RepositorySnapshot> {
         ensure_worktree_relative_path(path, "不能使用 IntelliJ IDEA 解决冲突")?;
         self.progress.emit(OperationEvent::Started(
             "正在等待 IntelliJ IDEA 合并完成".into(),
         ));
         conflict_for_path(&repo.index()?, path)?;
-        let result = external_merge::run_intellij_idea_merge(repo, path)?;
+        let result = external_merge::run_intellij_idea_merge_with_settings(repo, path, settings)?;
         write_conflict_result_bytes(repo, path, &result)?;
         let snapshot = self.mark_conflict_resolved_inner(repo, path)?;
         self.progress.emit(OperationEvent::Finished(

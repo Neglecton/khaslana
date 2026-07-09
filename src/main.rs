@@ -6,6 +6,7 @@ mod browse_compare_view;
 mod browse_view;
 mod conflicts;
 mod diff_view;
+mod external_merge_view;
 mod history_view;
 mod operation_blocker_view;
 mod proxy_view;
@@ -48,15 +49,15 @@ use khaslana::{
     ChangeState, CommitFileChange, CommitInfo, CommitMessage, ConflictBlockResolution,
     ConflictFileKind, ConflictFileView, CredentialProvider, CredentialRecord, CredentialRequest,
     CredentialScope, CredentialStore, CustomProxySettings, DiffEncodingChoice, DiffEncodingInfo,
-    DiffEncodingPreferences, DiffLineKind, DiffScope, FileDiff, GitCredential, GitService,
-    HistoryRefsCache, HistoryScope, KeyringCredentialStore, NetworkProxyMode, NetworkProxySettings,
-    OperationEvent, ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings,
-    RemoteCredentialPolicy, RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode,
-    SessionState, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, UpdatePreferences,
-    credential_display_target, credential_key_filename, credential_kind_label,
-    credential_record_is_compatible_with_url, credential_record_label,
-    credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
-    test_credential_connection,
+    DiffEncodingPreferences, DiffLineKind, DiffScope, ExternalMergeSettings, FileDiff,
+    GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
+    NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
+    RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
+    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, SubmoduleInfo,
+    SubmoduleRemoteSyncStatus, TagName, UpdatePreferences, credential_display_target,
+    credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
+    credential_record_label, credential_record_matches_remote_url, credential_scope_label,
+    normalize_remote_url, test_credential_connection,
     update::{self, UpdateCheckResult, UpdateManifest, UpdatePlatformAsset},
 };
 use lru::LruCache;
@@ -150,7 +151,7 @@ const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
 const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1540.0;
 const TOOLBAR_MORE_MENU_WIDTH: f32 = 190.0;
-const TOOLBAR_MORE_MENU_HEIGHT: f32 = 196.0;
+const TOOLBAR_MORE_MENU_HEIGHT: f32 = 224.0;
 const TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH: f32 = 76.0;
 const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
@@ -186,6 +187,7 @@ enum FieldId {
     AiBaseUrl,
     AiApiKey,
     AiModel,
+    ExternalMergeIntellijPath,
     StashMessage,
     WorkflowInput(usize),
 }
@@ -257,6 +259,7 @@ pub(crate) enum DialogState {
     },
     NetworkProxySettings,
     AiProviderSettings,
+    ExternalMergeSettings,
     StashForm,
     ConfirmDropStash {
         index: usize,
@@ -576,6 +579,7 @@ enum ToolbarMoreAction {
     Credentials,
     Proxy,
     AiSettings,
+    ExternalMergeSettings,
     UpdateSettings,
 }
 
@@ -599,6 +603,7 @@ fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy:
         ToolbarMoreAction::Credentials
         | ToolbarMoreAction::Proxy
         | ToolbarMoreAction::AiSettings
+        | ToolbarMoreAction::ExternalMergeSettings
         | ToolbarMoreAction::UpdateSettings => !busy,
     }
 }
@@ -693,6 +698,7 @@ struct ConflictWorkbenchState {
     show_base: bool,
     pending_resolve: Option<PendingConflictResolve>,
     files: BTreeMap<String, ConflictFileView>,
+    external_merge_auto_opened: BTreeSet<String>,
 }
 
 impl ConflictWorkbenchState {
@@ -710,6 +716,15 @@ impl ConflictWorkbenchState {
 
     fn clear_pending_resolve(&mut self) {
         self.pending_resolve = None;
+    }
+
+    fn mark_external_merge_auto_opened(&mut self, path: impl Into<String>) -> bool {
+        self.external_merge_auto_opened.insert(path.into())
+    }
+
+    fn prune_external_merge_auto_opened(&mut self, conflict_paths: &[String]) {
+        self.external_merge_auto_opened
+            .retain(|path| conflict_paths.iter().any(|candidate| candidate == path));
     }
 }
 
@@ -731,6 +746,7 @@ fn sync_conflict_state_from_paths(
     state
         .files
         .retain(|path, _| conflict_paths.iter().any(|candidate| candidate == path));
+    state.prune_external_merge_auto_opened(conflict_paths);
     if state
         .pending_resolve
         .as_ref()
@@ -1896,6 +1912,10 @@ pub(crate) struct RepositoryView {
     proxy_https_url: TextFieldState,
     proxy_socks5_url: TextFieldState,
     pub(crate) ai_settings: AiProviderSettings,
+    pub(crate) external_merge_settings: ExternalMergeSettings,
+    pub(crate) external_merge_enabled_form: bool,
+    pub(crate) external_merge_auto_open_form: bool,
+    external_merge_intellij_path: TextFieldState,
     pub(crate) ai_enabled_form: bool,
     ai_base_url: TextFieldState,
     ai_api_key: TextFieldState,
@@ -1929,6 +1949,7 @@ impl RepositoryView {
         let remote_credential_bindings =
             Arc::new(Mutex::new(Self::load_remote_credential_bindings(&storage)));
         let proxy_settings = Self::load_proxy_settings(&storage);
+        let external_merge_settings = Self::load_external_merge_settings(&storage);
         let proxy_custom = proxy_settings.custom.normalized();
         Self::spawn_event_pump(rx.clone(), cx);
         Self::spawn_ui_tick(tx.clone());
@@ -2028,11 +2049,16 @@ impl RepositoryView {
             sidebar_remote_branch_search_open: false,
             remote_branch_operation: RemoteBranchOperationState::default(),
             proxy_mode: proxy_settings.mode,
+            external_merge_enabled_form: external_merge_settings.enabled,
+            external_merge_auto_open_form: external_merge_settings.auto_open_intellij,
+            external_merge_settings: external_merge_settings.clone(),
             ai_enabled_form: ai_settings.enabled,
             ai_settings,
             ai_base_url: TextFieldState::new(cx, "Base URL，例如 https://api.openai.com/v1"),
             ai_api_key: TextFieldState::new(cx, "API Key").secret(),
             ai_model: TextFieldState::new(cx, "模型名称，例如 gpt-4o-mini"),
+            external_merge_intellij_path: TextFieldState::new(cx, "IntelliJ IDEA 路径（可选）")
+                .with_value(external_merge_settings.normalized_intellij_path()),
             ai_commit_loading: false,
             ai_commit_buffer: String::new(),
             ai_review: None,
@@ -2322,6 +2348,13 @@ impl RepositoryView {
             .unwrap_or_default()
     }
 
+    fn load_external_merge_settings(storage: &khaslana::AppStorage) -> ExternalMergeSettings {
+        storage
+            .load_external_merge_settings()
+            .inspect_err(|err| tracing::warn!("external merge settings load skipped: {err}"))
+            .unwrap_or_default()
+    }
+
     fn load_update_preferences(storage: &khaslana::AppStorage) -> UpdatePreferences {
         storage
             .load_update_preferences()
@@ -2351,6 +2384,15 @@ impl RepositoryView {
     pub(crate) fn save_ai_provider_settings(&self) {
         if let Err(err) = self.storage.save_ai_provider_settings(&self.ai_settings) {
             tracing::warn!("ai provider settings write skipped: {err}");
+        }
+    }
+
+    pub(crate) fn save_external_merge_settings(&self) {
+        if let Err(err) = self
+            .storage
+            .save_external_merge_settings(&self.external_merge_settings)
+        {
+            tracing::warn!("external merge settings write skipped: {err}");
         }
     }
 
@@ -3615,6 +3657,7 @@ impl RepositoryView {
         }
         self.ensure_conflict_views_loaded();
         self.sync_conflict_editor_from_state();
+        self.maybe_auto_open_external_merge_for_selected_conflict();
     }
 
     fn ensure_conflict_views_loaded(&mut self) {
@@ -3761,6 +3804,7 @@ impl RepositoryView {
         self.ensure_conflict_views_loaded();
         if self.conflict_workbench.files.contains_key(&path) {
             self.sync_conflict_editor_from_state();
+            self.maybe_auto_open_external_merge_for_selected_conflict();
         }
     }
 
@@ -3966,6 +4010,10 @@ impl RepositoryView {
         ) {
             if self.active_dialog == Some(DialogState::NetworkProxySettings) {
                 self.save_network_proxy_settings();
+            }
+        } else if matches!(field, FieldId::ExternalMergeIntellijPath) {
+            if self.active_dialog == Some(DialogState::ExternalMergeSettings) {
+                self.save_external_merge_settings_from_form();
             }
         } else if matches!(
             field,
@@ -4201,6 +4249,11 @@ impl RepositoryView {
             {
                 self.save_ai_provider_settings_from_form();
                 cx.notify();
+            } else if field == FieldId::ExternalMergeIntellijPath
+                && self.active_dialog == Some(DialogState::ExternalMergeSettings)
+            {
+                self.save_external_merge_settings_from_form();
+                cx.notify();
             }
         }
     }
@@ -4259,6 +4312,10 @@ impl RepositoryView {
             (FieldId::AiBaseUrl, &self.ai_base_url),
             (FieldId::AiApiKey, &self.ai_api_key),
             (FieldId::AiModel, &self.ai_model),
+            (
+                FieldId::ExternalMergeIntellijPath,
+                &self.external_merge_intellij_path,
+            ),
         ]
         .into_iter()
         .find_map(|(id, field)| field.focus.is_focused(window).then_some(id))
@@ -4292,6 +4349,7 @@ impl RepositoryView {
             FieldId::AiBaseUrl => &self.ai_base_url,
             FieldId::AiApiKey => &self.ai_api_key,
             FieldId::AiModel => &self.ai_model,
+            FieldId::ExternalMergeIntellijPath => &self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field(index),
         }
     }
@@ -4323,6 +4381,7 @@ impl RepositoryView {
             FieldId::AiBaseUrl => &mut self.ai_base_url,
             FieldId::AiApiKey => &mut self.ai_api_key,
             FieldId::AiModel => &mut self.ai_model,
+            FieldId::ExternalMergeIntellijPath => &mut self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field_mut(index),
         }
     }
@@ -4513,6 +4572,74 @@ impl RepositoryView {
         self.active_dialog = Some(DialogState::AiProviderSettings);
         self.status = "AI 设置已打开".into();
         self.last_error = None;
+    }
+
+    pub(crate) fn open_external_merge_settings(&mut self) {
+        self.close_popups();
+        self.reset_external_merge_form_from_settings();
+        self.active_dialog = Some(DialogState::ExternalMergeSettings);
+        self.status = "合并工具设置已打开".into();
+        self.last_error = None;
+    }
+
+    pub(crate) fn reset_external_merge_form_from_settings(&mut self) {
+        self.external_merge_enabled_form = self.external_merge_settings.enabled;
+        self.external_merge_auto_open_form = self.external_merge_settings.auto_open_intellij;
+        self.external_merge_intellij_path
+            .set_value(self.external_merge_settings.normalized_intellij_path());
+    }
+
+    pub(crate) fn external_merge_form_settings(&self) -> ExternalMergeSettings {
+        ExternalMergeSettings {
+            enabled: self.external_merge_enabled_form,
+            auto_open_intellij: self.external_merge_auto_open_form,
+            intellij_path: self.external_merge_intellij_path.value.trim().to_string(),
+        }
+    }
+
+    pub(crate) fn set_external_merge_enabled_form(&mut self, enabled: bool) {
+        self.external_merge_enabled_form = enabled;
+        if !enabled {
+            self.external_merge_auto_open_form = false;
+        }
+        self.last_error = None;
+    }
+
+    pub(crate) fn set_external_merge_auto_open_form(&mut self, enabled: bool) {
+        self.external_merge_auto_open_form = enabled;
+        if enabled {
+            self.external_merge_enabled_form = true;
+        }
+        self.last_error = None;
+    }
+
+    pub(crate) fn save_external_merge_settings_from_form(&mut self) {
+        self.external_merge_settings = self.external_merge_form_settings();
+        self.save_external_merge_settings();
+        self.status = "合并工具设置已保存".into();
+        self.last_error = None;
+    }
+
+    pub(crate) fn save_external_merge_settings_from_form_and_close(&mut self) {
+        self.save_external_merge_settings_from_form();
+        if self.last_error.is_none() {
+            self.active_dialog = None;
+        }
+    }
+
+    pub(crate) fn test_external_merge_settings_from_form(&mut self) {
+        let settings = self.external_merge_form_settings();
+        match khaslana::external_merge::resolve_intellij_idea_command_with_settings(&settings) {
+            Ok(path) => {
+                self.external_merge_settings = settings;
+                self.save_external_merge_settings();
+                self.status = format!("已找到 IntelliJ IDEA：{}", path.display());
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+            }
+        }
     }
 
     // ── 更新方法 ──────────────────────────────────────────────────────────
@@ -8719,6 +8846,17 @@ impl RepositoryView {
                 cx,
             ))
             .child(self.toolbar_more_menu_item(
+                "合并工具",
+                ToolbarIcon::Workflow,
+                toolbar_more_action_enabled(
+                    ToolbarMoreAction::ExternalMergeSettings,
+                    repo_open,
+                    self.busy,
+                ),
+                |this, _, _| this.open_external_merge_settings(),
+                cx,
+            ))
+            .child(self.toolbar_more_menu_item(
                 "更新设置",
                 ToolbarIcon::Update,
                 toolbar_more_action_enabled(ToolbarMoreAction::UpdateSettings, repo_open, self.busy),
@@ -10441,6 +10579,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::AiProviderSettings => self
                 .render_ai_provider_settings_dialog(window, cx)
+                .into_any_element(),
+            DialogState::ExternalMergeSettings => self
+                .render_external_merge_settings_dialog(window, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
