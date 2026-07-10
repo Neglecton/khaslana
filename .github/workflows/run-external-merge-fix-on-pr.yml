@@ -24,20 +24,33 @@ jobs:
         run: |
           @'
           import re
+          import traceback
           from pathlib import Path
 
-          workflow = Path('.github/workflows/fix-external-merge-flow.yml').read_text(encoding='utf-8')
-          match = re.search(r"@'\n(?P<script>.*)\n\s*'@ \| python -", workflow, re.S)
-          if not match:
-              raise SystemExit('embedded patch script was not found')
-          lines = match.group('script').splitlines()
-          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines)
-          exec(compile(script, '<external-merge-fix>', 'exec'))
+          try:
+              workflow = Path('.github/workflows/fix-external-merge-flow.yml').read_text(encoding='utf-8')
+              match = re.search(r"@'\n(?P<script>.*)\n\s*'@ \| python -", workflow, re.S)
+              if not match:
+                  raise RuntimeError('embedded patch script was not found')
+              lines = match.group('script').splitlines()
+              script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines)
+              exec(compile(script, '<external-merge-fix>', 'exec'))
 
-          trigger = Path('.github/workflows/run-external-merge-fix-on-pr.yml')
-          if trigger.exists():
-              trigger.unlink()
+              trigger = Path('.github/workflows/run-external-merge-fix-on-pr.yml')
+              if trigger.exists():
+                  trigger.unlink()
+          except BaseException:
+              Path('external-merge-fix-error.txt').write_text(traceback.format_exc(), encoding='utf-8')
+              raise
           '@ | python -
+
+      - name: Upload patch diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-merge-fix-error
+          path: external-merge-fix-error.txt
+          if-no-files-found: error
 
       - name: Format
         shell: pwsh
