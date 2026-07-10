@@ -32,8 +32,17 @@ jobs:
               match = re.search(r"@'\n(?P<script>.*)\n\s*'@ \| python -", workflow, re.S)
               if not match:
                   raise RuntimeError('embedded patch script was not found')
-              lines = match.group('script').splitlines()
-              script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines)
+
+              inside_triple_string = False
+              script_lines = []
+              for line in match.group('script').splitlines():
+                  processed = line if inside_triple_string else (
+                      line[10:] if line.startswith('          ') else line
+                  )
+                  script_lines.append(processed)
+                  if processed.count("'''") % 2 == 1:
+                      inside_triple_string = not inside_triple_string
+              script = '\n'.join(script_lines)
               exec(compile(script, '<external-merge-fix>', 'exec'))
 
               trigger = Path('.github/workflows/run-external-merge-fix-on-pr.yml')
