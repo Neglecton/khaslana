@@ -522,8 +522,12 @@ impl RepositoryView {
                         cx,
                     ))
                     .child(self.button(
-                        "用 IntelliJ IDEA 解决",
-                        view.is_some() && self.external_merge_settings.enabled && !self.busy,
+                        if self.external_merge_settings.enabled {
+                            "用 IntelliJ IDEA 解决"
+                        } else {
+                            "配置 IDEA 并解决"
+                        },
+                        view.is_some() && !self.busy,
                         |this, _, _| this.resolve_selected_conflict_with_intellij_idea(),
                         cx,
                     ))
@@ -1058,26 +1062,8 @@ impl RepositoryView {
         self.resolve_conflict_with_intellij_idea_path(path);
     }
 
-    fn resolve_conflict_with_intellij_idea_path(&mut self, path: String) {
-        if !self.external_merge_settings.enabled {
-            self.last_error = Some("外部合并工具未启用".into());
-            return;
-        }
-        let settings = self.external_merge_settings.clone();
-        self.diff = None;
-        self.diff_headers_expanded = false;
-        self.reset_uniform_scroll("diff-scroll");
-        self.conflict_workbench.files.remove(&path);
-        self.with_repo_blocking(
-            "IntelliJ IDEA 合并结果已应用",
-            move |service, repo| {
-                service.resolve_conflict_with_intellij_idea_settings(
-                    repo,
-                    Path::new(&path),
-                    &settings,
-                )
-            },
-        );
+    fn resolve_conflict_with_intellij_idea_path(&mut self, path: String) -> bool {
+        self.request_external_merge_for_path(path)
     }
 
     pub(crate) fn maybe_auto_open_external_merge_for_selected_conflict(&mut self) {
@@ -1090,14 +1076,17 @@ impl RepositoryView {
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             return;
         };
-        if !self.conflict_workbench.files.contains_key(&path) {
+        if !self.conflict_workbench.files.contains_key(&path)
+            || self
+                .conflict_workbench
+                .external_merge_auto_opened
+                .contains(&path)
+        {
             return;
         }
-        if self
-            .conflict_workbench
-            .mark_external_merge_auto_opened(path.clone())
-        {
-            self.resolve_conflict_with_intellij_idea_path(path);
+        if self.resolve_conflict_with_intellij_idea_path(path.clone()) {
+            self.conflict_workbench
+                .mark_external_merge_auto_opened(path);
         }
     }
 
