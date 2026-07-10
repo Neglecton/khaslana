@@ -29,18 +29,10 @@ jobs:
 
           main_path = Path('src/main.rs')
           main = main_path.read_text(encoding='utf-8')
-          old = '''        } else if matches!(field, FieldId::ExternalMergeIntellijPath) {
-              if self.active_dialog == Some(DialogState::ExternalMergeSettings) {
-                  self.save_external_merge_settings_from_form();
-              }
-          } else if matches!('''
-          new = '''        } else if matches!(field, FieldId::ExternalMergeIntellijPath) {
-              if self.active_dialog == Some(DialogState::ExternalMergeSettings) {
-                  self.save_external_merge_settings_from_form_and_resume();
-              }
-          } else if matches!('''
+          old = 'self.save_external_merge_settings_from_form();'
+          new = 'self.save_external_merge_settings_from_form_and_resume();'
           if main.count(old) != 1:
-              raise RuntimeError('external merge submit block changed unexpectedly')
+              raise RuntimeError('external merge save call changed unexpectedly')
           main_path.write_text(main.replace(old, new, 1), encoding='utf-8')
 
           workflow = Path('.github/workflows/cleanup-external-merge-fix.yml')
