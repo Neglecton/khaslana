@@ -1,0 +1,65 @@
+name: Run external merge fix
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev_lcc'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout dev_lcc
+        uses: actions/checkout@v4
+        with:
+          ref: dev_lcc
+          fetch-depth: 0
+
+      - name: Run embedded patch
+        shell: pwsh
+        run: |
+          @'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/fix-external-merge-flow.yml').read_text(encoding='utf-8')
+          match = re.search(r"@'\n(?P<script>.*)\n\s*'@ \| python -", workflow, re.S)
+          if not match:
+              raise SystemExit('embedded patch script was not found')
+          script = match.group('script')
+          lines = script.splitlines()
+          non_empty = [line for line in lines if line.strip()]
+          indent = min(len(line) - len(line.lstrip()) for line in non_empty)
+          script = '\n'.join(line[indent:] if line.strip() else '' for line in lines)
+          exec(compile(script, '<external-merge-fix>', 'exec'))
+
+          trigger = Path('.github/workflows/run-external-merge-fix-on-pr.yml')
+          if trigger.exists():
+              trigger.unlink()
+          '@ | python -
+
+      - name: Format
+        shell: pwsh
+        run: cargo fmt --all
+
+      - name: Verify formatting
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Compile check
+        shell: pwsh
+        run: cargo check --bin khaslana
+
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: guide external merge tool configuration"
+          git push origin HEAD:dev_lcc
