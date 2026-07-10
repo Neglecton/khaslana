@@ -25,15 +25,24 @@ jobs:
           git checkout 1dfe37231f3a267d7248d4d1565ea585d67a04df -- src/bin/khaslana_updater.rs src/tests/update.rs src/update.rs src/main.rs
 
           @'
+          import re
           from pathlib import Path
 
           main_path = Path('src/main.rs')
           main = main_path.read_text(encoding='utf-8')
-          old = 'self.save_external_merge_settings_from_form();'
-          new = 'self.save_external_merge_settings_from_form_and_resume();'
-          if main.count(old) != 1:
-              raise RuntimeError('external merge save call changed unexpectedly')
-          main_path.write_text(main.replace(old, new, 1), encoding='utf-8')
+          pattern = re.compile(
+              r'(FieldId::ExternalMergeIntellijPath\) \{\s*'
+              r'if self\.active_dialog == Some\(DialogState::ExternalMergeSettings\) \{\s*)'
+              r'self\.save_external_merge_settings_from_form\(\);'
+          )
+          main, replacements = pattern.subn(
+              r'\1self.save_external_merge_settings_from_form_and_resume();',
+              main,
+              count=1,
+          )
+          if replacements != 1:
+              raise RuntimeError('external merge submit call changed unexpectedly')
+          main_path.write_text(main, encoding='utf-8')
 
           workflow = Path('.github/workflows/cleanup-external-merge-fix.yml')
           if workflow.exists():
