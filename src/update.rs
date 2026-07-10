@@ -8,8 +8,8 @@ use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use semver::Version;
 use sha2::{Digest as _, Sha256};
+use semver::Version;
 
 use crate::proxy::NetworkProxySettings;
 use crate::types::{GitError, Result};
@@ -68,10 +68,8 @@ pub fn current_version() -> Version {
 /// 默认 manifest 下载源列表，CNB 优先，GitHub 兜底。
 pub fn default_manifest_sources() -> Vec<String> {
     vec![
-        "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/khaslana-update.json"
-            .to_string(),
-        "https://github.com/FuturePrayer/khaslana/releases/latest/download/khaslana-update.json"
-            .to_string(),
+        "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/khaslana-update.json".to_string(),
+        "https://github.com/FuturePrayer/khaslana/releases/latest/download/khaslana-update.json".to_string(),
     ]
 }
 
@@ -101,10 +99,9 @@ pub fn check_for_update(
     })?;
 
     // 版本比较
-    let remote_version: Version = manifest
-        .version
-        .parse()
-        .map_err(|err| GitError::Message(format!("更新清单版本号格式错误：{err}")))?;
+    let remote_version: Version = manifest.version.parse().map_err(|err| {
+        GitError::Message(format!("更新清单版本号格式错误：{err}"))
+    })?;
     let current = current_version();
 
     if remote_version <= current {
@@ -113,9 +110,9 @@ pub fn check_for_update(
 
     // 跳过版本检查
     if let Some(ref skipped) = preferences.skipped_version {
-        let skipped: Version = skipped
-            .parse()
-            .map_err(|err| GitError::Message(format!("已跳过版本号格式错误：{err}")))?;
+        let skipped: Version = skipped.parse().map_err(|err| {
+            GitError::Message(format!("已跳过版本号格式错误：{err}"))
+        })?;
         if remote_version == skipped {
             return Ok(UpdateCheckResult::SkippedVersion);
         }
@@ -142,7 +139,10 @@ pub fn download_update(
 
     let zip_filename = format!(
         "khaslana-v{}-windows-x86_64.zip",
-        asset.archive_url.rsplit('/').next().unwrap_or("unknown")
+        asset.archive_url
+            .rsplit('/')
+            .next()
+            .unwrap_or("unknown")
     );
     let zip_path = downloads_dir.join(&zip_filename);
     let part_path = zip_path.with_extension("zip.part");
@@ -182,9 +182,7 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<bool> {
     let mut buf = [0u8; 8192];
     loop {
         let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        if n == 0 { break; }
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
@@ -212,9 +210,9 @@ pub fn prepare_staging(zip_path: &Path, version: &str, config_dir: &Path) -> Res
         .map_err(|err| GitError::Message(format!("更新包解压失败：{err}")))?;
 
     for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|err| GitError::Message(format!("更新包读取条目失败：{err}")))?;
+        let mut entry = archive.by_index(i).map_err(|err| {
+            GitError::Message(format!("更新包读取条目失败：{err}"))
+        })?;
         let entry_name = entry.name().to_string();
 
         // 安全检查：跳过绝对路径和路径遍历
@@ -242,7 +240,9 @@ pub fn prepare_staging(zip_path: &Path, version: &str, config_dir: &Path) -> Res
     let updater_path = staging_dir.join("khaslana_updater.exe");
 
     if !exe_path.exists() {
-        return Err(GitError::Message("更新包缺少 khaslana.exe".to_string()));
+        return Err(GitError::Message(
+            "更新包缺少 khaslana.exe".to_string(),
+        ));
     }
     if !updater_path.exists() {
         return Err(GitError::Message(
@@ -267,15 +267,17 @@ fn fetch_manifest(
         let agent = build_agent(proxy_url, 15);
 
         match agent.get(source).call() {
-            Ok(response) => match response.into_json::<UpdateManifest>() {
-                Ok(manifest) => return Ok(manifest),
-                Err(err) => {
-                    last_err = Some(GitError::Message(format!(
-                        "更新清单解析失败（{source}）：{err}"
-                    )));
-                    continue;
+            Ok(response) => {
+                match response.into_json::<UpdateManifest>() {
+                    Ok(manifest) => return Ok(manifest),
+                    Err(err) => {
+                        last_err = Some(GitError::Message(format!(
+                            "更新清单解析失败（{source}）：{err}"
+                        )));
+                        continue;
+                    }
                 }
-            },
+            }
             Err(err) => {
                 last_err = Some(GitError::Message(format!(
                     "更新清单下载失败（{source}）：{err}"
@@ -319,10 +321,9 @@ fn download_file(
     // 下载可能较慢，使用更长超时（120s 读）
     let agent = build_agent(proxy_url, 120);
 
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|err| GitError::Message(format!("下载更新包失败（{url}）：{err}")))?;
+    let response = agent.get(url).call().map_err(|err| {
+        GitError::Message(format!("下载更新包失败（{url}）：{err}"))
+    })?;
 
     // 尝试从 Content-Length 获取总大小
     let content_length = response
@@ -341,9 +342,7 @@ fn download_file(
 
     loop {
         let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        if n == 0 { break; }
         file.write_all(&buf[..n])?;
         hasher.update(&buf[..n]);
         downloaded += n as u64;

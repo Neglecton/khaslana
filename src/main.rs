@@ -1776,7 +1776,9 @@ fn open_url(url: &str) {
         .args(["/C", "start", url])
         .spawn();
     #[cfg(not(target_os = "windows"))]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let _ = std::process::Command::new("open")
+        .arg(url)
+        .spawn();
 }
 
 pub(crate) fn perf_log(stage: &'static str, started: Instant, details: impl AsRef<str>) {
@@ -3607,13 +3609,9 @@ impl RepositoryView {
             UiEvent::UpdateDownloadProgress { downloaded, total } => {
                 let mb_down = downloaded as f64 / 1_048_576.0;
                 let mb_total = total as f64 / 1_048_576.0;
-                self.update_download_progress =
-                    Some(format!("{:.1} MB / {:.1} MB", mb_down, mb_total));
+                self.update_download_progress = Some(format!("{:.1} MB / {:.1} MB", mb_down, mb_total));
             }
-            UiEvent::UpdateReadyToInstall {
-                staging_dir,
-                manifest,
-            } => {
+            UiEvent::UpdateReadyToInstall { staging_dir, manifest } => {
                 self.update_downloading = false;
                 self.update_download_progress = None;
                 self.status = format!("更新 v{} 已准备就绪", manifest.version);
@@ -4675,9 +4673,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn start_update_check(&mut self) {
-        if self.update_checking {
-            return;
-        }
+        if self.update_checking { return; }
         self.update_checking = true;
         self.update_error = None;
         self.status = "检查更新中".into();
@@ -4689,47 +4685,33 @@ impl RepositoryView {
             let sources = update::default_manifest_sources();
             match update::check_for_update(&sources, &preferences, &proxy_settings) {
                 Ok(UpdateCheckResult::UpdateAvailable { manifest, asset }) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::UpdateCheckFinished {
-                            manifest: Arc::new(manifest),
-                            asset,
-                        },
-                    );
+                    send_ui_event(&tx, UiEvent::UpdateCheckFinished {
+                        manifest: Arc::new(manifest),
+                        asset,
+                    });
                 }
                 Ok(UpdateCheckResult::UpToDate) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::UpdateCheckFailed {
-                            error: "当前已是最新版本".into(),
-                        },
-                    );
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: "当前已是最新版本".into(),
+                    });
                 }
                 Ok(UpdateCheckResult::SkippedVersion) => {
                     // 用户跳过了此版本，静默忽略
-                    send_ui_event(
-                        &tx,
-                        UiEvent::UpdateCheckFailed {
-                            error: String::new(),
-                        },
-                    );
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: String::new(),
+                    });
                 }
                 Err(err) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::UpdateCheckFailed {
-                            error: err.to_string(),
-                        },
-                    );
+                    send_ui_event(&tx, UiEvent::UpdateCheckFailed {
+                        error: err.to_string(),
+                    });
                 }
             }
         });
     }
 
     pub(crate) fn start_update_download(&mut self) {
-        let Some(manifest) = self.available_update.clone() else {
-            return;
-        };
+        let Some(manifest) = self.available_update.clone() else { return; };
         let asset = manifest.platforms.get("windows-x86_64").cloned();
         let Some(asset) = asset else {
             self.update_error = Some("缺少下载信息".into());
@@ -4753,48 +4735,35 @@ impl RepositoryView {
             };
 
             // 下载
-            match update::download_update(&asset, &config_dir, &proxy_settings, Some(&on_progress))
-            {
+            match update::download_update(&asset, &config_dir, &proxy_settings, Some(&on_progress)) {
                 Ok((zip_path, computed_sha256)) => {
                     // SHA-256 校验
                     if computed_sha256 != asset.sha256 {
-                        send_ui_event(
-                            &tx,
-                            UiEvent::UpdateInstallFailed {
-                                error: "更新包 SHA-256 校验失败，文件可能被篡改".into(),
-                            },
-                        );
+                        send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                            error: "更新包 SHA-256 校验失败，文件可能被篡改".into(),
+                        });
                         return;
                     }
                     // 解压 staging
                     let version = manifest.version.clone();
                     match update::prepare_staging(&zip_path, &version, &config_dir) {
                         Ok(staging_dir) => {
-                            send_ui_event(
-                                &tx,
-                                UiEvent::UpdateReadyToInstall {
-                                    staging_dir,
-                                    manifest,
-                                },
-                            );
+                            send_ui_event(&tx, UiEvent::UpdateReadyToInstall {
+                                staging_dir,
+                                manifest,
+                            });
                         }
                         Err(err) => {
-                            send_ui_event(
-                                &tx,
-                                UiEvent::UpdateInstallFailed {
-                                    error: format!("更新包解压失败：{err}"),
-                                },
-                            );
+                            send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                                error: format!("更新包解压失败：{err}"),
+                            });
                         }
                     }
                 }
                 Err(err) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::UpdateInstallFailed {
-                            error: format!("更新包下载失败：{err}"),
-                        },
-                    );
+                    send_ui_event(&tx, UiEvent::UpdateInstallFailed {
+                        error: format!("更新包下载失败：{err}"),
+                    });
                 }
             }
         });
@@ -4803,9 +4772,7 @@ impl RepositoryView {
     pub(crate) fn install_update(&mut self, staging_dir: &Path, _version: &str) {
         // 检查写入权限
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("khaslana.exe"));
-        let exe_dir = current_exe
-            .parent()
-            .unwrap_or_else(|| Path::as_ref(Path::new(".")));
+        let exe_dir = current_exe.parent().unwrap_or_else(|| Path::as_ref(Path::new(".")));
 
         // 尝试在 exe 目录创建临时文件来验证写入权限
         let test_file = exe_dir.join(".khaslana_update_test");
@@ -4813,8 +4780,7 @@ impl RepositoryView {
         let _ = fs::remove_file(&test_file);
 
         if !writable {
-            let version = self
-                .available_update
+            let version = self.available_update
                 .as_ref()
                 .map(|m| m.version.clone())
                 .unwrap_or_default();
@@ -4840,16 +4806,11 @@ impl RepositoryView {
 
         let _ = Command::new(&new_updater_str)
             .args([
-                "--pid",
-                &pid_str,
-                "--target-exe",
-                &current_exe_str,
-                "--new-exe",
-                &new_exe_str,
-                "--new-updater",
-                &new_updater_str,
-                "--backup-dir",
-                &backup_dir_str,
+                "--pid", &pid_str,
+                "--target-exe", &current_exe_str,
+                "--new-exe", &new_exe_str,
+                "--new-updater", &new_updater_str,
+                "--backup-dir", &backup_dir_str,
                 "--restart",
             ])
             .spawn();
@@ -4870,10 +4831,7 @@ impl RepositoryView {
     }
 
     fn save_update_preferences(&self) {
-        if let Err(err) = self
-            .storage
-            .save_update_preferences(&self.update_preferences)
-        {
+        if let Err(err) = self.storage.save_update_preferences(&self.update_preferences) {
             tracing::warn!("update preferences write skipped: {err}");
         }
     }
@@ -9013,11 +8971,7 @@ impl RepositoryView {
             .child(self.toolbar_more_menu_item(
                 "更新设置",
                 ToolbarIcon::Update,
-                toolbar_more_action_enabled(
-                    ToolbarMoreAction::UpdateSettings,
-                    repo_open,
-                    self.busy,
-                ),
+                toolbar_more_action_enabled(ToolbarMoreAction::UpdateSettings, repo_open, self.busy),
                 |this, _, _| this.open_update_settings(),
                 cx,
             ))
@@ -10514,7 +10468,7 @@ impl RepositoryView {
                     .flex_none()
                     .text_size(px(11.0))
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
             )
     }
 
@@ -10752,15 +10706,10 @@ impl RepositoryView {
                 .render_confirm_conflict_resolve_dialog(cx)
                 .into_any_element(),
             // ── 更新对话框 ──
-            DialogState::UpdateSettings => {
-                self.render_update_settings_dialog(cx).into_any_element()
-            }
-            DialogState::NewVersionAvailable {
-                version,
-                notes,
-                published_at,
-                size,
-            } => self
+            DialogState::UpdateSettings => self
+                .render_update_settings_dialog(cx)
+                .into_any_element(),
+            DialogState::NewVersionAvailable { version, notes, published_at, size } => self
                 .render_new_version_dialog(&version, &notes, &published_at, size, cx)
                 .into_any_element(),
             DialogState::ConfirmInstallUpdate { version } => self
@@ -11217,28 +11166,25 @@ impl RepositoryView {
                             .child("已跳过版本"),
                     )
                     .child(
-                        div().text_color(rgb(ui_theme::MUTED_FOREGROUND)).child(
-                            skipped
-                                .map(|v| format!("v{v}"))
-                                .unwrap_or_else(|| "无".to_string()),
-                        ),
+                        div()
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(skipped.map(|v| format!("v{v}")).unwrap_or_else(|| "无".to_string())),
                     ),
             )
-            .child(
-                dialog_actions()
-                    .child(self.primary_button(
-                        "立即检查",
-                        !self.update_checking && !self.busy,
-                        |this, _, _| this.start_update_check(),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "清除跳过",
-                        self.update_preferences.skipped_version.is_some(),
-                        |this, _, _| this.clear_skipped_version(),
-                        cx,
-                    ))
-                    .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx)),
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即检查",
+                    !self.update_checking && !self.busy,
+                    |this, _, _| this.start_update_check(),
+                    cx,
+                ))
+                .child(self.button(
+                    "清除跳过",
+                    self.update_preferences.skipped_version.is_some(),
+                    |this, _, _| this.clear_skipped_version(),
+                    cx,
+                ))
+                .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx))
             )
     }
 
@@ -11274,24 +11220,23 @@ impl RepositoryView {
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("包大小：{:.1} MB", size_mb)),
             )
-            .child(
-                dialog_actions()
-                    .child(self.primary_button(
-                        "立即更新",
-                        !self.update_downloading && !self.busy,
-                        |this, _, _| {
-                            this.active_dialog = None;
-                            this.start_update_download();
-                        },
-                        cx,
-                    ))
-                    .child(self.button(
-                        "跳过此版本",
-                        !self.update_downloading,
-                        move |this, _, _| this.skip_version(&version_owned),
-                        cx,
-                    ))
-                    .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx)),
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即更新",
+                    !self.update_downloading && !self.busy,
+                    |this, _, _| {
+                        this.active_dialog = None;
+                        this.start_update_download();
+                    },
+                    cx,
+                ))
+                .child(self.button(
+                    "跳过此版本",
+                    !self.update_downloading,
+                    move |this, _, _| this.skip_version(&version_owned),
+                    cx,
+                ))
+                .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx))
             )
     }
 
@@ -11308,28 +11253,23 @@ impl RepositoryView {
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(ui_theme::FOREGROUND))
-                    .child(format!(
-                        "版本 v{version} 已下载并校验通过，应用将重启以完成安装。"
-                    )),
+                    .child(format!("版本 v{version} 已下载并校验通过，应用将重启以完成安装。")),
             )
-            .child(danger_callout(
-                "安装过程中应用会自动退出并重启，请确保没有未保存的工作。",
-            ))
-            .child(
-                dialog_actions()
-                    .child(self.primary_button(
-                        "立即重启",
-                        true,
-                        move |this, _, _| {
-                            if let Some(dir) = staging_dir.clone() {
-                                this.install_update(&dir, &version_owned);
-                            } else {
-                                this.update_error = Some("staging 目录丢失".into());
-                            }
-                        },
-                        cx,
-                    ))
-                    .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx)),
+            .child(danger_callout("安装过程中应用会自动退出并重启，请确保没有未保存的工作。"))
+            .child(dialog_actions()
+                .child(self.primary_button(
+                    "立即重启",
+                    true,
+                    move |this, _, _| {
+                        if let Some(dir) = staging_dir.clone() {
+                            this.install_update(&dir, &version_owned);
+                        } else {
+                            this.update_error = Some("staging 目录丢失".into());
+                        }
+                    },
+                    cx,
+                ))
+                .child(self.button("稍后", true, |this, _, _| this.close_dialog(), cx))
             )
     }
 
@@ -11349,29 +11289,16 @@ impl RepositoryView {
                 div()
                     .flex()
                     .gap_2()
-                    .child(self.button(
-                        "打开 CNB 下载页",
-                        true,
-                        |_, _, _| {
-                            open_url("https://cnb.cool/suhoan/khaslana-release");
-                        },
-                        cx,
-                    ))
-                    .child(self.button(
-                        "打开 GitHub Release",
-                        true,
-                        |_, _, _| {
-                            open_url("https://github.com/FuturePrayer/khaslana/releases");
-                        },
-                        cx,
-                    )),
+                    .child(self.button("打开 CNB 下载页", true, |_, _, _| {
+                        open_url("https://cnb.cool/suhoan/khaslana-release");
+                    }, cx))
+                    .child(self.button("打开 GitHub Release", true, |_, _, _| {
+                        open_url("https://github.com/FuturePrayer/khaslana/releases");
+                    }, cx)),
             )
-            .child(dialog_actions().child(self.button(
-                "关闭",
-                true,
-                |this, _, _| this.close_dialog(),
-                cx,
-            )))
+            .child(dialog_actions()
+                .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx))
+            )
     }
 
     fn render_remote_manager_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
