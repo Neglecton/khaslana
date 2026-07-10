@@ -222,6 +222,24 @@ fn toolbar_layout_switches_hidden_actions_by_width() {
 }
 
 #[test]
+fn toolbar_more_actions_expand_only_in_full_layout() {
+    assert_eq!(
+        toolbar_more_action_placement(ToolbarLayoutMode::Compact),
+        ToolbarMoreActionPlacement {
+            show_inline_actions: false,
+            show_more_button: true,
+        }
+    );
+    assert_eq!(
+        toolbar_more_action_placement(ToolbarLayoutMode::Full),
+        ToolbarMoreActionPlacement {
+            show_inline_actions: true,
+            show_more_button: false,
+        }
+    );
+}
+
+#[test]
 fn toolbar_more_menu_position_stays_inside_viewport() {
     assert_eq!(
         toolbar_more_menu_position(700.0, 58.0, 1280.0, 720.0),

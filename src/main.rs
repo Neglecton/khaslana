@@ -589,6 +589,13 @@ enum ToolbarLayoutMode {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToolbarMoreActionPlacement {
+    // 宽屏时把“更多”动作平铺到工具栏，窄屏时收进“更多”菜单。
+    show_inline_actions: bool,
+    show_more_button: bool,
+}
+
 #[derive(Clone, Debug)]
 struct ToolbarMoreMenu {
     x: f32,
@@ -613,6 +620,19 @@ fn toolbar_layout_mode(viewport_width: f32) -> ToolbarLayoutMode {
         ToolbarLayoutMode::Full
     } else {
         ToolbarLayoutMode::Compact
+    }
+}
+
+fn toolbar_more_action_placement(layout: ToolbarLayoutMode) -> ToolbarMoreActionPlacement {
+    match layout {
+        ToolbarLayoutMode::Compact => ToolbarMoreActionPlacement {
+            show_inline_actions: false,
+            show_more_button: true,
+        },
+        ToolbarLayoutMode::Full => ToolbarMoreActionPlacement {
+            show_inline_actions: true,
+            show_more_button: false,
+        },
     }
 }
 
@@ -8484,9 +8504,11 @@ impl RepositoryView {
             })
     }
 
-    fn render_toolbar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repo_open = self.repo_path.is_some();
         let remote_open = !self.loading.remote() && self.current_remote().is_some();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let more_placement = toolbar_more_action_placement(toolbar_layout_mode(viewport_width));
         let behind_count = self
             .branch_sync_status
             .as_ref()
@@ -8572,7 +8594,95 @@ impl RepositoryView {
                         },
                         cx,
                     ))
-                    .child(self.render_toolbar_more_button(cx)),
+                    .when(more_placement.show_inline_actions, |this| {
+                        this.child(self.render_toolbar_action_button(
+                            "贮藏",
+                            ToolbarIcon::Stash,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::Stash,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_stash_dialog(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "子模块",
+                            ToolbarIcon::Submodule,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::Submodule,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_submodule_manager(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "凭据管理",
+                            ToolbarIcon::Credentials,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::Credentials,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_credential_manager(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "代理设置",
+                            ToolbarIcon::Proxy,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::Proxy,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_network_proxy_settings(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "AI 设置",
+                            ToolbarIcon::Ai,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::AiSettings,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_ai_provider_settings(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "合并工具",
+                            ToolbarIcon::Workflow,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::ExternalMergeSettings,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_external_merge_settings(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
+                            "更新设置",
+                            ToolbarIcon::Update,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::UpdateSettings,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_update_settings(),
+                            cx,
+                        ))
+                    })
+                    .when(more_placement.show_more_button, |this| {
+                        this.child(self.render_toolbar_more_button(cx))
+                    }),
             )
             // ── 右侧：模式切换药丸 ──
             .child(
