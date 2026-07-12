@@ -1,12 +1,13 @@
 use std::{
     path::Path,
     sync::{Mutex, OnceLock},
+    thread,
 };
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px, rgb};
 
 use crate::{
-    DialogState, FieldId, RepositoryView,
+    DialogState, FieldId, RepositoryView, UiEvent, send_ui_event,
     ui::{components::dialog_actions, theme as ui_theme},
 };
 
@@ -275,16 +276,16 @@ impl RepositoryView {
     }
 
     pub(crate) fn browse_external_merge_executable(&mut self) {
-        let dialog = rfd::FileDialog::new().set_title("选择 IntelliJ IDEA 启动程序");
-        #[cfg(windows)]
-        let dialog = dialog.add_filter("IntelliJ IDEA", &["exe", "bat", "cmd"]);
-
-        if let Some(path) = dialog.pick_file() {
-            self.external_merge_intellij_path
-                .set_value(path.display().to_string());
-            self.external_merge_enabled_form = true;
-            self.status = format!("已选择 IntelliJ IDEA：{}", path.display());
-            self.last_error = None;
-        }
+        self.status = "正在选择 IntelliJ IDEA 程序...".to_string();
+        self.last_error = None;
+        let tx = self.tx.clone();
+        // Windows 原生文件框有自己的 COM / 消息循环，不能阻塞在 GPUI 事件回调中。
+        thread::spawn(move || {
+            let dialog = rfd::FileDialog::new().set_title("选择 IntelliJ IDEA 启动程序");
+            #[cfg(windows)]
+            let dialog = dialog.add_filter("IntelliJ IDEA", &["exe", "bat", "cmd"]);
+            let path = dialog.pick_file();
+            send_ui_event(&tx, UiEvent::ExternalMergeExecutableSelected { path });
+        });
     }
 }

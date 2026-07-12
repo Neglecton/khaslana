@@ -79,6 +79,10 @@ pub struct BranchInfo {
     pub kind: BranchKind,
     pub is_head: bool,
     pub upstream: Option<String>,
+    /// 相对 upstream 需要推送的提交数；未关联 upstream 时为 None。
+    pub ahead: Option<usize>,
+    /// 相对 upstream 需要拉取的提交数；未关联 upstream 时为 None。
+    pub behind: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

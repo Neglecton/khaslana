@@ -133,7 +133,7 @@ const MIN_BROWSE_TREE_WIDTH: f32 = 240.0;
 const MAX_BROWSE_TREE_WIDTH: f32 = 640.0;
 const HISTORY_PAGE_SIZE: usize = 50;
 pub(crate) const BRANCH_MENU_WIDTH: f32 = 190.0;
-pub(crate) const BRANCH_MENU_HEIGHT: f32 = 376.0;
+pub(crate) const BRANCH_MENU_HEIGHT: f32 = 404.0;
 pub(crate) const REMOTE_MENU_WIDTH: f32 = 170.0;
 pub(crate) const REMOTE_MENU_HEIGHT: f32 = 80.0;
 const CHANGE_MENU_WIDTH: f32 = 210.0;
@@ -1409,6 +1409,9 @@ pub(crate) enum UiEvent {
         path: Option<PathBuf>,
     },
     CloneTargetFolderSelected {
+        path: Option<PathBuf>,
+    },
+    ExternalMergeExecutableSelected {
         path: Option<PathBuf>,
     },
     AiCommitMessageGenerated {
@@ -3531,6 +3534,18 @@ impl RepositoryView {
                     self.last_error = None;
                 } else {
                     self.status = "已取消选择克隆父文件夹".to_string();
+                    self.last_error = None;
+                }
+            }
+            UiEvent::ExternalMergeExecutableSelected { path } => {
+                if let Some(path) = path {
+                    self.external_merge_intellij_path
+                        .set_value(path.display().to_string());
+                    self.external_merge_enabled_form = true;
+                    self.status = format!("已选择 IntelliJ IDEA：{}", path.display());
+                    self.last_error = None;
+                } else {
+                    self.status = "已取消选择 IntelliJ IDEA 程序".to_string();
                     self.last_error = None;
                 }
             }

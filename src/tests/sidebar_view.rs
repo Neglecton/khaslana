@@ -6,6 +6,8 @@ fn branch(name: &str, kind: BranchKind, upstream: Option<&str>) -> BranchInfo {
         kind,
         is_head: false,
         upstream: upstream.map(str::to_string),
+        ahead: None,
+        behind: None,
     }
 }
 

@@ -410,6 +410,23 @@ impl GitService {
             } else {
                 None
             };
+            let (ahead, behind) = if branch_type == BranchType::Local {
+                match (branch.get().target(), branch.upstream().ok()) {
+                    (Some(local_oid), Some(upstream_branch)) => {
+                        match upstream_branch.get().target() {
+                            Some(upstream_oid) => {
+                                let (ahead, behind) =
+                                    repo.graph_ahead_behind(local_oid, upstream_oid)?;
+                                (Some(ahead), Some(behind))
+                            }
+                            None => (None, None),
+                        }
+                    }
+                    _ => (None, None),
+                }
+            } else {
+                (None, None)
+            };
             branches.push(BranchInfo {
                 name: name.to_string(),
                 kind: match branch_type {
@@ -418,6 +435,8 @@ impl GitService {
                 },
                 is_head: branch.is_head(),
                 upstream,
+                ahead,
+                behind,
             });
         }
 
@@ -697,6 +716,90 @@ impl GitService {
         self.progress.emit(OperationEvent::Finished(format!(
             "已拉取 {}/{}",
             remote.0, remote_branch.0
+        )));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// 拉取指定本地分支。当前分支执行正常合并，非当前分支仅允许安全快进。
+    pub fn pull_local_branch(
+        &self,
+        repo: &mut Repository,
+        local_branch_name: &BranchName,
+    ) -> Result<RepositorySnapshot> {
+        validate_branch_name(&local_branch_name.0)?;
+        let local_ref_name = format!("refs/heads/{}", local_branch_name.0);
+        let remote = repo
+            .branch_upstream_remote(&local_ref_name)?
+            .as_str()
+            .map_err(|_| GitError::Message("upstream 远端名称不是有效 UTF-8".into()))?
+            .to_string();
+        let upstream_ref_name = repo
+            .branch_upstream_name(&local_ref_name)?
+            .as_str()
+            .map_err(|_| GitError::Message("upstream 分支名称不是有效 UTF-8".into()))?
+            .to_string();
+        let remote_prefix = format!("refs/remotes/{remote}/");
+        let remote_branch = upstream_ref_name
+            .strip_prefix(&remote_prefix)
+            .ok_or_else(|| GitError::Message("无法识别本地分支关联的远程分支".into()))?
+            .to_string();
+
+        self.progress.emit(OperationEvent::Started(format!(
+            "正在拉取本地分支 {}（{remote}/{remote_branch}）",
+            local_branch_name.0
+        )));
+        self.fetch_remote_refs(repo, &RemoteName::new(remote.clone()))?;
+
+        let local_branch = repo.find_branch(&local_branch_name.0, BranchType::Local)?;
+        let is_head = local_branch.is_head();
+        let local_oid = local_branch
+            .get()
+            .target()
+            .ok_or_else(|| GitError::Message("本地分支没有可更新的提交".into()))?;
+        let upstream_branch = local_branch.upstream()?;
+        let upstream_oid = upstream_branch
+            .get()
+            .target()
+            .ok_or_else(|| GitError::Message("远程分支没有可拉取的提交".into()))?;
+        let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
+
+        if behind == 0 {
+            self.progress.emit(OperationEvent::Finished(format!(
+                "本地分支 {} 已是最新",
+                local_branch_name.0
+            )));
+            drop(upstream_branch);
+            drop(local_branch);
+            return self.snapshot_after_operation(repo);
+        }
+
+        if !is_head {
+            if ahead > 0 {
+                return Err(GitError::Message(format!(
+                    "分支 {} 与 {remote}/{remote_branch} 已分叉，请先切换到该分支再拉取",
+                    local_branch_name.0
+                )));
+            }
+            drop(upstream_branch);
+            drop(local_branch);
+            repo.find_reference(&local_ref_name)?.set_target(
+                upstream_oid,
+                &format!("pull: fast-forward {remote}/{remote_branch}"),
+            )?;
+        } else {
+            let annotated = repo.find_annotated_commit(upstream_oid)?;
+            drop(upstream_branch);
+            drop(local_branch);
+            self.merge_annotated(
+                repo,
+                &annotated,
+                &format!("{remote}/{remote_branch}"),
+            )?;
+        }
+
+        self.progress.emit(OperationEvent::Finished(format!(
+            "已拉取本地分支 {}",
+            local_branch_name.0
         )));
         self.snapshot_after_operation(repo)
     }

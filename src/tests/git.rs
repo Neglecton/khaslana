@@ -1707,6 +1707,32 @@ fn branch_sync_status_reports_remote_behind_commits() {
 }
 
 #[test]
+fn local_branch_metadata_reports_ahead_and_behind_counts() {
+    let (remote_dir, clone_dir, _clone_path, mut repo, service) =
+        clone_repo_with_remote_feature();
+    git_support::write_file(
+        clone_dir.path().join("clone").as_path(),
+        "local.txt",
+        "local\n",
+    );
+    git_support::commit_all(&repo, "local ahead");
+    advance_remote_main(remote_dir.path(), &service, "remote.txt", "remote\n");
+    service
+        .fetch(&mut repo, &RemoteName::new("origin"))
+        .unwrap();
+
+    let main = service
+        .local_branches(&repo)
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.name == "main")
+        .unwrap();
+
+    assert_eq!(main.ahead, Some(1));
+    assert_eq!(main.behind, Some(1));
+}
+
+#[test]
 fn branch_sync_status_reports_diverged_branch() {
     let (remote_dir, clone_dir, _clone_path, mut repo, service) = clone_repo_with_remote_feature();
     git_support::write_file(
@@ -2117,6 +2143,39 @@ fn pull_branch_reports_missing_remote_branch_in_chinese() {
         .unwrap_err();
 
     assert!(err.to_string().contains("远端分支不存在"));
+}
+
+#[test]
+fn pull_local_branch_fast_forwards_selected_non_current_branch() {
+    let (remote_dir, _clone_dir, _clone_path, mut repo, service) =
+        clone_repo_with_remote_feature();
+    service
+        .fetch(&mut repo, &RemoteName::new("origin"))
+        .unwrap();
+    service
+        .checkout_remote_branch(&mut repo, &BranchName::new("origin/feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    advance_remote_feature(remote_dir.path(), &service);
+
+    let snapshot = service
+        .pull_local_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+
+    assert_eq!(snapshot.head.as_deref(), Some("main"));
+    let local_oid = repo
+        .find_branch("feature", BranchType::Local)
+        .unwrap()
+        .get()
+        .target();
+    let remote_oid = repo
+        .find_branch("origin/feature", BranchType::Remote)
+        .unwrap()
+        .get()
+        .target();
+    assert_eq!(local_oid, remote_oid);
 }
 
 #[test]

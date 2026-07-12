@@ -1,7 +1,7 @@
 use gpui::{
     ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb,
 };
-use khaslana::{BranchInfo, BranchKind, RemoteInfo, StashInfo, TagInfo};
+use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
     BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, REMOTE_MENU_HEIGHT,
@@ -10,7 +10,7 @@ use crate::{
     clamped_menu_position, context_menu_item, context_menu_item_with_context, menu_separator,
     nav_list, placeholder_row,
     ui::{
-        components::{glass_menu, tooltip_text},
+        components::{glass_menu, sync_badge, tooltip_text},
         icons::{ToolbarIcon, toolbar_icon, toolbar_icon_rotated},
         theme as ui_theme,
     },
@@ -801,6 +801,8 @@ impl RepositoryView {
         let right_click_is_head = branch.is_head;
         let selected = self.selected_branch.as_deref() == Some(&branch.name);
         let upstream = branch.upstream.clone();
+        let ahead = branch.ahead.unwrap_or(0);
+        let behind = branch.behind.unwrap_or(0);
 
         // 设计图：
         // 活跃分支：bg $--sidebar-accent, 左侧 HEAD 圆点 6×6 $--primary,
@@ -871,11 +873,22 @@ impl RepositoryView {
             })
             .cursor_pointer()
             .child(leading)
-            .child(name_el);
+            .child(name_el)
+            .when(ahead > 0, |this| {
+                this.child(sync_badge("↑", ahead))
+            })
+            .when(behind > 0, |this| {
+                this.child(sync_badge("↓", behind))
+            });
 
-        // 鼠标悬停时显示 upstream tooltip（仅当前分支有 upstream 时）
-        let row = if let Some(up) = upstream.filter(|_| is_current) {
-            let upstream_label = format!("→{}", strip_remote_prefix(&up));
+        // 本地分支悬停时显示 upstream 和同步数量，便于确认推送/拉取目标。
+        let row = if let Some(up) = upstream.filter(|_| is_local) {
+            let upstream_label = format!(
+                "→{} · 待推送 {} · 待拉取 {}",
+                strip_remote_prefix(&up),
+                ahead,
+                behind
+            );
             row.tooltip(move |_window, cx| tooltip_text(upstream_label.clone(), cx))
         } else {
             row
@@ -927,6 +940,14 @@ impl RepositoryView {
             return div().into_any_element();
         };
         let is_local = menu.kind == BranchKind::Local;
+        let can_pull_local = is_local
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.branches.iter().any(|branch| {
+                    branch.kind == BranchKind::Local
+                        && branch.name == menu.branch
+                        && branch.upstream.is_some()
+                })
+            });
 
         glass_menu()
             .absolute()
@@ -961,6 +982,15 @@ impl RepositoryView {
                 {
                     let branch = menu.branch.clone();
                     move |this| this.checkout(branch.clone())
+                },
+                cx,
+            ))
+            .child(context_menu_item(
+                "拉取此分支更新",
+                can_pull_local && !self.busy,
+                {
+                    let branch = menu.branch.clone();
+                    move |this| this.pull_local_branch_update(branch.clone())
                 },
                 cx,
             ))
@@ -1049,6 +1079,13 @@ impl RepositoryView {
                 cx,
             ))
             .into_any_element()
+    }
+
+    fn pull_local_branch_update(&mut self, branch: String) {
+        self.branch_context_menu = None;
+        self.with_repo_blocking("分支拉取完成", move |service, repo| {
+            service.pull_local_branch(repo, &BranchName::new(branch))
+        });
     }
 }
 
