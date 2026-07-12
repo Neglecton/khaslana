@@ -14,6 +14,7 @@ mod rebase_view;
 mod remote_branch_operation;
 mod sidebar_view;
 mod stash_view;
+mod ssh_credentials;
 mod submodule_view;
 mod system;
 mod tasks;
@@ -67,6 +68,7 @@ use remote_branch_operation::{
     local_branch_by_name, remote_branch_dialog_defaults, remote_branch_exists,
 };
 use stash_view::StashPreviewState;
+use ssh_credentials::{SshCredentialDiscoveryState, SshDiscoveryResult};
 use submodule_view::{
     SubmoduleDialogState, operation_refreshes_submodule_dialog, submodule_remote_request_matches,
     submodule_request_matches,
@@ -78,8 +80,7 @@ use ui::{
         AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
         dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
-        input_frame, list_row_surface, mode_pill, operation_loading_bar,
-        segmented_button, toggle_box, tooltip_text,
+        input_frame, list_row_surface, mode_pill, segmented_button, toggle_box, tooltip_text,
     },
     icons::{ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
     theme as ui_theme,
@@ -1389,6 +1390,17 @@ pub(crate) enum UiEvent {
         request: CredentialRequest,
         response_tx: Arc<Mutex<Option<mpsc::Sender<khaslana::Result<Option<GitCredential>>>>>>,
     },
+    SshCredentialsDiscovered {
+        request_id: u64,
+        result: SshDiscoveryResult,
+    },
+    SshCredentialDiscoveryFailed {
+        request_id: u64,
+        error: String,
+    },
+    CredentialSshKeyFileSelected {
+        path: Option<PathBuf>,
+    },
     ProxyTestFinished {
         message: String,
     },
@@ -1904,6 +1916,7 @@ pub(crate) struct RepositoryView {
     credential_scope: CredentialScope,
     credential_form_mode: CredentialFormMode,
     credential_use_ssh_agent: bool,
+    pub(crate) ssh_credential_discovery: SshCredentialDiscoveryState,
     browse_content_focus: FocusHandle,
     clone_url: TextFieldState,
     clone_path: TextFieldState,
@@ -1941,6 +1954,7 @@ pub(crate) struct RepositoryView {
     pub(crate) external_merge_enabled_form: bool,
     pub(crate) external_merge_auto_open_form: bool,
     external_merge_intellij_path: TextFieldState,
+    external_merge_detection: Option<(ExternalMergeSettings, bool)>,
     pub(crate) ai_enabled_form: bool,
     ai_base_url: TextFieldState,
     ai_api_key: TextFieldState,
@@ -2045,6 +2059,7 @@ impl RepositoryView {
             credential_scope: CredentialScope::RemoteUrl,
             credential_form_mode: CredentialFormMode::Https,
             credential_use_ssh_agent: false,
+            ssh_credential_discovery: SshCredentialDiscoveryState::default(),
             browse_content_focus: cx.focus_handle(),
             clone_url: TextFieldState::new(cx, "远程仓库 URL"),
             clone_path: TextFieldState::new(cx, "克隆到父文件夹"),
@@ -2084,6 +2099,7 @@ impl RepositoryView {
             ai_model: TextFieldState::new(cx, "模型名称，例如 gpt-4o-mini"),
             external_merge_intellij_path: TextFieldState::new(cx, "IntelliJ IDEA 路径（可选）")
                 .with_value(external_merge_settings.normalized_intellij_path()),
+            external_merge_detection: None,
             ai_commit_loading: false,
             ai_commit_buffer: String::new(),
             ai_review: None,
@@ -2979,6 +2995,33 @@ impl RepositoryView {
                     self.notify_completion(&toast_message, cx);
                 }
             }
+            UiEvent::SshCredentialsDiscovered { request_id, result } => {
+                if request_id == self.ssh_credential_discovery.request_id {
+                    let key_count = result.keys.len();
+                    let agent_count = result.agent_identities.len();
+                    self.ssh_credential_discovery.loading = false;
+                    self.ssh_credential_discovery.result = Some(result);
+                    self.ssh_credential_discovery.error = None;
+                    self.status = format!(
+                        "已发现 {key_count} 个 SSH 私钥，Agent 中有 {agent_count} 个身份"
+                    );
+                }
+            }
+            UiEvent::SshCredentialDiscoveryFailed { request_id, error } => {
+                if request_id == self.ssh_credential_discovery.request_id {
+                    self.ssh_credential_discovery.loading = false;
+                    self.ssh_credential_discovery.error = Some(error.clone());
+                    self.status = "本机 SSH 检测失败".into();
+                    self.last_error = Some(error);
+                }
+            }
+            UiEvent::CredentialSshKeyFileSelected { path } => {
+                if let Some(path) = path {
+                    self.use_discovered_ssh_key(path);
+                } else {
+                    self.status = "已取消选择 SSH 私钥".into();
+                }
+            }
             UiEvent::HistoryCommitsLoaded {
                 tab_id,
                 commits,
@@ -3538,6 +3581,7 @@ impl RepositoryView {
                 }
             }
             UiEvent::ExternalMergeExecutableSelected { path } => {
+                self.external_merge_detection = None;
                 if let Some(path) = path {
                     self.external_merge_intellij_path
                         .set_value(path.display().to_string());
@@ -4626,6 +4670,7 @@ impl RepositoryView {
         self.external_merge_auto_open_form = self.external_merge_settings.auto_open_intellij;
         self.external_merge_intellij_path
             .set_value(self.external_merge_settings.normalized_intellij_path());
+        self.external_merge_detection = None;
     }
 
     pub(crate) fn external_merge_form_settings(&self) -> ExternalMergeSettings {
@@ -4670,12 +4715,15 @@ impl RepositoryView {
         let settings = self.external_merge_form_settings();
         match khaslana::external_merge::resolve_intellij_idea_command_with_settings(&settings) {
             Ok(path) => {
+                self.external_merge_detection = Some((settings.clone(), true));
                 self.external_merge_settings = settings;
                 self.save_external_merge_settings();
                 self.status = format!("已找到 IntelliJ IDEA：{}", path.display());
                 self.last_error = None;
             }
             Err(err) => {
+                self.external_merge_detection = Some((settings, false));
+                self.status = "IntelliJ IDEA 检测失败".into();
                 self.last_error = Some(err.to_string());
             }
         }
@@ -4950,12 +4998,49 @@ impl RepositoryView {
 
     fn open_credential_form(&mut self) {
         self.credential_context_menu = None;
+        let suggested_remote_url = self.snapshot.as_ref().and_then(|snapshot| {
+            self.selected_remote
+                .as_deref()
+                .and_then(|name| snapshot.remotes.iter().find(|remote| remote.name == name))
+                .or_else(|| snapshot.remotes.iter().find(|remote| remote.name == "origin"))
+                .or_else(|| snapshot.remotes.first())
+                .map(|remote| remote.url.clone())
+        });
         self.reset_credential_form();
+        if let Some(url) = suggested_remote_url {
+            self.credential_remote_url.set_value(url.clone());
+            let mode = credential_form_mode_for_request(&CredentialRequest {
+                url,
+                username_from_url: None,
+                allowed_types: git2::CredentialType::USER_PASS_PLAINTEXT
+                    | git2::CredentialType::SSH_KEY,
+                repo_path: None,
+                remote_name: None,
+                operation_id: None,
+            });
+            self.credential_form_mode = mode;
+            if mode == CredentialFormMode::Ssh {
+                self.credential_username.set_value(
+                    ssh_credentials::ssh_username_from_url(&self.credential_remote_url.value)
+                        .unwrap_or_else(|| "git".into()),
+                );
+                self.discover_ssh_credentials_if_needed();
+            }
+        }
         self.active_dialog = Some(DialogState::CredentialForm { editing: None });
         self.last_error = None;
     }
 
     fn reset_credential_form(&mut self) {
+        if self.ssh_credential_discovery.loading {
+            // 关闭表单后忽略尚未完成的扫描结果，避免异步结果覆盖其他界面状态。
+            self.ssh_credential_discovery.request_id = self
+                .ssh_credential_discovery
+                .request_id
+                .wrapping_add(1)
+                .max(1);
+            self.ssh_credential_discovery.loading = false;
+        }
         self.credential_form_mode = CredentialFormMode::Https;
         self.credential_scope = CredentialScope::RemoteUrl;
         self.credential_use_ssh_agent = false;
@@ -4973,6 +5058,97 @@ impl RepositoryView {
         self.last_error = None;
         self.feedbacks
             .retain(|feedback| feedback.kind != AppToastKind::Error);
+    }
+
+    fn set_credential_form_mode(&mut self, mode: CredentialFormMode) {
+        self.credential_form_mode = mode;
+        self.last_error = None;
+        if mode == CredentialFormMode::Ssh {
+            if self.credential_username.value.trim().is_empty() {
+                self.credential_username.set_value("git");
+            }
+            self.discover_ssh_credentials_if_needed();
+        }
+    }
+
+    fn discover_ssh_credentials_if_needed(&mut self) {
+        if self.ssh_credential_discovery.result.is_none()
+            && !self.ssh_credential_discovery.loading
+        {
+            self.discover_ssh_credentials();
+        }
+    }
+
+    pub(crate) fn discover_ssh_credentials(&mut self) {
+        if self.ssh_credential_discovery.loading {
+            return;
+        }
+        self.ssh_credential_discovery.request_id = self
+            .ssh_credential_discovery
+            .request_id
+            .wrapping_add(1)
+            .max(1);
+        let request_id = self.ssh_credential_discovery.request_id;
+        self.ssh_credential_discovery.loading = true;
+        self.ssh_credential_discovery.error = None;
+        self.status = "正在检测本机 SSH 身份".into();
+        self.last_error = None;
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Short, move || {
+            match ssh_credentials::discover_local_ssh_credentials() {
+                Ok(result) => send_ui_event(
+                    &tx,
+                    UiEvent::SshCredentialsDiscovered { request_id, result },
+                ),
+                Err(error) => send_ui_event(
+                    &tx,
+                    UiEvent::SshCredentialDiscoveryFailed { request_id, error },
+                ),
+            }
+        });
+    }
+
+    pub(crate) fn use_discovered_ssh_agent(&mut self) {
+        self.credential_use_ssh_agent = true;
+        self.credential_key_path.clear();
+        self.credential_passphrase.clear();
+        if self.credential_display_name.value.trim().is_empty()
+            || self.credential_display_name.value.starts_with("SSH · ")
+        {
+            self.credential_display_name.set_value("本机 SSH Agent");
+        }
+        self.status = "已选择本机 SSH Agent".into();
+        self.last_error = None;
+    }
+
+    pub(crate) fn use_discovered_ssh_key(&mut self, path: PathBuf) {
+        if self.credential_key_path.value.trim() != path.to_string_lossy() {
+            self.credential_passphrase.clear();
+        }
+        self.credential_use_ssh_agent = false;
+        self.credential_key_path
+            .set_value(path.display().to_string());
+        if (self.credential_display_name.value.trim().is_empty()
+            || self.credential_display_name.value == "本机 SSH Agent")
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        {
+            self.credential_display_name
+                .set_value(format!("SSH · {name}"));
+        }
+        self.status = format!("已选择 SSH 私钥：{}", path.display());
+        self.last_error = None;
+    }
+
+    fn browse_credential_ssh_key(&mut self) {
+        self.status = "正在选择 SSH 私钥...".into();
+        self.last_error = None;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .set_title("选择 SSH 私钥")
+                .pick_file();
+            send_ui_event(&tx, UiEvent::CredentialSshKeyFileSelected { path });
+        });
     }
 
     fn save_credential_form(&mut self) {
@@ -5019,6 +5195,12 @@ impl RepositoryView {
                 let key_path = self.credential_key_path.value.trim().to_string();
                 if !self.credential_use_ssh_agent && key_path.is_empty() {
                     self.last_error = Some("需要填写 SSH 私钥路径或选择使用 SSH agent".into());
+                    return;
+                }
+                if !self.credential_use_ssh_agent
+                    && let Err(error) = ssh_credentials::validate_ssh_private_key_path(Path::new(&key_path))
+                {
+                    self.last_error = Some(error);
                     return;
                 }
                 GitCredential::SshPassphrase {
@@ -8139,7 +8321,7 @@ impl RepositoryView {
         let selected = self.credential_form_mode == mode;
         segmented_button(format!("credential-kind-{label}"), selected, true)
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.credential_form_mode = mode;
+                this.set_credential_form_mode(mode);
                 cx.notify();
             }))
             .child(label)
@@ -10678,11 +10860,10 @@ impl RepositoryView {
             )
     }
 
-    fn active_loading_message(&self) -> Option<String> {
+    fn has_active_loading(&self) -> bool {
         let tab = self.active_tab_state();
-        (tab.operation_kind.shows_progress()
-            && (tab.busy || tab.loading != RepositoryLoading::default()))
-        .then(|| tab.status.clone())
+        tab.operation_kind.shows_progress()
+            && (tab.busy || tab.loading != RepositoryLoading::default())
     }
 
     fn render_feedback_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -10713,9 +10894,9 @@ impl RepositoryView {
             .bottom(px(0.0))
             .child(left_stack)
             .child(right_stack)
-            .when_some(self.active_loading_message(), |this, message| {
-                this.child(operation_loading_bar(message))
-                    .child(bottom_progress_bar(self.progress_phase))
+            // 状态文字已在底栏展示，操作期间只保留轻量进度线，避免重复悬浮框。
+            .when(self.has_active_loading(), |this| {
+                this.child(bottom_progress_bar(self.progress_phase))
             })
     }
 
@@ -11986,7 +12167,8 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.dialog_panel("添加凭据", cx)
-            .w(px(560.0))
+            .w(px(680.0))
+            .max_h(px(760.0))
             .child(
                 div()
                     .flex()
@@ -12011,22 +12193,57 @@ impl RepositoryView {
             .when(
                 self.credential_form_mode == CredentialFormMode::Ssh,
                 |this| {
-                    this.child(self.toggle_row(
+                    this.child(self.render_ssh_credential_discovery(cx))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child("推荐优先使用 SSH Agent；使用私钥文件时，应用只保存路径，密码短语仍存入系统 Keyring。"),
+                    )
+                    .child(self.toggle_row(
                         "credential-form-use-ssh-agent",
-                        "使用 SSH agent",
+                        "使用 SSH Agent（不保存私钥路径）",
                         self.credential_use_ssh_agent,
-                        |this, _, _| this.credential_use_ssh_agent = !this.credential_use_ssh_agent,
+                        |this, _, _| {
+                            this.credential_use_ssh_agent = !this.credential_use_ssh_agent;
+                            if this.credential_use_ssh_agent {
+                                this.credential_key_path.clear();
+                                this.credential_passphrase.clear();
+                            }
+                        },
                         cx,
                     ))
                     .when(!self.credential_use_ssh_agent, |this| {
-                        this.child(self.input(FieldId::CredentialKeyPath, false, window, cx))
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .child(self.input(
+                                            FieldId::CredentialKeyPath,
+                                            false,
+                                            window,
+                                            cx,
+                                        )),
+                                )
+                                .child(self.button(
+                                    "选择私钥文件",
+                                    !self.busy,
+                                    |this, _, _| this.browse_credential_ssh_key(),
+                                    cx,
+                                )),
+                        )
+                        .child(self.input(
+                            FieldId::CredentialPassphrase,
+                            false,
+                            window,
+                            cx,
+                        ))
                     })
-                    .child(self.input(
-                        FieldId::CredentialPassphrase,
-                        false,
-                        window,
-                        cx,
-                    ))
                 },
             )
             .child(

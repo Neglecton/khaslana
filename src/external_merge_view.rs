@@ -13,6 +13,17 @@ use crate::{
 
 static PENDING_EXTERNAL_MERGE_PATH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
+fn external_merge_detection_label(
+    settings: &khaslana::ExternalMergeSettings,
+    detection: Option<&(khaslana::ExternalMergeSettings, bool)>,
+) -> &'static str {
+    match detection.filter(|(detected_settings, _)| detected_settings == settings) {
+        Some((_, true)) => "✓ IDEA 可用",
+        Some((_, false)) => "检测失败 · 重试",
+        None => "检测 IDEA",
+    }
+}
+
 fn pending_external_merge_path_cell() -> &'static Mutex<Option<String>> {
     PENDING_EXTERNAL_MERGE_PATH.get_or_init(|| Mutex::new(None))
 }
@@ -55,6 +66,10 @@ impl RepositoryView {
         } else {
             "保存"
         };
+        let detection_label = external_merge_detection_label(
+            &self.external_merge_form_settings(),
+            self.external_merge_detection.as_ref(),
+        );
 
         self.dialog_panel("合并工具", cx)
             .w(px(580.0))
@@ -134,7 +149,7 @@ impl RepositoryView {
                         cx,
                     ))
                     .child(self.button(
-                        "检测 IDEA",
+                        detection_label,
                         !self.busy,
                         |this, _, _| this.test_external_merge_settings_from_form(),
                         cx,
@@ -242,10 +257,12 @@ impl RepositoryView {
         let settings = self.external_merge_form_settings();
         match khaslana::external_merge::resolve_intellij_idea_command_with_settings(&settings) {
             Ok(path) => {
+                self.external_merge_detection = Some((settings, true));
                 self.status = format!("已找到 IntelliJ IDEA：{}", path.display());
                 self.last_error = None;
             }
             Err(err) => {
+                self.external_merge_detection = Some((settings, false));
                 self.status = "需要配置 IntelliJ IDEA 合并工具".into();
                 self.last_error = Some(format!(
                     "启用前需要配置 IntelliJ IDEA：{err}。请填写路径或点击“选择 IDEA 程序”。"
@@ -263,10 +280,12 @@ impl RepositoryView {
         let settings = self.external_merge_form_settings();
         match khaslana::external_merge::resolve_intellij_idea_command_with_settings(&settings) {
             Ok(path) => {
+                self.external_merge_detection = Some((settings, true));
                 self.status = format!("已找到 IntelliJ IDEA：{}", path.display());
                 self.last_error = None;
             }
             Err(err) => {
+                self.external_merge_detection = Some((settings, false));
                 self.status = "需要配置 IntelliJ IDEA 合并工具".into();
                 self.last_error = Some(format!(
                     "开启自动打开前需要配置 IntelliJ IDEA：{err}。请填写路径或点击“选择 IDEA 程序”。"
@@ -287,5 +306,31 @@ impl RepositoryView {
             let path = dialog.pick_file();
             send_ui_event(&tx, UiEvent::ExternalMergeExecutableSelected { path });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detection_button_only_shows_result_for_current_settings() {
+        let settings = khaslana::ExternalMergeSettings {
+            enabled: true,
+            auto_open_intellij: false,
+            intellij_path: "idea64.exe".into(),
+        };
+        let succeeded = (settings.clone(), true);
+        assert_eq!(
+            external_merge_detection_label(&settings, Some(&succeeded)),
+            "✓ IDEA 可用"
+        );
+
+        let mut changed = settings.clone();
+        changed.intellij_path = "other.exe".into();
+        assert_eq!(
+            external_merge_detection_label(&changed, Some(&succeeded)),
+            "检测 IDEA"
+        );
     }
 }
