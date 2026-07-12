@@ -172,6 +172,16 @@ fn clone_dialog_defaults_to_recursive_submodules() {
 #[test]
 fn toolbar_more_menu_actions_keep_original_enabled_rules() {
     assert!(toolbar_more_action_enabled(
+        ToolbarMoreAction::Clone,
+        false,
+        false
+    ));
+    assert!(!toolbar_more_action_enabled(
+        ToolbarMoreAction::Clone,
+        false,
+        true
+    ));
+    assert!(toolbar_more_action_enabled(
         ToolbarMoreAction::Stash,
         true,
         false

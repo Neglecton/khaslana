@@ -12,6 +12,8 @@ fn toolbar_icon_paths_match_embedded_asset_root() {
     assert_eq!(ToolbarIcon::Ai.path(), "icons/ai.svg");
     assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
     assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
+    assert_eq!(ToolbarIcon::Maximize.path(), "icons/maximize.svg");
+    assert_eq!(ToolbarIcon::Restore.path(), "icons/restore.svg");
     assert_eq!(ToolbarIcon::Plus.path(), "icons/plus.svg");
     assert_eq!(ToolbarIcon::Globe.path(), "icons/globe.svg");
     assert_eq!(ToolbarIcon::ChevronRight.path(), "icons/chevron-right.svg");
@@ -37,6 +39,8 @@ fn toolbar_svgs_use_monochrome_mask_shapes() {
         ToolbarIcon::Ai,
         ToolbarIcon::Search,
         ToolbarIcon::Close,
+        ToolbarIcon::Maximize,
+        ToolbarIcon::Restore,
         ToolbarIcon::Plus,
         ToolbarIcon::Globe,
         ToolbarIcon::ChevronRight,

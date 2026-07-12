@@ -40,8 +40,8 @@ use gpui::{
     Focusable, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
     ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowOptions, actions, canvas, div, point, prelude::*, px, rgb, rgba, size,
-    uniform_list,
+    WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, point, prelude::*, px,
+    rgb, rgba, size, uniform_list,
 };
 use khaslana::{
     AiProviderSettings, AiReviewResult, BranchKind, BranchName, BranchSyncStatus,
@@ -78,10 +78,10 @@ use ui::{
         AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
         dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
-        inline_error_bubble, input_frame, list_row_surface, mode_pill, operation_loading_bar,
-        segmented_button, status_pill, toggle_box, tooltip_text,
+        input_frame, list_row_surface, mode_pill, operation_loading_bar,
+        segmented_button, toggle_box, tooltip_text,
     },
-    icons::{ToolbarIcon, toolbar_icon},
+    icons::{ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
     theme as ui_theme,
 };
 use ui_helpers::*;
@@ -149,9 +149,9 @@ const COMMIT_MENU_HEIGHT: f32 = 230.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 265.0;
 const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
-const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1540.0;
+const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1760.0;
 const TOOLBAR_MORE_MENU_WIDTH: f32 = 190.0;
-const TOOLBAR_MORE_MENU_HEIGHT: f32 = 224.0;
+const TOOLBAR_MORE_MENU_HEIGHT: f32 = 256.0;
 const TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH: f32 = 76.0;
 const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
@@ -574,6 +574,7 @@ fn default_clone_recursive_submodules() -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarMoreAction {
+    Clone,
     Stash,
     Submodule,
     Credentials,
@@ -607,7 +608,8 @@ struct ToolbarMoreMenu {
 fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy: bool) -> bool {
     match action {
         ToolbarMoreAction::Stash | ToolbarMoreAction::Submodule => repo_open && !busy,
-        ToolbarMoreAction::Credentials
+        ToolbarMoreAction::Clone
+        | ToolbarMoreAction::Credentials
         | ToolbarMoreAction::Proxy
         | ToolbarMoreAction::AiSettings
         | ToolbarMoreAction::ExternalMergeSettings
@@ -8509,6 +8511,10 @@ impl RepositoryView {
         let remote_open = !self.loading.remote() && self.current_remote().is_some();
         let viewport_width = f32::from(window.viewport_size().width);
         let more_placement = toolbar_more_action_placement(toolbar_layout_mode(viewport_width));
+        let has_conflicts = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.conflicts.is_empty());
         let behind_count = self
             .branch_sync_status
             .as_ref()
@@ -8520,34 +8526,27 @@ impl RepositoryView {
             .map(|s| s.ahead)
             .unwrap_or(0);
 
-        // 新版工具栏布局：左=Logo+名称 | 中=5操作按钮 | 右=模式切换药丸
+        // 自定义标题栏沿用 Pencil 主页面结构：品牌、Git 操作、拖动区、模式切换和窗口控制。
         hero_toolbar()
             .flex()
             .items_center()
-            .justify_between()
-            .px(px(16.0))
             .h(px(52.0))
-            // ── 中间：操作按钮（打开/克隆 + 刷新/获取/拉取/推送 + 更多）──
+            .pl(px(16.0))
+            .child(self.render_titlebar_brand())
+            // Git 操作按钮保留现有能力，宽屏时继续展开“更多”中的动作。
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(2.0))
+                    .ml(px(20.0))
                     .child(self.render_toolbar_action_button(
                         "打开",
                         ToolbarIcon::Open,
                         None,
                         !self.busy,
                         |this, _, _| this.browse_open(),
-                        cx,
-                    ))
-                    .child(self.render_toolbar_action_button(
-                        "克隆",
-                        ToolbarIcon::Clone,
-                        None,
-                        !self.busy,
-                        |this, window, _cx| this.open_clone_dialog(window),
                         cx,
                     ))
                     .child(self.render_toolbar_action_button(
@@ -8596,6 +8595,18 @@ impl RepositoryView {
                     ))
                     .when(more_placement.show_inline_actions, |this| {
                         this.child(self.render_toolbar_action_button(
+                            "克隆",
+                            ToolbarIcon::Clone,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::Clone,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, window, _cx| this.open_clone_dialog(window),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
                             "贮藏",
                             ToolbarIcon::Stash,
                             None,
@@ -8684,17 +8695,21 @@ impl RepositoryView {
                         this.child(self.render_toolbar_more_button(cx))
                     }),
             )
-            // ── 右侧：模式切换药丸 ──
+            .child(self.render_titlebar_drag_area())
+            // 右侧模式切换与 Pencil 稿一致使用图标和药丸选中态。
             .child(
                 div()
                     .flex()
                     .flex_none()
+                    // GPUI 需要显式宽度才能在主标题栏中为右侧固定区域预留空间。
+                    .w(px(if has_conflicts { 384.0 } else { 288.0 }))
                     .items_center()
                     .gap(px(4.0))
                     .child(
                         mode_pill(
                             "mode-worktree".into(),
                             "工作区",
+                            Some(ToolbarIcon::Worktree),
                             self.main_mode == MainMode::Worktree,
                         )
                         .on_click(cx.listener(
@@ -8705,14 +8720,13 @@ impl RepositoryView {
                         )),
                     )
                     .when(
-                        self.snapshot
-                            .as_ref()
-                            .is_some_and(|snapshot| !snapshot.conflicts.is_empty()),
+                        has_conflicts,
                         |this| {
                             this.child(
                                 mode_pill(
                                     "mode-conflict".into(),
                                     "冲突处理",
+                                    None,
                                     self.main_mode == MainMode::Conflict,
                                 )
                                 .on_click(cx.listener(
@@ -8728,6 +8742,7 @@ impl RepositoryView {
                         mode_pill(
                             "mode-history".into(),
                             "提交记录",
+                            Some(ToolbarIcon::History),
                             self.main_mode == MainMode::History,
                         )
                         .on_click(cx.listener(
@@ -8741,6 +8756,7 @@ impl RepositoryView {
                         mode_pill(
                             "mode-workflow".into(),
                             "工作流",
+                            Some(ToolbarIcon::Workflow),
                             self.main_mode == MainMode::Workflow,
                         )
                         .on_click(cx.listener(
@@ -8749,8 +8765,113 @@ impl RepositoryView {
                                 cx.notify();
                             },
                         )),
-                    ),
+                    )
+                    .mr(px(8.0)),
             )
+            .child(self.render_window_controls(window))
+    }
+
+    /// 品牌区交给 Windows 原生命中测试处理拖动和双击最大化。
+    fn render_titlebar_brand(&self) -> impl IntoElement {
+        div()
+            .id("titlebar-brand")
+            .flex()
+            .flex_none()
+            .h_full()
+            .items_center()
+            .gap(px(8.0))
+            .cursor(CursorStyle::Arrow)
+            .window_control_area(WindowControlArea::Drag)
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .size(px(28.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .bg(rgb(ui_theme::PRIMARY))
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                    .child("K"),
+            )
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("Khaslana"),
+            )
+    }
+
+    /// 中间弹性空白区使用原生标题栏命中区域，支持拖动、双击和系统菜单。
+    fn render_titlebar_drag_area(&self) -> impl IntoElement {
+        div()
+            .id("titlebar-drag-area")
+            .flex_1()
+            .min_w(px(24.0))
+            .h_full()
+            .window_control_area(WindowControlArea::Drag)
+    }
+
+    /// Windows 窗口控制按钮通过原生命中测试获得最小化、还原和关闭行为。
+    fn render_window_controls(&self, window: &Window) -> impl IntoElement {
+        let maximize_icon = if window.is_maximized() {
+            ToolbarIcon::Restore
+        } else {
+            ToolbarIcon::Maximize
+        };
+        div()
+            .flex()
+            .flex_none()
+            .w(px(132.0))
+            .h_full()
+            .child(self.render_window_control_button(
+                "window-minimize",
+                ToolbarIcon::Minus,
+                false,
+                WindowControlArea::Min,
+            ))
+            .child(self.render_window_control_button(
+                "window-maximize",
+                maximize_icon,
+                false,
+                WindowControlArea::Max,
+            ))
+            .child(self.render_window_control_button(
+                "window-close",
+                ToolbarIcon::Close,
+                true,
+                WindowControlArea::Close,
+            ))
+    }
+
+    fn render_window_control_button(
+        &self,
+        id: &'static str,
+        icon: ToolbarIcon,
+        danger: bool,
+        area: WindowControlArea,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .w(px(44.0))
+            .h_full()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .window_control_area(area)
+            .hover(move |this| {
+                if danger {
+                    this.bg(rgb(ui_theme::COLOR_ERROR))
+                } else {
+                    this.bg(rgb(ui_theme::ACCENT))
+                }
+            })
+            .child(toolbar_icon_with_size(icon, ui_theme::FOREGROUND, 12.0, 16.0))
     }
 
     /// 工具栏操作按钮：图标 + 中文标签 + 可选差异数角标
@@ -8923,6 +9044,13 @@ impl RepositoryView {
                 cx.stop_propagation();
             })
             .child(self.toolbar_more_menu_item(
+                "克隆",
+                ToolbarIcon::Clone,
+                toolbar_more_action_enabled(ToolbarMoreAction::Clone, repo_open, self.busy),
+                |this, window, _cx| this.open_clone_dialog(window),
+                cx,
+            ))
+            .child(self.toolbar_more_menu_item(
                 "贮藏",
                 ToolbarIcon::Stash,
                 toolbar_more_action_enabled(ToolbarMoreAction::Stash, repo_open, self.busy),
@@ -9024,10 +9152,6 @@ impl RepositoryView {
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.tabs.is_empty() {
-            return div().into_any_element();
-        }
-
         let handle = self.scroll_handle("repo-tab-bar-scroll");
         let content = div()
             .id("repo-tab-bar-scroll")
@@ -9036,8 +9160,8 @@ impl RepositoryView {
             .gap_1()
             .min_w(px(0.0))
             .w_full()
+            .h(px(36.0))
             .px_2()
-            .py_1()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
             .bg(rgb(ui_theme::CARD))
@@ -9048,6 +9172,28 @@ impl RepositoryView {
                     .iter()
                     .map(|tab| self.render_repo_tab(tab, cx).into_any_element())
                     .collect::<Vec<_>>(),
+            )
+            .child(
+                div()
+                    .id("repo-tab-add")
+                    .flex()
+                    .flex_none()
+                    .size(px(28.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.browse_open();
+                        cx.stop_propagation();
+                    }))
+                    .child(toolbar_icon_with_size(
+                        ToolbarIcon::Plus,
+                        ui_theme::MUTED_FOREGROUND,
+                        14.0,
+                        14.0,
+                    )),
             )
             .into_any_element();
 
@@ -9076,23 +9222,15 @@ impl RepositoryView {
             .flex()
             .flex_none()
             .items_center()
-            .gap_2()
-            .w(px(214.0))
-            .min_w(px(120.0))
-            .max_w(px(280.0))
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
+            .gap(px(6.0))
+            .max_w(px(220.0))
+            .px(px(14.0))
+            .py(px(6.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .bg(if selected {
-                rgb(ui_theme::CARD)
-            } else {
                 rgb(ui_theme::ACCENT)
+            } else {
+                rgb(ui_theme::CARD)
             })
             .cursor_pointer()
             .hover(|this| {
@@ -9106,10 +9244,20 @@ impl RepositoryView {
                 this.activate_tab(id);
                 cx.notify();
             }))
+            .child(toolbar_icon_with_size(
+                ToolbarIcon::Open,
+                if selected {
+                    ui_theme::PRIMARY
+                } else {
+                    ui_theme::MUTED_FOREGROUND
+                },
+                12.0,
+                12.0,
+            ))
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.0))
+                    .max_w(px(150.0))
                     .text_size(px(12.0))
                     .text_color(if selected {
                         rgb(ui_theme::FOREGROUND)
@@ -9122,16 +9270,14 @@ impl RepositoryView {
             .child(
                 div()
                     .id(format!("repo-tab-close-{}", id.0))
+                    .flex()
                     .flex_none()
-                    .px_1()
-                    .text_size(px(12.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    })
+                    .size(px(14.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.0))
                     .cursor_pointer()
-                    .hover(|this| this.text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND)))
+                    .hover(|this| this.bg(rgb(ui_theme::COLOR_ERROR)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -9140,7 +9286,12 @@ impl RepositoryView {
                         cx.stop_propagation();
                         cx.notify();
                     }))
-                    .child("x"),
+                    .child(toolbar_icon_with_size(
+                        ToolbarIcon::Close,
+                        ui_theme::MUTED_FOREGROUND,
+                        10.0,
+                        12.0,
+                    )),
             )
     }
 
@@ -10433,17 +10584,46 @@ impl RepositoryView {
 
     fn render_status(&self) -> impl IntoElement {
         let status_label = if self.busy { "运行中" } else { "就绪" };
+        let branch = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.head.as_deref())
+            .unwrap_or("未打开仓库");
+        let staged_count = self.change_indexes.staged.len();
+        let unstaged_count = self.change_indexes.unstaged.len();
         div()
             .flex()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
+            .gap(px(8.0))
+            .h(px(24.0))
+            .px(px(16.0))
             .border_t_1()
             .border_color(rgb(ui_theme::BORDER))
             .bg(rgb(ui_theme::CARD))
-            .text_size(px(12.0))
-            .child(status_pill(status_label, self.busy))
+            .text_size(px(10.0))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(if self.busy {
+                        ui_theme::PRIMARY
+                    } else {
+                        ui_theme::GIT_ADDED
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(status_label),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(branch.to_string()),
+            )
             .child(
                 div()
                     .flex_1()
@@ -10461,12 +10641,23 @@ impl RepositoryView {
                     }),
             )
             .when_some(self.last_error.clone(), |this, error| {
-                this.child(inline_error_bubble(format!("错误：{error}")))
+                this.child(
+                    div()
+                        .max_w(px(360.0))
+                        .truncate()
+                        .text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND))
+                        .child(format!("错误：{error}")),
+                )
             })
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!("{unstaged_count} 未暂存 · {staged_count} 已暂存")),
+            )
+            .child(
+                div()
+                    .flex_none()
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("v{}", env!("CARGO_PKG_VERSION")))
             )
@@ -12750,6 +12941,8 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Khaslana".into()),
+                        // 隐藏 Windows 原生标题栏，由主工具栏承载拖动和窗口控制。
+                        appears_transparent: true,
                         ..Default::default()
                     }),
                     ..Default::default()

@@ -202,10 +202,18 @@ pub(crate) fn pill_badge(
 }
 
 /// 模式切换药丸按钮（工作区/提交记录/工作流）
-pub(crate) fn mode_pill(id: String, label: &'static str, active: bool) -> Stateful<Div> {
+pub(crate) fn mode_pill(
+    id: String,
+    label: &'static str,
+    icon: Option<ToolbarIcon>,
+    active: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
+        .flex()
         .flex_none()
+        .items_center()
+        .gap(px(6.0))
         .rounded(px(theme::RADIUS_PILL))
         .px(px(14.0))
         .py(px(6.0))
@@ -226,6 +234,16 @@ pub(crate) fn mode_pill(id: String, label: &'static str, active: bool) -> Statef
             gpui::FontWeight::SEMIBOLD
         } else {
             gpui::FontWeight::MEDIUM
+        })
+        .when_some(icon, |this, icon| {
+            this.child(toolbar_icon(
+                icon,
+                if active {
+                    theme::PRIMARY_FOREGROUND
+                } else {
+                    theme::MUTED_FOREGROUND
+                },
+            ))
         })
         .child(label)
 }
