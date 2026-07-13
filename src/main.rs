@@ -5067,6 +5067,13 @@ impl RepositoryView {
             if self.credential_username.value.trim().is_empty() {
                 self.credential_username.set_value("git");
             }
+            if let Some(ssh_url) = ssh_credentials::http_remote_to_ssh(
+                &self.credential_remote_url.value,
+                &self.credential_username.value,
+            ) {
+                self.credential_remote_url.set_value(ssh_url.clone());
+                self.status = format!("已将适用远端地址切换为 SSH：{ssh_url}");
+            }
             self.discover_ssh_credentials_if_needed();
         }
     }
@@ -5167,7 +5174,16 @@ impl RepositoryView {
             operation_id: None,
         });
         if inferred_mode != self.credential_form_mode {
-            self.last_error = Some("凭据类型与远端 URL 协议不匹配".into());
+            self.last_error = Some(match self.credential_form_mode {
+                CredentialFormMode::Ssh => {
+                    "当前“适用远端 URL”不是 SSH 地址，请使用 git@主机:仓库路径 或 ssh:// 地址"
+                        .into()
+                }
+                CredentialFormMode::Https => {
+                    "当前“适用远端 URL”不是 HTTP(S) 地址，请切换到 SSH 凭据或修改地址"
+                        .into()
+                }
+            });
             return;
         }
         let username = self

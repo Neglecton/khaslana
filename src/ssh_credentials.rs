@@ -163,6 +163,36 @@ pub(crate) fn ssh_username_from_url(url: &str) -> Option<String> {
     (host_and_path.contains(':') && !username.is_empty()).then(|| username.to_string())
 }
 
+/// 将常见的 HTTP(S) Git 远端地址转换为 SCP 风格 SSH 地址。
+pub(crate) fn http_remote_to_ssh(url: &str, username: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))?;
+    let (authority, path) = rest.split_once('/')?;
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = if authority.starts_with('[') {
+        authority.split_once(']')?.0.trim_start_matches('[')
+    } else {
+        authority.split(':').next()?
+    };
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    let username = username.trim();
+    let username = if username.is_empty() { "git" } else { username };
+    if host.contains(':') {
+        Some(format!("ssh://{username}@[{host}]/{path}"))
+    } else {
+        Some(format!("{username}@{host}:{path}"))
+    }
+}
+
 fn ssh_agent_identities() -> Vec<String> {
     let mut command = Command::new("ssh-add");
     command.arg("-l");
@@ -397,5 +427,19 @@ mod tests {
             Some("alice")
         );
         assert_eq!(ssh_username_from_url("https://example.com/repo"), None);
+    }
+
+    #[test]
+    fn converts_common_https_remote_to_ssh() {
+        assert_eq!(
+            http_remote_to_ssh("https://github.com/owner/repo.git", "git").as_deref(),
+            Some("git@github.com:owner/repo.git")
+        );
+        assert_eq!(
+            http_remote_to_ssh("https://git.example.com:8443/team/repo.git", "alice")
+                .as_deref(),
+            Some("alice@git.example.com:team/repo.git")
+        );
+        assert_eq!(http_remote_to_ssh("git@example.com:repo.git", "git"), None);
     }
 }
