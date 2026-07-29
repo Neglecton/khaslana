@@ -170,6 +170,24 @@ fn clone_dialog_defaults_to_recursive_submodules() {
 }
 
 #[test]
+fn change_list_indexes_keep_large_staged_and_unstaged_lists_separate() {
+    let changes = (0..20_000)
+        .map(|index| khaslana::WorktreeChange {
+            path: format!("generated/file-{index}.txt"),
+            staged: (index % 2 == 0).then_some(ChangeState::Added),
+            unstaged: (index % 3 != 0).then_some(ChangeState::Modified),
+        })
+        .collect::<Vec<_>>();
+
+    let indexes = ChangeListIndexes::rebuild(&changes);
+
+    assert_eq!(indexes.for_scope(&DiffScope::Staged).len(), 10_000);
+    assert_eq!(indexes.for_scope(&DiffScope::Unstaged).len(), 13_333);
+    assert_eq!(indexes.for_scope(&DiffScope::Staged)[..3], [0, 2, 4]);
+    assert_eq!(indexes.for_scope(&DiffScope::Unstaged)[..3], [1, 2, 4]);
+}
+
+#[test]
 fn toolbar_more_menu_actions_keep_original_enabled_rules() {
     assert!(toolbar_more_action_enabled(
         ToolbarMoreAction::Clone,

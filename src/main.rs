@@ -20,6 +20,8 @@ mod system;
 mod tasks;
 mod text_input;
 mod theme_view;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod ui_helpers;
 mod workflow_view;
@@ -273,6 +275,7 @@ pub(crate) enum DialogState {
         kind: RemoteBranchOperationKind,
     },
     ConfirmConflictResolve,
+    ConfirmWindowClose,
     // ── 更新对话框 ──
     UpdateSettings,
     NewVersionAvailable {
@@ -413,6 +416,13 @@ impl ChangeListIndexes {
             }
         }
         indexes
+    }
+
+    fn for_scope(&self, scope: &DiffScope) -> &[usize] {
+        match scope {
+            DiffScope::Staged => &self.staged,
+            DiffScope::Unstaged => &self.unstaged,
+        }
     }
 }
 
@@ -1908,6 +1918,12 @@ pub(crate) struct RepositoryView {
     next_feedback_id: u64,
     progress_phase: u64,
     pub(crate) active_dialog: Option<DialogState>,
+    dialog_before_window_close: Option<DialogState>,
+    exit_requested: bool,
+    #[cfg(windows)]
+    tray: Option<tray::TrayController>,
+    #[cfg(windows)]
+    tray_error: Option<String>,
     pub(crate) branch_context_menu: Option<BranchContextMenu>,
     pub(crate) remote_context_menu: Option<RemoteContextMenu>,
     change_context_menu: Option<ChangeContextMenu>,
@@ -1997,6 +2013,11 @@ impl RepositoryView {
         let external_merge_settings = Self::load_external_merge_settings(&storage);
         let theme_mode = Self::load_theme_mode(&storage);
         let proxy_custom = proxy_settings.custom.normalized();
+        #[cfg(windows)]
+        let (tray, tray_error) = match tray::TrayController::new() {
+            Ok(tray) => (Some(tray), None),
+            Err(error) => (None, Some(error)),
+        };
         Self::spawn_event_pump(rx.clone(), cx);
         Self::spawn_ui_tick(tx.clone());
         let tasks = TaskExecutor::new();
@@ -2053,6 +2074,12 @@ impl RepositoryView {
             next_feedback_id: 0,
             progress_phase: 0,
             active_dialog: None,
+            dialog_before_window_close: None,
+            exit_requested: false,
+            #[cfg(windows)]
+            tray,
+            #[cfg(windows)]
+            tray_error,
             branch_context_menu: None,
             remote_context_menu: None,
             change_context_menu: None,
@@ -2744,6 +2771,7 @@ impl RepositoryView {
                 let now = Instant::now();
                 self.feedbacks.retain(|feedback| !feedback.is_expired(now));
                 self.sync_conflict_editor_into_state();
+                self.handle_tray_action(cx);
                 // 操作遮罩层有延迟显示阈值；UiTick 到达阈值时触发重绘让遮罩层出现。
                 if self.active_operation_blocker_message().is_some() {
                     cx.notify();
@@ -4582,6 +4610,10 @@ impl RepositoryView {
     }
 
     pub(crate) fn close_dialog(&mut self) {
+        if self.active_dialog == Some(DialogState::ConfirmWindowClose) {
+            self.cancel_window_close();
+            return;
+        }
         let closing_submodule_manager = self.active_dialog == Some(DialogState::SubmoduleManager);
         self.active_dialog = None;
         self.remote_branch_operation.branch_dropdown_open = false;
@@ -4591,6 +4623,99 @@ impl RepositoryView {
             self.submodule_dialog.invalidate();
         }
         self.last_error = None;
+    }
+
+    fn request_window_close(&mut self) {
+        if self.active_dialog == Some(DialogState::ConfirmWindowClose) {
+            return;
+        }
+        // 关闭确认临时覆盖已有弹窗；用户取消时恢复，避免丢失尚未保存的表单。
+        let previous_dialog = self.active_dialog.take();
+        self.close_popups();
+        self.dialog_before_window_close = previous_dialog;
+        self.active_dialog = Some(DialogState::ConfirmWindowClose);
+        self.last_error = None;
+    }
+
+    fn cancel_window_close(&mut self) {
+        self.active_dialog = self.dialog_before_window_close.take();
+        self.last_error = None;
+    }
+
+    fn should_close_window(&mut self) -> bool {
+        if self.exit_requested {
+            return true;
+        }
+        self.request_window_close();
+        false
+    }
+
+    fn exit_application(&mut self, cx: &mut Context<Self>) {
+        self.exit_requested = true;
+        self.dialog_before_window_close = None;
+        cx.quit();
+    }
+
+    fn minimize_to_tray(&mut self, window: &Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            let result = self
+                .tray
+                .as_mut()
+                .ok_or_else(|| {
+                    self.tray_error
+                        .clone()
+                        .unwrap_or_else(|| "系统托盘不可用".to_string())
+                })
+                .and_then(|tray| tray.hide_window(window));
+            match result {
+                Ok(()) => {
+                    self.active_dialog = None;
+                    self.dialog_before_window_close = None;
+                    self.last_error = None;
+                }
+                Err(error) => {
+                    self.last_error = Some(error);
+                    self.notify_error("无法缩小到系统托盘", cx);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = window;
+            self.last_error = Some("当前平台暂不支持缩小到系统托盘".to_string());
+            self.notify_error("无法缩小到系统托盘", cx);
+        }
+    }
+
+    #[cfg(windows)]
+    fn attach_window_to_tray(&mut self, window: &Window) {
+        let result = self.tray.as_mut().map(|tray| tray.attach_window(window));
+        if let Some(Err(error)) = result {
+            self.tray = None;
+            self.tray_error = Some(error);
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn attach_window_to_tray(&mut self, _window: &Window) {}
+
+    fn handle_tray_action(&mut self, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            let action = self.tray.as_ref().and_then(|tray| tray.next_action());
+            match action {
+                Some(tray::TrayAction::Show) => {
+                    if let Some(tray) = self.tray.as_ref() {
+                        tray.show_window();
+                    }
+                }
+                Some(tray::TrayAction::Exit) => self.exit_application(cx),
+                None => {}
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = cx;
     }
 
     fn close_credential_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -10047,39 +10172,10 @@ impl RepositoryView {
     }
 
     fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (staged_rows, unstaged_rows) = if let Some(snapshot) = self.snapshot.as_ref() {
-            let staged_rows = self
-                .change_indexes
-                .staged
-                .iter()
-                .filter_map(|index| snapshot.changes.get(*index))
-                .cloned()
-                .map(|change| {
-                    self.change_row(change, DiffScope::Staged, cx)
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>();
-            let unstaged_rows = self
-                .change_indexes
-                .unstaged
-                .iter()
-                .filter_map(|index| snapshot.changes.get(*index))
-                .cloned()
-                .map(|change| {
-                    self.change_row(change, DiffScope::Unstaged, cx)
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>();
-            (staged_rows, unstaged_rows)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let has_staged_selection = !self.change_selection.staged.is_empty();
-        let has_unstaged_selection = !self.change_selection.unstaged.is_empty();
-        let has_staged = !staged_rows.is_empty();
-        let has_unstaged = !unstaged_rows.is_empty();
-        let staged_count = staged_rows.len();
-        let unstaged_count = unstaged_rows.len();
+        let staged_count = self.change_indexes.staged.len();
+        let unstaged_count = self.change_indexes.unstaged.len();
+        let has_staged = staged_count > 0;
+        let has_unstaged = unstaged_count > 0;
 
         app_panel()
             .flex()
@@ -10094,15 +10190,13 @@ impl RepositoryView {
                 this.child(banner)
             })
             .child(self.render_conflict_section(cx))
-            .child(self.render_change_section(
+            .child(self.render_virtual_change_section(
                 "已暂存变更",
                 "staged-change-list",
                 "暂存区加载中...",
                 self.loading.staged(),
-                staged_rows,
-                has_staged || self.loading.staged(),
                 staged_count,
-                true,
+                DiffScope::Staged,
                 vec![
                         // 设计图：minus 图标按钮 22×22，取消暂存全部
                         self.change_icon_button(
@@ -10116,15 +10210,13 @@ impl RepositoryView {
                     ],
                 cx,
             ))
-            .child(self.render_change_section(
+            .child(self.render_virtual_change_section(
                 "未暂存变更",
                 "unstaged-change-list",
                 "修改区加载中...",
                 self.loading.unstaged(),
-                unstaged_rows,
-                has_unstaged || self.loading.unstaged(),
                 unstaged_count,
-                false,
+                DiffScope::Unstaged,
                 vec![
                         // 设计图：plus 图标按钮 22×22，暂存全部
                         self.change_icon_button(
@@ -10148,24 +10240,18 @@ impl RepositoryView {
             ))
     }
 
-    fn render_change_section(
+    fn render_virtual_change_section(
         &self,
         title: &'static str,
         id: &'static str,
         loading_text: &'static str,
         loading: bool,
-        rows: Vec<gpui::AnyElement>,
-        content_present: bool,
         count: usize,
-        is_staged: bool,
+        scope: DiffScope,
         actions: Vec<gpui::AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let rows = if rows.is_empty() && loading {
-            vec![placeholder_row(loading_text).into_any_element()]
-        } else {
-            rows
-        };
+        let is_staged = scope == DiffScope::Staged;
 
         // 设计图：
         // 未暂存变更标题 + 计数 badge（SECONDARY bg / SECONDARY_FOREGROUND fg）
@@ -10199,6 +10285,166 @@ impl RepositoryView {
         };
 
         // 设计图：已暂存标题上下都有 border（分割线），未暂存标题只有下 border
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .when(is_staged, |this| {
+                this.border_t_1().border_color(rgb(ui_theme::BORDER))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child(title),
+                            )
+                            .when_some(count_badge, |this, badge| this.child(badge)),
+                    )
+                    .child(div().flex().items_center().gap(px(4.0)).children(actions)),
+            )
+            .child({
+                let handle = self.uniform_scroll_handle(id);
+                let list_handle = handle.clone();
+                let scope_for_list = scope.clone();
+                let empty_text = if loading {
+                    loading_text
+                } else if is_staged {
+                    "暂无已暂存变更"
+                } else {
+                    "暂无未暂存变更"
+                };
+                let content = div()
+                    .id(id)
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .child(
+                        // 上万文件时仅为当前可见范围构造行，避免每次重绘创建全部元素。
+                        uniform_list(
+                            id,
+                            count.max(1),
+                            cx.processor(
+                                move |this, range: std::ops::Range<usize>, _window, cx| {
+                                    if count == 0 {
+                                        return range
+                                            .map(|_| placeholder_row(empty_text).into_any_element())
+                                            .collect::<Vec<_>>();
+                                    }
+                                    let indexes = this.change_indexes.for_scope(&scope_for_list);
+                                    range
+                                        .map(|row_index| {
+                                            indexes
+                                                .get(row_index)
+                                                .and_then(|change_index| {
+                                                    this.snapshot.as_ref().and_then(|snapshot| {
+                                                        snapshot.changes.get(*change_index)
+                                                    })
+                                                })
+                                                .cloned()
+                                                .map(|change| {
+                                                    this.change_row(
+                                                        change,
+                                                        scope_for_list.clone(),
+                                                        cx,
+                                                    )
+                                                    .into_any_element()
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    placeholder_row("").into_any_element()
+                                                })
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            ),
+                        )
+                        .track_scroll(&list_handle)
+                        .with_sizing_behavior(ListSizingBehavior::Auto)
+                        .flex_1()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .min_h(px(0.0)),
+                    )
+                    .into_any_element();
+                scrollable_uniform_frame(
+                    id,
+                    ScrollbarMode::Vertical,
+                    content,
+                    handle,
+                    count > 0,
+                    cx,
+                )
+            })
+    }
+
+    fn render_change_section(
+        &self,
+        title: &'static str,
+        id: &'static str,
+        loading_text: &'static str,
+        loading: bool,
+        rows: Vec<gpui::AnyElement>,
+        content_present: bool,
+        count: usize,
+        is_staged: bool,
+        actions: Vec<gpui::AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = if rows.is_empty() && loading {
+            vec![placeholder_row(loading_text).into_any_element()]
+        } else {
+            rows
+        };
+        let badge_bg = if is_staged {
+            ui_theme::PRIMARY
+        } else {
+            ui_theme::SECONDARY
+        };
+        let badge_fg = if is_staged {
+            ui_theme::PRIMARY_FOREGROUND
+        } else {
+            ui_theme::SECONDARY_FOREGROUND
+        };
+        let count_badge = if count > 0 {
+            Some(
+                div()
+                    .flex_none()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(ui_theme::RADIUS_PILL))
+                    .bg(rgb(badge_bg))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(badge_fg))
+                    .child(count.to_string())
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // 冲突工作台仍使用自定义行；保留普通滚动容器，避免改变既有交互。
         div()
             .flex()
             .flex_col()
@@ -10469,6 +10715,9 @@ impl RepositoryView {
         )
         .flex()
         .flex_none()
+        .w_full()
+        .min_w(px(0.0))
+        .h(px(CHANGE_ROW_HEIGHT))
         .items_center()
         .gap(px(8.0))
         .px(px(16.0))
@@ -11138,6 +11387,9 @@ impl RepositoryView {
             DialogState::ConfirmConflictResolve => self
                 .render_confirm_conflict_resolve_dialog(cx)
                 .into_any_element(),
+            DialogState::ConfirmWindowClose => self
+                .render_confirm_window_close_dialog(cx)
+                .into_any_element(),
             // ── 更新对话框 ──
             DialogState::UpdateSettings => self
                 .render_update_settings_dialog(cx)
@@ -11219,6 +11471,39 @@ impl RepositoryView {
                                 cx,
                             )),
                     ),
+            )
+    }
+
+    fn render_confirm_window_close_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.dialog_panel("关闭 Khaslana", cx)
+            .w(px(520.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("要直接退出应用，还是让 Khaslana 继续在系统托盘中运行？"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("缩小到托盘后，可点击托盘图标恢复主窗口，或从托盘菜单退出。"),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", true, |this, _, _| this.cancel_window_close(), cx))
+                    .child(self.primary_button(
+                        "缩小到托盘",
+                        true,
+                        |this, window, cx| this.minimize_to_tray(window, cx),
+                        cx,
+                    ))
+                    .child(self.danger_button(
+                        "直接退出",
+                        true,
+                        |this, _, cx| this.exit_application(cx),
+                        cx,
+                    )),
             )
     }
 
@@ -13228,6 +13513,7 @@ fn main() {
                 |window, cx| {
                     let view = cx.new(RepositoryView::new_with_session);
                     view.update(cx, |this, cx| {
+                        this.attach_window_to_tray(window);
                         this.apply_theme_for_appearance(window.appearance(), cx);
                         // 跟随系统模式在系统深浅色变化时即时刷新；固定模式也会保持所选色板。
                         cx.observe_window_appearance(window, |this, window, cx| {
@@ -13235,6 +13521,16 @@ fn main() {
                             window.refresh();
                         })
                         .detach();
+                    });
+                    let weak_view = view.downgrade();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        weak_view
+                            .update(cx, |this, cx| {
+                                let should_close = this.should_close_window();
+                                cx.notify();
+                                should_close
+                            })
+                            .unwrap_or(true)
                     });
                     window.focus(&view.read(cx).focus_handle(cx));
                     view

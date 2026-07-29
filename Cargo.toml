@@ -36,6 +36,11 @@ ureq = { version = "2", features = ["json"] }
 unicode-segmentation = "1"
 yororen_ui = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+tray-icon = { version = "0.24.2", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 tempfile = "3"
 
