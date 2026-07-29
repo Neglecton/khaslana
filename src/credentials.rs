@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -805,7 +806,8 @@ pub fn test_credential_connection(
         .ok_or_else(|| GitError::Credential("系统凭据管理器中未找到该凭据密文".to_string()))?;
     let request = CredentialRequest {
         url: record.remote_url.clone(),
-        username_from_url: Some(record.username.clone()),
+        username_from_url: ssh_username_from_remote_url(&record.remote_url)
+            .or_else(|| Some(record.username.clone())),
         allowed_types: match record.kind {
             StoredCredentialKind::HttpsUserPass => CredentialType::USER_PASS_PLAINTEXT,
             StoredCredentialKind::SshKey => CredentialType::SSH_KEY,
@@ -818,16 +820,86 @@ pub fn test_credential_connection(
     let repo = git2::Repository::init_bare(&temp)?;
     let mut remote = repo.remote_anonymous(&record.remote_url)?;
     let mut callbacks = git2::RemoteCallbacks::new();
+    let callback_credential = credential.clone();
+    let mut credential_attempted = false;
     callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
-        to_git_credential(&request, credential.clone())
+        if credential_attempted {
+            return Err(git2::Error::from_str("SSH/HTTPS 凭据已尝试，远端拒绝认证"));
+        }
+        credential_attempted = true;
+        to_git_credential(&request, callback_credential.clone())
     });
-    {
-        let _connection = remote
-            .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
-            .map_err(GitError::from)?;
-    }
+    let result = remote
+        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+        .map(|_| ())
+        .map_err(GitError::from);
     let _ = fs::remove_dir_all(temp);
-    Ok(())
+    match result {
+        Ok(()) => Ok(()),
+        Err(libgit2_error) if record.kind == StoredCredentialKind::SshKey => {
+            // Windows 上 libssh2 对部分 OpenSSH 私钥格式兼容性有限，使用系统 Git 复核同一凭据。
+            test_ssh_credential_with_system_git(&record.remote_url, &credential).map_err(
+                |system_error| {
+                    GitError::Credential(format!(
+                        "libgit2 测试失败：{libgit2_error}；系统 Git/OpenSSH 复核失败：{system_error}"
+                    ))
+                },
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ssh_username_from_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("ssh://") {
+        return rest
+            .split(['/', '?', '#'])
+            .next()
+            .and_then(|authority| authority.rsplit_once('@').map(|(username, _)| username))
+            .filter(|username| !username.is_empty())
+            .map(str::to_string);
+    }
+    let (username, host_and_path) = trimmed.split_once('@')?;
+    (host_and_path.contains(':') && !username.is_empty()).then(|| username.to_string())
+}
+
+fn test_ssh_credential_with_system_git(url: &str, credential: &GitCredential) -> Result<()> {
+    let ssh_command = git_ssh_command_for_credential(credential)
+        .ok_or_else(|| GitError::Credential("所选记录不是 SSH 凭据".to_string()))?;
+    let output = Command::new("git")
+        .args(["ls-remote", "--exit-code", url, "HEAD"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_SSH_COMMAND", ssh_command)
+        .output()
+        .map_err(|error| GitError::Credential(format!("无法启动系统 Git：{error}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(GitError::Credential(if stderr.is_empty() {
+        format!("系统 Git 返回状态 {}", output.status)
+    } else {
+        stderr
+    }))
+}
+
+fn git_ssh_command_for_credential(credential: &GitCredential) -> Option<String> {
+    let GitCredential::SshPassphrase {
+        private_key_path, ..
+    } = credential
+    else {
+        return None;
+    };
+    let options = "-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15";
+    Some(match private_key_path.as_deref() {
+        Some(path) => format!(
+            "ssh -i \"{}\" -o IdentitiesOnly=yes {options}",
+            path.replace('"', "\\\"")
+        ),
+        None => format!("ssh {options}"),
+    })
 }
 
 pub(crate) fn to_git_credential(
@@ -844,6 +916,11 @@ pub(crate) fn to_git_credential(
             passphrase,
             ..
         } => {
+            let username = request
+                .username_from_url
+                .as_deref()
+                .filter(|username| !username.is_empty())
+                .unwrap_or(&username);
             if let Some(private_key_path) = private_key_path {
                 Cred::ssh_key(
                     &username,

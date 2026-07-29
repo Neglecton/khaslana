@@ -17,7 +17,7 @@ use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RemoteCredentialBindings {
@@ -69,6 +69,15 @@ impl Default for UpdatePreferences {
             skipped_version: None,
         }
     }
+}
+
+/// 应用主题偏好。System 会跟随操作系统窗口外观变化。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -220,6 +229,18 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn load_theme_mode(&self) -> Result<ThemeMode> {
+        let conn = self.lock_conn()?;
+        load_theme_mode_from_conn(&conn)
+    }
+
+    pub fn save_theme_mode(&self, mode: ThemeMode) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_theme_mode_tx(&tx, mode)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn import_legacy_json(
         &self,
         paths: &LegacyStoragePaths,
@@ -335,6 +356,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             enabled INTEGER NOT NULL,
             payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS theme_preferences (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            mode TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
         "#,
@@ -635,6 +662,34 @@ fn save_update_preferences_tx(tx: &Transaction<'_>, preferences: &UpdatePreferen
     Ok(())
 }
 
+fn load_theme_mode_from_conn(conn: &Connection) -> Result<ThemeMode> {
+    conn.query_row(
+        "SELECT mode FROM theme_preferences WHERE id = 1",
+        [],
+        |row| {
+            theme_mode_from_db(row.get::<_, String>(0)?).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(err.to_string())),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|mode| mode.unwrap_or_default())
+}
+
+fn save_theme_mode_tx(tx: &Transaction<'_>, mode: ThemeMode) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO theme_preferences (id, mode, updated_at) VALUES (1, ?1, ?2)",
+        params![theme_mode_to_db(mode), now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 fn load_ai_provider_settings_from_conn(conn: &Connection) -> Result<AiProviderSettings> {
     // AI 配置整体存为 JSON payload，便于后续增字段而不改表结构。
     conn.query_row(
@@ -810,6 +865,23 @@ fn network_proxy_mode_from_db(value: String) -> Result<NetworkProxyMode> {
         "system" => Ok(NetworkProxyMode::System),
         "custom" => Ok(NetworkProxyMode::Custom),
         _ => Err(GitError::Message(format!("未知代理模式：{value}"))),
+    }
+}
+
+fn theme_mode_to_db(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::System => "system",
+        ThemeMode::Light => "light",
+        ThemeMode::Dark => "dark",
+    }
+}
+
+fn theme_mode_from_db(value: String) -> Result<ThemeMode> {
+    match value.as_str() {
+        "system" => Ok(ThemeMode::System),
+        "light" => Ok(ThemeMode::Light),
+        "dark" => Ok(ThemeMode::Dark),
+        _ => Err(GitError::Message(format!("未知主题模式：{value}"))),
     }
 }
 

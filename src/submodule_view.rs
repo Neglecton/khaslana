@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use git2::Repository;
-use gpui::{Context, CursorStyle, IntoElement, MouseButton, div, prelude::*, px, rgb, rgba};
+use gpui::{Context, CursorStyle, IntoElement, MouseButton, div, prelude::*, px};
 use khaslana::{SubmoduleInfo, SubmoduleRemoteSyncStatus, SubmoduleState};
 
+use crate::ui::theme::rgb;
 use crate::{
     DialogState, RepositoryView, ScrollbarMode, UiEvent, placeholder_row, scrollable_frame_when,
     send_ui_event, tasks::TaskKind, ui::theme as ui_theme,

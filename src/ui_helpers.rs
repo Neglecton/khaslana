@@ -1,10 +1,11 @@
 use gpui::{
     Bounds, Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, ScrollHandle, SharedString, UniformListScrollHandle, Window, canvas, div, fill,
-    point, prelude::*, px, rgb, rgba,
+    point, prelude::*, px,
 };
 use khaslana::{ChangeState, DiffLineKind, DiffScope};
 
+use crate::ui::theme::{rgb, rgba};
 use crate::{DiffHeaderTarget, RepositoryView, ui::theme as ui_theme};
 
 pub(crate) use crate::ui::theme::ACCENT as COLOR_BLUE_SOFT;

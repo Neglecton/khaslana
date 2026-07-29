@@ -1,5 +1,6 @@
+use crate::ui::theme::rgb;
 use gpui::{
-    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb,
+    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px,
 };
 use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
@@ -171,7 +172,7 @@ impl RepositoryView {
                 .rounded(px(ui_theme::RADIUS_PILL))
                 .border_1()
                 .border_color(rgb(ui_theme::SIDEBAR_BORDER))
-                .bg(rgb(ui_theme::WHITE))
+                .bg(rgb(ui_theme::SIDEBAR))
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(rgb(ui_theme::SIDEBAR_FOREGROUND))
@@ -239,7 +240,7 @@ impl RepositoryView {
             .min_w(px(self.sidebar_width))
             .h_full()
             // 扁平纯色背景，与工具栏保持一致。
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SIDEBAR))
             .pt(px(12.0))
             .child(self.render_nav_section(
                 "本地分支",
@@ -364,7 +365,7 @@ impl RepositoryView {
             .py_2()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SIDEBAR))
             // 复用统一输入框，确保侧边栏搜索也支持现有 IME、选区和光标逻辑。
             .child(self.input(field, true, window, cx))
     }
@@ -430,7 +431,7 @@ impl RepositoryView {
             .bg(rgb(if active {
                 ui_theme::ACCENT
             } else {
-                ui_theme::WHITE
+                ui_theme::SIDEBAR
             }))
             .when(enabled, |this| {
                 this.cursor_pointer()
@@ -618,7 +619,7 @@ impl RepositoryView {
             .bg(if selected {
                 rgb(ui_theme::SIDEBAR_ACCENT)
             } else {
-                rgb(ui_theme::WHITE)
+                rgb(ui_theme::SIDEBAR)
             })
             .hover(move |this| {
                 if selected {
@@ -712,7 +713,7 @@ impl RepositoryView {
             .px(px(16.0))
             .pl(px(24.0))
             .py(px(4.0))
-            .bg(rgb(ui_theme::WHITE))
+            .bg(rgb(ui_theme::SIDEBAR))
             .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .cursor_pointer()
             .child(
@@ -759,7 +760,7 @@ impl RepositoryView {
             .px(px(16.0))
             .pl(px(24.0))
             .py(px(4.0))
-            .bg(rgb(ui_theme::WHITE))
+            .bg(rgb(ui_theme::SIDEBAR))
             .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .cursor_pointer()
             .child(
@@ -814,7 +815,7 @@ impl RepositoryView {
         } else if selected {
             ui_theme::SIDEBAR_ACCENT
         } else {
-            ui_theme::WHITE
+            ui_theme::SIDEBAR
         };
 
         let leading = if is_current {

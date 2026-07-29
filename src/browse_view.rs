@@ -4,9 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::ui::theme::rgb;
 use gpui::{
     ClickEvent, Context, IntoElement, ListHorizontalSizingBehavior, ListSizingBehavior,
-    MouseButton, MouseDownEvent, MouseMoveEvent, div, prelude::*, px, rgb, rgba, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, div, prelude::*, px, uniform_list,
 };
 use khaslana::{BrowseEntry, BrowseEntryKind, BrowseListMode};
 

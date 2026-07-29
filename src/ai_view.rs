@@ -5,12 +5,13 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, IntoElement, Window, div, point, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Window, div, point, prelude::*, px};
 use khaslana::{
     AiApiType, AiReviewResult, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffLineKind,
     DiffScope,
 };
 
+use crate::ui::theme::rgb;
 use crate::{
     FieldId, RepositoryView,
     ui::{components::dialog_actions, theme as ui_theme},

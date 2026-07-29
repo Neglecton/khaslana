@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
+use crate::ui::theme::rgb;
 use gpui::{
-    Context, IntoElement, ListSizingBehavior, PathBuilder, div, point, prelude::*, px, rgb,
-    uniform_list,
+    Context, IntoElement, ListSizingBehavior, PathBuilder, div, point, prelude::*, px, uniform_list,
 };
 use khaslana::{CommitFileChange, CommitInfo, CommitRefInfo, CommitRefKind};
 
@@ -16,8 +16,9 @@ use crate::{
     },
 };
 
-const HISTORY_GRAPH_WIDTH: f32 = 96.0;
-const HISTORY_GRAPH_ROW_HEIGHT: f32 = 42.0;
+// 提交记录采用紧凑列宽；图形单元仍覆盖完整行高，保证相邻行的轨道连续。
+const HISTORY_GRAPH_WIDTH: f32 = 88.0;
+const HISTORY_GRAPH_ROW_HEIGHT: f32 = 36.0;
 // 提交行只直接展示少量引用，剩余引用通过 +n 的悬浮提示查看，避免挤压提交摘要。
 const MAX_COMMIT_REF_LABELS: usize = 3;
 const GRAPH_LANE_START: f32 = 12.0;
@@ -27,6 +28,7 @@ pub(crate) struct CommitGraphRow {
     lane: usize,
     lanes: Vec<usize>,
     connectors: Vec<usize>,
+    connected_from_top: bool,
 }
 
 impl RepositoryView {
@@ -211,9 +213,8 @@ impl RepositoryView {
             .w_full()
             .min_w(px(0.0))
             .items_center()
-            .gap_2()
+            .gap_1()
             .pr_2()
-            .py_1()
             .h(px(HISTORY_GRAPH_ROW_HEIGHT))
             .rounded_sm()
             .cursor_pointer()
@@ -268,9 +269,9 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_none()
-                    .w(px(72.0))
-                    .px_2()
-                    .py_1()
+                    .w(px(68.0))
+                    .px_1()
+                    .py(px(2.0))
                     .rounded_sm()
                     .bg(rgb(ui_theme::ACCENT))
                     .font_family("Consolas, monospace")
@@ -325,7 +326,7 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_none()
-                    .w(px(118.0))
+                    .w(px(100.0))
                     .text_size(px(11.0))
                     .text_color(if selected {
                         rgb(ui_theme::MUTED_FOREGROUND)
@@ -338,7 +339,7 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_none()
-                    .w(px(142.0))
+                    .w(px(128.0))
                     .text_size(px(11.0))
                     .text_color(if selected {
                         rgb(ui_theme::MUTED_FOREGROUND)
@@ -532,18 +533,19 @@ pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
-        let lane = lanes
+        let existing_lane = lanes
             .iter()
-            .position(|oid| oid.as_deref() == Some(commit.oid.as_str()))
-            .unwrap_or_else(|| {
-                if let Some(index) = lanes.iter().position(Option::is_none) {
-                    lanes[index] = Some(commit.oid.clone());
-                    index
-                } else {
-                    lanes.push(Some(commit.oid.clone()));
-                    lanes.len() - 1
-                }
-            });
+            .position(|oid| oid.as_deref() == Some(commit.oid.as_str()));
+        let connected_from_top = existing_lane.is_some();
+        let lane = existing_lane.unwrap_or_else(|| {
+            if let Some(index) = lanes.iter().position(Option::is_none) {
+                lanes[index] = Some(commit.oid.clone());
+                index
+            } else {
+                lanes.push(Some(commit.oid.clone()));
+                lanes.len() - 1
+            }
+        });
         let lanes_before = active_lane_indices(&lanes, lane);
         let mut connectors = Vec::new();
 
@@ -584,6 +586,7 @@ pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
             lane,
             lanes: lanes_before,
             connectors,
+            connected_from_top,
         });
     }
 
@@ -630,9 +633,26 @@ fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
                     let current_lane = graph.lane.min(5);
                     let current_x = bounds.origin.x + px(graph_x(current_lane));
 
-                    for lane in graph.lanes.iter().copied().filter(|lane| *lane <= 5) {
+                    // 当前提交的轨道分段绘制，分支尖端的圆点上方不再出现悬空线段。
+                    for lane in graph
+                        .lanes
+                        .iter()
+                        .copied()
+                        .filter(|lane| *lane <= 5 && *lane != current_lane)
+                    {
                         let x = bounds.origin.x + px(graph_x(lane));
                         paint_graph_line(window, x, top_y, x, bottom_y, graph_color(lane));
+                    }
+
+                    if graph.connected_from_top {
+                        paint_graph_line(
+                            window,
+                            current_x,
+                            top_y,
+                            current_x,
+                            center_y,
+                            graph_color(current_lane),
+                        );
                     }
 
                     for target in graph.connectors.iter().copied().filter(|lane| *lane <= 5) {
@@ -846,5 +866,37 @@ fn commit_ref_kind_label(kind: &CommitRefKind) -> &'static str {
         CommitRefKind::RemoteBranch => "远端分支",
         CommitRefKind::Tag => "标签",
         CommitRefKind::Head => "HEAD",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_commit(oid: &str, parents: &[&str]) -> CommitInfo {
+        CommitInfo {
+            oid: oid.to_string(),
+            short_oid: oid.to_string(),
+            summary: oid.to_string(),
+            author: "测试作者".to_string(),
+            time: 0,
+            parents: parents.iter().map(|parent| (*parent).to_string()).collect(),
+            refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unmerged_branch_tips_do_not_connect_from_top() {
+        let commits = vec![
+            test_commit("feature-tip", &["base"]),
+            test_commit("main-tip", &["base"]),
+            test_commit("base", &[]),
+        ];
+
+        let rows = commit_graph_rows(&commits);
+
+        assert!(!rows[0].connected_from_top);
+        assert!(!rows[1].connected_from_top);
+        assert!(rows[2].connected_from_top);
     }
 }

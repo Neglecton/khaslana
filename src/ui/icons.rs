@@ -1,4 +1,6 @@
-use gpui::{IntoElement, ParentElement, Radians, Styled, Transformation, div, px, rgb, svg};
+use gpui::{IntoElement, ParentElement, Radians, Styled, Transformation, div, px, svg};
+
+use super::theme::rgb;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolbarIcon {

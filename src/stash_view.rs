@@ -2,10 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::ui::theme::rgb;
 use git2::Repository;
-use gpui::{
-    Context, IntoElement, ListSizingBehavior, Window, div, prelude::*, px, rgb, uniform_list,
-};
+use gpui::{Context, IntoElement, ListSizingBehavior, Window, div, prelude::*, px, uniform_list};
 use khaslana::{FileDiff, StashFileChange};
 
 use crate::{

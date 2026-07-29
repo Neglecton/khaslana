@@ -3,11 +3,12 @@ use std::ops::{Deref, DerefMut, Range};
 use gpui::{
     App, Bounds, Context, Element, ElementId, ElementInputHandler, FocusHandle, GlobalElementId,
     IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, Window,
-    fill, point, px, relative, rgb, rgba, size,
+    fill, point, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ui::theme as ui_theme;
+use crate::ui::theme::{rgb, rgba};
 use crate::{FieldId, RepositoryView};
 
 const MULTILINE_LINE_HEIGHT: f32 = 18.0;

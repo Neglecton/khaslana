@@ -4,9 +4,10 @@
 //! 当 `snapshot.rebase_in_progress` 为真时，在工作区顶部显示变基状态条，
 //! 提供"继续变基 / 跳过此提交 / 中止"三个动作。
 
-use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px};
 use khaslana::{BranchName, GitError, RebaseOutcome};
 
+use crate::ui::theme::rgb;
 use crate::{RepositoryView, ui::theme as ui_theme};
 
 impl RepositoryView {

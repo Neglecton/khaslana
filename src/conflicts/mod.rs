@@ -1,8 +1,9 @@
 use std::{ops::Range, path::Path, sync::Arc};
 
+use crate::ui::theme::rgb;
 use gpui::{
     Context, IntoElement, ListHorizontalSizingBehavior, ListSizingBehavior, MouseButton,
-    MouseDownEvent, Window, div, prelude::*, px, rgb, uniform_list,
+    MouseDownEvent, Window, div, prelude::*, px, uniform_list,
 };
 use khaslana::{
     ConflictBlock, ConflictBlockResolution, ConflictBlockStatus, ConflictFileKind,

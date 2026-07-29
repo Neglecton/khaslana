@@ -9,10 +9,11 @@ use std::path::Path;
 
 use gpui::{
     Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, div, prelude::*, px,
-    rgb, uniform_list,
+    uniform_list,
 };
 use khaslana::{BrowseCompareFile, ChangeState};
 
+use crate::ui::theme::rgb;
 use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
     ui::theme as ui_theme,

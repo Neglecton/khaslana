@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
-use gpui::{CursorStyle, Div, IntoElement, MouseButton, div, prelude::*, px, rgb, rgba};
+use gpui::{CursorStyle, Div, IntoElement, MouseButton, div, prelude::*, px};
 
+use crate::ui::theme::{rgb, rgba};
 use crate::{RepositoryView, ui::theme as ui_theme};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

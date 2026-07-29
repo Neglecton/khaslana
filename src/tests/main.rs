@@ -211,6 +211,16 @@ fn toolbar_more_menu_actions_keep_original_enabled_rules() {
         false,
         false
     ));
+    assert!(toolbar_more_action_enabled(
+        ToolbarMoreAction::ThemeSettings,
+        false,
+        false
+    ));
+    assert!(!toolbar_more_action_enabled(
+        ToolbarMoreAction::ThemeSettings,
+        false,
+        true
+    ));
     assert!(!toolbar_more_action_enabled(
         ToolbarMoreAction::Credentials,
         true,

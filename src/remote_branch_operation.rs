@@ -1,6 +1,6 @@
+use crate::ui::theme::rgb;
 use gpui::{
-    Animation, AnimationExt, Context, IntoElement, MouseButton, Window, div, prelude::*, px, rgb,
-    rgba,
+    Animation, AnimationExt, Context, IntoElement, MouseButton, Window, div, prelude::*, px,
 };
 use khaslana::{BranchInfo, BranchKind, RepositorySnapshot};
 use yororen_ui::animation::{constants::duration, ease_out_quint_clamped};

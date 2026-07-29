@@ -429,3 +429,25 @@ fn host_key_distinguishes_protocol_families() {
     assert_eq!(ssh.host_key, "ssh://example.com");
     assert_ne!(https.host_key, ssh.host_key);
 }
+
+#[test]
+fn ssh_username_prefers_remote_url_identity() {
+    assert_eq!(
+        ssh_username_from_remote_url("git@github.com:owner/repo.git").as_deref(),
+        Some("git")
+    );
+    assert_eq!(
+        ssh_username_from_remote_url("ssh://alice@example.com/repo").as_deref(),
+        Some("alice")
+    );
+}
+
+#[test]
+fn system_git_ssh_command_uses_selected_key_and_strict_host_check() {
+    let credential = ssh_credential(CredentialScope::Host, "C:/Users/me/.ssh/id_ed25519");
+    let command = git_ssh_command_for_credential(&credential).unwrap();
+    assert!(command.contains("-i \"C:/Users/me/.ssh/id_ed25519\""));
+    assert!(command.contains("IdentitiesOnly=yes"));
+    assert!(command.contains("BatchMode=yes"));
+    assert!(command.contains("StrictHostKeyChecking=yes"));
+}

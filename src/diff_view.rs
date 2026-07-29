@@ -7,8 +7,9 @@
 //! 当文件体积超过 `FULL_FILE_MAX_BYTES` 时，GitService 层在分配逐行 String 之前
 //! 就会返回 `FULL_FILE_TOO_LARGE_MESSAGE` 错误，UI 据此自动回退到紧凑差异。
 
-use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, MouseButton, MouseDownEvent, div, prelude::*, px};
 
+use crate::ui::theme::rgb;
 use crate::{EncodingMenuTarget, MainMode, RepositoryView, ui::theme as ui_theme};
 
 impl RepositoryView {

@@ -1,6 +1,7 @@
-use gpui::{Context, IntoElement, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::NetworkProxyMode;
 
+use crate::ui::theme::rgb;
 use crate::{
     FieldId, RepositoryView,
     ui::{

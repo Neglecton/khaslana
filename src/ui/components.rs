@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
+use crate::ui::theme::{rgb, rgba};
 use gpui::{
     App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Render, Stateful, Window,
-    div, prelude::*, px, rgb, rgba,
+    div, prelude::*, px,
 };
 use yororen_ui::component::{IconName, icon};
 
@@ -222,7 +223,7 @@ pub(crate) fn mode_pill(
         .bg(if active {
             rgb(theme::PRIMARY)
         } else {
-            rgb(theme::WHITE)
+            rgb(theme::CARD)
         })
         .text_color(if active {
             rgb(theme::PRIMARY_FOREGROUND)

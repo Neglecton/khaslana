@@ -19,6 +19,7 @@ mod submodule_view;
 mod system;
 mod tasks;
 mod text_input;
+mod theme_view;
 mod ui;
 mod ui_helpers;
 mod workflow_view;
@@ -42,7 +43,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
     ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
     WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, point, prelude::*, px,
-    rgb, rgba, size, uniform_list,
+    size, uniform_list,
 };
 use khaslana::{
     AiProviderSettings, AiReviewResult, BranchKind, BranchName, BranchSyncStatus,
@@ -55,7 +56,7 @@ use khaslana::{
     NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
     RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
     RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, SubmoduleInfo,
-    SubmoduleRemoteSyncStatus, TagName, UpdatePreferences, credential_display_target,
+    SubmoduleRemoteSyncStatus, TagName, ThemeMode, UpdatePreferences, credential_display_target,
     credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
     normalize_remote_url, test_credential_connection,
@@ -75,6 +76,7 @@ use submodule_view::{
 };
 use tasks::{TaskExecutor, TaskKind};
 use text_input::{MultiLineInputElement, SingleLineInputElement, TextFieldState};
+use ui::theme::rgb;
 use ui::{
     components::{
         AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
@@ -152,7 +154,7 @@ const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
 const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1760.0;
 const TOOLBAR_MORE_MENU_WIDTH: f32 = 190.0;
-const TOOLBAR_MORE_MENU_HEIGHT: f32 = 256.0;
+const TOOLBAR_MORE_MENU_HEIGHT: f32 = 288.0;
 const TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH: f32 = 76.0;
 const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
@@ -261,6 +263,7 @@ pub(crate) enum DialogState {
     NetworkProxySettings,
     AiProviderSettings,
     ExternalMergeSettings,
+    ThemeSettings,
     StashForm,
     ConfirmDropStash {
         index: usize,
@@ -582,6 +585,7 @@ enum ToolbarMoreAction {
     Proxy,
     AiSettings,
     ExternalMergeSettings,
+    ThemeSettings,
     UpdateSettings,
 }
 
@@ -614,6 +618,7 @@ fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy:
         | ToolbarMoreAction::Proxy
         | ToolbarMoreAction::AiSettings
         | ToolbarMoreAction::ExternalMergeSettings
+        | ToolbarMoreAction::ThemeSettings
         | ToolbarMoreAction::UpdateSettings => !busy,
     }
 }
@@ -1874,6 +1879,7 @@ pub(crate) struct RepositoryView {
     diff_encoding_preferences: DiffEncodingPreferences,
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
+    pub(crate) theme_mode: ThemeMode,
     tabs: Vec<RepoTabState>,
     active_tab: Option<RepoTabId>,
     next_tab_id: u64,
@@ -1989,6 +1995,7 @@ impl RepositoryView {
             Arc::new(Mutex::new(Self::load_remote_credential_bindings(&storage)));
         let proxy_settings = Self::load_proxy_settings(&storage);
         let external_merge_settings = Self::load_external_merge_settings(&storage);
+        let theme_mode = Self::load_theme_mode(&storage);
         let proxy_custom = proxy_settings.custom.normalized();
         Self::spawn_event_pump(rx.clone(), cx);
         Self::spawn_ui_tick(tx.clone());
@@ -2010,6 +2017,7 @@ impl RepositoryView {
                     .expect("diff cache capacity must be nonzero"),
             )),
             proxy_settings: proxy_settings.clone(),
+            theme_mode,
             tabs: Vec::new(),
             active_tab: None,
             next_tab_id: 1,
@@ -8892,6 +8900,18 @@ impl RepositoryView {
                             cx,
                         ))
                         .child(self.render_toolbar_action_button(
+                            "外观",
+                            ToolbarIcon::Globe,
+                            None,
+                            toolbar_more_action_enabled(
+                                ToolbarMoreAction::ThemeSettings,
+                                repo_open,
+                                self.busy,
+                            ),
+                            |this, _, _| this.open_theme_settings(),
+                            cx,
+                        ))
+                        .child(self.render_toolbar_action_button(
                             "更新设置",
                             ToolbarIcon::Update,
                             None,
@@ -9307,6 +9327,13 @@ impl RepositoryView {
                     self.busy,
                 ),
                 |this, _, _| this.open_external_merge_settings(),
+                cx,
+            ))
+            .child(self.toolbar_more_menu_item(
+                "外观",
+                ToolbarIcon::Globe,
+                toolbar_more_action_enabled(ToolbarMoreAction::ThemeSettings, repo_open, self.busy),
+                |this, _, _| this.open_theme_settings(),
                 cx,
             ))
             .child(self.toolbar_more_menu_item(
@@ -11097,6 +11124,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ExternalMergeSettings => self
                 .render_external_merge_settings_dialog(window, cx)
+                .into_any_element(),
+            DialogState::ThemeSettings => self
+                .render_theme_settings_dialog(window, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
@@ -13197,6 +13227,15 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(RepositoryView::new_with_session);
+                    view.update(cx, |this, cx| {
+                        this.apply_theme_for_appearance(window.appearance(), cx);
+                        // 跟随系统模式在系统深浅色变化时即时刷新；固定模式也会保持所选色板。
+                        cx.observe_window_appearance(window, |this, window, cx| {
+                            this.apply_theme_for_appearance(window.appearance(), cx);
+                            window.refresh();
+                        })
+                        .detach();
+                    });
                     window.focus(&view.read(cx).focus_handle(cx));
                     view
                 },

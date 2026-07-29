@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{fs, thread};
 
+use crate::ui::theme::rgb;
 use chrono::{DateTime, Local};
 use directories::BaseDirs;
 use git2::Repository;
-use gpui::{ClickEvent, Context, IntoElement, Window, div, prelude::*, px, rgb};
+use gpui::{ClickEvent, Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::{
     WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
     WorkflowProgressEvent, WorkflowRunOptions, parse_workflow_json5,

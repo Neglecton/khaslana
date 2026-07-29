@@ -63,7 +63,8 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
 - `src/submodule_view.rs`：子模块弹窗 UI 和按需加载/更新动作，包括远端超前/落后状态展示、同步记录版本、更新全部到远端最新和更新单个子模块到远端最新。
-- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 语义色值和状态 token，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
+- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
+- `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色，并同步更新 Yororen 全局主题。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
 - `src/history_view.rs`：提交历史 UI、提交图渲染、提交文件列表、历史 diff。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
@@ -166,6 +167,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 仓库远端到凭据策略的绑定。
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
 - 外部合并工具设置，包括是否启用 IntelliJ IDEA、是否选中冲突文件后自动打开以及可选 IDEA 命令路径。
+- 全局主题偏好，支持跟随系统、浅色和深色。
 - 凭据记录索引等非密元数据。
 
 凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入。
@@ -248,6 +250,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 新增 SSH 凭据时自动检测 `~/.ssh`、SSH config 和 SSH Agent，可一键选择已有身份，也可通过文件框手动选择私钥
 - 凭据保存到系统 Keyring
 - 凭据记录管理、删除、测试连接
+- SSH 凭据测试优先使用 libgit2；Windows 下遇到 OpenSSH 私钥兼容问题时，使用系统 Git/OpenSSH 严格校验 `known_hosts` 并复核所选私钥
 - 远端凭据策略：自动匹配、不使用凭据、绑定指定记录
 
 ### 5.7 网络代理
@@ -256,6 +259,13 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - “使用系统代理”基于 libgit2 的 `GIT_PROXY_AUTO`，读取 Git 代理配置和 `http_proxy` / `https_proxy` 环境变量，不读取系统 UI 代理或 PAC
 - 自定义代理支持 HTTP、HTTPS、SOCKS5 URL；代理认证第一版写在 URL 中
 - clone、fetch、pull、push、删除远端分支和工作流远端步骤共用同一代理策略
+
+### 5.8 外观主题
+
+- 支持跟随系统、浅色和深色三种主题模式
+- 主题可在“外观”设置中即时切换并持久化
+- 跟随系统模式会响应操作系统窗口外观变化
+- Khaslana 语义色、自绘输入框和 Yororen 组件使用一致的深浅色模式
 
 ## 6. 开发命令
 
@@ -302,6 +312,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。
 - 新增或改造 UI 时优先使用 `src/ui/theme.rs` 的语义 token，例如 `SURFACE`、`BORDER`、`TEXT_MUTED`、`ACCENT`、`DANGER`，不要在业务 view 中新增零散十六进制色值。
+- 业务 UI 的语义色必须通过 `src/ui/theme.rs` 导出的主题感知 `rgb` / `rgba` 转换，不能直接调用 GPUI 同名函数解析主题 token。
 - 主界面、弹框和输入框外壳应优先复用 `src/ui/components.rs` 的项目级 helper，例如 `app_panel`、`dialog_panel`、`dialog_overlay`、`input_frame`、`segmented_button`、`list_row_surface`、`status_pill`。业务 view 不应重复实现这些通用外壳。
 - 反馈、toast、错误提示和加载进度必须走 `src/ui/components.rs` 的项目级 helper，例如 `feedback_bubble`、`feedback_stack`、`inline_error_bubble`、`bottom_progress_bar`；操作状态文字只在底部状态栏展示，不再叠加悬浮加载框。业务 view 不应直接使用 Yororen 默认 `notification_host` 或另写零散提示样式。
 - 按钮默认不为 enabled 状态显示 tooltip；只有禁用原因或特殊风险说明才显示提示文字。点击反馈应写入项目级反馈队列，轻量提示放左下角，失败/冲突/凭据等重要提示放右下角。

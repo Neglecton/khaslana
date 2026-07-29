@@ -7,8 +7,9 @@ use std::{
 };
 
 use directories::UserDirs;
-use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px};
 
+use crate::ui::theme::rgb;
 use crate::{RepositoryView, ui::theme as ui_theme};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -217,3 +217,15 @@ fn update_preferences_auto_check_toggle() {
     storage.save_update_preferences(&prefs).unwrap();
     assert!(!storage.load_update_preferences().unwrap().auto_check);
 }
+
+#[test]
+fn theme_mode_defaults_to_system_and_round_trips() {
+    let (_temp, storage) = temp_storage();
+    assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::System);
+
+    storage.save_theme_mode(ThemeMode::Dark).unwrap();
+    assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::Dark);
+
+    storage.save_theme_mode(ThemeMode::Light).unwrap();
+    assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::Light);
+}
