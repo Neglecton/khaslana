@@ -56,7 +56,8 @@ macro_rules! theme_tokens {
             pub(crate) const $name: u32 = THEME_TOKEN_PREFIX | $id;
         )+
 
-        pub(crate) fn resolve_color_for_variant(color: u32, variant: ThemeVariant) -> u32 {
+        /// 解析静态色板 token（主色族 token 不在此处处理，由 accent 预设动态解析）。
+        fn resolve_static_token(color: u32, variant: ThemeVariant) -> u32 {
             match color {
                 $(
                     $name => match variant {
@@ -76,9 +77,6 @@ theme_tokens! {
     2: FOREGROUND => 0x2A2933, 0xE8E8EC;
     3: CARD => 0xffffff, 0x181A20;
     4: CARD_FOREGROUND => 0x2A2933, 0xE8E8EC;
-    5: PRIMARY => 0x5749F4, 0x9A92FF;
-    6: PRIMARY_FOREGROUND => 0xffffff, 0x111318;
-    7: PRIMARY_SUBTLE => 0xE8E6FB, 0x302D55;
     8: SECONDARY => 0xD9D9DB, 0x343740;
     9: SECONDARY_FOREGROUND => 0x2A2933, 0xE8E8EC;
     10: MUTED_FOREGROUND => 0x616167, 0xA8A8B0;
@@ -129,10 +127,8 @@ theme_tokens! {
     45: INPUT_BG => 0xffffff, 0x181A20;
     46: INPUT_BG_FOCUSED => 0xffffff, 0x1C1E25;
     47: INPUT_BORDER => 0xC5C5CB, 0x3E414B;
-    48: INPUT_BORDER_FOCUSED => 0x5749F4, 0x9A92FF;
-    // 自绘输入框通过 rgba 使用占位色；两套色板都显式携带透明度。
+    // 主色族 token（48 INPUT_BORDER_FOCUSED、50 INPUT_SELECTION）见下方 accent 声明。
     49: INPUT_PLACEHOLDER => 0x61616799, 0xA8A8B099;
-    50: INPUT_SELECTION => 0x5749F433, 0x9A92FF55;
     51: INPUT_CARET => 0x2A2933, 0xE8E8EC;
 
     // ── 弹窗和对话 ────────────────────────────────────────
@@ -160,7 +156,7 @@ theme_tokens! {
     69: REF_TAG_BG => 0xFFF2D9, 0x483816;
     70: REF_TAG_BORDER => 0xD4A72C, 0xDDBB4D;
     71: REF_TAG_TEXT => 0x7C5800, 0xF2CC60;
-    72: REF_HEAD_BG => 0x5749F4, 0x9A92FF;
+    // 主色族 token（72 REF_HEAD_BG）见下方 accent 声明。
     73: REF_HEAD_TEXT => 0xffffff, 0x111318;
 
     // ── 反馈/Toast ────────────────────────────────────────
@@ -179,12 +175,206 @@ theme_tokens! {
 
     // ── 进度条 ────────────────────────────────────────────
     86: PROGRESS_TRACK => 0xE0E0E3, 0x343740;
-    87: PROGRESS_FILL => 0x5749F4, 0x9A92FF;
+    // 主色族 token（87 PROGRESS_FILL）见下方 accent 声明。
 
     // ── 滚动条 ────────────────────────────────────────────
     88: SCROLLBAR_TRACK => 0xF5F5F5CC, 0x24262DCC;
     89: SCROLLBAR_THUMB => 0xC5C5CBDD, 0x555863DD;
     90: SCROLLBAR_THUMB_ACTIVE => 0x939399EE, 0x777A86EE;
+}
+
+// ── 主色族 token（受 accent 预设动态控制）─────────────────
+// 这些 token 的真实色值由当前激活的 accent 预设决定，运行时可切换。
+// const 仅声明 token ID，解析在 resolve_accent_token 中完成。
+pub(crate) const PRIMARY: u32 = THEME_TOKEN_PREFIX | 5;
+pub(crate) const PRIMARY_FOREGROUND: u32 = THEME_TOKEN_PREFIX | 6;
+pub(crate) const PRIMARY_SUBTLE: u32 = THEME_TOKEN_PREFIX | 7;
+pub(crate) const INPUT_BORDER_FOCUSED: u32 = THEME_TOKEN_PREFIX | 48;
+pub(crate) const INPUT_SELECTION: u32 = THEME_TOKEN_PREFIX | 50;
+pub(crate) const REF_HEAD_BG: u32 = THEME_TOKEN_PREFIX | 72;
+pub(crate) const PROGRESS_FILL: u32 = THEME_TOKEN_PREFIX | 87;
+
+/// 一个主题色预设的浅色/深色色对。元组按 (浅色, 深色) 顺序。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccentPalette {
+    /// 主色（按钮、选中态、链接）
+    pub primary: (u32, u32),
+    /// 主色上的文字
+    pub foreground: (u32, u32),
+    /// 主色淡背景（hover / 选中底色）
+    pub subtle: (u32, u32),
+    /// 输入框聚焦边框
+    pub focused_border: (u32, u32),
+    /// 输入选区（带透明度）
+    pub selection: (u32, u32),
+    /// HEAD 引用标签底色
+    pub head_bg: (u32, u32),
+    /// 进度条填充色
+    pub progress_fill: (u32, u32),
+}
+
+/// 预置主题色。索引 0「靛蓝」为默认，其值与历史硬编码完全一致（回归保护）。
+/// 其余 8 种按色相环选取，每种均手工调配浅/深与派生色，保证深色下可读性。
+pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
+    // 0 靛蓝（默认，沿用原值）
+    (
+        "靛蓝",
+        AccentPalette {
+            primary: (0x5749F4, 0x9A92FF),
+            foreground: (0xFFFFFF, 0x111318),
+            subtle: (0xE8E6FB, 0x302D55),
+            focused_border: (0x5749F4, 0x9A92FF),
+            selection: (0x5749F433, 0x9A92FF55),
+            head_bg: (0x5749F4, 0x9A92FF),
+            progress_fill: (0x5749F4, 0x9A92FF),
+        },
+    ),
+    // 1 紫罗兰
+    (
+        "紫罗兰",
+        AccentPalette {
+            primary: (0x7C3AED, 0xA78BFA),
+            foreground: (0xFFFFFF, 0x14101F),
+            subtle: (0xEDE5FE, 0x2A1F4A),
+            focused_border: (0x7C3AED, 0xA78BFA),
+            selection: (0x7C3AED33, 0xA78BFA55),
+            head_bg: (0x7C3AED, 0xA78BFA),
+            progress_fill: (0x7C3AED, 0xA78BFA),
+        },
+    ),
+    // 2 玫红
+    (
+        "玫红",
+        AccentPalette {
+            primary: (0xDB2777, 0xF472B6),
+            foreground: (0xFFFFFF, 0x1D0A14),
+            subtle: (0xFCE7F3, 0x3D1428),
+            focused_border: (0xDB2777, 0xF472B6),
+            selection: (0xDB277733, 0xF472B655),
+            head_bg: (0xDB2777, 0xF472B6),
+            progress_fill: (0xDB2777, 0xF472B6),
+        },
+    ),
+    // 3 橙
+    (
+        "橙",
+        AccentPalette {
+            primary: (0xEA580C, 0xFB923C),
+            foreground: (0xFFFFFF, 0x1D0E03),
+            subtle: (0xFFEAD2, 0x3A1E08),
+            focused_border: (0xEA580C, 0xFB923C),
+            selection: (0xEA580C33, 0xFB923C55),
+            head_bg: (0xEA580C, 0xFB923C),
+            progress_fill: (0xEA580C, 0xFB923C),
+        },
+    ),
+    // 4 青
+    (
+        "青",
+        AccentPalette {
+            primary: (0x0891B2, 0x22D3EE),
+            foreground: (0xFFFFFF, 0x04212B),
+            subtle: (0xCFFAFE, 0x0A333D),
+            focused_border: (0x0891B2, 0x22D3EE),
+            selection: (0x0891B233, 0x22D3EE55),
+            head_bg: (0x0891B2, 0x22D3EE),
+            progress_fill: (0x0891B2, 0x22D3EE),
+        },
+    ),
+    // 5 翠绿
+    (
+        "翠绿",
+        AccentPalette {
+            primary: (0x16A34A, 0x4ADE80),
+            foreground: (0xFFFFFF, 0x052114),
+            subtle: (0xDCFCE7, 0x0D3320),
+            focused_border: (0x16A34A, 0x4ADE80),
+            selection: (0x16A34A33, 0x4ADE8055),
+            head_bg: (0x16A34A, 0x4ADE80),
+            progress_fill: (0x16A34A, 0x4ADE80),
+        },
+    ),
+    // 6 石墨
+    (
+        "石墨",
+        AccentPalette {
+            primary: (0x374151, 0x9CA3AF),
+            foreground: (0xFFFFFF, 0x111318),
+            subtle: (0xE5E7EB, 0x262A33),
+            focused_border: (0x374151, 0x9CA3AF),
+            selection: (0x37415133, 0x9CA3AF55),
+            head_bg: (0x374151, 0x9CA3AF),
+            progress_fill: (0x374151, 0x9CA3AF),
+        },
+    ),
+    // 7 金棕
+    (
+        "金棕",
+        AccentPalette {
+            primary: (0xA16207, 0xFACC15),
+            foreground: (0xFFFFFF, 0x1F1804),
+            subtle: (0xFEF3C7, 0x332A0E),
+            focused_border: (0xA16207, 0xFACC15),
+            selection: (0xA1620733, 0xFACC1555),
+            head_bg: (0xA16207, 0xFACC15),
+            progress_fill: (0xA16207, 0xFACC15),
+        },
+    ),
+    // 8 天蓝
+    (
+        "天蓝",
+        AccentPalette {
+            primary: (0x2563EB, 0x60A5FA),
+            foreground: (0xFFFFFF, 0x0A1430),
+            subtle: (0xDBEAFE, 0x122140),
+            focused_border: (0x2563EB, 0x60A5FA),
+            selection: (0x2563EB33, 0x60A5FA55),
+            head_bg: (0x2563EB, 0x60A5FA),
+            progress_fill: (0x2563EB, 0x60A5FA),
+        },
+    ),
+];
+
+/// 当前激活的主题色索引（运行时可切换）。
+static ACTIVE_ACCENT: AtomicU8 = AtomicU8::new(0);
+
+/// 设置当前主题色预设索引。越界时回退到默认（靛蓝）。
+pub(crate) fn set_active_accent(index: usize) {
+    let clamped = if index < ACCENT_PRESETS.len() {
+        index as u8
+    } else {
+        0
+    };
+    ACTIVE_ACCENT.store(clamped, Ordering::Relaxed);
+}
+
+/// 当前激活的主题色预设。
+pub(crate) fn active_accent() -> &'static AccentPalette {
+    let index = ACTIVE_ACCENT.load(Ordering::Relaxed) as usize;
+    ACCENT_PRESETS
+        .get(index)
+        .map(|(_, palette)| palette)
+        .unwrap_or(&ACCENT_PRESETS[0].1)
+}
+
+/// 解析主色族 token：按当前激活的 accent 预设取浅/深值。
+/// 非主色族 token 返回 None，交由静态色板处理。
+fn resolve_accent_token(color: u32, variant: ThemeVariant) -> Option<u32> {
+    let accent = active_accent();
+    let pick = |pair: (u32, u32)| match variant {
+        ThemeVariant::Light => pair.0,
+        ThemeVariant::Dark => pair.1,
+    };
+    match color {
+        PRIMARY => Some(pick(accent.primary)),
+        PRIMARY_FOREGROUND => Some(pick(accent.foreground)),
+        PRIMARY_SUBTLE => Some(pick(accent.subtle)),
+        INPUT_BORDER_FOCUSED => Some(pick(accent.focused_border)),
+        INPUT_SELECTION => Some(pick(accent.selection)),
+        REF_HEAD_BG => Some(pick(accent.head_bg)),
+        PROGRESS_FILL => Some(pick(accent.progress_fill)),
+        _ => None,
+    }
 }
 
 pub(crate) const HISTORY_GRAPH_COLORS: [u32; 8] = [
@@ -197,6 +387,14 @@ pub(crate) const HISTORY_GRAPH_COLORS: [u32; 8] = [
     HISTORY_GRAPH_6,
     HISTORY_GRAPH_7,
 ];
+
+/// 按 variant 解析颜色：主色族 token 走 accent 预设，其余走静态色板，字面颜色原样透传。
+pub(crate) fn resolve_color_for_variant(color: u32, variant: ThemeVariant) -> u32 {
+    if let Some(resolved) = resolve_accent_token(color, variant) {
+        return resolved;
+    }
+    resolve_static_token(color, variant)
+}
 
 pub(crate) fn resolve_color(color: u32) -> u32 {
     resolve_color_for_variant(color, active_variant())
@@ -258,5 +456,73 @@ mod tests {
             variant_for_mode(ThemeMode::Light, WindowAppearance::Dark),
             ThemeVariant::Light
         );
+    }
+
+    #[test]
+    fn accent_presets_have_expected_count_and_default_indigo() {
+        // 预置 9 种主题色
+        assert_eq!(ACCENT_PRESETS.len(), 9);
+        // 默认预设 0 是「靛蓝」，且其主色与历史硬编码值完全一致（回归保护）
+        let (name, palette) = &ACCENT_PRESETS[0];
+        assert_eq!(*name, "靛蓝");
+        assert_eq!(palette.primary, (0x5749F4, 0x9A92FF));
+        assert_eq!(palette.focused_border, (0x5749F4, 0x9A92FF));
+        assert_eq!(palette.selection, (0x5749F433, 0x9A92FF55));
+        assert_eq!(palette.head_bg, (0x5749F4, 0x9A92FF));
+        assert_eq!(palette.progress_fill, (0x5749F4, 0x9A92FF));
+    }
+
+    #[test]
+    fn accent_switching_changes_primary_resolution() {
+        // 重置为默认，避免其他测试干扰
+        set_active_accent(0);
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY, ThemeVariant::Light),
+            0x5749F4
+        );
+        // 切换到紫罗兰（索引 1）
+        set_active_accent(1);
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY, ThemeVariant::Light),
+            0x7C3AED
+        );
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY, ThemeVariant::Dark),
+            0xA78BFA
+        );
+        // 派生 token 也跟随
+        assert_eq!(
+            resolve_color_for_variant(INPUT_BORDER_FOCUSED, ThemeVariant::Light),
+            0x7C3AED
+        );
+        assert_eq!(
+            resolve_color_for_variant(PROGRESS_FILL, ThemeVariant::Dark),
+            0xA78BFA
+        );
+        // 还原默认，避免污染后续测试
+        set_active_accent(0);
+    }
+
+    #[test]
+    fn accent_out_of_range_falls_back_to_default() {
+        set_active_accent(999);
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY, ThemeVariant::Light),
+            0x5749F4
+        );
+        set_active_accent(0);
+    }
+
+    #[test]
+    fn non_accent_tokens_unaffected_by_accent_switch() {
+        set_active_accent(0);
+        let bg_light = resolve_color_for_variant(BACKGROUND, ThemeVariant::Light);
+        set_active_accent(2);
+        // 非主色族 token 不应受 accent 切换影响
+        assert_eq!(
+            resolve_color_for_variant(BACKGROUND, ThemeVariant::Light),
+            bg_light
+        );
+        set_active_accent(0);
     }
 }

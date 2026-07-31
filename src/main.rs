@@ -1890,6 +1890,8 @@ pub(crate) struct RepositoryView {
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
     pub(crate) theme_mode: ThemeMode,
+    /// 当前激活的主题色预设索引（0 = 靛蓝默认）。
+    pub(crate) theme_accent: usize,
     tabs: Vec<RepoTabState>,
     active_tab: Option<RepoTabId>,
     next_tab_id: u64,
@@ -2012,6 +2014,7 @@ impl RepositoryView {
         let proxy_settings = Self::load_proxy_settings(&storage);
         let external_merge_settings = Self::load_external_merge_settings(&storage);
         let theme_mode = Self::load_theme_mode(&storage);
+        let theme_accent = Self::load_theme_accent(&storage);
         let proxy_custom = proxy_settings.custom.normalized();
         #[cfg(windows)]
         let (tray, tray_error) = match tray::TrayController::new() {
@@ -2039,6 +2042,7 @@ impl RepositoryView {
             )),
             proxy_settings: proxy_settings.clone(),
             theme_mode,
+            theme_accent,
             tabs: Vec::new(),
             active_tab: None,
             next_tab_id: 1,

@@ -64,7 +64,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
 - `src/submodule_view.rs`：子模块弹窗 UI 和按需加载/更新动作，包括远端超前/落后状态展示、同步记录版本、更新全部到远端最新和更新单个子模块到远端最新。
 - `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
-- `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色，并同步更新 Yororen 全局主题。
+- `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
 - `src/history_view.rs`：提交历史 UI、提交图渲染、提交文件列表、历史 diff。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
@@ -268,6 +268,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 主题可在“外观”设置中即时切换并持久化
 - 跟随系统模式会响应操作系统窗口外观变化
 - Khaslana 语义色、自绘输入框和 Yororen 组件使用一致的深浅色模式
+- 主题色更换：在外观设置中可从 9 种预置主题色（靛蓝、紫罗兰、玫红、橙、青、翠绿、石墨、金棕、天蓝）中选择，默认为靛蓝。主题色影响主色族（按钮、选中态、链接、输入框聚焦边框/选区、HEAD 标签、进度条等），Yororen 组件的聚焦边框也跟随主题色。主题色预设定义在 `src/ui/theme.rs` 的 `ACCENT_PRESETS`，运行时通过 `ACTIVE_ACCENT` 原子和 `resolve_accent_token` 动态解析，业务 view 无需感知。主题色索引持久化到 `theme_preferences.accent` 列。
 
 ## 6. 开发命令
 
