@@ -67,7 +67,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
-- `src/history_view.rs`：提交历史 UI、提交图渲染、提交文件列表、历史 diff。
+- `src/history_view.rs`：提交历史 UI、提交图泳道分配与可调宽度渲染、提交文件列表、历史 diff。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
@@ -225,6 +225,8 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 - 当前分支 / 所有分支提交历史
 - 拓扑排序提交图
+- 提交图列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位），可见泳道数随列宽动态计算，超出以省略号提示
+- 提交图泳道不按加载窗口剪枝，保证线条跨行连续、跨页加载时上方布局不抖动
 - 提交引用标签，包括本地分支、远端分支、tag、HEAD
 - 分页加载更多
 - 查看提交文件列表

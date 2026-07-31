@@ -1,28 +1,29 @@
-use std::collections::BTreeSet;
-
 use crate::ui::theme::rgb;
 use gpui::{
-    Context, IntoElement, ListSizingBehavior, PathBuilder, div, point, prelude::*, px, uniform_list,
+    Context, CursorStyle, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, div, point, prelude::*, px, uniform_list,
 };
 use khaslana::{CommitFileChange, CommitInfo, CommitRefInfo, CommitRefKind};
 
 use crate::{
     CHANGE_ROW_HEIGHT, DiffHeaderTarget, EncodingMenuTarget, RepositoryView, ResizeTarget,
-    ScrollbarMode, author_avatar, change_state_color, commit_time_label, history_scope_button,
-    placeholder_row, scrollable_uniform_frame, section_header, section_header_action,
+    ScrollbarMode, author_avatar, change_state_color, column_splitter_accepts_mouse_events,
+    column_splitter_should_clear_resize, commit_time_label, history_scope_button, placeholder_row,
+    scrollable_uniform_frame, section_header, section_header_action,
     ui::{
         components::{metric_badge, tooltip_text},
         theme as ui_theme,
     },
 };
 
-// 提交记录采用紧凑列宽；图形单元仍覆盖完整行高，保证相邻行的轨道连续。
-const HISTORY_GRAPH_WIDTH: f32 = 88.0;
+// 提交记录图形单元覆盖完整行高，保证相邻行的轨道连续；列宽由 history_graph_width 状态提供，可拖拽调整。
 const HISTORY_GRAPH_ROW_HEIGHT: f32 = 36.0;
 // 提交行只直接展示少量引用，剩余引用通过 +n 的悬浮提示查看，避免挤压提交摘要。
 const MAX_COMMIT_REF_LABELS: usize = 3;
 const GRAPH_LANE_START: f32 = 12.0;
 const GRAPH_LANE_SPACING: f32 = 14.0;
+// 图形列右侧的拖拽分割条宽度，行内流式排布，自动与图形列对齐。
+const GRAPH_SPLITTER_WIDTH: f32 = 6.0;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommitGraphRow {
     lane: usize,
@@ -66,8 +67,14 @@ impl RepositoryView {
         let content_present = !self.history_commits.is_empty();
         let handle = self.uniform_scroll_handle("commit-history-list");
         let list_handle = handle.clone();
+        // 拖拽提交图列宽时挂载窗口级鼠标事件承载层；无命中区，不拦截列表点击。
+        let graph_resize_overlay = self
+            .resize_state(ResizeTarget::HistoryGraph)
+            .is_some()
+            .then(|| self.history_graph_resize_overlay(cx).into_any_element());
         let content = div()
             .id("commit-history-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -138,6 +145,7 @@ impl RepositoryView {
             .into_any_element();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
@@ -175,6 +183,114 @@ impl RepositoryView {
                 content_present,
                 cx,
             ))
+            .children(graph_resize_overlay)
+    }
+
+    /// 提交图列右侧的行内拖拽分割条：流式排布自动与图形列对齐，吞掉点击避免误选提交。
+    fn render_history_graph_splitter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.resize_state(ResizeTarget::HistoryGraph).is_some();
+        div()
+            .flex_none()
+            .relative()
+            .w(px(GRAPH_SPLITTER_WIDTH))
+            .h_full()
+            .cursor(CursorStyle::ResizeColumn)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    // 阻止冒泡到提交行的 on_click，避免拖拽分割条时误选中提交。
+                    cx.stop_propagation();
+                    if this.active_dialog.is_some() {
+                        this.finish_resize_column(ResizeTarget::HistoryGraph);
+                        cx.notify();
+                        return;
+                    }
+                    if event.click_count >= 2 {
+                        this.reset_resize_target(ResizeTarget::HistoryGraph);
+                    } else {
+                        this.start_resize_column(ResizeTarget::HistoryGraph, event);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(2.0))
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .w(px(1.0))
+                    .bg(if active {
+                        rgb(ui_theme::PRIMARY)
+                    } else {
+                        rgb(ui_theme::BORDER)
+                    }),
+            )
+    }
+
+    /// 拖拽提交图列宽期间的窗口级鼠标事件承载层：无命中区，不拦截列表点击。
+    fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        gpui::canvas(
+            |_, _, _| (),
+            move |_, _, window, _cx| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        let (resizing, active_dialog) = {
+                            let view = entity.read(cx);
+                            (
+                                view.resize_state(ResizeTarget::HistoryGraph).is_some(),
+                                view.active_dialog.is_some(),
+                            )
+                        };
+                        if column_splitter_should_clear_resize(active_dialog, resizing) {
+                            entity.update(cx, |this, cx| {
+                                this.finish_resize_column(ResizeTarget::HistoryGraph);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        if !resizing
+                            || !event.dragging()
+                            || !column_splitter_accepts_mouse_events(active_dialog)
+                        {
+                            return;
+                        }
+                        entity.update(cx, |this, cx| {
+                            this.update_resize_column(ResizeTarget::HistoryGraph, event);
+                            cx.notify();
+                        });
+                    }
+                });
+                window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
+                    let (resizing, active_dialog) = {
+                        let view = entity.read(cx);
+                        (
+                            view.resize_state(ResizeTarget::HistoryGraph).is_some(),
+                            view.active_dialog.is_some(),
+                        )
+                    };
+                    if !resizing {
+                        return;
+                    }
+                    if !column_splitter_accepts_mouse_events(active_dialog)
+                        && !column_splitter_should_clear_resize(active_dialog, resizing)
+                    {
+                        return;
+                    }
+                    entity.update(cx, |this, cx| {
+                        this.finish_resize_column(ResizeTarget::HistoryGraph);
+                        cx.notify();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
     }
 
     fn commit_row(
@@ -265,7 +381,8 @@ impl RepositoryView {
                     cx.notify();
                 }),
             )
-            .child(render_commit_graph_cell(graph))
+            .child(render_commit_graph_cell(graph, self.history_graph_width))
+            .child(self.render_history_graph_splitter(cx))
             .child(
                 div()
                     .flex_none()
@@ -525,10 +642,9 @@ impl RepositoryView {
 }
 
 pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
-    let loaded_oids = commits
-        .iter()
-        .map(|commit| commit.oid.as_str())
-        .collect::<BTreeSet<_>>();
+    // 不再按“已加载窗口”剪枝泳道：revwalk 为完整父提交遍历，未分页到的父提交最终必被加载，
+    // 剪枝只会让合并第二父等泳道在引入行悬空、并在跨页加载时改变上方行的泳道分配，造成断线与抖动。
+    // 保留泳道后，每行状态仅依赖该行及之前的提交，线条跨行连续且跨页前缀稳定。
     let mut lanes = Vec::<Option<String>>::new();
     let mut rows = Vec::with_capacity(commits.len());
 
@@ -572,14 +688,6 @@ pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
             connectors.push(parent_lane);
         }
 
-        for lane in lanes.iter_mut() {
-            if let Some(oid) = lane.as_ref()
-                && !loaded_oids.contains(oid.as_str())
-            {
-                *lane = None;
-            }
-        }
-
         connectors.sort_unstable();
         connectors.dedup();
         rows.push(CommitGraphRow {
@@ -607,30 +715,41 @@ fn active_lane_indices(lanes: &[Option<String>], current_lane: usize) -> Vec<usi
     indices
 }
 
-fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
-    let max_lane = graph
+// 由图形列宽推算最右可绘制泳道索引：为圆点半径与右侧分割条预留空间，避免圆点被分割条遮挡。
+fn graph_max_lane(width: f32) -> usize {
+    let usable = width - GRAPH_LANE_START - 9.0;
+    if usable < 0.0 {
+        0
+    } else {
+        (usable / GRAPH_LANE_SPACING).floor() as usize
+    }
+}
+
+fn render_commit_graph_cell(graph: CommitGraphRow, width: f32) -> impl IntoElement {
+    // 可见泳道上限随列宽动态变化；超出可见范围的轨道不绘制，并以省略号提示。
+    let visible_max = graph_max_lane(width);
+    let overflow = graph
         .lanes
         .iter()
         .chain(graph.connectors.iter())
         .copied()
-        .max()
-        .unwrap_or(graph.lane)
-        .min(5);
+        .chain(std::iter::once(graph.lane))
+        .any(|lane| lane > visible_max);
 
     div()
         .relative()
         .flex_none()
-        .w(px(HISTORY_GRAPH_WIDTH))
+        .w(px(width))
         .h_full()
         .overflow_hidden()
         .child(
             gpui::canvas(
                 |_, _, _| graph,
-                |bounds, graph, window, _cx| {
+                move |bounds, graph, window, _cx| {
                     let top_y = bounds.origin.y;
                     let bottom_y = bounds.origin.y + bounds.size.height;
                     let center_y = bounds.origin.y + px(HISTORY_GRAPH_ROW_HEIGHT / 2.0);
-                    let current_lane = graph.lane.min(5);
+                    let current_lane = graph.lane.min(visible_max);
                     let current_x = bounds.origin.x + px(graph_x(current_lane));
 
                     // 当前提交的轨道分段绘制，分支尖端的圆点上方不再出现悬空线段。
@@ -638,7 +757,7 @@ fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
                         .lanes
                         .iter()
                         .copied()
-                        .filter(|lane| *lane <= 5 && *lane != current_lane)
+                        .filter(|lane| *lane <= visible_max && *lane != current_lane)
                     {
                         let x = bounds.origin.x + px(graph_x(lane));
                         paint_graph_line(window, x, top_y, x, bottom_y, graph_color(lane));
@@ -655,7 +774,12 @@ fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
                         );
                     }
 
-                    for target in graph.connectors.iter().copied().filter(|lane| *lane <= 5) {
+                    for target in graph
+                        .connectors
+                        .iter()
+                        .copied()
+                        .filter(|lane| *lane <= visible_max)
+                    {
                         let target_x = bounds.origin.x + px(graph_x(target));
                         paint_graph_line(
                             window,
@@ -676,7 +800,7 @@ fn render_commit_graph_cell(graph: CommitGraphRow) -> impl IntoElement {
             .right(px(0.0))
             .bottom(px(0.0)),
         )
-        .when(max_lane >= 5, |this| {
+        .when(overflow, |this| {
             this.child(
                 div()
                     .absolute()
@@ -898,5 +1022,30 @@ mod tests {
         assert!(!rows[0].connected_from_top);
         assert!(!rows[1].connected_from_top);
         assert!(rows[2].connected_from_top);
+    }
+
+    // 合并提交的第二父提交尚未分页加载时，其泳道不应被剪掉：引入行画斜线但不画悬空顶部竖线，
+    // 下一行该泳道作为贯穿竖线接续，保证线条连续。
+    #[test]
+    fn unloaded_parent_lane_stays_continuous() {
+        let commits = vec![
+            test_commit("merge", &["base", "missing"]),
+            test_commit("base", &[]),
+        ];
+
+        let rows = commit_graph_rows(&commits);
+
+        assert!(rows[0].connectors.contains(&1));
+        assert!(!rows[0].lanes.contains(&1));
+        assert!(rows[1].lanes.contains(&1));
+    }
+
+    // 可见泳道上限随列宽增长，过窄时回退到 0。
+    #[test]
+    fn graph_max_lane_scales_with_width() {
+        assert_eq!(graph_max_lane(20.0), 0);
+        assert_eq!(graph_max_lane(64.0), 3);
+        assert_eq!(graph_max_lane(96.0), 5);
+        assert_eq!(graph_max_lane(480.0), 32);
     }
 }

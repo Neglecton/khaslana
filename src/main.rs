@@ -138,6 +138,10 @@ const MAX_HISTORY_FILES_WIDTH: f32 = 720.0;
 const DEFAULT_BROWSE_TREE_WIDTH: f32 = 400.0;
 const MIN_BROWSE_TREE_WIDTH: f32 = 240.0;
 const MAX_BROWSE_TREE_WIDTH: f32 = 640.0;
+// 提交图列宽：默认显示 6 条泳道，可拖拽调整；过窄时仅显示少量泳道，超出以省略号提示。
+const DEFAULT_HISTORY_GRAPH_WIDTH: f32 = 96.0;
+const MIN_HISTORY_GRAPH_WIDTH: f32 = 64.0;
+const MAX_HISTORY_GRAPH_WIDTH: f32 = 480.0;
 const HISTORY_PAGE_SIZE: usize = 50;
 pub(crate) const BRANCH_MENU_WIDTH: f32 = 190.0;
 pub(crate) const BRANCH_MENU_HEIGHT: f32 = 404.0;
@@ -1126,6 +1130,7 @@ pub(crate) enum ResizeTarget {
     WorkflowTemplates,
     HistoryFiles,
     HistoryTop,
+    HistoryGraph,
     BrowseFiles,
 }
 
@@ -1903,12 +1908,14 @@ pub(crate) struct RepositoryView {
     pub(crate) history_top_height: f32,
     pub(crate) history_files_width: f32,
     pub(crate) browse_tree_width: f32,
+    pub(crate) history_graph_width: f32,
     resizing_sidebar_width: Option<ResizeState>,
     resizing_changes_width: Option<ResizeState>,
     resizing_workflow_templates_width: Option<ResizeState>,
     resizing_history_files_width: Option<ResizeState>,
     resizing_history_top_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
+    resizing_history_graph_width: Option<ResizeState>,
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
     uniform_scroll_handles: RefCell<HashMap<String, UniformListScrollHandle>>,
     pub(crate) scrollbar_drag: Option<ScrollbarDragState>,
@@ -2061,12 +2068,14 @@ impl RepositoryView {
             history_top_height: DEFAULT_HISTORY_TOP_HEIGHT,
             history_files_width: DEFAULT_HISTORY_FILES_WIDTH,
             browse_tree_width: DEFAULT_BROWSE_TREE_WIDTH,
+            history_graph_width: DEFAULT_HISTORY_GRAPH_WIDTH,
             resizing_sidebar_width: None,
             resizing_changes_width: None,
             resizing_workflow_templates_width: None,
             resizing_history_files_width: None,
             resizing_history_top_height: None,
             resizing_browse_tree_width: None,
+            resizing_history_graph_width: None,
             scroll_handles: RefCell::new(HashMap::new()),
             uniform_scroll_handles: RefCell::new(HashMap::new()),
             scrollbar_drag: None,
@@ -7191,6 +7200,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = Some(state),
             ResizeTarget::HistoryTop => self.resizing_history_top_height = Some(state),
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = Some(state),
+            ResizeTarget::HistoryGraph => self.resizing_history_graph_width = Some(state),
         }
     }
 
@@ -7218,6 +7228,11 @@ impl RepositoryView {
                     .clamp(MIN_BROWSE_TREE_WIDTH, MAX_BROWSE_TREE_WIDTH);
                 self.set_column_width(target, width);
             }
+            ResizeTarget::HistoryGraph => {
+                let width = (resize.start_width + delta)
+                    .clamp(MIN_HISTORY_GRAPH_WIDTH, MAX_HISTORY_GRAPH_WIDTH);
+                self.set_column_width(target, width);
+            }
             ResizeTarget::Sidebar | ResizeTarget::Changes => {
                 let width = (resize.start_width + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
                 self.set_column_width(target, width);
@@ -7233,6 +7248,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = None,
             ResizeTarget::HistoryTop => self.resizing_history_top_height = None,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
+            ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
         }
     }
 
@@ -7247,6 +7263,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.history_files_width = DEFAULT_HISTORY_FILES_WIDTH,
             ResizeTarget::HistoryTop => self.history_top_height = DEFAULT_HISTORY_TOP_HEIGHT,
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
+            ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
         }
     }
 
@@ -7258,6 +7275,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.history_files_width,
             ResizeTarget::HistoryTop => 0.0,
             ResizeTarget::BrowseFiles => self.browse_tree_width,
+            ResizeTarget::HistoryGraph => self.history_graph_width,
         }
     }
 
@@ -7269,6 +7287,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.history_files_width = width,
             ResizeTarget::HistoryTop => {}
             ResizeTarget::BrowseFiles => self.browse_tree_width = width,
+            ResizeTarget::HistoryGraph => self.history_graph_width = width,
         }
     }
 
@@ -7279,7 +7298,8 @@ impl RepositoryView {
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
             | ResizeTarget::HistoryFiles
-            | ResizeTarget::BrowseFiles => 0.0,
+            | ResizeTarget::BrowseFiles
+            | ResizeTarget::HistoryGraph => 0.0,
         }
     }
 
@@ -7290,7 +7310,8 @@ impl RepositoryView {
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
             | ResizeTarget::HistoryFiles
-            | ResizeTarget::BrowseFiles => {}
+            | ResizeTarget::BrowseFiles
+            | ResizeTarget::HistoryGraph => {}
         }
     }
 
@@ -7302,6 +7323,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.resizing_history_files_width,
             ResizeTarget::HistoryTop => self.resizing_history_top_height,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width,
+            ResizeTarget::HistoryGraph => self.resizing_history_graph_width,
         }
     }
 
