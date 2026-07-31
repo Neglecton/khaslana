@@ -135,3 +135,38 @@ fn compare_file_leaf_display_rename_same_basename() {
         "main.rs"
     );
 }
+
+// 深前缀共享的差异文件：展平后可见行数（目录节点 + 文件叶子）必须大于文件数，
+// 且每个文件叶子都应出现在展平行中。这固化了“uniform_list 行数不能用文件数”的不变量，
+// 否则深层目录与文件叶子会因超出虚拟化列表行数而不渲染（文件树显示不全）。
+#[test]
+fn compare_visible_row_count_exceeds_file_count_for_nested_paths() {
+    let files = vec![
+        file("src/main/java/com/a/X.java", ChangeState::Modified),
+        file("src/main/java/com/b/Y.java", ChangeState::Added),
+        file("src/main/java/com/c/Z.java", ChangeState::Modified),
+        file("src/main/java/com/d/W.java", ChangeState::Modified),
+    ];
+    let expanded = all_compare_dirs(&files);
+
+    let rows = flatten_compare_files(&files, &expanded);
+    let row_count = compare_visible_row_count(&files, &expanded);
+
+    assert_eq!(row_count, rows.len());
+    assert!(row_count > files.len());
+
+    for file in &files {
+        let present = rows.iter().any(|row| {
+            row.path == file.path
+                && matches!(row.kind, CompareTreeRowKind::File { .. })
+        });
+        assert!(present, "文件叶子未出现在展平行中: {}", file.path);
+    }
+}
+
+#[test]
+fn compare_visible_row_count_empty_is_one() {
+    let expanded = HashSet::new();
+    // 空列表返回 1，供占位行渲染。
+    assert_eq!(compare_visible_row_count(&[], &expanded), 1);
+}

@@ -94,6 +94,22 @@ pub(crate) fn flatten_compare_files(
     rows
 }
 
+/// 差异文件树当前应渲染的可见行数（含目录节点与文件叶子）。
+///
+/// `uniform_list` 的行数必须用此值，而不能用差异文件数：展平后每个中间目录都会
+/// 额外占一行，行数通常大于文件数。若误用文件数，深层目录和文件叶子会因超出
+/// 虚拟化列表行数而根本不渲染，表现为文件树“显示不全”。空列表返回 1，供占位行渲染。
+pub(crate) fn compare_visible_row_count(
+    files: &[BrowseCompareFile],
+    expanded: &HashSet<String>,
+) -> usize {
+    if files.is_empty() {
+        1
+    } else {
+        flatten_compare_files(files, expanded).len().max(1)
+    }
+}
+
 fn flatten_dir(
     dir: &str,
     depth: usize,
@@ -213,6 +229,16 @@ impl RepositoryView {
         let file_count = self.browse.compare_files.len();
         let has_target = self.browse.target.is_some();
         let content_present = file_count > 0;
+        // 展开集合：空表示默认全部展开；须与 uniform_list 回调内的计算保持一致，
+        // 否则行数与可见行不匹配会出现空行或截断。
+        let expanded_for_count = if self.browse.compare_expanded.is_empty() {
+            all_compare_dirs(&self.browse.compare_files)
+        } else {
+            self.browse.compare_expanded.clone()
+        };
+        // 行数用展平后的可见行数（目录节点 + 文件叶子），不能用差异文件数 file_count。
+        let compare_row_count =
+            compare_visible_row_count(&self.browse.compare_files, &expanded_for_count);
         let handle = self.uniform_scroll_handle("browse-compare-scroll");
         let list_handle = handle.clone();
 
@@ -231,7 +257,7 @@ impl RepositoryView {
             .child(
                 uniform_list(
                     "browse-compare-list",
-                    file_count.max(1),
+                    compare_row_count,
                     cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                         if this.browse.compare_files.is_empty() {
                             return range
