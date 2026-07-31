@@ -204,10 +204,12 @@ impl GitService {
         })
     }
 
-    /// 列出目标分支相对当前 HEAD 有差异的文件。
+    /// 列出目标分支领先当前 HEAD 的提交所改动的文件（三点比较）。
     ///
-    /// 方向与 browse_file_diff 保持一致：old=HEAD、new=目标分支，因此 Added 表示
-    /// 文件存在于目标分支但当前分支没有，Deleted 表示目标分支删除了当前分支文件。
+    /// 以 merge_base(HEAD, 目标) 的树作为 old、目标分支树作为 new，即 `merge_base..target`，
+    /// 因此只展示选定分支领先当前分支的提交，当前分支独有的改动不会进入列表。
+    /// Added 表示目标分支相对共同祖先新增的文件，Deleted 表示目标分支相对共同祖先删除的文件。
+    /// 若无法计算共同祖先（无 HEAD 或无关历史），降级为 HEAD 树，避免报错。
     pub fn browse_compare_files(
         &self,
         repo: &Repository,
@@ -215,11 +217,11 @@ impl GitService {
     ) -> Result<Vec<BrowseCompareFile>> {
         let target_commit = self.find_commit_by_oid(repo, commit_oid)?;
         let target_tree = target_commit.tree()?;
-        let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+        let base_tree = compare_base_tree(repo, &target_commit);
 
         let mut options = DiffOptions::new();
         let mut diff =
-            repo.diff_tree_to_tree(head_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
+            repo.diff_tree_to_tree(base_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
         // 分支比较列表启用基础重命名识别，便于左侧用 R 展示重命名而非一增一删。
         let mut find_options = DiffFindOptions::new();
         find_options.renames(true).rename_threshold(50);
@@ -262,8 +264,9 @@ impl GitService {
         self.browse_file_diff_for_compare(repo, commit_oid, path, None, full_context, encoding)
     }
 
-    /// 计算分支比较列表中某个文件的差异。
+    /// 计算分支比较列表中某个文件的差异（三点比较，与 browse_compare_files 同向）。
     ///
+    /// old 侧取 merge_base(HEAD, 目标) 的树，仅展示目标分支领先当前分支引入的改动；
     /// 对重命名文件同时传入旧路径和新路径，避免 pathspec 只命中新路径时丢失重命名信息。
     pub fn browse_file_diff_for_compare(
         &self,
@@ -276,7 +279,7 @@ impl GitService {
     ) -> Result<FileDiff> {
         let target_commit = self.find_commit_by_oid(repo, commit_oid)?;
         let target_tree = target_commit.tree()?;
-        let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+        let base_tree = compare_base_tree(repo, &target_commit);
 
         let mut options = DiffOptions::new();
         options.context_lines(super::diff_context_lines(full_context));
@@ -288,11 +291,30 @@ impl GitService {
         }
 
         let diff =
-            repo.diff_tree_to_tree(head_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
+            repo.diff_tree_to_tree(base_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
 
         super::guard_full_file_size(&diff, full_context)?;
         self.file_diff_from_diff(diff, super::path_to_git(path), DiffScope::Staged, encoding)
     }
+}
+
+/// 计算分支比较的 old 侧树：merge_base(HEAD, 目标) 的树，实现三点比较。
+///
+/// 无法计算共同祖先时（无 HEAD 或无关历史）降级为 HEAD 树，避免报错。
+fn compare_base_tree<'r>(
+    repo: &'r Repository,
+    target_commit: &git2::Commit<'r>,
+) -> Option<git2::Tree<'r>> {
+    let head_commit = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+    head_commit
+        .as_ref()
+        .and_then(|head| {
+            repo.merge_base(head.id(), target_commit.id())
+                .ok()
+                .and_then(|oid| repo.find_commit(oid).ok())
+                .and_then(|base| base.tree().ok())
+        })
+        .or_else(|| head_commit.as_ref().and_then(|head| head.tree().ok()))
 }
 
 #[cfg(test)]

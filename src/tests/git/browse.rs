@@ -298,6 +298,37 @@ fn browse_compare_files_reports_deleted_files() {
     assert_eq!(deleted.status, ChangeState::Deleted);
 }
 
+// 发散拓扑：当前分支也领先目标分支一个提交时，三点比较应排除当前分支独有的改动。
+// 旧两点语义会把仅被当前分支改动的 README.md 错误列入，本测试在该语义下失败。
+#[test]
+fn browse_compare_files_excludes_current_branch_only_changes() {
+    let (dir, svc) = build_repo();
+    let repo_path = dir.path();
+    let mut repo = git2::Repository::open(repo_path).unwrap();
+    // 在当前 main（HEAD）上额外提交一次，只改 README.md，使 main 领先 feature 形成发散。
+    git_support::write_file(repo_path, "README.md", "# main updated\n");
+    stage_and_commit(&mut repo, &svc, "main only change");
+    drop(repo);
+
+    let repo = git2::Repository::open(repo_path).unwrap();
+    let feature = svc
+        .resolve_browse_target(&repo, "feature", BrowseRefKind::LocalBranch)
+        .unwrap();
+    let files = svc
+        .browse_compare_files(&repo, &feature.commit_oid)
+        .unwrap();
+    let paths = files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>();
+
+    // 仅被当前分支改动的文件不应出现。
+    assert!(
+        !paths.contains(&"README.md"),
+        "当前分支独有的改动不应进入比较列表: {paths:?}"
+    );
+    // 目标分支领先的改动仍在。
+    assert!(paths.contains(&"src/lib.rs"));
+    assert!(paths.contains(&"src/new.rs"));
+}
+
 #[test]
 fn browse_compare_file_diff_keeps_head_to_target_direction() {
     let (dir, svc) = build_repo();

@@ -51,7 +51,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/submodule.rs`：子模块 Git 服务，包括状态读取、同步父仓库记录版本、快进到子模块远端最新以及递归子模块更新。
 - `src/git/rebase.rs`：变基 Git 服务，包括 `rebase_branch`、`rebase_continue`、`rebase_skip`、`rebase_abort` 和 `pull_branch_rebase`。
 - `src/git/worktree_compat.rs`：工作区写入兼容层。Windows 下为 checkout、merge/pull、hard reset、revert、rebase、stash 和子模块更新统一附加 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`，避免编辑器占用空目录导致 Git 操作失败；其他平台保持 git2 默认行为。
-- `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
+- `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
@@ -237,7 +237,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 - 不切换分支查看其他分支/标签的完整代码
 - 从侧边栏本地分支、远端分支和标签的右键菜单进入「浏览此分支 / 浏览此标签」
-- 从侧边栏本地分支和远端分支右键进入「与当前分支比较」，不切换分支列出目标分支相对当前 HEAD 有差异的文件
+- 从侧边栏本地分支和远端分支右键进入「与当前分支比较」，不切换分支列出目标分支领先当前分支的提交所改动的文件（三点比较，当前分支独有改动不显示）
 - 左侧文件树浏览器：可展开/折叠的目录树，按目录懒加载
 - 右侧默认显示目标分支上文件的只读原始内容（含行号和编码识别）
 - 顶部可一键切换到「与当前 HEAD 的差异」视图
