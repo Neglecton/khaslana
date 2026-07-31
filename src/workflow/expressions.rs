@@ -26,7 +26,7 @@ struct MethodCall {
 
 pub(super) fn evaluate_workflow_expression(
     expression: &str,
-    mut resolve_primary: impl FnMut(&str) -> Result<String>,
+    mut resolve_primary: impl FnMut(&str) -> Result<WorkflowExpressionValue>,
 ) -> Result<WorkflowExpressionValue> {
     let stages = split_unquoted(expression, '|')?;
     let Some((primary, methods)) = stages.split_first() else {
@@ -37,7 +37,7 @@ pub(super) fn evaluate_workflow_expression(
         return Err(GitError::Message("工作流表达式不能为空".into()));
     }
 
-    let mut value = WorkflowExpressionValue::String(resolve_primary(primary)?);
+    let mut value = resolve_primary(primary)?;
     for method in methods {
         value = apply_method(value, parse_method_call(method)?)?;
     }
@@ -217,6 +217,12 @@ fn apply_string_method(value: String, method: MethodCall) -> Result<WorkflowExpr
             expect_arg_count(&method, 0)?;
             Ok(WorkflowExpressionValue::String(slugify(&value)))
         }
+        "alt" => {
+            // 把逗号分隔列表转成正则交替分组，便于把"前缀枚举输入"嵌进 pattern。
+            // 例："dev,uat,release" | alt → "(dev|uat|release)"；每项 trim，忽略空项。
+            expect_arg_count(&method, 0)?;
+            Ok(WorkflowExpressionValue::String(regex_alternation(&value)))
+        }
         "split" => {
             expect_arg_count(&method, 1)?;
             let delimiter = &method.args[0];
@@ -351,6 +357,23 @@ fn slugify(value: &str) -> String {
         output.pop();
     }
     output
+}
+
+/// 把逗号分隔的列表转换成正则交替分组字符串。
+///
+/// 例如 `"dev, uat , release,"` 会变成 `"(dev|uat|release)"`：
+/// 每项会去除首尾空白，空项被忽略；若结果为空则返回空字符串（不包裹括号）。
+/// 用于把"前缀枚举输入"嵌入 `filterBranches` 的 `pattern`。
+fn regex_alternation(value: &str) -> String {
+    let parts: Vec<&str> = value
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("({})", parts.join("|"))
 }
 
 #[cfg(test)]

@@ -146,7 +146,10 @@ fn sha256_verification_matches_known_content() {
     // "hello world" 的 SHA-256
     let content = b"hello world";
     let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-    fs::File::create(&file_path).unwrap().write_all(content).unwrap();
+    fs::File::create(&file_path)
+        .unwrap()
+        .write_all(content)
+        .unwrap();
     assert!(verify_sha256(&file_path, expected).unwrap());
 }
 
@@ -156,7 +159,10 @@ fn sha256_verification_fails_on_tampered_hash() {
     let file_path = temp.path().join("test.bin");
     let content = b"hello world";
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    fs::File::create(&file_path).unwrap().write_all(content).unwrap();
+    fs::File::create(&file_path)
+        .unwrap()
+        .write_all(content)
+        .unwrap();
     assert!(!verify_sha256(&file_path, wrong_hash).unwrap());
 }
 

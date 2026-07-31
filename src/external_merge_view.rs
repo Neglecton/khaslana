@@ -8,7 +8,7 @@ use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::ui::theme::rgb;
 use crate::{
-    DialogState, FieldId, RepositoryView, UiEvent, send_ui_event,
+    FieldId, RepositoryView, UiEvent, send_ui_event,
     ui::{components::dialog_actions, theme as ui_theme},
 };
 

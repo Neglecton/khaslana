@@ -1,12 +1,12 @@
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuId, MenuItem},
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 use windows_sys::Win32::{
     Foundation::HWND,
-    UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW},
+    UI::WindowsAndMessaging::{SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow},
 };
 
 const SHOW_MENU_ID: &str = "khaslana-tray-show";
