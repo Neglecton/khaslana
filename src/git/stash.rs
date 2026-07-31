@@ -56,7 +56,9 @@ impl GitService {
         } else {
             message
         };
-        repo.stash_save(&signature, message, Some(flags))?;
+        super::worktree_compat::save_stash_preserving_locked_directories(
+            repo, &signature, message, flags,
+        )?;
         self.progress
             .emit(OperationEvent::Finished("已贮藏当前修改".into()));
         self.snapshot_after_operation(repo)
@@ -80,7 +82,11 @@ impl GitService {
             "正在应用贮藏 stash@{{{index}}}"
         )));
         let mut options = StashApplyOptions::new();
-        repo.stash_apply(index, Some(&mut options))?;
+        super::worktree_compat::apply_stash_preserving_locked_directories(
+            repo,
+            index,
+            &mut options,
+        )?;
         self.progress.emit(OperationEvent::Finished(format!(
             "已应用贮藏 stash@{{{index}}}"
         )));
@@ -93,7 +99,7 @@ impl GitService {
             "正在弹出贮藏 stash@{{{index}}}"
         )));
         let mut options = StashApplyOptions::new();
-        repo.stash_pop(index, Some(&mut options))?;
+        super::worktree_compat::pop_stash_preserving_locked_directories(repo, index, &mut options)?;
         self.progress.emit(OperationEvent::Finished(format!(
             "已弹出贮藏 stash@{{{index}}}"
         )));

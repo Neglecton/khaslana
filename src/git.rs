@@ -34,6 +34,13 @@ mod conflicts;
 mod rebase;
 mod stash;
 mod submodule;
+mod worktree_compat;
+
+use worktree_compat::{
+    checkout_head_preserving_locked_directories, checkout_index_preserving_locked_directories,
+    checkout_tree_preserving_locked_directories, reset_preserving_locked_directories,
+    revert_preserving_locked_directories,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -964,7 +971,7 @@ impl GitService {
 
         let mut checkout = CheckoutBuilder::new();
         checkout.safe();
-        repo.checkout_tree(&object, Some(&mut checkout))?;
+        checkout_tree_preserving_locked_directories(repo, &object, &mut checkout)?;
         let refname = reference.name().map_err(GitError::from)?;
         repo.set_head(refname)?;
         drop(object);
@@ -1012,7 +1019,7 @@ impl GitService {
         let commit = object.peel_to_commit()?;
         let mut checkout = CheckoutBuilder::new();
         checkout.safe();
-        repo.checkout_tree(commit.as_object(), Some(&mut checkout))?;
+        checkout_tree_preserving_locked_directories(repo, commit.as_object(), &mut checkout)?;
         repo.set_head_detached(commit.id())?;
         drop(commit);
         drop(object);
@@ -1151,7 +1158,11 @@ impl GitService {
             if has_index_entry {
                 let mut checkout = CheckoutBuilder::new();
                 checkout.force().path(path).disable_pathspec_match(true);
-                repo.checkout_index(Some(&mut index), Some(&mut checkout))?;
+                checkout_index_preserving_locked_directories(
+                    repo,
+                    Some(&mut index),
+                    &mut checkout,
+                )?;
             } else {
                 remove_worktree_path(repo, path)?;
             }
@@ -1197,7 +1208,7 @@ impl GitService {
                     if head_has_path {
                         let mut checkout = CheckoutBuilder::new();
                         checkout.force().path(path).disable_pathspec_match(true);
-                        repo.checkout_head(Some(&mut checkout))?;
+                        checkout_head_preserving_locked_directories(repo, &mut checkout)?;
                     } else {
                         let mut index = repo.index()?;
                         let _ = index.remove_path(path);
@@ -1384,7 +1395,7 @@ impl GitService {
         };
         self.progress
             .emit(OperationEvent::Started("正在重置分支".into()));
-        repo.reset(commit.as_object(), reset_type, None)?;
+        reset_preserving_locked_directories(repo, commit.as_object(), reset_type)?;
         drop(commit);
         self.progress
             .emit(OperationEvent::Finished("分支已重置".into()));
@@ -1440,7 +1451,7 @@ impl GitService {
         let parent = repo.find_commit(parent_oid)?;
         self.progress
             .emit(OperationEvent::Started("正在还原提交到暂存区".into()));
-        repo.reset(parent.as_object(), ResetType::Soft, None)?;
+        reset_preserving_locked_directories(repo, parent.as_object(), ResetType::Soft)?;
         drop(parent);
         self.progress
             .emit(OperationEvent::Finished("提交已还原到暂存区".into()));
@@ -1494,7 +1505,7 @@ impl GitService {
         repo.cleanup_state()?;
         let mut checkout = CheckoutBuilder::new();
         checkout.force();
-        repo.checkout_head(Some(&mut checkout))?;
+        checkout_head_preserving_locked_directories(repo, &mut checkout)?;
         drop(tree);
         drop(head_commit);
         self.progress
@@ -1520,7 +1531,8 @@ impl GitService {
         self.progress
             .emit(OperationEvent::Started("正在回滚提交".into()));
         let mut options = RevertOptions::new();
-        let revert_result = repo.revert(&revert_commit, Some(&mut options));
+        let revert_result =
+            revert_preserving_locked_directories(repo, &revert_commit, &mut options);
         drop(revert_commit);
         if let Err(err) = revert_result {
             self.handle_revert_apply_error(repo, err)?;
@@ -1555,7 +1567,7 @@ impl GitService {
         // 第一版固定使用 git revert -m 1 语义：保留合并提交的第一父提交主线侧。
         let mut options = RevertOptions::new();
         options.mainline(1);
-        let revert_result = repo.revert(&merge_commit, Some(&mut options));
+        let revert_result = revert_preserving_locked_directories(repo, &merge_commit, &mut options);
         drop(merge_commit);
         if let Err(err) = revert_result {
             self.handle_revert_apply_error(repo, err)?;
@@ -2115,9 +2127,12 @@ impl GitService {
                 repo.merge_commits(&head_commit, &other_commit, Some(&mut merge_options))?;
 
             if index.has_conflicts() {
-                repo.checkout_index(
+                let mut checkout = CheckoutBuilder::new();
+                checkout.allow_conflicts(true);
+                checkout_index_preserving_locked_directories(
+                    repo,
                     Some(&mut index),
-                    Some(CheckoutBuilder::new().allow_conflicts(true)),
+                    &mut checkout,
                 )?;
                 repo.cleanup_state()?;
                 return Err(GitError::Conflicts(self.conflicts(repo)?));
@@ -2132,7 +2147,11 @@ impl GitService {
             repo_index.write()?;
             let mut checkout = CheckoutBuilder::new();
             checkout.safe();
-            repo.checkout_index(Some(&mut repo_index), Some(&mut checkout))?;
+            checkout_index_preserving_locked_directories(
+                repo,
+                Some(&mut repo_index),
+                &mut checkout,
+            )?;
 
             repo.commit(
                 Some("HEAD"),
@@ -2405,7 +2424,7 @@ fn fast_forward(repo: &Repository, annotated: &AnnotatedCommit<'_>) -> Result<()
     let target = repo.find_object(annotated.id(), None)?;
     let mut checkout = CheckoutBuilder::new();
     checkout.safe();
-    repo.checkout_tree(&target, Some(&mut checkout))?;
+    checkout_tree_preserving_locked_directories(repo, &target, &mut checkout)?;
 
     let mut reference = repo.find_reference(&refname)?;
     reference.set_target(annotated.id(), "khaslana fast-forward")?;

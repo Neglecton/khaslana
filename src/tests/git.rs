@@ -1,11 +1,44 @@
 use std::fs;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 use git2::{BranchType, Oid, RepositoryInitOptions};
 use tempfile::TempDir;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    },
+};
 
 use super::*;
 use crate::git::test_support::git_test_support as git_support;
 use crate::types::SubmoduleRemoteSyncStatus;
+
+#[cfg(windows)]
+fn lock_directory_without_delete_share(path: &Path) -> HANDLE {
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // 不共享删除权限的目录句柄，稳定模拟 VS Code、终端或语言服务对该目录的占用。
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    handle
+}
 
 fn set_gitmodules_branch(root: &Path, submodule_path: &str, branch: &str) {
     let gitmodules_path = root.join(".gitmodules");
@@ -438,6 +471,36 @@ fn branch_create_rename_delete() {
         .delete_branch(&mut repo, &BranchName::new("topic"))
         .unwrap();
     assert!(repo.find_branch("topic", BranchType::Local).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn checkout_branch_keeps_vscode_locked_directory_and_switches() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "README.md", "main\n");
+    git_support::commit_all(&repo, "main");
+    service
+        .create_branch(&mut repo, &BranchName::new("with-directory"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("with-directory"))
+        .unwrap();
+    git_support::write_file(dir.path(), "opened-in-vscode/file.txt", "branch only\n");
+    git_support::commit_all(&repo, "add directory");
+
+    let opened_directory = dir.path().join("opened-in-vscode");
+    let directory_handle = lock_directory_without_delete_share(&opened_directory);
+
+    let checkout_result = service.checkout_branch(&mut repo, &BranchName::new("main"));
+    unsafe {
+        CloseHandle(directory_handle);
+    }
+
+    let snapshot = checkout_result.unwrap();
+    assert_eq!(snapshot.head.as_deref(), Some("main"));
+    assert!(!opened_directory.join("file.txt").exists());
+    assert!(opened_directory.exists());
+    assert!(opened_directory.read_dir().unwrap().next().is_none());
 }
 
 #[test]
@@ -2106,6 +2169,51 @@ fn fast_forward_pull_keeps_index_clean_after_branch_switch() {
     assert!(service.status_full(&repo).unwrap().is_empty());
 }
 
+#[cfg(windows)]
+#[test]
+fn fast_forward_pull_keeps_vscode_locked_directory_and_updates() {
+    let (remote_dir, _clone_dir, clone_path, mut repo, service) = clone_repo_with_remote_feature();
+    git_support::write_file(&clone_path, "opened-in-vscode/file.txt", "tracked\n");
+    git_support::commit_all(&repo, "add opened directory");
+    service.push(&mut repo, &RemoteName::new("origin")).unwrap();
+
+    let remote_work_dir = TempDir::new().unwrap();
+    let remote_work_path = remote_work_dir.path().join("remote-work");
+    service
+        .clone_repo(
+            &git_support::path_url(remote_dir.path()),
+            &RepoPath::new(&remote_work_path),
+        )
+        .unwrap();
+    let mut remote_repo = Repository::open(&remote_work_path).unwrap();
+    git_support::configure_user(&remote_repo);
+    fs::remove_file(remote_work_path.join("opened-in-vscode/file.txt")).unwrap();
+    let mut remote_index = remote_repo.index().unwrap();
+    remote_index
+        .remove_path(Path::new("opened-in-vscode/file.txt"))
+        .unwrap();
+    remote_index.write().unwrap();
+    drop(remote_index);
+    git_support::commit_all(&remote_repo, "remove opened directory");
+    service
+        .push(&mut remote_repo, &RemoteName::new("origin"))
+        .unwrap();
+
+    let opened_directory = clone_path.join("opened-in-vscode");
+    let directory_handle = lock_directory_without_delete_share(&opened_directory);
+    let pull_result = service.pull(&mut repo, &RemoteName::new("origin"));
+    unsafe {
+        CloseHandle(directory_handle);
+    }
+
+    let snapshot = pull_result.unwrap();
+    assert_eq!(snapshot.head.as_deref(), Some("main"));
+    assert!(!opened_directory.join("file.txt").exists());
+    assert!(opened_directory.exists());
+    assert!(opened_directory.read_dir().unwrap().next().is_none());
+    assert!(snapshot.changes.is_empty());
+}
+
 #[test]
 fn pull_branch_fetches_and_merges_selected_remote_branch() {
     let (remote_dir, _clone_dir, _clone_path, mut repo, service) = clone_repo_with_remote_feature();
@@ -3300,6 +3408,60 @@ fn stash_apply_keeps_entry_and_pop_removes_it() {
         "popped\n"
     );
     assert!(pop_service.stashes(&mut pop_repo).unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn apply_stash_keeps_vscode_locked_directory_and_applies_deletion() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "opened-in-vscode/tracked.txt", "tracked\n");
+    git_support::commit_all(&repo, "initial");
+    fs::remove_file(dir.path().join("opened-in-vscode/tracked.txt")).unwrap();
+    service
+        .save_stash(&mut repo, "delete tracked file", false, false)
+        .unwrap();
+
+    let opened_directory = dir.path().join("opened-in-vscode");
+    let directory_handle = lock_directory_without_delete_share(&opened_directory);
+    let apply_result = service.apply_stash(&mut repo, 0);
+    unsafe {
+        CloseHandle(directory_handle);
+    }
+
+    let snapshot = apply_result.unwrap();
+    assert!(!opened_directory.join("tracked.txt").exists());
+    assert!(opened_directory.exists());
+    assert!(opened_directory.read_dir().unwrap().next().is_none());
+    assert_eq!(snapshot.stashes.len(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn save_stash_keeps_vscode_locked_directory_and_cleans_worktree() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "README.md", "base\n");
+    git_support::commit_all(&repo, "initial");
+    git_support::write_file(dir.path(), "opened-in-vscode/staged.txt", "staged\n");
+    let mut index = repo.index().unwrap();
+    index
+        .add_path(Path::new("opened-in-vscode/staged.txt"))
+        .unwrap();
+    index.write().unwrap();
+    drop(index);
+
+    let opened_directory = dir.path().join("opened-in-vscode");
+    let directory_handle = lock_directory_without_delete_share(&opened_directory);
+    let stash_result = service.save_stash(&mut repo, "locked directory", false, false);
+    unsafe {
+        CloseHandle(directory_handle);
+    }
+
+    let snapshot = stash_result.unwrap();
+    assert!(!opened_directory.join("staged.txt").exists());
+    assert!(opened_directory.exists());
+    assert!(opened_directory.read_dir().unwrap().next().is_none());
+    assert!(snapshot.changes.is_empty());
+    assert_eq!(snapshot.stashes.len(), 1);
 }
 
 #[test]

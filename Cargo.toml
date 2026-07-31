@@ -37,12 +37,17 @@ unicode-segmentation = "1"
 yororen_ui = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+# git2 0.21 尚未暴露跳过被占用目录的 checkout 选项，Windows 工作区操作需直接配置 libgit2。
+libgit2-sys = "0.18"
 raw-window-handle = "0.6"
 tray-icon = { version = "0.24.2", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 [build-dependencies]
 embed-resource = "3"

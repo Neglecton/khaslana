@@ -26,11 +26,12 @@ impl super::GitService {
         let onto_annotated = repo.reference_to_annotated_commit(&onto_ref)?;
 
         let mut opts = RebaseOptions::new();
-        let mut rebase = repo.rebase(
+        let mut rebase = super::worktree_compat::rebase_preserving_locked_directories(
+            repo,
             Some(&branch_annotated),
             Some(&onto_annotated),
             None,
-            Some(&mut opts),
+            &mut opts,
         )?;
         let total = rebase.len();
         let sig = super::signature(repo)?;
@@ -75,7 +76,8 @@ impl super::GitService {
             .emit(OperationEvent::Started("正在继续变基".into()));
 
         let mut opts = RebaseOptions::new();
-        let mut rebase = repo.open_rebase(Some(&mut opts))?;
+        let mut rebase =
+            super::worktree_compat::open_rebase_preserving_locked_directories(repo, &mut opts)?;
         let total = rebase.len();
         let sig = super::signature(repo)?;
 
@@ -118,14 +120,19 @@ impl super::GitService {
             .emit(OperationEvent::Started("正在跳过变基提交".into()));
 
         let mut opts = RebaseOptions::new();
-        let mut rebase = repo.open_rebase(Some(&mut opts))?;
+        let mut rebase =
+            super::worktree_compat::open_rebase_preserving_locked_directories(repo, &mut opts)?;
         let total = rebase.len();
         let sig = super::signature(repo)?;
 
         // reset 到当前 HEAD，清除冲突状态
         {
             let head = repo.head()?.peel_to_commit()?;
-            repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+            super::worktree_compat::reset_preserving_locked_directories(
+                repo,
+                head.as_object(),
+                git2::ResetType::Hard,
+            )?;
         }
 
         // 用干净索引提交当前操作（可能产生空提交，忽略错误以推进指针）
@@ -162,7 +169,8 @@ impl super::GitService {
             .emit(OperationEvent::Started("正在中止变基".into()));
 
         let mut opts = RebaseOptions::new();
-        let mut rebase = repo.open_rebase(Some(&mut opts))?;
+        let mut rebase =
+            super::worktree_compat::open_rebase_preserving_locked_directories(repo, &mut opts)?;
         rebase.abort()?;
         drop(rebase);
 
@@ -194,11 +202,12 @@ impl super::GitService {
         let branch_annotated = repo.reference_to_annotated_commit(&head_ref)?;
 
         let mut opts = RebaseOptions::new();
-        let mut rebase = repo.rebase(
+        let mut rebase = super::worktree_compat::rebase_preserving_locked_directories(
+            repo,
             Some(&branch_annotated),
             Some(&upstream_annotated),
             None,
-            Some(&mut opts),
+            &mut opts,
         )?;
         let sig = super::signature(repo)?;
 

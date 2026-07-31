@@ -177,7 +177,11 @@ impl GitService {
                     checkout.use_theirs(true);
                 }
             }
-            repo.checkout_index(Some(&mut index), Some(&mut checkout))?;
+            super::worktree_compat::checkout_index_preserving_locked_directories(
+                repo,
+                Some(&mut index),
+                &mut checkout,
+            )?;
             drop(index);
             let snapshot = self.mark_conflict_resolved_inner(repo, path)?;
             self.progress

@@ -50,6 +50,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git.rs`：核心 Git 服务层的汇总入口；大型或独立 Git 能力放到 `src/git/` 子目录，例如冲突解决服务在 `src/git/conflicts.rs`，贮藏服务在 `src/git/stash.rs`，变基服务在 `src/git/rebase.rs`。
 - `src/git/submodule.rs`：子模块 Git 服务，包括状态读取、同步父仓库记录版本、快进到子模块远端最新以及递归子模块更新。
 - `src/git/rebase.rs`：变基 Git 服务，包括 `rebase_branch`、`rebase_continue`、`rebase_skip`、`rebase_abort` 和 `pull_branch_rebase`。
+- `src/git/worktree_compat.rs`：工作区写入兼容层。Windows 下为 checkout、merge/pull、hard reset、revert、rebase、stash 和子模块更新统一附加 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`，避免编辑器占用空目录导致 Git 操作失败；其他平台保持 git2 默认行为。
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
@@ -302,6 +303,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - `src/credentials.rs`：凭据匹配、Keyring/内存存储逻辑、URL 规范化、记录排序、兼容性判断等。
 - `src/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
 - `src/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
+- `src/tests/git.rs`：包含 Windows 目录占用回归测试，通过不共享删除权限的目录句柄模拟 VS Code/终端占用，覆盖分支切换、快进 pull、stash 保存和 stash 应用。
 - `src/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
 
 新增 Git 业务能力时，优先在 `src/git.rs` 增加基于 `tempfile` 的仓库级单元测试。新增纯 UI 状态逻辑时，优先拆成可测试的小函数，放在 `main.rs` 或对应 view 模块的 `#[cfg(test)]` 中测试。
@@ -333,6 +335,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - 凭据逻辑要避免把 secret 写入普通配置文件或日志。
 - 代理设置不要把代理 secret 拆分写入普通配置；如需认证，第一版只接受用户写在代理 URL 中。
 - 子模块的克隆和更新必须复用现有凭据回调和代理策略，不能绕开 `GitService` 直接使用裸 libgit2 默认网络选项。
+- 新增或修改会写入工作区的 Git 操作时，必须复用 `src/git/worktree_compat.rs`，不能直接调用 `checkout_tree`、`checkout_index`、`checkout_head`，也不能绕过其中对 reset、revert、rebase、stash 和子模块更新的包装。Windows 下只允许跳过“受 Git 管理的文件已正确处理、但空父目录因占用无法删除”的情况；锁定文件、冲突和本地修改保护仍必须报错。
 - 右键菜单和弹窗位置应复用现有菜单定位/对话框样式。
 
 ## 9. 已知风险和维护重点
@@ -364,6 +367,18 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 ### 9.5 UI 自动化测试缺失
 
 当前测试主要是单元层。GPUI 桌面 UI 的端到端自动化较难，但新增复杂交互时至少应把状态计算逻辑拆出来测。
+
+### 9.6 Windows 子目录占用与 libgit2 工作区写入
+
+已修复问题：当 VS Code、终端或语言服务打开仓库中的某个子目录，而切换分支、pull 或其他 Git 操作需要删除该目录中的最后一个受管文件时，libgit2 会继续尝试删除空父目录。Windows 会因目录句柄未共享删除权限而返回 `could not rmdir ... 另一个程序正在使用此文件`，并让整个操作失败；SourceTree/系统 Git 对这种情况通常会保留空目录并继续完成操作。
+
+修复结果：
+
+- `src/git/worktree_compat.rs` 统一配置 libgit2 的 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`。
+- 已接入显式分支/标签切换、普通及冲突合并、快进 pull、pull --rebase、hard reset、revert、rebase 的开始/继续/跳过/中止、stash 保存/应用/pop、丢弃修改、冲突版本选择和子模块更新。
+- Git 仍会正确删除或更新受管文件并推进 HEAD/引用；只有被占用且已为空的目录可能暂时保留，待占用释放后可由用户或后续操作清理。
+- 锁定文件本身、未提交修改覆盖风险和 Git 冲突不会被忽略。
+- Windows 回归测试使用真实目录句柄验证分支切换、快进拉取、stash 保存和 stash 应用，完整 `cargo test --lib` 已通过。
 
 ## 10. 推荐的新功能路线
 

@@ -1,9 +1,12 @@
 use std::path::Path;
 
+#[cfg(windows)]
+use git2::Binding;
+#[cfg(not(windows))]
+use git2::SubmoduleUpdateOptions;
 use git2::build::CheckoutBuilder;
 use git2::{
     BranchType, Direction, FetchOptions, Oid, Repository, SubmoduleIgnore, SubmoduleStatus,
-    SubmoduleUpdateOptions,
 };
 
 use super::{GitService, remote_fetch_url};
@@ -193,9 +196,31 @@ impl GitService {
 
         let mut checkout = CheckoutBuilder::new();
         checkout.safe();
-        let mut options = SubmoduleUpdateOptions::new();
-        options.fetch(fetch_options).checkout(checkout);
-        submodule.update(true, Some(&mut options))?;
+        #[cfg(windows)]
+        {
+            let mut raw_options = unsafe { std::mem::zeroed() };
+            super::worktree_compat::raw_git_result(unsafe {
+                libgit2_sys::git_submodule_update_init_options(
+                    &mut raw_options,
+                    libgit2_sys::GIT_SUBMODULE_UPDATE_OPTIONS_VERSION,
+                )
+            })?;
+            raw_options.checkout_opts =
+                super::worktree_compat::checkout_options_preserving_locked_directories(
+                    &mut checkout,
+                )?;
+            raw_options.fetch_opts = fetch_options.raw();
+            raw_options.allow_fetch = 1;
+            super::worktree_compat::raw_git_result(unsafe {
+                libgit2_sys::git_submodule_update(submodule.raw(), 1, &mut raw_options)
+            })?;
+        }
+        #[cfg(not(windows))]
+        {
+            let mut options = SubmoduleUpdateOptions::new();
+            options.fetch(fetch_options).checkout(checkout);
+            submodule.update(true, Some(&mut options))?;
+        }
         Ok(())
     }
 
@@ -263,7 +288,11 @@ impl GitService {
         let target_object = subrepo.find_object(target, None)?;
         let mut checkout = CheckoutBuilder::new();
         checkout.safe();
-        subrepo.checkout_tree(&target_object, Some(&mut checkout))?;
+        super::worktree_compat::checkout_tree_preserving_locked_directories(
+            subrepo,
+            &target_object,
+            &mut checkout,
+        )?;
 
         if head.is_branch()
             && let Ok(refname) = head.name()

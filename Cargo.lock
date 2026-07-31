@@ -3727,6 +3727,7 @@ dependencies = [
  "json5",
  "keyring",
  "keyring-core",
+ "libgit2-sys",
  "lru",
  "raw-window-handle",
  "rayon",
