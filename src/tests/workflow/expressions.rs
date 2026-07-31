@@ -3,12 +3,12 @@ use super::*;
 fn eval(expression: &str) -> Result<WorkflowExpressionValue> {
     evaluate_workflow_expression(expression, |primary| {
         Ok(match primary {
-            "branch" => "feature/demo".to_string(),
-            "delimited" => "a|b:c".to_string(),
-            "emoji" => "你好吗🙂x".to_string(),
-            "spaced" => " Hello/World ".to_string(),
-            "empty" => " ".to_string(),
-            other => other.to_string(),
+            "branch" => WorkflowExpressionValue::String("feature/demo".to_string()),
+            "delimited" => WorkflowExpressionValue::String("a|b:c".to_string()),
+            "emoji" => WorkflowExpressionValue::String("你好吗🙂x".to_string()),
+            "spaced" => WorkflowExpressionValue::String(" Hello/World ".to_string()),
+            "empty" => WorkflowExpressionValue::String(" ".to_string()),
+            other => WorkflowExpressionValue::String(other.to_string()),
         })
     })
 }
@@ -87,4 +87,24 @@ fn parser_allows_quoted_delimiters_inside_method_args() {
         eval_string("delimited | replace:\"|\":\":\"").unwrap(),
         "a:b:c"
     );
+}
+
+#[test]
+fn alt_method_builds_regex_alternation() {
+    // 基本用法：逗号分隔列表转成交替分组
+    assert_eq!(
+        eval_string("dev,uat,release | alt").unwrap(),
+        "(dev|uat|release)"
+    );
+    // 含空格的项会被 trim
+    assert_eq!(
+        eval_string("dev, uat , release | alt").unwrap(),
+        "(dev|uat|release)"
+    );
+    // 尾部多余逗号和空项被忽略
+    assert_eq!(eval_string("dev,uat, | alt").unwrap(), "(dev|uat)");
+    // 单项仍包裹括号
+    assert_eq!(eval_string("dev | alt").unwrap(), "(dev)");
+    // 全空时返回空字符串
+    assert_eq!(eval_string(", , | alt").unwrap(), "");
 }

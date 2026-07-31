@@ -875,12 +875,8 @@ impl RepositoryView {
             .cursor_pointer()
             .child(leading)
             .child(name_el)
-            .when(ahead > 0, |this| {
-                this.child(sync_badge("↑", ahead))
-            })
-            .when(behind > 0, |this| {
-                this.child(sync_badge("↓", behind))
-            });
+            .when(ahead > 0, |this| this.child(sync_badge("↑", ahead)))
+            .when(behind > 0, |this| this.child(sync_badge("↓", behind)));
 
         // 本地分支悬停时显示 upstream 和同步数量，便于确认推送/拉取目标。
         let row = if let Some(up) = upstream.filter(|_| is_local) {

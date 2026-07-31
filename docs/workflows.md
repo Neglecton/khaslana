@@ -278,6 +278,83 @@ steps: [
 
 如果当前分支不一致，工作流会停止。
 
+### filterBranches
+
+按命名规则筛选符合条件的本地分支，把结果作为一个**数组变量**写入步骤输出，供后续步骤消费。该步骤**只读**，不改动仓库；预览阶段即可看到命中清单。
+
+```json5
+{
+  op: "filterBranches",
+  output: "out.staleBranches",
+  pattern: "^(dev|uat|release)_[^_]+_(?P<date>\\d{8})_",
+  dateFormat: "%Y%m%d",
+  dateGroup: "date",
+  olderThanMonths: "3",
+  skipCurrent: true,
+}
+```
+
+字段：
+
+| 字段 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `output` | 是 | — | 输出变量名，筛选命中的分支数组写入此处（供后续步骤通过 `${output}` 消费）。 |
+| `pattern` | 是 | — | 正则表达式，需包含至少一个日期捕获组。优先取 `dateGroup` 指定的命名组，否则回退到第一个捕获组。 |
+| `dateFormat` | 否 | `%Y%m%d` | chrono 日期格式，用于解析捕获组里的日期。 |
+| `dateGroup` | 否 | `date` | 日期命名捕获组名。 |
+| `olderThanMonths` | 是 | — | 距今月数阈值，插值后解析为整数；分支日期距今月数**大于**该值才入选。 |
+| `skipCurrent` | 否 | `true` | 是否把当前分支排除在结果之外。 |
+
+筛选逻辑：遍历所有本地分支，对分支名执行 `pattern` 匹配；匹配成功后用 `dateFormat` 解析日期捕获组，计算该日期距今的**日历月数差**（`(今天.年 - 分支.年) * 12 + (今天.月 - 分支.月)`），大于 `olderThanMonths` 才入选。日期无法解析的分支会被归入"跳过（日期无法解析）"，未超期的归入"跳过（未超过阈值）"，这两类都不会出现在输出数组里。
+
+配合字符串方法 `alt` 可以把逗号分隔的前缀枚举转成正则交替分组，避免硬编码：
+
+```json5
+inputs: {
+  prefixes: { label: "前缀（逗号分隔）", default: "dev,uat,release" },
+},
+vars: {
+  // 注意：管道方法必须整体写在 ${...} 内部，写成 "${prefixes|alt}"，
+  // 不能写成 "${prefixes}|alt"（那样 |alt 会变成字面文本，不会被执行）。
+  prefixAlt: "${prefixes|alt}",  // → "(dev|uat|release)"
+},
+steps: [
+  {
+    op: "filterBranches",
+    output: "out.staleBranches",
+    pattern: "^${prefixAlt}_[^_]+_(?P<date>\\d{8})_",
+    olderThanMonths: "${months}",
+  },
+],
+```
+
+> 命名捕获组 `(?P<date>...)` 在 JSON5 里反斜杠需要写成 `\\d`。
+
+输出变量是数组语义，后续可以直接用数组方法消费，例如 `${out.staleBranches}|join:", "` 生成摘要文案，或传给下面的 `deleteBranches`。
+
+### deleteBranches
+
+删除一批本地分支（仅本地，不涉及远端）。通常配合 `filterBranches` 使用：把上一步的数组输出传给 `branches`。
+
+```json5
+{
+  op: "deleteBranches",
+  branches: "${out.staleBranches}",
+  dryRun: true,
+  skipCurrent: true,
+}
+```
+
+字段：
+
+| 字段 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `branches` | 是 | — | 分支列表。可以是数组变量（如 `${out.staleBranches}`），也可以是换行分隔的字符串。 |
+| `dryRun` | 否 | `true` | 试运行模式：只列出将要删除的分支，不真正删除。建议先 `true` 预览清单，确认后改 `false` 正式删除。 |
+| `skipCurrent` | 否 | `true` | 是否自动跳过当前分支（即使它出现在列表里也不删除）。 |
+
+`branches` 既支持数组变量，也支持字符串。如果传入的是数组变量（如 `${out.staleBranches}`），会原样作为分支列表；如果是字符串，会按换行切分并清理空行。删除是危险操作，默认 `dryRun: true`；正式删除时批量执行，仅刷新一次快照。
+
 ## 变量与字符串拼接
 
 任意字符串字段都支持 `${...}` 插值。变量可以和普通文本拼接：
@@ -398,6 +475,7 @@ vars: {
 | `default:value` | 当前值为空白时使用 `value`。 |
 | `slug` | 转小写，将非 ASCII 字母数字替换为 `-`，并合并连续 `-`。 |
 | `split:delimiter` | 按字面量分隔符拆成数组。 |
+| `alt` | 把逗号分隔列表转成正则交替分组，便于嵌入 `pattern`。例：`"dev,uat,release" \| alt` → `"(dev|uat|release)"`。 |
 
 数组方法：
 
@@ -409,7 +487,17 @@ vars: {
 | `nth:index[:default]` | 取第 `index` 个元素，`index` 从 0 开始。 |
 | `join:delimiter` | 用分隔符把数组拼回字符串。 |
 
-`split` 产生的数组只能在管道中临时使用，最终必须通过 `first`、`last`、`nth` 或 `join` 转回字符串。第一版不支持循环、条件、正则或方法参数里的 `${...}` 嵌套插值。
+`split` 产生的数组只能在管道中临时使用，最终必须通过 `first`、`last`、`nth` 或 `join` 转回字符串。内置方法本身不支持循环、条件或方法参数里的 `${...}` 嵌套插值。
+
+> **管道方法必须整体写在 `${...}` 内部。** 写 `${prefixes|alt}` 会对 `prefixes` 应用 `alt` 方法；而 `${prefixes}|alt` 会把 `${prefixes}` 插值后，把 `|alt` 当作字面文本原样拼接，方法不会被执行。其他方法（`split`、`join`、`slug` 等）同理。
+
+#### 步骤输出
+
+部分步骤会把结果作为**数组变量**写入步骤输出，供后续步骤消费：
+
+- `filterBranches` 通过 `output` 字段指定输出变量名，筛选命中的分支数组会写入该变量。
+
+后续步骤可以直接引用这些变量。当某个 `${...}` 占位整段就是一个数组变量时（如 `branches: "${out.staleBranches}"`），会保留数组语义，无需先 `join` 回字符串；也可以继续用数组方法处理，例如 `${out.staleBranches}|join:", "`。
 
 ## 完整示例
 
@@ -475,13 +563,64 @@ vars: {
 }
 ```
 
+### 示例 4：清理过期命名分支
+
+按 `(dev|uat|release)_xxx_yyyyMMdd_xxx` 这类命名规则筛选超过 N 个月的本地分支并删除。先用 `filterBranches` 筛选，再用 `deleteBranches` 删除，两步解耦，筛选结果也可用于其他用途。
+
+```json5
+{
+  version: 1,
+  name: "清理过期命名分支",
+  defaults: { requireCleanWorktree: true },
+  inputs: {
+    prefixes: {
+      label: "前缀（逗号分隔）",
+      description: "只筛选这些前缀开头的分支",
+      default: "dev,uat,release",
+      required: true,
+    },
+    months: {
+      label: "超过多少个月",
+      description: "分支名里的日期距今超过该月数才会被选中",
+      default: "3",
+      required: true,
+    },
+  },
+  vars: {
+    // 注意：管道方法必须整体写在 ${...} 内部（"${prefixes|alt}"），
+    // 否则 |alt 会被当作字面文本，不会被当作方法执行。
+    prefixAlt: "${prefixes|alt}",  // → "(dev|uat|release)"
+  },
+  steps: [
+    {
+      op: "filterBranches",
+      output: "out.staleBranches",
+      // 插值 + alt 后变为: ^(dev|uat|release)_[^_]+_(?P<date>\d{8})_
+      pattern: "^${prefixAlt}_[^_]+_(?P<date>\\d{8})_",
+      dateFormat: "%Y%m%d",
+      dateGroup: "date",
+      olderThanMonths: "${months}",
+      skipCurrent: true,
+    },
+    {
+      op: "deleteBranches",
+      branches: "${out.staleBranches}",
+      dryRun: true,   // 先 true 预览清单；确认无误后改 false 正式删除
+      skipCurrent: true,
+    },
+  ],
+}
+```
+
+运行后预览和日志里会逐行列出命中的分支（如 `命中：dev_wzf_20250418_测试系统`）。确认清单无误后把 `dryRun` 改成 `false` 重新运行即可真正删除。筛选出的 `${out.staleBranches}` 也能用 `${out.staleBranches}|join:", "` 生成摘要文案。
+
 ## 当前限制
 
 - 只支持顺序执行，不支持条件、循环、并发或手动暂停。
 - 不支持执行 shell、JavaScript、Python 等脚本。
 - 不支持跨仓库编排；工作流只作用于当前激活仓库。
 - 不支持行级别或 hunk 级别操作。
-- 内置方法只支持字符串处理和临时数组取值，不支持循环、条件或正则表达式。
+- 内置方法只支持字符串处理和临时数组取值，不支持循环、条件；正则匹配只在 `filterBranches` 步骤的 `pattern` 中支持，内置管道方法本身不支持正则。
 - 取消运行目前只在步骤之间有意义；正在执行的 Git 远程操作不会被强制中断。
 - 用户模板目录会自动发现 `.json5` / `.jsonc` 文件；仓库内工作流不会自动扫描，需要通过“选择文件”手动选择。
 

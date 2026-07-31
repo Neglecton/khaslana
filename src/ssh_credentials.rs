@@ -125,7 +125,10 @@ fn expand_ssh_path(value: &str, home: &Path) -> PathBuf {
 }
 
 fn looks_like_private_key(path: &Path) -> bool {
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pub")) {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+    {
         return false;
     }
     let Ok(file) = fs::File::open(path) else {
@@ -171,7 +174,9 @@ pub(crate) fn http_remote_to_ssh(url: &str, username: &str) -> Option<String> {
         .strip_prefix("https://")
         .or_else(|| url.trim().strip_prefix("http://"))?;
     let (authority, path) = rest.split_once('/')?;
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     let host = if authority.starts_with('[') {
         authority.split_once(']')?.0.trim_start_matches('[')
     } else {
@@ -437,8 +442,7 @@ mod tests {
             Some("git@github.com:owner/repo.git")
         );
         assert_eq!(
-            http_remote_to_ssh("https://git.example.com:8443/team/repo.git", "alice")
-                .as_deref(),
+            http_remote_to_ssh("https://git.example.com:8443/team/repo.git", "alice").as_deref(),
             Some("alice@git.example.com:team/repo.git")
         );
         assert_eq!(http_remote_to_ssh("git@example.com:repo.git", "git"), None);

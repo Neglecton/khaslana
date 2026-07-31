@@ -1,3 +1,7 @@
+// 本文件是项目级设计系统 helper 库（按钮、徽标、对话框外壳、toast 等），
+// 其中部分控件为预留的公共 API，可能暂未被业务 view 调用，属于有意保留。
+#![allow(dead_code)]
+
 use std::time::{Duration, Instant};
 
 use crate::ui::theme::{rgb, rgba};

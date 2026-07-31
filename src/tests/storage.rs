@@ -229,3 +229,58 @@ fn theme_mode_defaults_to_system_and_round_trips() {
     storage.save_theme_mode(ThemeMode::Light).unwrap();
     assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::Light);
 }
+
+#[test]
+fn theme_accent_defaults_to_zero_and_round_trips() {
+    let (_temp, storage) = temp_storage();
+    // 默认值 0（靛蓝）
+    assert_eq!(storage.load_theme_accent().unwrap(), 0);
+
+    storage.save_theme_accent(3).unwrap();
+    assert_eq!(storage.load_theme_accent().unwrap(), 3);
+
+    // 切换 mode 不应清掉 accent
+    storage.save_theme_mode(ThemeMode::Dark).unwrap();
+    assert_eq!(storage.load_theme_accent().unwrap(), 3);
+
+    // 反之 accent 也不应清掉 mode
+    storage.save_theme_accent(5).unwrap();
+    assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::Dark);
+}
+
+#[test]
+fn theme_accent_migration_adds_column_to_legacy_database() {
+    // 模拟旧版数据库：theme_preferences 表没有 accent 列。
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("legacy.sqlite3");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE theme_preferences (id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO theme_preferences (id, mode, updated_at) VALUES (1, 'dark', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+    }
+    // 重新打开：initialize_schema 应幂等补上 accent 列
+    let storage = AppStorage::open(&db_path).unwrap();
+    // 迁移后旧记录的 accent 默认为 0，mode 保持 dark
+    assert_eq!(storage.load_theme_accent().unwrap(), 0);
+    assert_eq!(storage.load_theme_mode().unwrap(), ThemeMode::Dark);
+    // 能正常读写 accent
+    storage.save_theme_accent(7).unwrap();
+    assert_eq!(storage.load_theme_accent().unwrap(), 7);
+    // 再次打开仍然幂等（不会重复加列报错）
+    drop(storage);
+    let storage2 = AppStorage::open(&db_path).unwrap();
+    assert_eq!(storage2.load_theme_accent().unwrap(), 7);
+}

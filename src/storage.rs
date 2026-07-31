@@ -17,7 +17,7 @@ use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RemoteCredentialBindings {
@@ -241,6 +241,18 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn load_theme_accent(&self) -> Result<usize> {
+        let conn = self.lock_conn()?;
+        load_theme_accent_from_conn(&conn)
+    }
+
+    pub fn save_theme_accent(&self, accent: usize) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_theme_accent_tx(&tx, accent)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn import_legacy_json(
         &self,
         paths: &LegacyStoragePaths,
@@ -362,16 +374,39 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS theme_preferences (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             mode TEXT NOT NULL,
+            accent INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
         "#,
     )
     .map_err(storage_error)?;
+    // 幂等迁移：旧版数据库的 theme_preferences 没有 accent 列，补上。
+    // CREATE TABLE IF NOT EXISTS 对已存在的表不会加列，需显式 ALTER。
+    ensure_theme_accent_column(&conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
     )
     .map_err(storage_error)?;
+    Ok(())
+}
+
+/// 检查 theme_preferences 是否有 accent 列，没有则补加（幂等）。
+fn ensure_theme_accent_column(conn: &Connection) -> Result<()> {
+    let has_accent = conn
+        .prepare("PRAGMA table_info(theme_preferences)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .filter_map(|col| col.ok())
+        .any(|col| col == "accent");
+    if !has_accent {
+        conn.execute(
+            "ALTER TABLE theme_preferences ADD COLUMN accent INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(storage_error)?;
+    }
     Ok(())
 }
 
@@ -682,9 +717,36 @@ fn load_theme_mode_from_conn(conn: &Connection) -> Result<ThemeMode> {
 }
 
 fn save_theme_mode_tx(tx: &Transaction<'_>, mode: ThemeMode) -> Result<()> {
+    // 只更新 mode 列，保留 accent（用 UPSERT 的 UPDATE 语义，行不存在时先插入）。
     tx.execute(
-        "INSERT OR REPLACE INTO theme_preferences (id, mode, updated_at) VALUES (1, ?1, ?2)",
+        "INSERT INTO theme_preferences (id, mode, accent, updated_at) VALUES (1, ?1, 0, ?2)
+         ON CONFLICT(id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at",
         params![theme_mode_to_db(mode), now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_theme_accent_from_conn(conn: &Connection) -> Result<usize> {
+    // accent 列可能因旧库未迁移而缺失，但 ensure_theme_accent_column 已保证它存在。
+    conn.query_row(
+        "SELECT accent FROM theme_preferences WHERE id = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(storage_error)
+    // 行不存在或读取失败时回退默认 0
+    .map(|value| value.unwrap_or(0).max(0) as usize)
+}
+
+fn save_theme_accent_tx(tx: &Transaction<'_>, accent: usize) -> Result<()> {
+    let accent = accent as i64;
+    tx.execute(
+        "INSERT INTO theme_preferences (id, mode, accent, updated_at)
+         VALUES (1, 'system', ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET accent = excluded.accent, updated_at = excluded.updated_at",
+        params![accent, now_seconds()],
     )
     .map_err(storage_error)?;
     Ok(())

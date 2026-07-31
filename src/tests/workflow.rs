@@ -757,3 +757,446 @@ fn default_clean_worktree_check_rejects_dirty_repo() {
 
     assert!(err.to_string().contains("工作区存在未提交更改"));
 }
+
+/// 构造一个带多个命名分支的临时仓库，用于 filterBranches / deleteBranches 测试。
+/// 当前分支为 main，并额外创建若干符合 (dev|uat|release)_xxx_yyyyMMdd_xxx 命名规则的分支。
+fn init_named_branches_repo() -> (TempDir, Repository, GitService) {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "README.md", "base\n");
+    git_support::commit_all(&repo, "initial");
+    // 基于 main 创建若干命名分支（不切换），分支名内嵌日期
+    for name in [
+        "dev_wzf_20250418_测试系统",
+        "uat_wzf_20250520_测试系统",
+        "release_wzf_20250601_发布",
+        "dev_abc_20990101_未来", // 未来日期，不应被选中
+        "feature_random_branch", // 不匹配前缀
+    ] {
+        service
+            .create_branch_from(
+                &mut repo,
+                &BranchName::new(name),
+                Some(&BranchName::new("main")),
+                false,
+            )
+            .unwrap();
+    }
+    (dir, repo, service)
+}
+
+#[test]
+fn months_between_counts_calendar_months() {
+    // 同年同月差为 0
+    assert_eq!(months_between(date(2026, 7, 1), date(2026, 7, 31)), 0);
+    // 同年跨月
+    assert_eq!(months_between(date(2026, 1, 31), date(2026, 7, 1)), 6);
+    // 跨年
+    assert_eq!(months_between(date(2025, 7, 1), date(2026, 7, 1)), 12);
+    // 未来日期返回负数
+    assert_eq!(months_between(date(2027, 1, 1), date(2026, 1, 1)), -12);
+}
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+#[test]
+fn filter_branches_selects_old_named_branches() {
+    let (_dir, repo, service) = init_named_branches_repo();
+    let pattern = Regex::new(r"^(dev|uat|release)_[^_]+_(?P<date>\d{8})_").unwrap();
+    // 阈值 1 个月：2025 年的分支都超过 1 个月（当前 2026-07），未来分支不算
+    let plan =
+        select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 1, true).unwrap();
+
+    assert_eq!(plan.matched.len(), 3);
+    assert!(
+        plan.matched
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+    assert!(
+        plan.matched
+            .contains(&"uat_wzf_20250520_测试系统".to_string())
+    );
+    assert!(
+        plan.matched
+            .contains(&"release_wzf_20250601_发布".to_string())
+    );
+    // 未来日期分支归入未超期
+    assert!(
+        plan.skipped_within
+            .contains(&"dev_abc_20990101_未来".to_string())
+    );
+    // 不匹配前缀的分支既不在 matched 也不在 skipped（直接被 pattern 过滤）
+}
+
+#[test]
+fn filter_branches_keeps_current_branch_when_skip_current() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    // 切换到一个符合命名规则的分支，验证 skip_current 会把它排除
+    service
+        .checkout_branch(&mut repo, &BranchName::new("dev_wzf_20250418_测试系统"))
+        .unwrap();
+    let pattern = Regex::new(r"^(dev|uat|release)_[^_]+_(?P<date>\d{8})_").unwrap();
+    let plan =
+        select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 1, true).unwrap();
+    assert!(
+        !plan
+            .matched
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+    assert!(
+        plan.skipped_current
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+
+    // skip_current=false 时当前分支可入选
+    let plan2 = select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 1, false)
+        .unwrap();
+    assert!(
+        plan2
+            .matched
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+}
+
+#[test]
+fn filter_branches_threshold_boundary_is_strictly_greater() {
+    let (_dir, repo, service) = init_named_branches_repo();
+    let pattern = Regex::new(r"^(dev|uat|release)_[^_]+_(?P<date>\d{8})_").unwrap();
+    // 用一个极大阈值，确保所有分支都"未超过"，验证严格大于语义
+    let plan =
+        select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 100_000, true)
+            .unwrap();
+    assert!(plan.matched.is_empty());
+    // 命名规则的分支（含未来日期）都应在 skipped_within（未来日期月数差为负，也 <= 阈值）
+    assert!(plan.skipped_within.len() >= 3);
+}
+
+#[test]
+fn filter_branches_falls_back_to_unnamed_group() {
+    let (_dir, repo, service) = init_named_branches_repo();
+    // 用未命名的第一个捕获组
+    let pattern = Regex::new(r"^(?:dev|uat|release)_[^_]+_(\d{8})_").unwrap();
+    let plan =
+        select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 1, true).unwrap();
+    assert!(
+        plan.matched
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+}
+
+#[test]
+fn filter_branches_reports_unparseable_date() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    // 一个匹配 pattern 但日期格式无法解析的分支
+    service
+        .create_branch_from(
+            &mut repo,
+            &BranchName::new("dev_wzf_BADDATE_测试"),
+            Some(&BranchName::new("main")),
+            false,
+        )
+        .unwrap();
+    // pattern 匹配任意非下划线段作为"日期"
+    let pattern = Regex::new(r"^dev_[^_]+_(?P<date>[^_]+)_").unwrap();
+    let plan =
+        select_branches_for_deletion(&service, &repo, &pattern, "%Y%m%d", "date", 1, true).unwrap();
+    assert!(
+        plan.skipped_nodate
+            .contains(&"dev_wzf_BADDATE_测试".to_string())
+    );
+    // 能解析的正常入选
+    assert!(
+        plan.matched
+            .contains(&"dev_wzf_20250418_测试系统".to_string())
+    );
+}
+
+#[test]
+fn filter_then_delete_workflow_passes_array_between_steps() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    // 两步工作流：filterBranches → deleteBranches(dryRun)
+    let definition = parse_workflow_json5(
+        r#"
+        {
+          version: 1,
+          steps: [
+            {
+              op: "filterBranches",
+              output: "out.stale",
+              pattern: "^(dev|uat|release)_[^_]+_(?P<date>\\d{8})_",
+              dateFormat: "%Y%m%d",
+              olderThanMonths: "1",
+              skipCurrent: true,
+            },
+            {
+              op: "deleteBranches",
+              branches: "${out.stale}",
+              dryRun: true,
+              skipCurrent: true,
+            },
+          ],
+        }
+        "#,
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    let executor = WorkflowExecutor::new(&service);
+    let result = executor
+        .run(&mut repo, &definition, WorkflowRunOptions::default(), |e| {
+            events.push(e);
+        })
+        .unwrap();
+
+    // dryRun 模式不真正删除，分支仍存在
+    let names: Vec<String> = service
+        .local_branches(&repo)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(names.contains(&"dev_wzf_20250418_测试系统".to_string()));
+
+    // 第二步（deleteBranches）完成事件应携带逐个"将删除"明细
+    let finished = events
+        .iter()
+        .filter_map(|e| match e {
+            WorkflowProgressEvent::StepFinished { details, .. } => Some(details),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap();
+    assert!(
+        finished
+            .iter()
+            .any(|d| d.contains("将删除") && d.contains("dev_wzf_20250418"))
+    );
+    // 步骤计数为 2
+    assert_eq!(result.steps_run, 2);
+}
+
+#[test]
+fn delete_branches_actually_removes_when_not_dry_run() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    let definition = parse_workflow_json5(
+        r#"
+        {
+          version: 1,
+          steps: [
+            {
+              op: "filterBranches",
+              output: "out.stale",
+              pattern: "^(dev|uat|release)_[^_]+_(?P<date>\\d{8})_",
+              olderThanMonths: "1",
+              skipCurrent: true,
+            },
+            {
+              op: "deleteBranches",
+              branches: "${out.stale}",
+              dryRun: false,
+              skipCurrent: true,
+            },
+          ],
+        }
+        "#,
+    )
+    .unwrap();
+    let executor = WorkflowExecutor::new(&service);
+    executor
+        .run(
+            &mut repo,
+            &definition,
+            WorkflowRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+
+    let names: Vec<String> = service
+        .local_branches(&repo)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    // 三个超期分支被删除
+    assert!(!names.contains(&"dev_wzf_20250418_测试系统".to_string()));
+    assert!(!names.contains(&"uat_wzf_20250520_测试系统".to_string()));
+    assert!(!names.contains(&"release_wzf_20250601_发布".to_string()));
+    // 不匹配前缀的分支保留
+    assert!(names.contains(&"feature_random_branch".to_string()));
+    // main 仍在
+    assert!(names.contains(&"main".to_string()));
+}
+
+#[test]
+fn delete_branches_string_input_splits_by_newline() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    // branches 用换行分隔的字符串而非数组变量
+    let definition = parse_workflow_json5(
+        r#"
+        {
+          version: 1,
+          steps: [
+            {
+              op: "deleteBranches",
+              branches: "dev_wzf_20250418_测试系统\nuat_wzf_20250520_测试系统",
+              dryRun: false,
+              skipCurrent: true,
+            },
+          ],
+        }
+        "#,
+    )
+    .unwrap();
+    let executor = WorkflowExecutor::new(&service);
+    executor
+        .run(
+            &mut repo,
+            &definition,
+            WorkflowRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+    let names: Vec<String> = service
+        .local_branches(&repo)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(!names.contains(&"dev_wzf_20250418_测试系统".to_string()));
+    assert!(!names.contains(&"uat_wzf_20250520_测试系统".to_string()));
+    // 其余分支不受影响
+    assert!(names.contains(&"release_wzf_20250601_发布".to_string()));
+}
+
+#[test]
+fn delete_local_branches_removes_multiple_and_errors_on_missing() {
+    let (_dir, mut repo, service) = init_named_branches_repo();
+    service
+        .delete_local_branches(
+            &mut repo,
+            &[
+                BranchName::new("dev_wzf_20250418_测试系统"),
+                BranchName::new("uat_wzf_20250520_测试系统"),
+            ],
+        )
+        .unwrap();
+    let names: Vec<String> = service
+        .local_branches(&repo)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(!names.contains(&"dev_wzf_20250418_测试系统".to_string()));
+    assert!(!names.contains(&"uat_wzf_20250520_测试系统".to_string()));
+
+    // 不存在的分支会报错
+    let err = service
+        .delete_local_branches(&mut repo, &[BranchName::new("not_exist")])
+        .unwrap_err();
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn filter_branches_preview_shows_matched_details() {
+    let (_dir, repo, service) = init_named_branches_repo();
+    let definition = parse_workflow_json5(
+        r#"
+        {
+          version: 1,
+          steps: [
+            {
+              op: "filterBranches",
+              output: "out.stale",
+              pattern: "^(dev|uat|release)_[^_]+_(?P<date>\\d{8})_",
+              olderThanMonths: "1",
+              skipCurrent: true,
+            },
+          ],
+        }
+        "#,
+    )
+    .unwrap();
+    let executor = WorkflowExecutor::new(&service);
+    let preview = executor
+        .preview(&repo, &definition, &WorkflowRunOptions::default())
+        .unwrap();
+    // 预览步骤应携带命中明细（只读计算，不改动仓库）
+    let details = &preview.steps[0].details;
+    assert!(details.iter().any(|d| d.contains("dev_wzf_20250418")));
+    assert!(details.iter().any(|d| d.contains("命中")));
+}
+
+#[test]
+fn reproduce_user_scenario_uat_branch_with_alt_and_inputs() {
+    // 精确复现用户反馈场景：
+    // 分支 uat_wzf_20250924_智慧消保系统，前缀 uat,release，阈值 2 个月（今天 2026-07-31，距今约 10 个月）。
+    // 使用示例 4 的完整结构（inputs + vars + alt + 两步骤）。
+    let (_dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(_dir.path(), "README.md", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch_from(
+            &mut repo,
+            &BranchName::new("uat_wzf_20250924_智慧消保系统"),
+            Some(&BranchName::new("main")),
+            false,
+        )
+        .unwrap();
+
+    let definition = parse_workflow_json5(
+        r#"
+        {
+          version: 1,
+          name: "清理过期命名分支",
+          defaults: { requireCleanWorktree: false },
+          inputs: {
+            prefixes: { label: "前缀", default: "uat,release", required: true },
+            months: { label: "月数", default: "2", required: true },
+          },
+          vars: {
+            prefixAlt: "${prefixes|alt}",
+          },
+          steps: [
+            {
+              op: "filterBranches",
+              output: "out.staleBranches",
+              pattern: "^${prefixAlt}_[^_]+_(?P<date>\\d{8})_",
+              dateFormat: "%Y%m%d",
+              dateGroup: "date",
+              olderThanMonths: "${months}",
+              skipCurrent: true,
+            },
+            {
+              op: "deleteBranches",
+              branches: "${out.staleBranches}",
+              dryRun: true,
+              skipCurrent: true,
+            },
+          ],
+        }
+        "#,
+    )
+    .unwrap();
+
+    let executor = WorkflowExecutor::new(&service);
+    // 模拟 UI 行为：用户填入前缀 uat,release 和月数 2
+    let options = WorkflowRunOptions {
+        default_remote: "origin".to_string(),
+        input_vars: {
+            let mut m = BTreeMap::new();
+            m.insert("prefixes".to_string(), "uat,release".to_string());
+            m.insert("months".to_string(), "2".to_string());
+            m
+        },
+    };
+    let preview = executor.preview(&repo, &definition, &options).unwrap();
+
+    // 预览第一步（filterBranches）的明细应命中该分支
+    let filter_details = &preview.steps[0].details;
+    assert!(
+        filter_details
+            .iter()
+            .any(|d| d.contains("uat_wzf_20250924_智慧消保系统") && d.contains("命中")),
+        "应命中 uat 分支，实际 details: {filter_details:?}"
+    );
+}

@@ -28,10 +28,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     let pid = arg_value(&args, "--pid").ok_or("缺少 --pid 参数")?;
-    let target_exe = PathBuf::from(arg_value(&args, "--target-exe").ok_or("缺少 --target-exe 参数")?);
+    let target_exe =
+        PathBuf::from(arg_value(&args, "--target-exe").ok_or("缺少 --target-exe 参数")?);
     let new_exe = PathBuf::from(arg_value(&args, "--new-exe").ok_or("缺少 --new-exe 参数")?);
-    let new_updater = PathBuf::from(arg_value(&args, "--new-updater").ok_or("缺少 --new-updater 参数")?);
-    let backup_dir = PathBuf::from(arg_value(&args, "--backup-dir").ok_or("缺少 --backup-dir 参数")?);
+    let new_updater =
+        PathBuf::from(arg_value(&args, "--new-updater").ok_or("缺少 --new-updater 参数")?);
+    let backup_dir =
+        PathBuf::from(arg_value(&args, "--backup-dir").ok_or("缺少 --backup-dir 参数")?);
     let restart = args.iter().any(|a| a == "--restart");
 
     // 推断同目录下的 khaslana_updater.exe
@@ -127,7 +130,5 @@ fn wait_for_process_exit(pid: u32, max_seconds: u64) -> Result<(), Box<dyn std::
 
 /// 从命令行参数中提取指定名称的值。
 fn arg_value(args: &[String], name: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == name)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
 }

@@ -1771,8 +1771,7 @@ fn branch_sync_status_reports_remote_behind_commits() {
 
 #[test]
 fn local_branch_metadata_reports_ahead_and_behind_counts() {
-    let (remote_dir, clone_dir, _clone_path, mut repo, service) =
-        clone_repo_with_remote_feature();
+    let (remote_dir, clone_dir, _clone_path, mut repo, service) = clone_repo_with_remote_feature();
     git_support::write_file(
         clone_dir.path().join("clone").as_path(),
         "local.txt",
@@ -2255,8 +2254,7 @@ fn pull_branch_reports_missing_remote_branch_in_chinese() {
 
 #[test]
 fn pull_local_branch_fast_forwards_selected_non_current_branch() {
-    let (remote_dir, _clone_dir, _clone_path, mut repo, service) =
-        clone_repo_with_remote_feature();
+    let (remote_dir, _clone_dir, _clone_path, mut repo, service) = clone_repo_with_remote_feature();
     service
         .fetch(&mut repo, &RemoteName::new("origin"))
         .unwrap();

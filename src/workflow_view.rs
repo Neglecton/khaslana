@@ -34,6 +34,31 @@ pub(crate) struct WorkflowInputFieldState {
     field: TextFieldState,
 }
 
+/// 一条工作流日志：标题行 + 可选的明细行（如逐个删除/命中的分支）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkflowLogEntry {
+    pub(crate) message: String,
+    pub(crate) details: Vec<String>,
+}
+
+impl From<String> for WorkflowLogEntry {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            details: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for WorkflowLogEntry {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            details: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct WorkflowTemplateItem {
     pub(crate) path: PathBuf,
@@ -199,22 +224,24 @@ impl RepositoryView {
             this.last_error = None;
         });
         self.tasks.spawn(TaskKind::Long, move || {
-            let result = (|| -> khaslana::Result<(RepositorySnapshot, Vec<String>, String)> {
-                let mut repo = Repository::open(repo_path)?;
-                let mut log = Vec::new();
-                let result = WorkflowExecutor::new(&service).run(
-                    &mut repo,
-                    &definition,
-                    options,
-                    |event| {
-                        let message = workflow_progress_message(&event);
-                        log.push(message.clone());
-                        send_ui_event(&tx, UiEvent::WorkflowProgress { tab_id, message });
-                    },
-                )?;
-                let message = format!("工作流“{}”已完成（{} 步）", result.name, result.steps_run);
-                Ok((result.snapshot, log, message))
-            })();
+            let result =
+                (|| -> khaslana::Result<(RepositorySnapshot, Vec<WorkflowLogEntry>, String)> {
+                    let mut repo = Repository::open(repo_path)?;
+                    let mut log: Vec<WorkflowLogEntry> = Vec::new();
+                    let result = WorkflowExecutor::new(&service).run(
+                        &mut repo,
+                        &definition,
+                        options,
+                        |event| {
+                            let entry = workflow_progress_entry(&event);
+                            log.push(entry.clone());
+                            send_ui_event(&tx, UiEvent::WorkflowProgress { tab_id, entry });
+                        },
+                    )?;
+                    let message =
+                        format!("工作流“{}”已完成（{} 步）", result.name, result.steps_run);
+                    Ok((result.snapshot, log, message))
+                })();
             match result {
                 Ok((snapshot, log, message)) => {
                     send_ui_event(
@@ -232,7 +259,10 @@ impl RepositoryView {
                         &tx,
                         UiEvent::WorkflowProgress {
                             tab_id,
-                            message: format!("工作流失败：{err}"),
+                            entry: WorkflowLogEntry {
+                                message: format!("工作流失败：{err}"),
+                                details: Vec::new(),
+                            },
                         },
                     );
                     send_ui_event(
@@ -718,10 +748,35 @@ impl RepositoryView {
                     .steps
                     .iter()
                     .map(|step| {
+                        // summary 列改为纵向容器：标题行 + 明细子行（如筛选命中的分支清单）。
+                        let summary_col = div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .truncate()
+                                    .child(step.summary.clone()),
+                            )
+                            .children(
+                                step.details
+                                    .iter()
+                                    .map(|detail| {
+                                        div()
+                                            .pl_4()
+                                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                            .truncate()
+                                            .child(detail.clone())
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
                         div()
                             .flex()
                             .flex_none()
-                            .items_center()
+                            .items_start()
                             .gap_2()
                             .px_2()
                             .py_2()
@@ -743,14 +798,7 @@ impl RepositoryView {
                                     .text_color(rgb(ui_theme::PRIMARY))
                                     .child(step.op),
                             )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .text_color(rgb(ui_theme::FOREGROUND))
-                                    .truncate()
-                                    .child(step.summary.clone()),
-                            )
+                            .child(summary_col)
                             .into_any_element()
                     })
                     .collect::<Vec<_>>()
@@ -801,7 +849,18 @@ impl RepositoryView {
             self.workflow_state
                 .log
                 .iter()
-                .map(|line| {
+                .map(|entry| {
+                    // 明细行（如逐个删除/命中的分支）以缩进子行渲染。
+                    let detail_rows = entry
+                        .details
+                        .iter()
+                        .map(|detail| {
+                            div()
+                                .pl_4()
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(detail.clone())
+                        })
+                        .collect::<Vec<_>>();
                     div()
                         .flex_none()
                         .px_2()
@@ -811,7 +870,8 @@ impl RepositoryView {
                         .text_size(px(12.0))
                         .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                         .bg(rgb(ui_theme::CARD))
-                        .child(line.clone())
+                        .child(entry.message.clone())
+                        .children(detail_rows)
                         .into_any_element()
                 })
                 .collect::<Vec<_>>()
@@ -851,24 +911,34 @@ impl RepositoryView {
     }
 }
 
-fn workflow_progress_message(event: &WorkflowProgressEvent) -> String {
+fn workflow_progress_entry(event: &WorkflowProgressEvent) -> WorkflowLogEntry {
     match event {
-        WorkflowProgressEvent::Started { name, total } => {
-            format!("开始运行工作流“{name}”（{total} 步）")
-        }
+        WorkflowProgressEvent::Started { name, total } => WorkflowLogEntry {
+            message: format!("开始运行工作流“{name}”（{total} 步）"),
+            details: Vec::new(),
+        },
         WorkflowProgressEvent::StepStarted {
             index,
             total,
             label,
-        } => format!("步骤 {}/{}：{label}", index + 1, total),
+            details,
+        } => WorkflowLogEntry {
+            message: format!("步骤 {}/{}：{label}", index + 1, total),
+            details: details.clone(),
+        },
         WorkflowProgressEvent::StepFinished {
             index,
             total,
             label,
-        } => format!("步骤 {}/{} 完成：{label}", index + 1, total),
-        WorkflowProgressEvent::Finished { name, total } => {
-            format!("工作流“{name}”已完成（{total} 步）")
-        }
+            details,
+        } => WorkflowLogEntry {
+            message: format!("步骤 {}/{} 完成：{label}", index + 1, total),
+            details: details.clone(),
+        },
+        WorkflowProgressEvent::Finished { name, total } => WorkflowLogEntry {
+            message: format!("工作流“{name}”已完成（{total} 步）"),
+            details: Vec::new(),
+        },
     }
 }
 

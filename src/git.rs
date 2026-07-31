@@ -797,11 +797,7 @@ impl GitService {
             let annotated = repo.find_annotated_commit(upstream_oid)?;
             drop(upstream_branch);
             drop(local_branch);
-            self.merge_annotated(
-                repo,
-                &annotated,
-                &format!("{remote}/{remote_branch}"),
-            )?;
+            self.merge_annotated(repo, &annotated, &format!("{remote}/{remote_branch}"))?;
         }
 
         self.progress.emit(OperationEvent::Finished(format!(
@@ -1068,6 +1064,20 @@ impl GitService {
         branch_handle.delete()?;
         drop(branch_handle);
         self.snapshot_after_operation(repo)
+    }
+
+    /// 批量删除本地分支（仅本地，不涉及远端）。
+    ///
+    /// 复用 `delete_branch` 的 libgit2 路径，不绕开 `GitService`。
+    /// 供工作流 `deleteBranches` 步骤使用：循环内只做删除，快照由调用方统一刷新一次。
+    /// 某个分支不存在或无法删除时立即返回错误，已删除的分支不会被回滚。
+    pub fn delete_local_branches(&self, repo: &mut Repository, names: &[BranchName]) -> Result<()> {
+        for name in names {
+            let mut branch_handle = repo.find_branch(&name.0, BranchType::Local)?;
+            branch_handle.delete()?;
+            drop(branch_handle);
+        }
+        Ok(())
     }
 
     pub fn rename_branch(
