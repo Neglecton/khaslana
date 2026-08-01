@@ -704,6 +704,50 @@ fn author_avatar_initial(author: &str) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// 仓库切换下拉里的仓库头像：圆角方形色块 + 1~2 字母缩写，颜色按名称哈希取色。
+/// 与提交行作者头像（圆形）形状区分，避免视觉混淆。
+pub(crate) fn repo_avatar(name: &str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .size(px(28.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(author_avatar_color(name)))
+        .text_color(rgb(COLOR_SURFACE))
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .child(repo_initials(name))
+}
+
+/// 计算仓库名缩写：多段名取前两段首字母，单词名取首字母加首个内部大写字母。
+/// 例如 `mc-manager`→`MM`、`EasyTier`→`ET`、`qqBot`→`QB`、`khaslana`→`K`。
+fn repo_initials(name: &str) -> String {
+    let segments = name
+        .split(|ch: char| matches!(ch, '-' | '_' | '/' | '\\' | '.' | ' '))
+        .filter(|seg| !seg.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() >= 2 {
+        let first = segments[0].chars().next().map(|ch| ch.to_uppercase().to_string());
+        let second = segments[1].chars().next().map(|ch| ch.to_uppercase().to_string());
+        return format!("{}{}", first.unwrap_or_default(), second.unwrap_or_default());
+    }
+    let Some(word) = segments.first().copied() else {
+        return "?".to_string();
+    };
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else {
+        return "?".to_string();
+    };
+    let mut initials = first.to_uppercase().to_string();
+    // 单词名：补一个首个内部大写字母，凑成两字母缩写（如 EasyTier→ET）。
+    if let Some(second) = chars.find(|ch| ch.is_uppercase()) {
+        initials.push(second);
+    }
+    initials
+}
+
 pub(crate) fn diff_scope_label(scope: &DiffScope) -> &'static str {
     match scope {
         DiffScope::Staged => "已暂存",

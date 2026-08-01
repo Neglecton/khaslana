@@ -188,122 +188,44 @@ fn change_list_indexes_keep_large_staged_and_unstaged_lists_separate() {
 }
 
 #[test]
-fn toolbar_more_menu_actions_keep_original_enabled_rules() {
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::Clone,
-        false,
-        false
-    ));
-    assert!(!toolbar_more_action_enabled(
-        ToolbarMoreAction::Clone,
-        false,
-        true
-    ));
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::Stash,
-        true,
-        false
-    ));
-    assert!(!toolbar_more_action_enabled(
-        ToolbarMoreAction::Stash,
-        false,
-        false
-    ));
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::Submodule,
-        true,
-        false
-    ));
-    assert!(!toolbar_more_action_enabled(
-        ToolbarMoreAction::Submodule,
-        true,
-        true
-    ));
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::Credentials,
-        false,
-        false
-    ));
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::Proxy,
-        false,
-        false
-    ));
-    assert!(toolbar_more_action_enabled(
-        ToolbarMoreAction::ThemeSettings,
-        false,
-        false
-    ));
-    assert!(!toolbar_more_action_enabled(
-        ToolbarMoreAction::ThemeSettings,
-        false,
-        true
-    ));
-    assert!(!toolbar_more_action_enabled(
-        ToolbarMoreAction::Credentials,
-        true,
-        true
-    ));
-}
-
-#[test]
-fn toolbar_layout_switches_hidden_actions_by_width() {
-    assert_eq!(
-        toolbar_layout_mode(TOOLBAR_FULL_LAYOUT_MIN_WIDTH - 1.0),
-        ToolbarLayoutMode::Compact
-    );
-    assert_eq!(
-        toolbar_layout_mode(TOOLBAR_FULL_LAYOUT_MIN_WIDTH),
-        ToolbarLayoutMode::Full
-    );
-    assert_eq!(toolbar_layout_mode(1920.0), ToolbarLayoutMode::Full);
-}
-
-#[test]
-fn toolbar_more_actions_expand_only_in_full_layout() {
-    assert_eq!(
-        toolbar_more_action_placement(ToolbarLayoutMode::Compact),
-        ToolbarMoreActionPlacement {
-            show_inline_actions: false,
-            show_more_button: true,
-        }
-    );
-    assert_eq!(
-        toolbar_more_action_placement(ToolbarLayoutMode::Full),
-        ToolbarMoreActionPlacement {
-            show_inline_actions: true,
-            show_more_button: false,
-        }
-    );
-}
-
-#[test]
-fn toolbar_more_menu_position_stays_inside_viewport() {
-    assert_eq!(
-        toolbar_more_menu_position(700.0, 58.0, 1280.0, 720.0),
-        (548.0, 78.0)
-    );
-    assert_eq!(
-        toolbar_more_menu_position(1268.0, 58.0, 1280.0, 720.0),
-        (
-            1280.0 - TOOLBAR_MORE_MENU_WIDTH - MENU_VIEWPORT_MARGIN,
-            78.0
-        )
-    );
-}
-
-#[test]
-fn toolbar_more_menu_hit_test_includes_menu_and_button_anchor() {
-    let menu = ToolbarMoreMenu {
-        x: 548.0,
-        y: 78.0,
-        button_x: 662.0,
-        button_y: 36.0,
+fn repo_switcher_menu_anchors_below_trigger_button() {
+    // 菜单水平对齐按钮左缘、垂直紧贴按钮下方。
+    let anchor = RepoSwitcherAnchor {
+        x: 120.0,
+        y: 8.0,
+        w: 140.0,
+        h: 32.0,
     };
+    assert_eq!(
+        repo_switcher_menu_origin(&anchor, 1280.0, 720.0),
+        (120.0, 40.0)
+    );
+    // 按钮靠近右缘时菜单左缘被钳制，避免溢出视口。
+    let right_anchor = RepoSwitcherAnchor {
+        x: 1200.0,
+        y: 8.0,
+        w: 140.0,
+        h: 32.0,
+    };
+    let (x, y) = repo_switcher_menu_origin(&right_anchor, 1280.0, 720.0);
+    assert_eq!(x, 1280.0 - REPO_SWITCHER_MENU_WIDTH - MENU_VIEWPORT_MARGIN);
+    assert_eq!(y, 40.0);
+}
 
-    assert!(point_in_toolbar_more_menu(560.0, 90.0, &menu));
-    assert!(point_in_toolbar_more_menu(700.0, 58.0, &menu));
-    assert!(!point_in_toolbar_more_menu(500.0, 58.0, &menu));
+#[test]
+fn repo_switcher_hit_test_covers_menu_and_trigger() {
+    let menu = RepoSwitcherMenu { x: 120.0, y: 40.0 };
+    let anchor = RepoSwitcherAnchor {
+        x: 120.0,
+        y: 8.0,
+        w: 140.0,
+        h: 32.0,
+    };
+    // 菜单内、触发器按钮内均命中；二者之外不命中。
+    assert!(point_in_repo_switcher(150.0, 60.0, &menu, Some(&anchor)));
+    assert!(point_in_repo_switcher(180.0, 20.0, &menu, Some(&anchor)));
+    // 菜单宽 320（x∈[120,440]）、高 480（y∈[40,520]）；500 在菜单与按钮右侧之外。
+    assert!(!point_in_repo_switcher(500.0, 300.0, &menu, Some(&anchor)));
 }
 
 #[test]
@@ -950,4 +872,71 @@ fn diff_render_rows_track_headers_and_empty_states() {
         diff_render_rows_for(None, false),
         vec![DiffRenderRow::Empty]
     );
+}
+
+fn switcher_tab(key: &str, name: &str, last_active: i64, tab_id: u64) -> RepoSwitcherTabInput {
+    RepoSwitcherTabInput {
+        key: key.to_string(),
+        name: name.to_string(),
+        full_path: format!("C:/repos/{key}"),
+        last_active,
+        tab_id: RepoTabId(tab_id),
+    }
+}
+
+fn switcher_recent(key: &str, name: &str, last_opened: i64) -> RepoSwitcherRecentInput {
+    RepoSwitcherRecentInput {
+        key: key.to_string(),
+        name: name.to_string(),
+        full_path: format!("C:/repos/{key}"),
+        last_opened,
+    }
+}
+
+#[test]
+fn repo_switcher_sections_actions_fixed_order() {
+    let sections = build_repo_switcher_sections(None, vec![], vec![]);
+    assert_eq!(
+        sections.actions,
+        vec![RepoSwitcherAction::Clone, RepoSwitcherAction::Open]
+    );
+    assert!(sections.open.is_empty());
+    assert!(sections.recent.is_empty());
+}
+
+#[test]
+fn repo_switcher_sections_active_first_then_recent_activity() {
+    // 活动仓库 c 置顶；其余按 last_active 倒序（b=20 先于 a=10）。
+    let tabs = vec![
+        switcher_tab("a", "alpha", 10, 1),
+        switcher_tab("b", "beta", 20, 2),
+        switcher_tab("c", "gamma", 5, 3),
+    ];
+    let sections = build_repo_switcher_sections(Some("c"), tabs, vec![]);
+
+    assert_eq!(sections.open.len(), 3);
+    assert_eq!(sections.open[0].path_key, "c");
+    assert!(sections.open[0].active);
+    assert_eq!(sections.open[0].tab_id, Some(RepoTabId(3)));
+    assert_eq!(sections.open[1].path_key, "b");
+    assert!(!sections.open[1].active);
+    assert_eq!(sections.open[2].path_key, "a");
+}
+
+#[test]
+fn repo_switcher_sections_recent_excludes_open_tabs() {
+    // b 已打开，应只出现在 open 区，不出现在 recent 区。
+    let tabs = vec![switcher_tab("b", "beta", 100, 2)];
+    let recent = vec![
+        switcher_recent("b", "beta", 90),
+        switcher_recent("z", "zeta", 80),
+    ];
+    let sections = build_repo_switcher_sections(Some("b"), tabs, recent);
+
+    assert_eq!(sections.open.len(), 1);
+    assert_eq!(sections.open[0].path_key, "b");
+    // recent 区只剩未打开的 z，且 tab_id 为 None。
+    assert_eq!(sections.recent.len(), 1);
+    assert_eq!(sections.recent[0].path_key, "z");
+    assert_eq!(sections.recent[0].tab_id, None);
 }

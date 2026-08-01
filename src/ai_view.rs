@@ -25,8 +25,10 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        self.dialog_panel("AI 设置", cx)
-            .w(px(560.0))
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(self.toggle_row(
                 "ai-enabled",
                 "启用 AI 功能",

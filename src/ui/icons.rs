@@ -17,7 +17,6 @@ pub(crate) enum ToolbarIcon {
     History,
     Stash,
     Submodule,
-    More,
     Ai,
     Search,
     Close,
@@ -29,6 +28,7 @@ pub(crate) enum ToolbarIcon {
     Globe,
     ChevronRight,
     Update,
+    Settings,
 }
 
 impl ToolbarIcon {
@@ -47,7 +47,6 @@ impl ToolbarIcon {
             Self::History => "icons/history.svg",
             Self::Stash => "icons/stash.svg",
             Self::Submodule => "icons/submodule.svg",
-            Self::More => "icons/more.svg",
             Self::Ai => "icons/ai.svg",
             Self::Search => "icons/search.svg",
             Self::Close => "icons/close.svg",
@@ -59,6 +58,7 @@ impl ToolbarIcon {
             Self::Globe => "icons/globe.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
             Self::Update => "icons/update.svg",
+            Self::Settings => "icons/settings.svg",
         }
     }
 }

@@ -6,7 +6,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 
 当前项目不是简单演示应用，而是已经具备完整 Git 工作流的客户端：
 
-- 多仓库标签页与会话恢复
+- 多仓库并存（仓库切换下拉）与会话恢复
 - 仓库打开、克隆、刷新
 - 本地/远端分支、标签、贮藏、远端管理
 - 暂存、取消暂存、丢弃变更、提交
@@ -55,8 +55,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
-- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗等。
-- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多标签页状态、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式等。
+- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
 - `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
 - `src/external_merge_view.rs`：外部合并工具设置弹窗，支持启用/禁用 IntelliJ IDEA 外部合并、配置 IDEA 命令路径、检测命令并在检测按钮显示成功/失败状态，以及开启选中冲突文件后自动打开 IDEA。
@@ -72,7 +71,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
 - `src/browse_compare_view.rs`：分支比较模式左侧差异文件树 UI，包括把扁平差异文件构造为目录嵌套文件树的 `flatten_compare_files`、默认全展开的 `all_compare_dirs`、文件名级重命名展示、差异文件状态徽标和列表空状态；虚拟化列表行数取展平可见行数 `compare_visible_row_count`（目录节点 + 文件叶子），不能用差异文件数，否则深层目录与文件叶子会因超出行数而不渲染。
-- `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像等辅助渲染。
+- `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像（`author_avatar`）、仓库头像（`repo_avatar`/`repo_initials`，圆角方形首字母缩写色块）等辅助渲染。
 
 ## 4. 核心架构
 
@@ -115,7 +114,8 @@ Git 操作通常返回新的 `RepositorySnapshot`，让 UI 统一刷新状态。
 
 `RepositoryView` 是主状态容器，维护：
 
-- 多仓库标签：`tabs`、`active_tab`、`RepoTabState`
+- 多仓库并存：`tabs`、`active_tab`、`RepoTabState`；仓库切换下拉（IDEA 式三区：功能区/打开项目/最近项目）替代标签页行
+- 设置中心：`settings_center: Option<SettingsCategory>`，独立于 `active_dialog`，凭据子弹窗可叠加
 - 每个仓库的快照、选中分支/远端、变更选择、diff、历史列表和历史 diff
 - 对话框和右键菜单状态
 - 凭据弹窗、凭据管理器、远端凭据策略
@@ -164,6 +164,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 应用使用 `directories::ProjectDirs::from("", "", "Khaslana")` 生成配置目录，主程序持久化数据统一写入 `khaslana.sqlite3`。当前数据库保存：
 
 - 打开过的仓库路径和当前激活仓库。
+- 最近打开过的仓库路径及最后打开时间（`recent_repositories` 表，供仓库切换下拉排序）。
 - 每个仓库的 diff 编码偏好。
 - 仓库远端到凭据策略的绑定。
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
@@ -179,7 +180,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 - 打开本地仓库
 - 克隆远端仓库，并根据 URL 推断目录名，默认递归克隆子模块
-- 多仓库标签页
+- 多仓库并存（仓库切换下拉：置顶克隆/打开 + 打开项目[活动置顶] + 最近项目，按最近时间排序，下拉项可关闭已打开仓库）。下拉菜单固定锚定在触发器按钮正下方（非鼠标位置），点击菜单外部或再次点击触发器按钮均关闭，复用根层 `capture_any_mouse_down` 的点击外部关闭机制。
 - 自动保存和恢复会话
 - 关闭主窗口时可选择直接退出或缩小到系统托盘；托盘支持恢复主窗口和退出应用
 - 刷新仓库状态
@@ -203,7 +204,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
 - 提交信息输入和 commit
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
-- 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；更多菜单的「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
+- 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；设置中心「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
 
 ### 5.3 分支、远端、标签、贮藏
 
@@ -272,6 +273,14 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 跟随系统模式会响应操作系统窗口外观变化
 - Khaslana 语义色、自绘输入框和 Yororen 组件使用一致的深浅色模式
 - 主题色更换：在外观设置中可从 9 种预置主题色（靛蓝、紫罗兰、玫红、橙、青、翠绿、石墨、金棕、天蓝）中选择，默认为靛蓝。主题色影响主色族（按钮、选中态、链接、输入框聚焦边框/选区、HEAD 标签、进度条等），Yororen 组件的聚焦边框也跟随主题色。主题色预设定义在 `src/ui/theme.rs` 的 `ACCENT_PRESETS`，运行时通过 `ACTIVE_ACCENT` 原子和 `resolve_accent_token` 动态解析，业务 view 无需感知。主题色索引持久化到 `theme_preferences.accent` 列。
+
+### 5.9 设置中心
+
+- 工具栏「设置」按钮打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）。
+- 左侧 6 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置。
+- 右侧内容面板渲染对应分类的表单/列表，保存/取消逻辑不变。
+- 凭据管理的子弹窗（详情/表单/删除确认）经 `active_dialog` 分发，可叠加在设置中心之上；关闭子弹窗后回到设置中心。
+- 原工具栏的 6 个独立设置按钮已移除，统一由设置中心承载。
 
 ## 6. 开发命令
 

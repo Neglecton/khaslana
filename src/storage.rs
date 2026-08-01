@@ -139,6 +139,20 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    /// 记录一个最近打开/激活的仓库，更新其最后打开时间（用于仓库切换下拉的“最近的项目”区）。
+    pub fn upsert_recent_repo(&self, path: &Path) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        upsert_recent_repo_tx(&tx, path)?;
+        tx.commit().map_err(storage_error)
+    }
+
+    /// 读取最近打开过的仓库，按最后打开时间倒序，供仓库切换下拉排序。
+    pub fn load_recent_repos(&self) -> Result<Vec<(PathBuf, i64)>> {
+        let conn = self.lock_conn()?;
+        load_recent_repos_from_conn(&conn)
+    }
+
     pub fn load_diff_encoding_preferences(&self) -> Result<DiffEncodingPreferences> {
         let conn = self.lock_conn()?;
         load_diff_encoding_preferences_from_conn(&conn)
@@ -377,6 +391,11 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             accent INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS recent_repositories (
+            path TEXT PRIMARY KEY,
+            last_opened_at INTEGER NOT NULL
+        );
         "#,
     )
     .map_err(storage_error)?;
@@ -526,6 +545,32 @@ fn save_session_state_tx(tx: &Transaction<'_>, state: &SessionState) -> Result<(
     )
     .map_err(storage_error)?;
     Ok(())
+}
+
+fn upsert_recent_repo_tx(tx: &Transaction<'_>, path: &Path) -> Result<()> {
+    // path 为主键，重复打开只刷新最后打开时间，不产生重复行。
+    tx.execute(
+        "INSERT INTO recent_repositories (path, last_opened_at) VALUES (?1, ?2)
+         ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at",
+        params![path.to_string_lossy().to_string(), now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_recent_repos_from_conn(conn: &Connection) -> Result<Vec<(PathBuf, i64)>> {
+    let mut stmt = conn
+        .prepare("SELECT path, last_opened_at FROM recent_repositories ORDER BY last_opened_at DESC LIMIT 20")
+        .map_err(storage_error)?;
+    stmt.query_map([], |row| {
+        Ok((
+            PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, i64>(1)?,
+        ))
+    })
+    .map_err(storage_error)?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(storage_error)
 }
 
 fn load_diff_encoding_preferences_from_conn(conn: &Connection) -> Result<DiffEncodingPreferences> {

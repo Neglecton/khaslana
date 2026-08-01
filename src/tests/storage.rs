@@ -284,3 +284,30 @@ fn theme_accent_migration_adds_column_to_legacy_database() {
     let storage2 = AppStorage::open(&db_path).unwrap();
     assert_eq!(storage2.load_theme_accent().unwrap(), 7);
 }
+
+// 同一仓库重复记录只保留一行，且最后打开时间被刷新。
+#[test]
+fn recent_repo_upsert_dedups_same_path() {
+    let (_temp, storage) = temp_storage();
+    storage.upsert_recent_repo(Path::new("C:/repo/a")).unwrap();
+    storage.upsert_recent_repo(Path::new("C:/repo/a")).unwrap();
+
+    let recent = storage.load_recent_repos().unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].0, PathBuf::from("C:/repo/a"));
+}
+
+// 最近仓库按最后打开时间倒序返回；跨秒 upsert 保证顺序确定。
+#[test]
+fn recent_repo_load_orders_by_last_opened_desc() {
+    let (_temp, storage) = temp_storage();
+    storage.upsert_recent_repo(Path::new("C:/repo/old")).unwrap();
+    // now_seconds 为秒级精度，sleep 跨秒以保证 old 的时间戳严格早于 new。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    storage.upsert_recent_repo(Path::new("C:/repo/new")).unwrap();
+
+    let recent = storage.load_recent_repos().unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].0, PathBuf::from("C:/repo/new"));
+    assert_eq!(recent[1].0, PathBuf::from("C:/repo/old"));
+}

@@ -3,7 +3,7 @@ use khaslana::ThemeMode;
 use yororen_ui::theme::{GlobalTheme, Theme, ThemeSet};
 
 use crate::{
-    DialogState, RepositoryView,
+    RepositoryView,
     ui::{
         components::{dialog_actions, segmented_button},
         theme::{self as ui_theme, ThemeVariant, rgb},
@@ -16,12 +16,6 @@ impl RepositoryView {
             .load_theme_mode()
             .inspect_err(|err| tracing::warn!("theme preferences load skipped: {err}"))
             .unwrap_or_default()
-    }
-
-    pub(crate) fn open_theme_settings(&mut self) {
-        self.close_popups();
-        self.active_dialog = Some(DialogState::ThemeSettings);
-        self.last_error = None;
     }
 
     /// 同时更新 Khaslana 语义色板和 Yororen 全局主题，避免混用组件出现深浅色割裂。
@@ -82,8 +76,10 @@ impl RepositoryView {
         let active_variant = ui_theme::variant_for_mode(self.theme_mode, window.appearance());
         let modes = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark];
 
-        self.dialog_panel("外观", cx)
-            .w(px(520.0))
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(
                 div()
                     .text_size(px(12.0))

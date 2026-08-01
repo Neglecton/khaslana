@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_channel::{Receiver, Sender};
 use git2::Repository;
@@ -160,11 +160,9 @@ const COMMIT_MENU_HEIGHT: f32 = 230.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 265.0;
 const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
-const TOOLBAR_FULL_LAYOUT_MIN_WIDTH: f32 = 1760.0;
-const TOOLBAR_MORE_MENU_WIDTH: f32 = 190.0;
-const TOOLBAR_MORE_MENU_HEIGHT: f32 = 288.0;
-const TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH: f32 = 76.0;
-const TOOLBAR_MORE_MENU_VERTICAL_OFFSET: f32 = 20.0;
+// 仓库切换下拉尺寸：宽 320 容纳完整路径，高 480 内部滚动。
+const REPO_SWITCHER_MENU_WIDTH: f32 = 320.0;
+const REPO_SWITCHER_MENU_HEIGHT: f32 = 480.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
 const LARGE_DIFF_CACHE_LINE_LIMIT: usize = 20_000;
 const DIFF_CACHE_CAPACITY: usize = 16;
@@ -216,6 +214,17 @@ enum CredentialFormMode {
     Ssh,
 }
 
+/// 设置中心的分类，独立于 DialogState 以避免凭据子弹窗叠加冲突。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsCategory {
+    Credentials,
+    Proxy,
+    Ai,
+    ExternalMerge,
+    Theme,
+    Update,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DialogState {
     CloneRepo,
@@ -245,7 +254,6 @@ pub(crate) enum DialogState {
         target: DiscardTarget,
         paths: Vec<String>,
     },
-    CredentialManager,
     CredentialDetails {
         record_id: String,
     },
@@ -268,10 +276,6 @@ pub(crate) enum DialogState {
         record_id: String,
         label: String,
     },
-    NetworkProxySettings,
-    AiProviderSettings,
-    ExternalMergeSettings,
-    ThemeSettings,
     StashForm,
     ConfirmDropStash {
         index: usize,
@@ -283,7 +287,6 @@ pub(crate) enum DialogState {
     ConfirmConflictResolve,
     ConfirmWindowClose,
     // ── 更新对话框 ──
-    UpdateSettings,
     NewVersionAvailable {
         version: String,
         notes: String,
@@ -592,111 +595,44 @@ fn default_clone_recursive_submodules() -> bool {
     true
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolbarMoreAction {
-    Clone,
-    Stash,
-    Submodule,
-    Credentials,
-    Proxy,
-    AiSettings,
-    ExternalMergeSettings,
-    ThemeSettings,
-    UpdateSettings,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolbarLayoutMode {
-    Compact,
-    Full,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ToolbarMoreActionPlacement {
-    // 宽屏时把“更多”动作平铺到工具栏，窄屏时收进“更多”菜单。
-    show_inline_actions: bool,
-    show_more_button: bool,
-}
-
+/// 仓库切换下拉的展开状态；x/y 为菜单左上角的窗口坐标，展开时按触发器按钮锚点计算。
 #[derive(Clone, Debug)]
-struct ToolbarMoreMenu {
+struct RepoSwitcherMenu {
     x: f32,
     y: f32,
-    button_x: f32,
-    button_y: f32,
 }
 
-fn toolbar_more_action_enabled(action: ToolbarMoreAction, repo_open: bool, busy: bool) -> bool {
-    match action {
-        ToolbarMoreAction::Stash | ToolbarMoreAction::Submodule => repo_open && !busy,
-        ToolbarMoreAction::Clone
-        | ToolbarMoreAction::Credentials
-        | ToolbarMoreAction::Proxy
-        | ToolbarMoreAction::AiSettings
-        | ToolbarMoreAction::ExternalMergeSettings
-        | ToolbarMoreAction::ThemeSettings
-        | ToolbarMoreAction::UpdateSettings => !busy,
-    }
+/// 仓库切换下拉触发器按钮的窗口坐标矩形，由触发器 paint 时记录，
+/// 用于把下拉菜单固定在按钮正下方，以及“点击外部/按钮关闭”的命中判定。
+#[derive(Clone, Copy, Debug)]
+struct RepoSwitcherAnchor {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
-fn toolbar_layout_mode(viewport_width: f32) -> ToolbarLayoutMode {
-    if viewport_width >= TOOLBAR_FULL_LAYOUT_MIN_WIDTH {
-        ToolbarLayoutMode::Full
-    } else {
-        ToolbarLayoutMode::Compact
-    }
-}
-
-fn toolbar_more_action_placement(layout: ToolbarLayoutMode) -> ToolbarMoreActionPlacement {
-    match layout {
-        ToolbarLayoutMode::Compact => ToolbarMoreActionPlacement {
-            show_inline_actions: false,
-            show_more_button: true,
-        },
-        ToolbarLayoutMode::Full => ToolbarMoreActionPlacement {
-            show_inline_actions: true,
-            show_more_button: false,
-        },
-    }
-}
-
-fn toolbar_more_menu_position(
-    click_x: f32,
-    click_y: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-) -> (f32, f32) {
-    // 以“更多”按钮右侧作为锚点，根层渲染下拉菜单，避免被工具栏裁剪。
-    let anchor_right = click_x + TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH / 2.0;
-    let raw_x = anchor_right - TOOLBAR_MORE_MENU_WIDTH;
-    let raw_y = click_y + TOOLBAR_MORE_MENU_VERTICAL_OFFSET;
+/// 由触发器按钮锚点计算下拉菜单左上角：水平对齐按钮左缘，垂直紧贴按钮下方，并钳制在视口内。
+fn repo_switcher_menu_origin(anchor: &RepoSwitcherAnchor, viewport_width: f32, viewport_height: f32) -> (f32, f32) {
     let max_x =
-        (viewport_width - TOOLBAR_MORE_MENU_WIDTH - MENU_VIEWPORT_MARGIN).max(MENU_VIEWPORT_MARGIN);
-    let max_y = (viewport_height - TOOLBAR_MORE_MENU_HEIGHT - MENU_VIEWPORT_MARGIN)
+        (viewport_width - REPO_SWITCHER_MENU_WIDTH - MENU_VIEWPORT_MARGIN).max(MENU_VIEWPORT_MARGIN);
+    let max_y = (viewport_height - REPO_SWITCHER_MENU_HEIGHT - MENU_VIEWPORT_MARGIN)
         .max(MENU_VIEWPORT_MARGIN);
-
     (
-        raw_x.clamp(MENU_VIEWPORT_MARGIN, max_x),
-        raw_y.clamp(MENU_VIEWPORT_MARGIN, max_y),
+        anchor.x.clamp(MENU_VIEWPORT_MARGIN, max_x),
+        (anchor.y + anchor.h).clamp(MENU_VIEWPORT_MARGIN, max_y),
     )
 }
 
-fn point_in_toolbar_more_menu(x: f32, y: f32, menu: &ToolbarMoreMenu) -> bool {
-    point_in_menu(
-        x,
-        y,
-        menu.x,
-        menu.y,
-        TOOLBAR_MORE_MENU_WIDTH,
-        TOOLBAR_MORE_MENU_HEIGHT,
-    ) || point_in_menu(
-        x,
-        y,
-        menu.button_x,
-        menu.button_y,
-        TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH,
-        44.0,
-    )
+/// 判定坐标是否落在仓库切换下拉菜单或触发器按钮矩形内（用于点击外部关闭）。
+fn point_in_repo_switcher(
+    x: f32,
+    y: f32,
+    menu: &RepoSwitcherMenu,
+    anchor: Option<&RepoSwitcherAnchor>,
+) -> bool {
+    point_in_menu(x, y, menu.x, menu.y, REPO_SWITCHER_MENU_WIDTH, REPO_SWITCHER_MENU_HEIGHT)
+        || anchor.is_some_and(|anchor| point_in_menu(x, y, anchor.x, anchor.y, anchor.w, anchor.h))
 }
 
 fn column_splitter_accepts_mouse_events(active_dialog: bool) -> bool {
@@ -970,6 +906,8 @@ struct RepoTabState {
     pub(crate) repository_load_id: u64,
     pub(crate) status: String,
     pub(crate) last_error: Option<String>,
+    /// 最后活动/打开时间（Unix 秒），用于仓库切换下拉排序。
+    pub(crate) last_active_at: i64,
 }
 
 impl RepoTabState {
@@ -1015,6 +953,7 @@ impl RepoTabState {
             repository_load_id: 0,
             status: "就绪".to_string(),
             last_error: None,
+            last_active_at: now_epoch_secs(),
         }
     }
 
@@ -1927,6 +1866,8 @@ pub(crate) struct RepositoryView {
     next_feedback_id: u64,
     progress_phase: u64,
     pub(crate) active_dialog: Option<DialogState>,
+    /// 设置中心当前分类；独立于 active_dialog，凭据子弹窗可叠加其上。
+    pub(crate) settings_center: Option<SettingsCategory>,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -1942,7 +1883,11 @@ pub(crate) struct RepositoryView {
     pub(crate) commit_context_menu: Option<CommitContextMenu>,
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
-    toolbar_more_menu: Option<ToolbarMoreMenu>,
+    repo_switcher_menu: Option<RepoSwitcherMenu>,
+    /// 仓库切换下拉触发器按钮的窗口坐标矩形，paint 时记录，供菜单锚定与点击外部关闭。
+    repo_switcher_anchor: Option<RepoSwitcherAnchor>,
+    /// 仓库切换下拉展开时缓存的最近仓库列表（toggle 时同步加载，渲染时纯读）。
+    repo_switcher_recent: Vec<(PathBuf, i64)>,
     save_credential: bool,
     credential_scope: CredentialScope,
     credential_form_mode: CredentialFormMode,
@@ -2087,6 +2032,7 @@ impl RepositoryView {
             next_feedback_id: 0,
             progress_phase: 0,
             active_dialog: None,
+            settings_center: None,
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -2102,7 +2048,9 @@ impl RepositoryView {
             commit_context_menu: None,
             encoding_menu_target: None,
             encoding_menu_closed_by_capture: None,
-            toolbar_more_menu: None,
+            repo_switcher_menu: None,
+            repo_switcher_anchor: None,
+            repo_switcher_recent: Vec::new(),
             save_credential: false,
             credential_scope: CredentialScope::RemoteUrl,
             credential_form_mode: CredentialFormMode::Https,
@@ -2284,14 +2232,18 @@ impl RepositoryView {
 
     fn ensure_tab_for_path(&mut self, path: PathBuf) -> RepoTabId {
         let key = normalize_repo_path(&path);
-        if let Some(tab) = self
+        let existing_id = self
             .tabs
             .iter()
             .find(|tab| tab.path_key().as_deref() == Some(key.as_str()))
-        {
-            self.active_tab = Some(tab.id);
+            .map(|tab| tab.id);
+        if let Some(id) = existing_id {
+            if let Some(tab) = self.tab_mut(id) {
+                tab.last_active_at = now_epoch_secs();
+            }
+            self.active_tab = Some(id);
             self.save_session();
-            return tab.id;
+            return id;
         }
 
         let id = RepoTabId(self.next_tab_id);
@@ -2317,6 +2269,13 @@ impl RepositoryView {
             tab.submodule_dialog.invalidate();
         }
         self.active_tab = Some(tab_id);
+        if let Some(tab) = self.tab_mut(tab_id) {
+            tab.last_active_at = now_epoch_secs();
+            // 记录最近打开时间，供仓库切换下拉排序。
+            if let Some(path) = tab.repo_path.clone() {
+                let _ = self.storage.upsert_recent_repo(&path);
+            }
+        }
         // 切换仓库后默认打开提交记录
         self.main_mode = MainMode::History;
         self.ensure_history_loaded();
@@ -4143,18 +4102,18 @@ impl RepositoryView {
             field,
             FieldId::ProxyHttpUrl | FieldId::ProxyHttpsUrl | FieldId::ProxySocks5Url
         ) {
-            if self.active_dialog == Some(DialogState::NetworkProxySettings) {
+            if self.settings_center == Some(SettingsCategory::Proxy) {
                 self.save_network_proxy_settings();
             }
         } else if matches!(field, FieldId::ExternalMergeIntellijPath) {
-            if self.active_dialog == Some(DialogState::ExternalMergeSettings) {
+            if self.settings_center == Some(SettingsCategory::ExternalMerge) {
                 self.save_external_merge_settings_from_form_and_resume();
             }
         } else if matches!(
             field,
             FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel
         ) {
-            if self.active_dialog == Some(DialogState::AiProviderSettings) {
+            if self.settings_center == Some(SettingsCategory::Ai) {
                 self.save_ai_provider_settings_from_form();
             }
         } else if matches!(
@@ -4373,19 +4332,19 @@ impl RepositoryView {
             } else if matches!(
                 field,
                 FieldId::ProxyHttpUrl | FieldId::ProxyHttpsUrl | FieldId::ProxySocks5Url
-            ) && self.active_dialog == Some(DialogState::NetworkProxySettings)
+            ) && self.settings_center == Some(SettingsCategory::Proxy)
             {
                 self.save_network_proxy_settings();
                 cx.notify();
             } else if matches!(
                 field,
                 FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel
-            ) && self.active_dialog == Some(DialogState::AiProviderSettings)
+            ) && self.settings_center == Some(SettingsCategory::Ai)
             {
                 self.save_ai_provider_settings_from_form();
                 cx.notify();
             } else if field == FieldId::ExternalMergeIntellijPath
-                && self.active_dialog == Some(DialogState::ExternalMergeSettings)
+                && self.settings_center == Some(SettingsCategory::ExternalMerge)
             {
                 self.save_external_merge_settings_from_form();
                 cx.notify();
@@ -4583,7 +4542,34 @@ impl RepositoryView {
         self.commit_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
-        self.toolbar_more_menu = None;
+        self.repo_switcher_menu = None;
+    }
+
+    /// 切换仓库切换下拉的展开/收起；展开时菜单固定在触发器按钮正下方（按记录的锚点定位）。
+    pub(crate) fn toggle_repo_switcher(&mut self, window: &Window) {
+        if self.repo_switcher_menu.is_some() {
+            self.repo_switcher_menu = None;
+            return;
+        }
+        // 展开时同步加载最近仓库列表（SQLite 本地查询 < 1ms），渲染时纯读缓存。
+        self.repo_switcher_recent = self.storage.load_recent_repos().unwrap_or_default();
+        let viewport_size = window.viewport_size();
+        // 锚点由触发器 paint 时记录；首帧尚未记录时回退到视口左上角。
+        let (x, y) = self
+            .repo_switcher_anchor
+            .map(|anchor| {
+                repo_switcher_menu_origin(
+                    &anchor,
+                    f32::from(viewport_size.width),
+                    f32::from(viewport_size.height),
+                )
+            })
+            .unwrap_or((MENU_VIEWPORT_MARGIN, MENU_VIEWPORT_MARGIN));
+        self.repo_switcher_menu = Some(RepoSwitcherMenu { x, y });
+    }
+
+    pub(crate) fn close_repo_switcher(&mut self) {
+        self.repo_switcher_menu = None;
     }
 
     pub(crate) fn toggle_sidebar_section(&mut self, section: SidebarSection) {
@@ -4594,6 +4580,11 @@ impl RepositoryView {
     pub(crate) fn close_dialog(&mut self) {
         if self.active_dialog == Some(DialogState::ConfirmWindowClose) {
             self.cancel_window_close();
+            return;
+        }
+        // 如果没有 active_dialog 但设置中心打开，关闭设置中心。
+        if self.active_dialog.is_none() && self.settings_center.is_some() {
+            self.settings_center = None;
             return;
         }
         let closing_submodule_manager = self.active_dialog == Some(DialogState::SubmoduleManager);
@@ -4707,18 +4698,41 @@ impl RepositoryView {
         }
     }
 
-    fn open_credential_manager(&mut self) {
+    /// 打开设置中心，默认显示凭据管理分类。
+    pub(crate) fn open_settings_center(&mut self) {
         self.close_popups();
-        self.active_dialog = Some(DialogState::CredentialManager);
+        self.settings_center = Some(SettingsCategory::Credentials);
         self.reload_credential_records("凭据列表已加载");
     }
 
-    pub(crate) fn open_network_proxy_settings(&mut self) {
-        self.close_popups();
-        self.reset_proxy_form_from_settings();
-        self.active_dialog = Some(DialogState::NetworkProxySettings);
-        self.status = "代理设置已打开".into();
-        self.last_error = None;
+    /// 切换设置中心的分类。
+    pub(crate) fn select_settings_category(&mut self, category: SettingsCategory) {
+        self.settings_center = Some(category);
+        match category {
+            SettingsCategory::Credentials => {
+                self.reload_credential_records("凭据列表已加载");
+            }
+            SettingsCategory::Proxy => {
+                self.reset_proxy_form_from_settings();
+            }
+            SettingsCategory::Ai => {
+                self.reset_ai_form_from_settings();
+            }
+            SettingsCategory::ExternalMerge => {
+                self.reset_external_merge_form_from_settings();
+            }
+            SettingsCategory::Theme | SettingsCategory::Update => {}
+        }
+    }
+
+    /// 关闭设置中心。
+    pub(crate) fn close_settings_center(&mut self) {
+        self.settings_center = None;
+    }
+
+    fn open_credential_manager(&mut self) {
+        self.open_settings_center();
+        self.select_settings_category(SettingsCategory::Credentials);
     }
 
     pub(crate) fn reset_proxy_form_from_settings(&mut self) {
@@ -4760,22 +4774,13 @@ impl RepositoryView {
     pub(crate) fn save_network_proxy_settings_and_close(&mut self) {
         self.save_network_proxy_settings();
         if self.last_error.is_none() {
-            self.active_dialog = None;
+            self.close_settings_center();
         }
     }
 
-    pub(crate) fn open_ai_provider_settings(&mut self) {
-        self.close_popups();
-        self.reset_ai_form_from_settings();
-        self.active_dialog = Some(DialogState::AiProviderSettings);
-        self.status = "AI 设置已打开".into();
-        self.last_error = None;
-    }
-
     pub(crate) fn open_external_merge_settings(&mut self) {
-        self.close_popups();
-        self.reset_external_merge_form_from_settings();
-        self.active_dialog = Some(DialogState::ExternalMergeSettings);
+        self.open_settings_center();
+        self.select_settings_category(SettingsCategory::ExternalMerge);
         self.status = "合并工具设置已打开".into();
         self.last_error = None;
     }
@@ -4838,12 +4843,6 @@ impl RepositoryView {
     }
 
     // ── 更新方法 ──────────────────────────────────────────────────────────
-
-    pub(crate) fn open_update_settings(&mut self) {
-        self.close_popups();
-        self.active_dialog = Some(DialogState::UpdateSettings);
-        self.last_error = None;
-    }
 
     pub(crate) fn start_update_check(&mut self) {
         if self.update_checking {
@@ -5207,7 +5206,7 @@ impl RepositoryView {
 
     fn close_credential_form(&mut self) {
         self.reset_credential_form();
-        self.active_dialog = Some(DialogState::CredentialManager);
+        self.open_credential_manager();
         self.last_error = None;
         self.feedbacks
             .retain(|feedback| feedback.kind != AppToastKind::Error);
@@ -5396,7 +5395,7 @@ impl RepositoryView {
         match self.credential_store.save_record(&request, &credential) {
             Ok(_) => {
                 self.reset_credential_form();
-                self.active_dialog = Some(DialogState::CredentialManager);
+                self.open_credential_manager();
                 self.last_error = None;
                 self.reload_credential_records("凭据已添加");
             }
@@ -5663,12 +5662,12 @@ impl RepositoryView {
     fn delete_credential_record(&mut self, record_id: String) {
         match self.credential_store.delete_record(&record_id) {
             Ok(()) => {
-                self.active_dialog = Some(DialogState::CredentialManager);
+                self.open_credential_manager();
                 self.credential_context_menu = None;
                 self.reload_credential_records("凭据已删除");
             }
             Err(err) => {
-                self.active_dialog = Some(DialogState::CredentialManager);
+                self.open_credential_manager();
                 self.last_error = Some(err.to_string());
             }
         }
@@ -5769,6 +5768,8 @@ impl RepositoryView {
             self.last_error = Some("该目录不是 Git 仓库".to_string());
             return;
         }
+        // 记录最近打开时间，供仓库切换下拉排序。
+        let _ = self.storage.upsert_recent_repo(&path);
         let tab_id = self.ensure_tab_for_path(path.clone());
         self.queue_repository_load(
             tab_id,
@@ -7131,9 +7132,11 @@ impl RepositoryView {
             .as_ref()
             .is_some_and(|menu| point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height))
             || self
-                .toolbar_more_menu
+                .repo_switcher_menu
                 .as_ref()
-                .is_some_and(|menu| point_in_toolbar_more_menu(x, y, menu))
+                .is_some_and(|menu| {
+                    point_in_repo_switcher(x, y, menu, self.repo_switcher_anchor.as_ref())
+                })
     }
 
     pub(crate) fn open_commit_context_menu(
@@ -8848,8 +8851,6 @@ impl RepositoryView {
     fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repo_open = self.repo_path.is_some();
         let remote_open = !self.loading.remote() && self.current_remote().is_some();
-        let viewport_width = f32::from(window.viewport_size().width);
-        let more_placement = toolbar_more_action_placement(toolbar_layout_mode(viewport_width));
         let has_conflicts = self
             .snapshot
             .as_ref()
@@ -8872,22 +8873,16 @@ impl RepositoryView {
             .h(px(52.0))
             .pl(px(16.0))
             .child(self.render_titlebar_brand())
-            // Git 操作按钮保留现有能力，宽屏时继续展开“更多”中的动作。
+            // 仓库切换下拉触发器（替代原"打开"按钮和标签页行）。
+            .child(self.render_repo_switcher_button(cx))
+            // Git 操作按钮：刷新/获取/拉取/推送 始终内联；宽屏额外内联 贮藏/子模块；设置始终在末尾。
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(2.0))
-                    .ml(px(20.0))
-                    .child(self.render_toolbar_action_button(
-                        "打开",
-                        ToolbarIcon::Open,
-                        None,
-                        !self.busy,
-                        |this, _, _| this.browse_open(),
-                        cx,
-                    ))
+                    .ml(px(8.0))
                     .child(self.render_toolbar_action_button(
                         "刷新",
                         ToolbarIcon::Refresh,
@@ -8932,119 +8927,32 @@ impl RepositoryView {
                         },
                         cx,
                     ))
-                    .when(more_placement.show_inline_actions, |this| {
-                        this.child(self.render_toolbar_action_button(
-                            "克隆",
-                            ToolbarIcon::Clone,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Clone,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, window, _cx| this.open_clone_dialog(window),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "贮藏",
-                            ToolbarIcon::Stash,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Stash,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_stash_dialog(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "子模块",
-                            ToolbarIcon::Submodule,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Submodule,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_submodule_manager(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "凭据管理",
-                            ToolbarIcon::Credentials,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Credentials,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_credential_manager(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "代理设置",
-                            ToolbarIcon::Proxy,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::Proxy,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_network_proxy_settings(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "AI 设置",
-                            ToolbarIcon::Ai,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::AiSettings,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_ai_provider_settings(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "合并工具",
-                            ToolbarIcon::Workflow,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::ExternalMergeSettings,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_external_merge_settings(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "外观",
-                            ToolbarIcon::Globe,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::ThemeSettings,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_theme_settings(),
-                            cx,
-                        ))
-                        .child(self.render_toolbar_action_button(
-                            "更新设置",
-                            ToolbarIcon::Update,
-                            None,
-                            toolbar_more_action_enabled(
-                                ToolbarMoreAction::UpdateSettings,
-                                repo_open,
-                                self.busy,
-                            ),
-                            |this, _, _| this.open_update_settings(),
-                            cx,
-                        ))
-                    })
-                    .when(more_placement.show_more_button, |this| {
-                        this.child(self.render_toolbar_more_button(cx))
-                    }),
+                    // 贮藏/子模块始终内联显示（取消“更多”按钮后不再按宽度收纳）。
+                    .child(self.render_toolbar_action_button(
+                        "贮藏",
+                        ToolbarIcon::Stash,
+                        None,
+                        repo_open && !self.busy,
+                        |this, _, _| this.open_stash_dialog(),
+                        cx,
+                    ))
+                    .child(self.render_toolbar_action_button(
+                        "子模块",
+                        ToolbarIcon::Submodule,
+                        None,
+                        repo_open && !self.busy,
+                        |this, _, _| this.open_submodule_manager(),
+                        cx,
+                    ))
+                    // 设置按钮始终在内联组末尾（全局入口，不要求 repo_open）。
+                    .child(self.render_toolbar_action_button(
+                        "设置",
+                        ToolbarIcon::Settings,
+                        None,
+                        !self.busy,
+                        |this, _, _| this.open_settings_center(),
+                        cx,
+                    )),
             )
             .child(self.render_titlebar_drag_area())
             // 右侧模式切换与 Pencil 稿一致使用图标和药丸选中态。
@@ -9283,7 +9191,10 @@ impl RepositoryView {
             })
     }
 
-    fn render_toolbar_more_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 仓库切换下拉触发器按钮：显示当前仓库头像 + 名称 + ▾。
+    fn render_repo_switcher_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        let name = self.display_name();
         let enabled = !self.busy;
         let text_color = if enabled {
             ui_theme::FOREGROUND
@@ -9291,13 +9202,15 @@ impl RepositoryView {
             ui_theme::MUTED_FOREGROUND
         };
         div()
-            .id("更多")
+            .id("repo-switcher-trigger")
+            .relative()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(5.0))
-            .px(px(12.0))
-            .py(px(6.0))
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .ml(px(12.0))
             .rounded(px(ui_theme::RADIUS_XS))
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed())
@@ -9307,320 +9220,469 @@ impl RepositoryView {
             })
             .when(!enabled, |this| this.opacity(0.5))
             .text_color(rgb(text_color))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !enabled {
+            .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
+                if this.busy {
                     return;
                 }
-                if this.toolbar_more_menu.is_some() {
-                    this.toolbar_more_menu = None;
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
+                // 已展开时点击按钮应关闭；close_popups 会清掉菜单，故先记录原状态，
+                // 仅在原本未展开时才重新打开，避免“点按钮关不掉”。
+                let was_open = this.repo_switcher_menu.is_some();
+                this.close_popups();
+                if !was_open {
+                    this.toggle_repo_switcher(window);
                 }
-
-                let position = event.position();
-                let viewport_size = window.viewport_size();
-                let (x, y) = toolbar_more_menu_position(
-                    position.x.into(),
-                    position.y.into(),
-                    f32::from(viewport_size.width),
-                    f32::from(viewport_size.height),
-                );
-                let button_x =
-                    (f32::from(position.x) - TOOLBAR_MORE_BUTTON_ANCHOR_WIDTH / 2.0).max(0.0);
-                let button_y = (f32::from(position.y) - 22.0).max(0.0);
-                this.toolbar_more_menu = Some(ToolbarMoreMenu {
-                    x,
-                    y,
-                    button_x,
-                    button_y,
-                });
-                cx.stop_propagation();
                 cx.notify();
             }))
-            .child(toolbar_icon(ToolbarIcon::More, text_color))
+            .child(repo_avatar(&name))
             .child(
                 div()
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .child("更多"),
+                    .max_w(px(120.0))
+                    .truncate()
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("▾"),
+            )
+            // paint 时记录按钮的窗口坐标矩形，供下拉菜单锚定与“点击外部关闭”命中判定。
+            // 纯记录、不注册鼠标事件，故不拦截按钮自身的点击；不 notify，避免重渲染循环。
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _window, cx| {
+                        entity.update(cx, |this, _cx| {
+                            this.repo_switcher_anchor = Some(RepoSwitcherAnchor {
+                                x: bounds.origin.x.into(),
+                                y: bounds.origin.y.into(),
+                                w: bounds.size.width.into(),
+                                h: bounds.size.height.into(),
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0)),
             )
     }
 
-    fn render_toolbar_more_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(menu) = self.toolbar_more_menu.as_ref() else {
+    /// 仓库切换下拉 overlay：IDEA 式三区结构（功能 / 打开项目 / 最近项目）。
+    fn render_repo_switcher_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.repo_switcher_menu.as_ref() else {
             return div().into_any_element();
         };
-        let repo_open = self.repo_path.is_some();
+        let menu = menu.clone();
+
+        // 构建纯函数输入。
+        let active_key = self
+            .active_tab
+            .and_then(|id| self.tab(id))
+            .and_then(|tab| tab.path_key());
+        let active_key_ref = active_key.as_deref();
+
+        let tabs: Vec<RepoSwitcherTabInput> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let path = tab.repo_path.as_ref()?;
+                Some(RepoSwitcherTabInput {
+                    key: normalize_repo_path(path),
+                    name: tab.display_name(),
+                    full_path: path.to_string_lossy().to_string(),
+                    last_active: tab.last_active_at,
+                    tab_id: tab.id,
+                })
+            })
+            .collect();
+
+        let recent: Vec<RepoSwitcherRecentInput> = self
+            .repo_switcher_recent
+            .iter()
+            .map(|(path, ts)| {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                RepoSwitcherRecentInput {
+                    key: normalize_repo_path(path),
+                    name,
+                    full_path: path.to_string_lossy().to_string(),
+                    last_opened: *ts,
+                }
+            })
+            .collect();
+
+        let sections = build_repo_switcher_sections(active_key_ref, tabs, recent);
+
+        // 下拉内容区的滚动句柄，内容超出最大高度时滚动并绘制滚动条。
+        let switcher_handle = self.scroll_handle("repo-switcher-scroll");
+        let switcher_content = div()
+            .id("repo-switcher-scroll")
+            .flex()
+            .flex_col()
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&switcher_handle)
+            // ── 功能区 ──
+            .child(self.repo_switcher_action_item(
+                "repo-switcher-clone",
+                ToolbarIcon::Clone,
+                "克隆仓库…",
+                |this, window, _cx| {
+                    this.close_repo_switcher();
+                    this.open_clone_dialog(window);
+                },
+                cx,
+            ))
+            .child(self.repo_switcher_action_item(
+                "repo-switcher-open",
+                ToolbarIcon::Open,
+                "打开仓库…",
+                |this, _window, _cx| {
+                    this.close_repo_switcher();
+                    this.browse_open();
+                },
+                cx,
+            ))
+            // ── 打开项目区 ──
+            .when(!sections.open.is_empty(), |this| {
+                this.child(self.repo_switcher_section_header("打开项目"))
+                    .children(sections.open.iter().map(|repo| {
+                        self.repo_switcher_repo_item(repo.clone(), cx)
+                            .into_any_element()
+                    }))
+            })
+            // ── 最近项目区 ──
+            .when(!sections.recent.is_empty(), |this| {
+                this.child(self.repo_switcher_section_header("最近的项目"))
+                    .children(sections.recent.iter().map(|repo| {
+                        self.repo_switcher_repo_item(repo.clone(), cx)
+                            .into_any_element()
+                    }))
+            })
+            .into_any_element();
+
+        // 外层仅做定位与最大高度约束，滚动与滚动条交给 scrollable_frame_when。
         glass_menu()
+            .id("repo-switcher-menu")
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
-            .w(px(TOOLBAR_MORE_MENU_WIDTH))
+            .w(px(REPO_SWITCHER_MENU_WIDTH))
+            .max_h(px(REPO_SWITCHER_MENU_HEIGHT))
             .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                 cx.stop_propagation();
             })
-            .child(self.toolbar_more_menu_item(
-                "克隆",
-                ToolbarIcon::Clone,
-                toolbar_more_action_enabled(ToolbarMoreAction::Clone, repo_open, self.busy),
-                |this, window, _cx| this.open_clone_dialog(window),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "贮藏",
-                ToolbarIcon::Stash,
-                toolbar_more_action_enabled(ToolbarMoreAction::Stash, repo_open, self.busy),
-                |this, _, _| this.open_stash_dialog(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "子模块",
-                ToolbarIcon::Submodule,
-                toolbar_more_action_enabled(ToolbarMoreAction::Submodule, repo_open, self.busy),
-                |this, _, _| this.open_submodule_manager(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "凭据管理",
-                ToolbarIcon::Credentials,
-                toolbar_more_action_enabled(ToolbarMoreAction::Credentials, repo_open, self.busy),
-                |this, _, _| this.open_credential_manager(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "代理设置",
-                ToolbarIcon::Proxy,
-                toolbar_more_action_enabled(ToolbarMoreAction::Proxy, repo_open, self.busy),
-                |this, _, _| this.open_network_proxy_settings(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "AI 设置",
-                ToolbarIcon::Ai,
-                toolbar_more_action_enabled(ToolbarMoreAction::AiSettings, repo_open, self.busy),
-                |this, _, _| this.open_ai_provider_settings(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "合并工具",
-                ToolbarIcon::Workflow,
-                toolbar_more_action_enabled(
-                    ToolbarMoreAction::ExternalMergeSettings,
-                    repo_open,
-                    self.busy,
-                ),
-                |this, _, _| this.open_external_merge_settings(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "外观",
-                ToolbarIcon::Globe,
-                toolbar_more_action_enabled(ToolbarMoreAction::ThemeSettings, repo_open, self.busy),
-                |this, _, _| this.open_theme_settings(),
-                cx,
-            ))
-            .child(self.toolbar_more_menu_item(
-                "更新设置",
-                ToolbarIcon::Update,
-                toolbar_more_action_enabled(
-                    ToolbarMoreAction::UpdateSettings,
-                    repo_open,
-                    self.busy,
-                ),
-                |this, _, _| this.open_update_settings(),
+            .child(scrollable_frame_when(
+                "repo-switcher-scroll",
+                ScrollbarMode::Vertical,
+                switcher_content,
+                switcher_handle,
+                true,
                 cx,
             ))
             .into_any_element()
     }
 
-    fn toolbar_more_menu_item(
+    /// 下拉功能区的一项（克隆/打开）。
+    fn repo_switcher_action_item(
         &self,
-        label: &'static str,
+        id: &'static str,
         icon: ToolbarIcon,
-        enabled: bool,
+        label: &'static str,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .id(format!("toolbar-more-{label}"))
+            .id(id)
             .flex()
             .items_center()
             .gap_2()
             .px_3()
             .py_2()
             .text_size(px(12.0))
-            .text_color(rgb(if enabled {
-                ui_theme::FOREGROUND
-            } else {
-                ui_theme::MUTED_FOREGROUND
+            .text_color(rgb(ui_theme::FOREGROUND))
+            .cursor_pointer()
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                on_click(this, window, cx);
+                cx.notify();
             }))
-            .cursor(if enabled {
-                CursorStyle::PointingHand
-            } else {
-                CursorStyle::Arrow
-            })
-            .when(enabled, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.toolbar_more_menu = None;
-                        on_click(this, window, cx);
-                        cx.notify();
-                    }))
-            })
-            .child(ui::icons::toolbar_icon(
-                icon,
-                if enabled {
-                    ui_theme::MUTED_FOREGROUND
-                } else {
-                    ui_theme::MUTED_FOREGROUND
-                },
-            ))
+            .child(toolbar_icon(icon, ui_theme::MUTED_FOREGROUND))
             .child(label)
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let handle = self.scroll_handle("repo-tab-bar-scroll");
-        let content = div()
-            .id("repo-tab-bar-scroll")
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w(px(0.0))
-            .w_full()
-            .h(px(36.0))
-            .px_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .overflow_x_scroll()
-            .track_scroll(&handle)
-            .children(
-                self.tabs
-                    .iter()
-                    .map(|tab| self.render_repo_tab(tab, cx).into_any_element())
-                    .collect::<Vec<_>>(),
-            )
-            .child(
-                div()
-                    .id("repo-tab-add")
-                    .flex()
-                    .flex_none()
-                    .size(px(28.0))
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(ui_theme::RADIUS_XS))
-                    .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.browse_open();
-                        cx.stop_propagation();
-                    }))
-                    .child(toolbar_icon_with_size(
-                        ToolbarIcon::Plus,
-                        ui_theme::MUTED_FOREGROUND,
-                        14.0,
-                        14.0,
-                    )),
-            )
-            .into_any_element();
-
-        scrollable_frame_intrinsic(
-            "repo-tab-bar-scroll",
-            ScrollbarMode::Horizontal,
-            content,
-            handle,
-            cx,
-        )
-        .into_any_element()
+    /// 下拉分区小标题。
+    fn repo_switcher_section_header(&self, label: &'static str) -> impl IntoElement {
+        div()
+            .px_3()
+            .pt_2()
+            .pb_1()
+            .text_size(px(11.0))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            .child(label)
     }
 
-    fn render_repo_tab(&self, tab: &RepoTabState, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = tab.id;
-        let selected = self.active_tab == Some(id);
-        let title = tab.display_name();
-        let status_dot = if tab.busy || tab.loading != RepositoryLoading::default() {
-            "..."
-        } else {
-            ""
-        };
+    /// 下拉仓库行：头像 + 名称 + 完整路径；已打开项 hover 显示关闭按钮。
+    fn repo_switcher_repo_item(
+        &self,
+        repo: RepoSwitcherRepo,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let path_for_click = repo.full_path.clone();
+        let tab_id = repo.tab_id;
+        let is_active = repo.active;
+        let can_close = repo.tab_id.is_some();
+        let close_tab_id = repo.tab_id;
 
         div()
-            .id(format!("repo-tab-{}", id.0))
+            .id(format!("repo-switcher-item-{}", repo.path_key))
             .flex()
-            .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .max_w(px(220.0))
-            .px(px(14.0))
-            .py(px(6.0))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(if selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
+            .gap_2()
+            .px_3()
+            .py_2()
             .cursor_pointer()
-            .hover(|this| {
-                if selected {
-                    this.bg(rgb(ui_theme::CARD))
-                } else {
-                    this.bg(rgb(ui_theme::SECONDARY))
-                }
+            .when(is_active, |this| this.bg(rgb(ui_theme::ACCENT)))
+            .when(!is_active, |this| {
+                this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.activate_tab(id);
+                this.close_repo_switcher();
+                if let Some(id) = tab_id {
+                    this.activate_tab(id);
+                } else {
+                    this.open_repo(PathBuf::from(&path_for_click));
+                }
                 cx.notify();
             }))
-            .child(toolbar_icon_with_size(
-                ToolbarIcon::Open,
-                if selected {
-                    ui_theme::PRIMARY
-                } else {
-                    ui_theme::MUTED_FOREGROUND
-                },
-                12.0,
-                12.0,
-            ))
+            .child(repo_avatar(&repo.name))
             .child(
                 div()
-                    .min_w(px(0.0))
-                    .max_w(px(150.0))
-                    .text_size(px(12.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::FOREGROUND)
-                    } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    })
-                    .truncate()
-                    .child(format!("{title}{status_dot}")),
-            )
-            .child(
-                div()
-                    .id(format!("repo-tab-close-{}", id.0))
                     .flex()
-                    .flex_none()
-                    .size(px(14.0))
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.0))
-                    .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::COLOR_ERROR)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .truncate()
+                                    .child(repo.name),
+                            )
+                            .when(is_active, |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(ui_theme::PRIMARY))
+                                        .child("✓"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .truncate()
+                            .child(repo.full_path),
+                    ),
+            )
+            .when(can_close, |this| {
+                this.child(
+                    div()
+                        .id(format!("repo-switcher-close-{}", repo.path_key))
+                        .flex_none()
+                        .size(px(20.0))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(ui_theme::DESTRUCTIVE)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(id) = close_tab_id {
+                                this.close_tab(id);
+                            }
+                            cx.notify();
+                        }))
+                        .child("✕"),
+                )
+            })
+    }
+
+    /// 设置中心 overlay：左导航 + 右内容面板。
+    fn render_settings_center_overlay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(category) = self.settings_center else {
+            return div().into_any_element();
+        };
+
+        let categories = [
+            (SettingsCategory::Credentials, ToolbarIcon::Credentials, "凭据管理"),
+            (SettingsCategory::Proxy, ToolbarIcon::Proxy, "网络代理"),
+            (SettingsCategory::Ai, ToolbarIcon::Ai, "AI 设置"),
+            (SettingsCategory::ExternalMerge, ToolbarIcon::Workflow, "合并工具"),
+            (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
+            (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
+        ];
+
+        // 右侧内容面板根据当前分类渲染对应 body。
+        let body: gpui::AnyElement = match category {
+            SettingsCategory::Credentials => self.render_credential_manager_dialog(cx).into_any_element(),
+            SettingsCategory::Proxy => self.render_network_proxy_settings_dialog(window, cx).into_any_element(),
+            SettingsCategory::Ai => self.render_ai_provider_settings_dialog(window, cx).into_any_element(),
+            SettingsCategory::ExternalMerge => self.render_external_merge_settings_dialog(window, cx).into_any_element(),
+            SettingsCategory::Theme => self.render_theme_settings_dialog(window, cx).into_any_element(),
+            SettingsCategory::Update => self.render_update_settings_dialog(cx).into_any_element(),
+        };
+        // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
+        let settings_content_handle = self.scroll_handle("settings-center-content");
+
+        dialog_overlay()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.close_settings_center();
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .id("settings-center-panel")
+                    .w(px(900.0))
+                    // 固定高度，弹窗大小不随分类内容多少变化；内容超出由右侧内容区滚动。
+                    .h(px(640.0))
+                    .min_w(px(0.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.close_tab(id);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .child(toolbar_icon_with_size(
-                        ToolbarIcon::Close,
-                        ui_theme::MUTED_FOREGROUND,
-                        10.0,
-                        12.0,
-                    )),
+                    // 顶栏
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(ui_theme::BORDER))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child("设置中心"),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-center-close")
+                                    .size(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .cursor_pointer()
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_settings_center();
+                                        cx.notify();
+                                    }))
+                                    .child("✕"),
+                            ),
+                    )
+                    // 主体：左导航 + 右内容
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            // 左导航
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_none()
+                                    .w(px(160.0))
+                                    .border_r_1()
+                                    .border_color(rgb(ui_theme::BORDER))
+                                    .py_2()
+                                    .children(categories.iter().map(|(cat, icon, label)| {
+                                        let is_active = *cat == category;
+                                        let cat = *cat;
+                                        div()
+                                            .id(format!("settings-nav-{label}"))
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_2()
+                                            .text_size(px(12.0))
+                                            .cursor_pointer()
+                                            .when(is_active, |this| {
+                                                this.bg(rgb(ui_theme::ACCENT))
+                                                    .text_color(rgb(ui_theme::PRIMARY))
+                                            })
+                                            .when(!is_active, |this| {
+                                                this.text_color(rgb(ui_theme::FOREGROUND))
+                                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                            })
+                                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                this.select_settings_category(cat);
+                                                cx.notify();
+                                            }))
+                                            .child(toolbar_icon(*icon, if is_active { ui_theme::PRIMARY } else { ui_theme::MUTED_FOREGROUND }))
+                                            .child(*label)
+                                            .into_any_element()
+                                    })),
+                            )
+                            // 右内容：固定高度内滚动，叠加滚动条。
+                            .child(scrollable_frame_when(
+                                "settings-center-content",
+                                ScrollbarMode::Vertical,
+                                div()
+                                    .id("settings-center-content")
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .w_full()
+                                    .min_w(px(0.0))
+                                    .min_h(px(0.0))
+                                    .p_4()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&settings_content_handle)
+                                    .child(body)
+                                    .into_any_element(),
+                                settings_content_handle,
+                                true,
+                                cx,
+                            )),
+                    ),
             )
+            .into_any_element()
     }
 
     fn render_tag_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -11303,9 +11365,6 @@ impl RepositoryView {
             } => self
                 .render_confirm_discard_change_dialog(scope, target, paths, cx)
                 .into_any_element(),
-            DialogState::CredentialManager => {
-                self.render_credential_manager_dialog(cx).into_any_element()
-            }
             DialogState::CredentialDetails { record_id } => self
                 .render_credential_details_dialog(record_id, cx)
                 .into_any_element(),
@@ -11328,18 +11387,6 @@ impl RepositoryView {
             DialogState::ConfirmDeleteCredential { record_id, label } => self
                 .render_confirm_delete_credential_dialog(record_id, label, cx)
                 .into_any_element(),
-            DialogState::NetworkProxySettings => self
-                .render_network_proxy_settings_dialog(window, cx)
-                .into_any_element(),
-            DialogState::AiProviderSettings => self
-                .render_ai_provider_settings_dialog(window, cx)
-                .into_any_element(),
-            DialogState::ExternalMergeSettings => self
-                .render_external_merge_settings_dialog(window, cx)
-                .into_any_element(),
-            DialogState::ThemeSettings => self
-                .render_theme_settings_dialog(window, cx)
-                .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
@@ -11354,9 +11401,6 @@ impl RepositoryView {
                 .render_confirm_window_close_dialog(cx)
                 .into_any_element(),
             // ── 更新对话框 ──
-            DialogState::UpdateSettings => {
-                self.render_update_settings_dialog(cx).into_any_element()
-            }
             DialogState::NewVersionAvailable {
                 version,
                 notes,
@@ -11802,7 +11846,10 @@ impl RepositoryView {
         let auto_check = self.update_preferences.auto_check;
         let skipped = self.update_preferences.skipped_version.clone();
 
-        self.dialog_panel("更新设置", cx)
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(
                 div()
                     .flex()
@@ -12623,40 +12670,14 @@ impl RepositoryView {
         };
 
         div()
-            .id("dialog-凭据管理")
-            .w(px(860.0))
-            .max_h(px(620.0))
-            .min_w(px(0.0))
-            .p_4()
-            .rounded_sm()
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .shadow_lg()
             .flex()
             .flex_col()
             .gap_3()
-            .cursor(CursorStyle::Arrow)
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.close_credential_context_menu(cx);
-                    cx.stop_propagation();
-                }),
-            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
-                            .child("凭据管理"),
-                    )
                     .child(
                         div()
                             .flex()
@@ -12727,12 +12748,6 @@ impl RepositoryView {
                         )
                     }),
             )
-            .child(div().flex().justify_end().child(self.button(
-                "关闭",
-                !self.busy,
-                |this, _, _| this.close_dialog(),
-                cx,
-            )))
     }
 
     fn render_credential_details_dialog(
@@ -12758,7 +12773,7 @@ impl RepositoryView {
                 .child(div().flex().justify_end().child(self.button(
                     "关闭",
                     !self.busy,
-                    |this, _, _| this.active_dialog = Some(DialogState::CredentialManager),
+                    |this, _, _| this.open_credential_manager(),
                     cx,
                 )));
         };
@@ -12812,7 +12827,7 @@ impl RepositoryView {
             .child(div().flex().justify_end().child(self.button(
                 "关闭",
                 !self.busy,
-                |this, _, _| this.active_dialog = Some(DialogState::CredentialManager),
+                |this, _, _| this.open_credential_manager(),
                 cx,
             )))
     }
@@ -13031,7 +13046,7 @@ impl RepositoryView {
                         "取消",
                         !self.busy,
                         |this, _, _| {
-                            this.active_dialog = Some(DialogState::CredentialManager);
+                            this.open_credential_manager();
                         },
                         cx,
                     ))
@@ -13070,11 +13085,6 @@ impl DerefMut for RepositoryView {
 impl Render for RepositoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_events(cx);
-        if toolbar_layout_mode(f32::from(window.viewport_size().width)) == ToolbarLayoutMode::Full
-            && self.toolbar_more_menu.is_some()
-        {
-            self.toolbar_more_menu = None;
-        }
 
         app_shell_surface()
             .relative()
@@ -13094,7 +13104,7 @@ impl Render for RepositoryView {
                     || this.stash_context_menu.is_some()
                     || this.commit_context_menu.is_some()
                     || this.encoding_menu_target.is_some()
-                    || this.toolbar_more_menu.is_some()
+                    || this.repo_switcher_menu.is_some()
                 {
                     let closed_encoding_menu = this.encoding_menu_target;
                     this.branch_context_menu = None;
@@ -13106,12 +13116,11 @@ impl Render for RepositoryView {
                     this.commit_context_menu = None;
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
-                    this.toolbar_more_menu = None;
+                    this.repo_switcher_menu = None;
                     cx.notify();
                 }
             }))
             .child(self.render_toolbar(window, cx))
-            .child(self.render_tab_bar(cx))
             .child(
                 div()
                     .flex()
@@ -13148,7 +13157,8 @@ impl Render for RepositoryView {
             .child(self.render_commit_context_menu(cx))
             .child(self.render_tag_context_menu(cx))
             .child(self.render_stash_context_menu(cx))
-            .child(self.render_toolbar_more_menu(cx))
+            .child(self.render_repo_switcher_menu(cx))
+            .child(self.render_settings_center_overlay(window, cx))
             .child(self.render_dialogs(window, cx))
             .child(self.render_credential_context_menu(cx))
             .child(self.render_operation_blocker())
@@ -13282,6 +13292,14 @@ impl EmptyStringExt for String {
     fn if_empty_then(self, f: impl FnOnce() -> String) -> String {
         if self.is_empty() { f() } else { self }
     }
+}
+
+/// 当前 Unix 时间戳（秒），用于 RepoTabState.last_active_at 等内存排序。
+fn now_epoch_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn normalize_repo_path(path: &Path) -> String {
@@ -13442,6 +13460,113 @@ fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .into_iter()
         .filter(|path| seen.insert(normalize_repo_path(path)))
         .collect()
+}
+
+/// 仓库切换下拉顶部的固定功能项。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RepoSwitcherAction {
+    /// 克隆仓库，排第一。
+    Clone,
+    /// 打开本地仓库，排第二。
+    Open,
+}
+
+/// 仓库切换下拉里的一个仓库行（“打开项目”或“最近的项目”区共用）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoSwitcherRepo {
+    /// 归一化路径键，用于元素 id 与去重，不直接展示。
+    pub path_key: String,
+    /// 显示名（路径末段）。
+    pub name: String,
+    /// 完整路径，展示于次行；最近项点击时据此重新打开仓库。
+    pub full_path: String,
+    /// 已打开 tab 的 id；最近项为 None。
+    pub tab_id: Option<RepoTabId>,
+    /// 是否为当前活动仓库。
+    pub active: bool,
+}
+
+/// 仓库切换下拉的纯函数输入：一个已打开 tab（归一化键由调用方算好，避免纯函数访问磁盘）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoSwitcherTabInput {
+    pub key: String,
+    pub name: String,
+    pub full_path: String,
+    pub last_active: i64,
+    pub tab_id: RepoTabId,
+}
+
+/// 仓库切换下拉的纯函数输入：一条最近打开记录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoSwitcherRecentInput {
+    pub key: String,
+    pub name: String,
+    pub full_path: String,
+    pub last_opened: i64,
+}
+
+/// 仓库切换下拉的三区结果。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RepoSwitcherSections {
+    /// 固定功能区：克隆、打开。
+    pub actions: Vec<RepoSwitcherAction>,
+    /// “打开项目”区：活动仓库置顶，其余已打开 tab 按最后活动时间倒序。
+    pub open: Vec<RepoSwitcherRepo>,
+    /// “最近的项目”区：未打开的历史仓库，按最后打开时间倒序。
+    pub recent: Vec<RepoSwitcherRepo>,
+}
+
+/// 构造仓库切换下拉的三区结构（纯函数，不含磁盘 IO）。
+///
+/// `active_key` 为当前活动仓库的归一化键；`tabs` 为已打开 tab；`recent` 为最近打开记录
+/// （调用方应保证已按 last_opened 倒序）。已打开 tab 与最近记录按归一化键去重，已打开优先，
+/// 因此“最近的项目”区只含当前未打开者。
+pub(crate) fn build_repo_switcher_sections(
+    active_key: Option<&str>,
+    mut tabs: Vec<RepoSwitcherTabInput>,
+    recent: Vec<RepoSwitcherRecentInput>,
+) -> RepoSwitcherSections {
+    let actions = vec![RepoSwitcherAction::Clone, RepoSwitcherAction::Open];
+
+    // 活动仓库置顶，其余按最后活动时间倒序。
+    tabs.sort_by(|a, b| {
+        let a_active = active_key == Some(a.key.as_str());
+        let b_active = active_key == Some(b.key.as_str());
+        b_active
+            .cmp(&a_active)
+            .then_with(|| b.last_active.cmp(&a.last_active))
+    });
+    let open = tabs
+        .iter()
+        .map(|tab| RepoSwitcherRepo {
+            active: active_key == Some(tab.key.as_str()),
+            path_key: tab.key.clone(),
+            name: tab.name.clone(),
+            full_path: tab.full_path.clone(),
+            tab_id: Some(tab.tab_id),
+        })
+        .collect();
+
+    // 最近区排除已打开者，保持 recent 原序（已按时间倒序）。
+    let tab_keys: std::collections::HashSet<&str> =
+        tabs.iter().map(|tab| tab.key.as_str()).collect();
+    let recent = recent
+        .into_iter()
+        .filter(|item| !tab_keys.contains(item.key.as_str()))
+        .map(|item| RepoSwitcherRepo {
+            active: false,
+            path_key: item.key,
+            name: item.name,
+            full_path: item.full_path,
+            tab_id: None,
+        })
+        .collect();
+
+    RepoSwitcherSections {
+        actions,
+        open,
+        recent,
+    }
 }
 
 #[cfg(test)]

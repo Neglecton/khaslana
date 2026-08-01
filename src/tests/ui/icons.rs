@@ -8,7 +8,6 @@ fn toolbar_icon_paths_match_embedded_asset_root() {
     assert_eq!(ToolbarIcon::Worktree.path(), "icons/worktree.svg");
     assert_eq!(ToolbarIcon::History.path(), "icons/history.svg");
     assert_eq!(ToolbarIcon::Stash.path(), "icons/stash.svg");
-    assert_eq!(ToolbarIcon::More.path(), "icons/more.svg");
     assert_eq!(ToolbarIcon::Ai.path(), "icons/ai.svg");
     assert_eq!(ToolbarIcon::Search.path(), "icons/search.svg");
     assert_eq!(ToolbarIcon::Close.path(), "icons/close.svg");
@@ -35,7 +34,6 @@ fn toolbar_svgs_use_monochrome_mask_shapes() {
         ToolbarIcon::History,
         ToolbarIcon::Stash,
         ToolbarIcon::Submodule,
-        ToolbarIcon::More,
         ToolbarIcon::Ai,
         ToolbarIcon::Search,
         ToolbarIcon::Close,

@@ -22,8 +22,10 @@ impl RepositoryView {
             .map(|remote| format!("测试将连接当前远端：{remote}"))
             .unwrap_or_else(|| "测试代理需要先打开带远端的仓库".to_string());
 
-        self.dialog_panel("代理设置", cx)
-            .w(px(620.0))
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(
                 div()
                     .flex()

@@ -72,8 +72,10 @@ impl RepositoryView {
             self.external_merge_detection.as_ref(),
         );
 
-        self.dialog_panel("合并工具", cx)
-            .w(px(580.0))
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .when_some(pending_path, |this, path| {
                 this.child(
                     div()
