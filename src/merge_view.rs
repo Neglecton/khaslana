@@ -7,12 +7,8 @@ use crate::ui::components::dialog_actions;
 use crate::ui::theme::rgb;
 use crate::{DialogState, RepositoryView, ui::theme as ui_theme};
 
-pub(crate) fn merge_banner_message(conflict_count: usize) -> String {
-    if conflict_count > 0 {
-        format!("合并进行中 · {conflict_count} 个冲突待解决")
-    } else {
-        "合并进行中 · 冲突已全部解决，请检查结果并完成合并".into()
-    }
+pub(crate) fn merge_banner_message(conflict_count: usize) -> Option<String> {
+    (conflict_count > 0).then(|| format!("合并进行中 · {conflict_count} 个冲突待解决"))
 }
 
 pub(crate) fn merge_can_finish(
@@ -128,12 +124,7 @@ impl RepositoryView {
         }
 
         let conflict_count = snapshot.conflicts.len();
-        let can_finish = merge_can_finish(
-            snapshot.merge_in_progress,
-            conflict_count,
-            self.busy,
-            &self.commit_message.value,
-        );
+        let message = merge_banner_message(conflict_count)?;
         Some(
             div()
                 .flex_none()
@@ -150,28 +141,14 @@ impl RepositoryView {
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
-                        .child(merge_banner_message(conflict_count)),
+                        .child(message),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(conflict_count == 0, |this| {
-                            this.child(self.primary_button(
-                                "完成合并",
-                                can_finish,
-                                |this, _, _| this.finish_merge(),
-                                cx,
-                            ))
-                        })
-                        .child(self.button(
-                            "中止合并",
-                            !self.busy,
-                            |this, _, _| this.open_abort_merge_confirm_dialog(),
-                            cx,
-                        )),
-                ),
+                .child(self.primary_button(
+                    "使用 IDEA 解决冲突",
+                    !self.busy,
+                    |this, _, _| this.resolve_selected_conflict_with_intellij_idea(),
+                    cx,
+                )),
         )
     }
 

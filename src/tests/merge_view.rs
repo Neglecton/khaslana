@@ -5,11 +5,11 @@ use super::{
 
 #[test]
 fn merge_banner_distinguishes_conflicts_from_ready_to_finish() {
-    assert_eq!(merge_banner_message(2), "合并进行中 · 2 个冲突待解决");
     assert_eq!(
-        merge_banner_message(0),
-        "合并进行中 · 冲突已全部解决，请检查结果并完成合并"
+        merge_banner_message(2),
+        Some("合并进行中 · 2 个冲突待解决".into())
     );
+    assert_eq!(merge_banner_message(0), None);
 }
 
 #[test]

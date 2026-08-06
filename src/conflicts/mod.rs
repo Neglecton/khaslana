@@ -24,6 +24,11 @@ enum ConflictDocumentPane {
 }
 
 pub(crate) fn conflict_status_message(label: &str, count: usize) -> String {
+    if label.starts_with("合并") {
+        return format!(
+            "合并产生冲突，请在工作区使用 IDEA 或进入“冲突处理”解决（{count} 个文件）"
+        );
+    }
     let operation = label.strip_suffix("完成").unwrap_or("操作");
     format!("{operation}产生冲突，请在左侧“冲突”区域解决（{count} 个文件）")
 }
@@ -1066,7 +1071,7 @@ impl RepositoryView {
         });
     }
 
-    fn resolve_selected_conflict_with_intellij_idea(&mut self) {
+    pub(crate) fn resolve_selected_conflict_with_intellij_idea(&mut self) {
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             self.last_error = Some("请先选择一个冲突文件".into());
             return;

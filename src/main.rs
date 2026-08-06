@@ -724,7 +724,11 @@ fn sync_conflict_state_from_paths(
     main_mode: &mut MainMode,
     state: &mut ConflictWorkbenchState,
     conflict_paths: &[String],
+    auto_open_conflict_mode: bool,
 ) {
+    let entering_conflicts = !conflict_paths.is_empty()
+        && state.selected_path.is_none()
+        && state.files.is_empty();
     state
         .files
         .retain(|path, _| conflict_paths.iter().any(|candidate| candidate == path));
@@ -745,8 +749,13 @@ fn sync_conflict_state_from_paths(
         return;
     }
 
-    if *main_mode != MainMode::Conflict {
-        *main_mode = MainMode::Conflict;
+    if entering_conflicts {
+        *main_mode = if auto_open_conflict_mode {
+            MainMode::Conflict
+        } else {
+            // 普通合并冲突先在工作区展示合并状态，不主动打开冲突工作台。
+            MainMode::Worktree
+        };
     }
     if state
         .selected_path
@@ -1785,7 +1794,7 @@ fn started_message_for_label(label: &'static str) -> &'static str {
         "远端分支已拉取到本地" => "正在拉取远端分支",
         "克隆完成" => "正在克隆仓库",
         "已刷新" => "正在刷新仓库",
-        "合并完成" => "正在合并分支",
+        "合并操作已完成" => "正在合并分支",
         "合并已完成" => "正在完成合并",
         "合并已中止" => "正在中止合并",
         "变基完成" => "正在变基分支",
@@ -3765,11 +3774,13 @@ impl RepositoryView {
             .as_ref()
             .map(|snapshot| snapshot.conflicts.clone())
             .unwrap_or_default();
+        let auto_open_conflict_mode = !self.merge_in_progress();
         let tab = self.active_tab_state_mut();
         sync_conflict_state_from_paths(
             &mut tab.main_mode,
             &mut tab.conflict_workbench,
             &conflict_paths,
+            auto_open_conflict_mode,
         );
 
         if conflict_paths.is_empty() {
@@ -6672,7 +6683,7 @@ impl RepositoryView {
         if !self.ensure_no_merge_in_progress("再次合并") {
             return;
         }
-        self.with_repo_blocking("合并完成", move |service, repo| {
+        self.with_repo_blocking("合并操作已完成", move |service, repo| {
             service.merge_branch(repo, &BranchName::new(name))
         });
     }
@@ -11189,12 +11200,22 @@ impl RepositoryView {
                                 |this, _, _| this.commit(),
                                 cx,
                             ))
-                            .child(self.primary_button(
-                                "提交并推送",
-                                can_commit_and_push,
-                                |this, _, _| this.commit_and_push(),
-                                cx,
-                            )),
+                            .when(merge_in_progress, |this| {
+                                this.child(self.danger_button(
+                                    "中止合并",
+                                    !self.busy,
+                                    |this, _, _| this.open_abort_merge_confirm_dialog(),
+                                    cx,
+                                ))
+                            })
+                            .when(!merge_in_progress, |this| {
+                                this.child(self.primary_button(
+                                    "提交并推送",
+                                    can_commit_and_push,
+                                    |this, _, _| this.commit_and_push(),
+                                    cx,
+                                ))
+                            }),
                     ),
             )
     }

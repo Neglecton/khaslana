@@ -16,8 +16,8 @@ fn conflict_paths_follow_snapshot_conflict_order() {
 #[test]
 fn conflict_status_message_names_operation_and_resolution_area() {
     assert_eq!(
-        conflict_status_message("合并完成", 2),
-        "合并产生冲突，请在左侧“冲突”区域解决（2 个文件）"
+        conflict_status_message("合并操作已完成", 2),
+        "合并产生冲突，请在工作区使用 IDEA 或进入“冲突处理”解决（2 个文件）"
     );
     assert_eq!(
         conflict_status_message("正在同步", 1),

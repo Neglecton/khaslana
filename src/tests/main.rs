@@ -658,16 +658,32 @@ fn sample_conflict_view(path: &str) -> ConflictFileView {
 }
 
 #[test]
-fn conflict_state_enters_conflict_mode_and_selects_first_path() {
+fn conflict_state_enters_worktree_and_selects_first_path() {
     let mut mode = MainMode::Worktree;
     let mut state = ConflictWorkbenchState::default();
     let paths = vec!["b.txt".to_string(), "a.txt".to_string()];
 
-    sync_conflict_state_from_paths(&mut mode, &mut state, &paths);
+    sync_conflict_state_from_paths(&mut mode, &mut state, &paths, false);
 
-    assert_eq!(mode, MainMode::Conflict);
+    assert_eq!(mode, MainMode::Worktree);
     assert_eq!(state.selected_path.as_deref(), Some("b.txt"));
     assert_eq!(state.selected_block, 0);
+}
+
+#[test]
+fn non_merge_conflict_state_still_opens_conflict_mode() {
+    let mut mode = MainMode::History;
+    let mut state = ConflictWorkbenchState::default();
+
+    sync_conflict_state_from_paths(
+        &mut mode,
+        &mut state,
+        &["conflict.txt".into()],
+        true,
+    );
+
+    assert_eq!(mode, MainMode::Conflict);
+    assert_eq!(state.selected_path.as_deref(), Some("conflict.txt"));
 }
 
 #[test]
@@ -685,7 +701,7 @@ fn conflict_state_returns_to_worktree_when_last_conflict_disappears() {
         external_merge_auto_opened: BTreeSet::new(),
     };
 
-    sync_conflict_state_from_paths(&mut mode, &mut state, &[]);
+    sync_conflict_state_from_paths(&mut mode, &mut state, &[], true);
 
     assert_eq!(mode, MainMode::Worktree);
     assert!(state.selected_path.is_none());
@@ -711,7 +727,7 @@ fn conflict_state_prunes_removed_files_and_keeps_existing_drafts() {
         external_merge_auto_opened: BTreeSet::new(),
     };
 
-    sync_conflict_state_from_paths(&mut mode, &mut state, &["b.txt".into()]);
+    sync_conflict_state_from_paths(&mut mode, &mut state, &["b.txt".into()], true);
 
     assert_eq!(mode, MainMode::Conflict);
     assert_eq!(state.selected_path.as_deref(), Some("b.txt"));

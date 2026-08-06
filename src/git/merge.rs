@@ -25,8 +25,12 @@ impl GitService {
         self.merge_annotated(repo, &annotated, &branch.0)?;
         drop(annotated);
         drop(reference);
-        self.progress
-            .emit(OperationEvent::Finished(format!("已合并 {}", branch.0)));
+        let message = if merge_in_progress(repo) {
+            format!("{} 的合并结果已写入暂存区", branch.0)
+        } else {
+            format!("已合并 {}", branch.0)
+        };
+        self.progress.emit(OperationEvent::Finished(message));
         self.snapshot_after_operation(repo)
     }
 
@@ -70,8 +74,8 @@ impl GitService {
             return Err(GitError::Conflicts(self.conflicts(repo)?));
         }
 
-        let message = merge_message(repo).unwrap_or_else(|| format!("Merge branch '{label}'"));
-        self.commit_merge(repo, &CommitMessage::new(message), &[annotated.id()])?;
+        // 即使没有冲突也保留真实 Merge 会话，合并结果作为已暂存变更交给用户检查，
+        // 只有用户点击“完成合并”后才创建双父提交。
         Ok(())
     }
 
