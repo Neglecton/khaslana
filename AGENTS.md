@@ -10,7 +10,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 仓库打开、克隆、刷新
 - 本地/远端分支、标签、贮藏、远端管理
 - 暂存、取消暂存、丢弃变更、提交
-- fetch、pull、push、merge、checkout
+- fetch、pull、push、merge、checkout；普通合并采用 IDEA 风格闭环，冲突后可完成或中止
 - 提交历史、提交文件列表、历史 diff、提交图
 - commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
@@ -79,7 +79,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 
 `src/types.rs` 定义应用内部统一的数据结构：
 
-- `RepositorySnapshot` 是 UI 的主要仓库状态输入，包含路径、HEAD、分支、变更、远端、标签、贮藏、冲突和变基进行中标记（`rebase_in_progress`）。
+- `RepositorySnapshot` 是 UI 的主要仓库状态输入，包含路径、HEAD、分支、变更、远端、标签、贮藏、冲突、普通合并状态（`merge_in_progress` / `merge_message`）和变基进行中标记（`rebase_in_progress`）。
 - `WorktreeChange` 使用 `staged` 与 `unstaged` 两个字段表达同一路径在暂存区和工作区中的不同状态。
 - `FileDiff` 包含路径、范围、二进制标记、编码信息和逐行 diff。
 - `CommitInfo` 表示提交历史中的一行，包含 oid、短 oid、摘要、作者、时间、父提交和 ref 标签。
@@ -97,7 +97,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 仓库：`open`、`open_fast`、`clone_repo`、`snapshot`、`snapshot_after_operation`
 - 子模块：状态读取、递归克隆、递归同步父仓库记录版本、快进更新到子模块远端最新
 - 状态：`status_fast`、`status_full`
-- 分支：创建、删除、重命名、checkout、远端分支 checkout、merge、rebase
+- 分支：创建、删除、重命名、checkout、远端分支 checkout、merge、完成/中止冲突合并、rebase
 - 远端：列表、添加、更新、删除、fetch、pull、pull --rebase、push
 - 标签：列表、checkout tag
 - 贮藏：列表、save、apply、pop、drop、文件列表和 diff 预览
@@ -204,6 +204,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
 - 提交信息输入和 commit
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
+- 普通合并要求工作区干净；无冲突时自动创建双父 merge commit，冲突时保留 Git Merge 状态，全部解决后可编辑提交信息并「完成合并」，也可确认后「中止合并」恢复到合并前 HEAD
 - 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；设置中心「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
 
 ### 5.3 分支、远端、标签、贮藏
@@ -318,6 +319,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - `src/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
 - `src/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
 - `src/tests/git.rs`：包含 Windows 目录占用回归测试，通过不共享删除权限的目录句柄模拟 VS Code/终端占用，覆盖分支切换、快进 pull、stash 保存和 stash 应用。
+- 普通合并测试覆盖快进、自动双父提交、冲突状态恢复、冲突后完成、确认中止、脏工作区拒绝和重新打开仓库后继续合并。
 - `src/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
 
 新增 Git 业务能力时，优先在 `src/git.rs` 增加基于 `tempfile` 的仓库级单元测试。新增纯 UI 状态逻辑时，优先拆成可测试的小函数，放在 `main.rs` 或对应 view 模块的 `#[cfg(test)]` 中测试。

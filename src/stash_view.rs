@@ -39,6 +39,9 @@ impl StashPreviewState {
 
 impl RepositoryView {
     pub(crate) fn open_stash_dialog(&mut self) {
+        if !self.ensure_no_merge_in_progress("创建贮藏") {
+            return;
+        }
         if self.repo_path.is_none() {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -52,6 +55,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn save_stash(&mut self) {
+        if !self.ensure_no_merge_in_progress("创建贮藏") {
+            return;
+        }
         let message = self.stash_message.value.clone();
         let include_untracked = self.stash_include_untracked;
         let keep_index = self.stash_keep_index;
@@ -571,6 +577,7 @@ impl RepositoryView {
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let can_apply = !self.busy && !self.merge_in_progress();
         div()
             .child(crate::context_menu_item(
                 "查看贮藏",
@@ -580,13 +587,13 @@ impl RepositoryView {
             ))
             .child(crate::context_menu_item(
                 "应用贮藏",
-                !self.busy,
+                can_apply,
                 move |this| this.apply_stash(index),
                 cx,
             ))
             .child(crate::context_menu_item(
                 "弹出贮藏",
-                !self.busy,
+                can_apply,
                 move |this| this.pop_stash(index),
                 cx,
             ))

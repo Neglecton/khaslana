@@ -239,12 +239,23 @@ impl RepositoryView {
     ) -> impl IntoElement {
         app_panel()
             .flex()
+            .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .h_full()
-            .child(self.render_conflict_file_rail(cx))
-            .child(self.render_column_splitter(crate::ResizeTarget::Changes, cx))
-            .child(self.render_conflict_detail(window, cx))
+            .when_some(self.render_merge_banner(cx), |this, banner| {
+                this.child(banner)
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .child(self.render_conflict_file_rail(cx))
+                    .child(self.render_column_splitter(crate::ResizeTarget::Changes, cx))
+                    .child(self.render_conflict_detail(window, cx)),
+            )
     }
 
     fn render_conflict_file_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {

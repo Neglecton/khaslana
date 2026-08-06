@@ -192,6 +192,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn run_workflow(&mut self) {
+        if !self.ensure_no_merge_in_progress("运行工作流") {
+            return;
+        }
         let Some(tab_id) = self.active_tab_id() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;

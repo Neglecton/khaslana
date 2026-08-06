@@ -12,10 +12,9 @@ use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{BIG5, Encoding, GB18030, UTF_8};
 use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{
-    AnnotatedCommit, BranchType, Cred, CredentialType, Delta, DiffFormat, DiffOptions, ErrorCode,
-    FetchOptions, FetchPrune, IndexAddOption, MergeAnalysis, MergeOptions, ProxyOptions,
-    PushOptions, Reference, RemoteCallbacks, Repository, ResetType, RevertOptions, Signature, Sort,
-    Status, StatusOptions,
+    BranchType, Cred, CredentialType, Delta, DiffFormat, DiffOptions, ErrorCode, FetchOptions,
+    FetchPrune, IndexAddOption, ProxyOptions, PushOptions, Reference, RemoteCallbacks, Repository,
+    ResetType, RevertOptions, Signature, Sort, Status, StatusOptions,
 };
 
 use crate::credentials::{CredentialProvider, CredentialRequest, to_git_credential};
@@ -31,6 +30,7 @@ use smallvec::SmallVec;
 
 mod browse;
 mod conflicts;
+mod merge;
 mod rebase;
 mod stash;
 mod submodule;
@@ -225,6 +225,8 @@ impl GitService {
             tags: Vec::new(),
             stashes: Vec::new(),
             conflicts: Vec::new(),
+            merge_in_progress: merge_in_progress(repo),
+            merge_message: merge_message(repo),
             rebase_in_progress: false,
         })
     }
@@ -285,6 +287,8 @@ impl GitService {
             tags,
             stashes,
             conflicts,
+            merge_in_progress: merge_in_progress(repo),
+            merge_message: merge_message(repo),
             rebase_in_progress: rebase_in_progress(repo),
         })
     }
@@ -338,6 +342,8 @@ impl GitService {
             tags,
             stashes,
             conflicts,
+            merge_in_progress: merge_in_progress(repo),
+            merge_message: merge_message(repo),
             rebase_in_progress: rebase_in_progress(repo),
         })
     }
@@ -936,23 +942,6 @@ impl GitService {
         self.snapshot_after_operation(repo)
     }
 
-    pub fn merge_branch(
-        &self,
-        repo: &mut Repository,
-        branch: &BranchName,
-    ) -> Result<RepositorySnapshot> {
-        self.progress
-            .emit(OperationEvent::Started(format!("正在合并 {}", branch.0)));
-        let reference = self.find_branch_reference(repo, &branch.0)?;
-        let annotated = repo.reference_to_annotated_commit(&reference)?;
-        self.merge_annotated(repo, &annotated, &branch.0)?;
-        drop(annotated);
-        drop(reference);
-        self.progress
-            .emit(OperationEvent::Finished(format!("已合并 {}", branch.0)));
-        self.snapshot_after_operation(repo)
-    }
-
     pub fn checkout_branch(
         &self,
         repo: &mut Repository,
@@ -1253,6 +1242,10 @@ impl GitService {
         repo: &mut Repository,
         message: &CommitMessage,
     ) -> Result<RepositorySnapshot> {
+        if merge::merge_in_progress(repo) {
+            return self.finish_merge(repo, message);
+        }
+
         let message = message.0.trim();
         if message.is_empty() {
             return Err(GitError::EmptyCommitMessage);
@@ -2112,74 +2105,6 @@ impl GitService {
         repo.find_reference(name).map_err(GitError::from)
     }
 
-    fn merge_annotated(
-        &self,
-        repo: &Repository,
-        annotated: &AnnotatedCommit<'_>,
-        label: &str,
-    ) -> Result<()> {
-        let (analysis, _preference) = repo.merge_analysis(&[annotated])?;
-
-        if analysis.contains(MergeAnalysis::ANALYSIS_UP_TO_DATE) {
-            return Ok(());
-        }
-
-        if analysis.contains(MergeAnalysis::ANALYSIS_FASTFORWARD) {
-            fast_forward(repo, annotated)?;
-            return Ok(());
-        }
-
-        if analysis.contains(MergeAnalysis::ANALYSIS_NORMAL) {
-            let head_commit = repo.head()?.peel_to_commit()?;
-            let other_commit = repo.find_commit(annotated.id())?;
-            let mut merge_options = MergeOptions::new();
-            let mut index =
-                repo.merge_commits(&head_commit, &other_commit, Some(&mut merge_options))?;
-
-            if index.has_conflicts() {
-                let mut checkout = CheckoutBuilder::new();
-                checkout.allow_conflicts(true);
-                checkout_index_preserving_locked_directories(
-                    repo,
-                    Some(&mut index),
-                    &mut checkout,
-                )?;
-                repo.cleanup_state()?;
-                return Err(GitError::Conflicts(self.conflicts(repo)?));
-            }
-
-            let tree_id = index.write_tree_to(repo)?;
-            let tree = repo.find_tree(tree_id)?;
-            let signature = signature(repo)?;
-
-            let mut repo_index = repo.index()?;
-            repo_index.read_tree(&tree)?;
-            repo_index.write()?;
-            let mut checkout = CheckoutBuilder::new();
-            checkout.safe();
-            checkout_index_preserving_locked_directories(
-                repo,
-                Some(&mut repo_index),
-                &mut checkout,
-            )?;
-
-            repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                &format!("Merge branch '{label}'"),
-                &tree,
-                &[&head_commit, &other_commit],
-            )?;
-            repo.cleanup_state()?;
-            return Ok(());
-        }
-
-        Err(GitError::Message(format!(
-            "无法合并 {label}：不支持的合并分析结果"
-        )))
-    }
-
     fn conflicts(&self, repo: &Repository) -> Result<Vec<String>> {
         let mut conflicts = Vec::new();
         let index = repo.index()?;
@@ -2414,6 +2339,16 @@ pub(crate) fn signature(repo: &Repository) -> Result<Signature<'static>> {
         .map_err(GitError::from)
 }
 
+/// 检测是否有普通合并正在进行。
+pub(crate) fn merge_in_progress(repo: &Repository) -> bool {
+    merge::merge_in_progress(repo)
+}
+
+/// 读取 libgit2 为当前合并准备的默认提交信息。
+fn merge_message(repo: &Repository) -> Option<String> {
+    merge::merge_message(repo)
+}
+
 /// 检测是否有变基正在进行：检查 `.git/rebase-merge` 或 `rebase-apply` 目录是否存在。
 pub(crate) fn rebase_in_progress(repo: &Repository) -> bool {
     let path = repo.path();
@@ -2427,19 +2362,6 @@ fn parents(repo: &Repository) -> Result<Vec<git2::Commit<'_>>> {
         }
     }
     Ok(Vec::new())
-}
-
-fn fast_forward(repo: &Repository, annotated: &AnnotatedCommit<'_>) -> Result<()> {
-    let refname = repo.head()?.name().map_err(GitError::from)?.to_string();
-    let target = repo.find_object(annotated.id(), None)?;
-    let mut checkout = CheckoutBuilder::new();
-    checkout.safe();
-    checkout_tree_preserving_locked_directories(repo, &target, &mut checkout)?;
-
-    let mut reference = repo.find_reference(&refname)?;
-    reference.set_target(annotated.id(), "khaslana fast-forward")?;
-    repo.set_head(&refname)?;
-    Ok(())
 }
 
 fn credential_for_remote(

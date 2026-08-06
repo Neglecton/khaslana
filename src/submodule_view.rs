@@ -186,6 +186,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn update_submodules(&mut self) {
+        if !self.ensure_no_merge_in_progress("同步子模块记录版本") {
+            return;
+        }
         if self.repo_path.is_none() {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -197,6 +200,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn update_submodules_to_remote_latest(&mut self) {
+        if !self.ensure_no_merge_in_progress("更新子模块") {
+            return;
+        }
         if self.repo_path.is_none() {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -208,6 +214,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn update_submodule_to_remote_latest(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("更新子模块") {
+            return;
+        }
         if self.repo_path.is_none() {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -236,7 +245,11 @@ impl RepositoryView {
                 .map(|module| self.submodule_dialog_row(module, cx).into_any_element())
                 .collect::<Vec<_>>()
         };
-        let can_update = state.loaded && !state.items.is_empty() && !self.busy && !state.loading;
+        let can_update = state.loaded
+            && !state.items.is_empty()
+            && !self.busy
+            && !state.loading
+            && !self.merge_in_progress();
 
         div()
             .id("dialog-子模块")
@@ -493,7 +506,7 @@ impl RepositoryView {
             )
             .child(div().flex_none().w(px(92.0)).child(self.button(
                 "更新最新",
-                !self.busy,
+                !self.busy && !self.merge_in_progress(),
                 move |this, _, _| this.update_submodule_to_remote_latest(module_name.clone()),
                 cx,
             )))

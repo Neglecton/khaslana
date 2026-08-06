@@ -937,6 +937,7 @@ impl RepositoryView {
             return div().into_any_element();
         };
         let is_local = menu.kind == BranchKind::Local;
+        let merge_in_progress = self.merge_in_progress();
         let can_pull_local = is_local
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.branches.iter().any(|branch| {
@@ -975,7 +976,7 @@ impl RepositoryView {
             })
             .child(context_menu_item(
                 "切换到此分支",
-                is_local && !menu.is_head && !self.busy,
+                is_local && !menu.is_head && !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.checkout(branch.clone())
@@ -984,7 +985,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "拉取此分支更新",
-                can_pull_local && !self.busy,
+                can_pull_local && !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.pull_local_branch_update(branch.clone())
@@ -993,7 +994,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "合并到当前分支",
-                !menu.is_head && !self.busy,
+                !menu.is_head && !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.merge_branch(branch.clone())
@@ -1002,7 +1003,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "变基到当前分支",
-                !menu.is_head && !self.busy,
+                !menu.is_head && !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.rebase_branch(branch.clone())
@@ -1011,7 +1012,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "拉取到本地并切换",
-                !is_local && !self.busy,
+                !is_local && !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.checkout_remote_branch(branch.clone())
@@ -1079,6 +1080,9 @@ impl RepositoryView {
     }
 
     fn pull_local_branch_update(&mut self, branch: String) {
+        if !self.ensure_no_merge_in_progress("拉取分支") {
+            return;
+        }
         self.branch_context_menu = None;
         self.with_repo_blocking("分支拉取完成", move |service, repo| {
             service.pull_local_branch(repo, &BranchName::new(branch))

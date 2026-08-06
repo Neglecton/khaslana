@@ -8,6 +8,7 @@ mod conflicts;
 mod diff_view;
 mod external_merge_view;
 mod history_view;
+mod merge_view;
 mod operation_blocker_view;
 mod proxy_view;
 mod rebase_view;
@@ -285,6 +286,7 @@ pub(crate) enum DialogState {
         kind: RemoteBranchOperationKind,
     },
     ConfirmConflictResolve,
+    ConfirmAbortMerge,
     ConfirmWindowClose,
     // ── 更新对话框 ──
     NewVersionAvailable {
@@ -1784,6 +1786,8 @@ fn started_message_for_label(label: &'static str) -> &'static str {
         "克隆完成" => "正在克隆仓库",
         "已刷新" => "正在刷新仓库",
         "合并完成" => "正在合并分支",
+        "合并已完成" => "正在完成合并",
+        "合并已中止" => "正在中止合并",
         "变基完成" => "正在变基分支",
         "变基已中止" => "正在中止变基",
         "变基拉取完成" => "正在变基拉取",
@@ -2770,6 +2774,9 @@ impl RepositoryView {
             } => {
                 self.with_tab_context(tab_id, |this| {
                     if load_id == this.repository_load_id {
+                        let was_merge_in_progress = this.merge_in_progress();
+                        let merge_in_progress = snapshot.merge_in_progress;
+                        let merge_message = snapshot.merge_message.clone();
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
                         this.operation_blocker_started = None;
@@ -2789,6 +2796,11 @@ impl RepositoryView {
                         this.sync_selected_remote(&snapshot);
                         this.change_indexes = ChangeListIndexes::rebuild(&snapshot.changes);
                         this.snapshot = Some(snapshot);
+                        this.sync_merge_message_transition(
+                            was_merge_in_progress,
+                            merge_in_progress,
+                            merge_message,
+                        );
                         this.sync_conflict_mode_with_snapshot();
                         this.scroll_local_branch_to_current();
                         this.reload_history_if_active();
@@ -2897,6 +2909,9 @@ impl RepositoryView {
                     this.loading = RepositoryLoading::default();
                     this.status = message;
                     if let Some(snapshot) = snapshot {
+                        let was_merge_in_progress = this.merge_in_progress();
+                        let merge_in_progress = snapshot.merge_in_progress;
+                        let merge_message = snapshot.merge_message.clone();
                         this.repo_path = (!snapshot.path.as_os_str().is_empty())
                             .then(|| snapshot.path.clone())
                             .or_else(|| this.repo_path.clone());
@@ -2908,6 +2923,11 @@ impl RepositoryView {
                             this.reset_uniform_scroll("diff-scroll");
                         }
                         this.snapshot = Some(snapshot);
+                        this.sync_merge_message_transition(
+                            was_merge_in_progress,
+                            merge_in_progress,
+                            merge_message,
+                        );
                         this.prune_stash_preview();
                         this.prune_change_selection();
                         this.sync_conflict_mode_with_snapshot();
@@ -3708,6 +3728,9 @@ impl RepositoryView {
 
     fn merge_metadata_snapshot(&mut self, snapshot: RepositorySnapshot) {
         let mut merged = self.snapshot.take().unwrap_or_default();
+        let was_merge_in_progress = merged.merge_in_progress;
+        let merge_in_progress = snapshot.merge_in_progress;
+        let merge_message = snapshot.merge_message.clone();
         merged.path = snapshot.path;
         merged.head = snapshot.head;
         merged.branches = snapshot.branches;
@@ -3715,10 +3738,14 @@ impl RepositoryView {
         merged.tags = snapshot.tags;
         merged.stashes = snapshot.stashes;
         merged.conflicts = snapshot.conflicts;
+        merged.merge_in_progress = merge_in_progress;
+        merged.merge_message = snapshot.merge_message;
+        merged.rebase_in_progress = snapshot.rebase_in_progress;
         self.repo_path = Some(merged.path.clone());
         self.sync_selected_remote(&merged);
         self.change_indexes = ChangeListIndexes::rebuild(&merged.changes);
         self.snapshot = Some(merged);
+        self.sync_merge_message_transition(was_merge_in_progress, merge_in_progress, merge_message);
         self.sync_conflict_mode_with_snapshot();
     }
 
@@ -6427,6 +6454,13 @@ impl RepositoryView {
     }
 
     fn open_remote_branch_operation(&mut self, kind: RemoteBranchOperationKind) {
+        if matches!(
+            kind,
+            RemoteBranchOperationKind::Pull | RemoteBranchOperationKind::Push
+        ) && !self.ensure_no_merge_in_progress("拉取或推送")
+        {
+            return;
+        }
         let Some(snapshot) = self.snapshot.as_ref() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -6508,6 +6542,13 @@ impl RepositoryView {
     }
 
     pub(crate) fn confirm_remote_branch_operation(&mut self, kind: RemoteBranchOperationKind) {
+        if matches!(
+            kind,
+            RemoteBranchOperationKind::Pull | RemoteBranchOperationKind::Push
+        ) && !self.ensure_no_merge_in_progress("拉取或推送")
+        {
+            return;
+        }
         let Some(snapshot) = self.snapshot.as_ref() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -6589,6 +6630,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn checkout(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("切换分支") {
+            return;
+        }
         self.close_browse_if_comparing();
         self.with_repo_blocking("切换分支完成", move |service, repo| {
             service.checkout_branch(repo, &BranchName::new(name))
@@ -6625,12 +6669,18 @@ impl RepositoryView {
     }
 
     pub(crate) fn merge_branch(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("再次合并") {
+            return;
+        }
         self.with_repo_blocking("合并完成", move |service, repo| {
             service.merge_branch(repo, &BranchName::new(name))
         });
     }
 
     pub(crate) fn checkout_remote_branch(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("切换远端分支") {
+            return;
+        }
         self.close_browse_if_comparing();
         self.with_repo_blocking("远端分支已拉取到本地", move |service, repo| {
             service.checkout_remote_branch(repo, &BranchName::new(name))
@@ -6638,6 +6688,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn checkout_tag(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("检出标签") {
+            return;
+        }
         self.close_browse_if_comparing();
         self.with_repo_blocking("检出标签完成", move |service, repo| {
             service.checkout_tag(repo, &TagName::new(name))
@@ -6645,12 +6698,18 @@ impl RepositoryView {
     }
 
     pub(crate) fn apply_stash(&mut self, index: usize) {
+        if !self.ensure_no_merge_in_progress("应用贮藏") {
+            return;
+        }
         self.with_repo_blocking("应用贮藏完成", move |service, repo| {
             service.apply_stash(repo, index)
         });
     }
 
     pub(crate) fn pop_stash(&mut self, index: usize) {
+        if !self.ensure_no_merge_in_progress("弹出贮藏") {
+            return;
+        }
         self.with_repo_blocking("弹出贮藏完成", move |service, repo| {
             service.pop_stash(repo, index)
         });
@@ -6736,30 +6795,45 @@ impl RepositoryView {
     }
 
     fn reset_to_commit(&mut self, oid: String, mode: ResetMode) {
+        if !self.ensure_no_merge_in_progress("重置提交") {
+            return;
+        }
         self.with_repo_blocking("分支已重置", move |service, repo| {
             service.reset_to_commit(repo, &oid, mode)
         });
     }
 
     fn revert_commit(&mut self, oid: String) {
+        if !self.ensure_no_merge_in_progress("回滚提交") {
+            return;
+        }
         self.with_repo_blocking("回滚提交完成", move |service, repo| {
             service.revert_commit(repo, &oid)
         });
     }
 
     fn revert_merge_commit(&mut self, oid: String) {
+        if !self.ensure_no_merge_in_progress("撤销合并提交") {
+            return;
+        }
         self.with_repo_blocking("撤销合并完成", move |service, repo| {
             service.revert_merge_commit(repo, &oid)
         });
     }
 
     fn uncommit_to_staged(&mut self, oid: String) {
+        if !self.ensure_no_merge_in_progress("还原提交到暂存区") {
+            return;
+        }
         self.with_repo_blocking("提交已还原到暂存区", move |service, repo| {
             service.uncommit_to_staged(repo, &oid)
         });
     }
 
     fn discard_change(&mut self, paths: Vec<String>, scope: DiffScope, target: DiscardTarget) {
+        if !self.ensure_no_merge_in_progress("回滚工作区更改") {
+            return;
+        }
         let message = match scope {
             DiffScope::Staged => match target {
                 DiscardTarget::Single => "已回滚文件全部更改",
@@ -8178,6 +8252,10 @@ impl RepositoryView {
     }
 
     fn commit(&mut self) {
+        if self.merge_in_progress() {
+            self.finish_merge();
+            return;
+        }
         let message = self.commit_message.value.trim().to_string();
         if message.is_empty() {
             self.last_error = Some("需要填写提交信息".into());
@@ -8192,6 +8270,9 @@ impl RepositoryView {
     }
 
     fn commit_and_push(&mut self) {
+        if !self.ensure_no_merge_in_progress("提交并推送") {
+            return;
+        }
         let message = self.commit_message.value.trim().to_string();
         if message.is_empty() {
             self.last_error = Some("需要填写提交信息".into());
@@ -8851,6 +8932,7 @@ impl RepositoryView {
     fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repo_open = self.repo_path.is_some();
         let remote_open = !self.loading.remote() && self.current_remote().is_some();
+        let merge_in_progress = self.merge_in_progress();
         let has_conflicts = self
             .snapshot
             .as_ref()
@@ -8907,7 +8989,7 @@ impl RepositoryView {
                         } else {
                             None
                         },
-                        repo_open && remote_open && !self.busy,
+                        repo_open && remote_open && !self.busy && !merge_in_progress,
                         |this, _, _| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Pull)
                         },
@@ -8921,7 +9003,7 @@ impl RepositoryView {
                         } else {
                             None
                         },
-                        repo_open && remote_open && !self.busy,
+                        repo_open && remote_open && !self.busy && !merge_in_progress,
                         |this, _, _| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Push)
                         },
@@ -8932,7 +9014,7 @@ impl RepositoryView {
                         "贮藏",
                         ToolbarIcon::Stash,
                         None,
-                        repo_open && !self.busy,
+                        repo_open && !self.busy && !merge_in_progress,
                         |this, _, _| this.open_stash_dialog(),
                         cx,
                     ))
@@ -9697,7 +9779,7 @@ impl RepositoryView {
             .w(px(TAG_MENU_WIDTH))
             .child(context_menu_item(
                 "检出标签",
-                !self.busy,
+                !self.busy && !self.merge_in_progress(),
                 {
                     let tag = menu.tag.clone();
                     move |this| this.checkout_tag(tag.clone())
@@ -9738,6 +9820,7 @@ impl RepositoryView {
         let selected_paths = self.selected_change_paths(menu.scope.clone());
         let all_paths = self.change_paths(menu.scope.clone());
         let all_count = all_paths.len();
+        let can_discard = !self.busy && !self.merge_in_progress();
 
         let mut menu_el = glass_menu()
             .absolute()
@@ -9775,7 +9858,7 @@ impl RepositoryView {
                 .child(menu_separator())
                 .child(context_menu_item(
                     "回滚更改...",
-                    !self.busy,
+                    can_discard,
                     {
                         let path = menu.path.clone();
                         let scope = menu.scope.clone();
@@ -9791,7 +9874,7 @@ impl RepositoryView {
                 ))
                 .child(context_menu_item(
                     "回滚指定更改...",
-                    selected_count > 0 && !self.busy,
+                    selected_count > 0 && can_discard,
                     {
                         let paths = selected_paths.clone();
                         let scope = menu.scope.clone();
@@ -9807,7 +9890,7 @@ impl RepositoryView {
                 ))
                 .child(context_menu_item(
                     "回滚全部更改...",
-                    all_count > 0 && !self.busy,
+                    all_count > 0 && can_discard,
                     {
                         let paths = all_paths.clone();
                         let scope = menu.scope.clone();
@@ -9837,7 +9920,7 @@ impl RepositoryView {
                 .child(menu_separator())
                 .child(context_menu_item(
                     "回滚更改...",
-                    !self.busy,
+                    can_discard,
                     {
                         let path = menu.path.clone();
                         let scope = menu.scope.clone();
@@ -9853,7 +9936,7 @@ impl RepositoryView {
                 ))
                 .child(context_menu_item(
                     "回滚指定更改...",
-                    selected_count > 0 && !self.busy,
+                    selected_count > 0 && can_discard,
                     {
                         let paths = selected_paths;
                         let scope = menu.scope.clone();
@@ -9869,7 +9952,7 @@ impl RepositoryView {
                 ))
                 .child(context_menu_item(
                     "回滚全部更改...",
-                    all_count > 0 && !self.busy,
+                    all_count > 0 && can_discard,
                     {
                         let paths = all_paths;
                         let scope = menu.scope.clone();
@@ -9898,6 +9981,7 @@ impl RepositoryView {
         } else {
             "回滚提交"
         };
+        let can_change_repository = !self.busy && !self.merge_in_progress();
 
         glass_menu()
             .absolute()
@@ -9927,7 +10011,7 @@ impl RepositoryView {
             )
             .child(menu_separator())
             .when(menu.is_unpushed, |this| {
-                let can_uncommit = !self.busy && menu.is_head;
+                let can_uncommit = can_change_repository && menu.is_head;
                 let label = if menu.is_head {
                     "还原到暂存区..."
                 } else {
@@ -9952,7 +10036,7 @@ impl RepositoryView {
             })
             .child(context_menu_item(
                 "软重置分支到此次提交",
-                !self.busy,
+                can_change_repository,
                 {
                     let oid = menu.oid.clone();
                     let summary = menu.summary.clone();
@@ -9968,7 +10052,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "混合重置分支到此次提交",
-                !self.busy,
+                can_change_repository,
                 {
                     let oid = menu.oid.clone();
                     let summary = menu.summary.clone();
@@ -9984,7 +10068,7 @@ impl RepositoryView {
             ))
             .child(context_menu_item(
                 "强制重置分支到此次提交",
-                !self.busy,
+                can_change_repository,
                 {
                     let oid = menu.oid.clone();
                     let summary = menu.summary.clone();
@@ -10001,7 +10085,7 @@ impl RepositoryView {
             .child(menu_separator())
             .child(context_menu_item(
                 revert_label,
-                !self.busy,
+                can_change_repository,
                 {
                     let oid = menu.oid.clone();
                     let summary = menu.summary.clone();
@@ -10211,6 +10295,9 @@ impl RepositoryView {
             .h_full()
             .border_r_1()
             .border_color(rgb(ui_theme::BORDER))
+            .when_some(self.render_merge_banner(cx), |this, banner| {
+                this.child(banner)
+            })
             .when_some(self.render_rebase_banner(cx), |this, banner| {
                 this.child(banner)
             })
@@ -11058,7 +11145,23 @@ impl RepositoryView {
 
     fn render_commit_box(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_commit = self.repo_path.is_some() && !self.busy;
-        let can_commit_and_push = can_commit && self.current_remote().is_some();
+        let merge_in_progress = self.merge_in_progress();
+        let conflict_count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.conflicts.len());
+        let can_primary_commit = if merge_in_progress {
+            merge_view::merge_can_finish(
+                merge_in_progress,
+                conflict_count,
+                self.busy,
+                &self.commit_message.value,
+            )
+        } else {
+            can_commit
+        };
+        let can_commit_and_push =
+            can_commit && !merge_in_progress && self.current_remote().is_some();
         div()
             .flex()
             .flex_col()
@@ -11081,8 +11184,8 @@ impl RepositoryView {
                             .items_center()
                             .gap_1()
                             .child(self.primary_button(
-                                "提交",
-                                can_commit,
+                                merge_view::merge_commit_button_label(merge_in_progress),
+                                can_primary_commit,
                                 |this, _, _| this.commit(),
                                 cx,
                             ))
@@ -11396,6 +11499,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ConfirmConflictResolve => self
                 .render_confirm_conflict_resolve_dialog(cx)
+                .into_any_element(),
+            DialogState::ConfirmAbortMerge => self
+                .render_confirm_abort_merge_dialog(cx)
                 .into_any_element(),
             DialogState::ConfirmWindowClose => self
                 .render_confirm_window_close_dialog(cx)

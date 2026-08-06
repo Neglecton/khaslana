@@ -2,7 +2,8 @@
 use git2::Binding;
 use git2::build::CheckoutBuilder;
 use git2::{
-    AnnotatedCommit, Repository, ResetType, RevertOptions, Signature, StashApplyOptions, StashFlags,
+    AnnotatedCommit, MergeOptions, Repository, ResetType, RevertOptions, Signature,
+    StashApplyOptions, StashFlags,
 };
 
 #[cfg(windows)]
@@ -86,6 +87,36 @@ pub(super) fn checkout_head_preserving_locked_directories(
     #[cfg(not(windows))]
     {
         repo.checkout_head(Some(checkout))
+    }
+}
+
+pub(super) fn merge_preserving_locked_directories(
+    repo: &Repository,
+    annotated_commits: &[&AnnotatedCommit<'_>],
+    merge_options: Option<&mut MergeOptions>,
+    checkout: &mut CheckoutBuilder<'_>,
+) -> std::result::Result<(), git2::Error> {
+    #[cfg(windows)]
+    {
+        let raw_checkout = checkout_options_preserving_locked_directories(checkout)?;
+        let mut commits = annotated_commits
+            .iter()
+            .map(|commit| commit.raw() as *const libgit2_sys::git_annotated_commit)
+            .collect::<Vec<_>>();
+        raw_git_result(unsafe {
+            libgit2_sys::git_merge(
+                repo.raw(),
+                commits.as_mut_ptr(),
+                commits.len(),
+                merge_options.map_or(std::ptr::null(), |options| options.raw()),
+                &raw_checkout,
+            )
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        repo.merge(annotated_commits, merge_options, Some(checkout))
     }
 }
 

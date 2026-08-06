@@ -13,6 +13,9 @@ use crate::{RepositoryView, ui::theme as ui_theme};
 impl RepositoryView {
     /// 把当前分支变基到指定分支之上。由侧边栏右键菜单调用。
     pub(crate) fn rebase_branch(&mut self, name: String) {
+        if !self.ensure_no_merge_in_progress("开始变基") {
+            return;
+        }
         self.with_repo_blocking("变基完成", move |service, repo| {
             match service.rebase_branch(repo, &BranchName::new(name))? {
                 RebaseOutcome::Completed(snapshot) => Ok(snapshot),

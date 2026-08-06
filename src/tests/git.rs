@@ -2,7 +2,7 @@ use std::fs;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
-use git2::{BranchType, Oid, RepositoryInitOptions};
+use git2::{BranchType, Oid, RepositoryInitOptions, RepositoryState};
 use tempfile::TempDir;
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -1367,9 +1367,10 @@ fn discard_paths_reject_conflicts_before_touching_other_files() {
         .unwrap();
     git_support::write_file(dir.path(), "same.txt", "main\n");
     git_support::commit_all(&repo, "main");
-    git_support::write_file(dir.path(), "safe.txt", "changed\n");
 
     let _ = service.merge_branch(&mut repo, &BranchName::new("feature"));
+    // 合并开始前必须保持工作区干净；进入冲突状态后再添加普通修改，验证批量回滚不会误触它。
+    git_support::write_file(dir.path(), "safe.txt", "changed\n");
     let err = service
         .discard_unstaged_paths(&mut repo, [Path::new("safe.txt"), Path::new("same.txt")])
         .unwrap_err();
@@ -1445,11 +1446,33 @@ fn merge_success() {
     git_support::write_file(dir.path(), "main.txt", "main\n");
     git_support::commit_all(&repo, "main");
 
-    service
+    let snapshot = service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
     assert!(dir.path().join("feature.txt").exists());
     assert!(service.conflicts(&repo).unwrap().is_empty());
+    assert!(!snapshot.merge_in_progress);
+    assert_eq!(repo.state(), RepositoryState::Clean);
+    assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().parent_count(), 2);
+}
+
+#[test]
+fn up_to_date_merge_does_not_create_commit() {
+    let (_dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(_dir.path(), "base.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    let original_head = repo.head().unwrap().target().unwrap();
+
+    let snapshot = service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+
+    assert_eq!(repo.head().unwrap().target(), Some(original_head));
+    assert!(!snapshot.merge_in_progress);
+    assert_eq!(repo.state(), RepositoryState::Clean);
 }
 
 #[test]
@@ -1477,6 +1500,9 @@ fn fast_forward_merge_keeps_index_clean() {
     assert!(dir.path().join("feature.txt").exists());
     assert!(snapshot.changes.is_empty());
     assert!(service.status_full(&repo).unwrap().is_empty());
+    assert!(!snapshot.merge_in_progress);
+    assert_eq!(repo.state(), RepositoryState::Clean);
+    assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().parent_count(), 1);
 }
 
 #[test]
@@ -1504,6 +1530,234 @@ fn merge_conflict_detection() {
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap_err();
     assert!(matches!(err, GitError::Conflicts(paths) if paths == vec!["same.txt"]));
+    assert_eq!(repo.state(), RepositoryState::Merge);
+    let snapshot = service.snapshot_after_operation(&mut repo).unwrap();
+    assert!(snapshot.merge_in_progress);
+    assert!(snapshot.merge_message.is_some());
+}
+
+#[test]
+fn conflicted_merge_can_finish_as_two_parent_commit() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "feature\n");
+    git_support::commit_all(&repo, "feature");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "main\n");
+    git_support::commit_all(&repo, "main");
+
+    service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap_err();
+    let unresolved = service.finish_merge(&mut repo, &CommitMessage::new("finish merge"));
+    assert!(matches!(unresolved, Err(GitError::Conflicts(_))));
+    let empty = service.finish_merge(&mut repo, &CommitMessage::new("  "));
+    assert!(matches!(empty, Err(GitError::EmptyCommitMessage)));
+
+    service
+        .resolve_conflict_with_side(
+            &mut repo,
+            Path::new("same.txt"),
+            crate::ConflictResolutionSide::Ours,
+        )
+        .unwrap();
+    let snapshot = service
+        .finish_merge(&mut repo, &CommitMessage::new("finish merge"))
+        .unwrap();
+
+    assert!(!snapshot.merge_in_progress);
+    assert!(snapshot.merge_message.is_none());
+    assert_eq!(repo.state(), RepositoryState::Clean);
+    let commit = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(commit.parent_count(), 2);
+    assert_eq!(commit.message().unwrap(), "finish merge");
+    git_support::assert_file_text(dir.path(), "same.txt", "main\n");
+}
+
+#[test]
+fn reopened_merge_can_restore_message_and_finish() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "feature\n");
+    git_support::commit_all(&repo, "feature");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "main\n");
+    git_support::commit_all(&repo, "main");
+
+    service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap_err();
+    drop(repo);
+
+    let mut reopened = Repository::open(dir.path()).unwrap();
+    let restored = service.snapshot_after_operation(&mut reopened).unwrap();
+    assert!(restored.merge_in_progress);
+    assert!(restored.merge_message.is_some());
+    service
+        .resolve_conflict_with_side(
+            &mut reopened,
+            Path::new("same.txt"),
+            crate::ConflictResolutionSide::Theirs,
+        )
+        .unwrap();
+    service
+        .finish_merge(&mut reopened, &CommitMessage::new("finish after reopen"))
+        .unwrap();
+
+    assert_eq!(reopened.state(), RepositoryState::Clean);
+    assert_eq!(
+        reopened.head().unwrap().peel_to_commit().unwrap().parent_count(),
+        2
+    );
+    git_support::assert_file_text(dir.path(), "same.txt", "feature\n");
+}
+
+#[test]
+fn abort_merge_restores_head_index_and_worktree() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "feature\n");
+    git_support::commit_all(&repo, "feature");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "main\n");
+    git_support::commit_all(&repo, "main");
+    let original_head = repo.head().unwrap().target().unwrap();
+
+    service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap_err();
+    let reopened = Repository::open(dir.path()).unwrap();
+    assert_eq!(reopened.state(), RepositoryState::Merge);
+    drop(reopened);
+
+    let snapshot = service.abort_merge(&mut repo).unwrap();
+    assert_eq!(repo.head().unwrap().target(), Some(original_head));
+    assert_eq!(repo.state(), RepositoryState::Clean);
+    assert!(!snapshot.merge_in_progress);
+    assert!(service.status_full(&repo).unwrap().is_empty());
+    git_support::assert_file_text(dir.path(), "same.txt", "main\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn conflicted_merge_and_abort_keep_vscode_locked_directory_compatible() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "opened/obsolete.txt", "obsolete\n");
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    fs::remove_file(dir.path().join("opened/obsolete.txt")).unwrap();
+    git_support::write_file(dir.path(), "same.txt", "feature\n");
+    git_support::commit_all(&repo, "feature");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "main\n");
+    git_support::commit_all(&repo, "main");
+
+    let opened_directory = dir.path().join("opened");
+    let directory_handle = lock_directory_without_delete_share(&opened_directory);
+    let merge_result = service.merge_branch(&mut repo, &BranchName::new("feature"));
+    assert!(matches!(merge_result, Err(GitError::Conflicts(_))));
+    assert!(opened_directory.exists());
+    assert!(!opened_directory.join("obsolete.txt").exists());
+
+    let abort_result = service.abort_merge(&mut repo);
+    unsafe {
+        CloseHandle(directory_handle);
+    }
+    abort_result.unwrap();
+    git_support::assert_file_text(dir.path(), "opened/obsolete.txt", "obsolete\n");
+    git_support::assert_file_text(dir.path(), "same.txt", "main\n");
+    assert_eq!(repo.state(), RepositoryState::Clean);
+}
+
+#[test]
+fn merge_rejects_dirty_worktree_without_moving_head() {
+    for prepare_dirty in ["unstaged", "staged", "untracked"] {
+        let (dir, mut repo, service) = git_support::init_repo();
+        git_support::write_file(dir.path(), "base.txt", "base\n");
+        git_support::commit_all(&repo, "initial");
+        service
+            .create_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        service
+            .checkout_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap();
+        git_support::write_file(dir.path(), "feature.txt", "feature\n");
+        git_support::commit_all(&repo, "feature");
+        service
+            .checkout_branch(&mut repo, &BranchName::new("main"))
+            .unwrap();
+        let original_head = repo.head().unwrap().target().unwrap();
+
+        match prepare_dirty {
+            "unstaged" => git_support::write_file(dir.path(), "base.txt", "dirty\n"),
+            "staged" => {
+                git_support::write_file(dir.path(), "base.txt", "dirty\n");
+                service
+                    .stage_path(&mut repo, Path::new("base.txt"))
+                    .unwrap();
+            }
+            "untracked" => git_support::write_file(dir.path(), "local.txt", "dirty\n"),
+            _ => unreachable!(),
+        }
+
+        let err = service
+            .merge_branch(&mut repo, &BranchName::new("feature"))
+            .unwrap_err();
+        assert!(err.to_string().contains("请先提交或贮藏"));
+        assert_eq!(repo.head().unwrap().target(), Some(original_head));
+        assert_eq!(repo.state(), RepositoryState::Clean);
+    }
+}
+
+#[test]
+fn finish_and_abort_merge_reject_clean_repository() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "base.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    let finish = service.finish_merge(&mut repo, &CommitMessage::new("merge"));
+    let finish_error = finish.unwrap_err().to_string();
+    assert!(
+        finish_error.contains("没有正在进行的合并"),
+        "{finish_error}"
+    );
+    let abort = service.abort_merge(&mut repo);
+    let abort_error = abort.unwrap_err().to_string();
+    assert!(abort_error.contains("没有正在进行的合并"), "{abort_error}");
 }
 
 #[test]

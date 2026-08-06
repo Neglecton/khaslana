@@ -358,6 +358,10 @@ pub struct RepositorySnapshot {
     pub tags: Vec<TagInfo>,
     pub stashes: Vec<StashInfo>,
     pub conflicts: Vec<String>,
+    /// 是否有普通合并正在进行（由 libgit2 的 RepositoryState::Merge 判定）。
+    pub merge_in_progress: bool,
+    /// 合并提交的默认信息；合并冲突解决后允许用户在提交框中修改。
+    pub merge_message: Option<String>,
     /// 是否有变基正在进行（检测 .git/rebase-merge 或 rebase-apply 目录）。
     pub rebase_in_progress: bool,
 }

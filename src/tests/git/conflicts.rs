@@ -404,9 +404,12 @@ fn apply_conflict_draft_and_resolve_clears_conflict_and_allows_commit() {
 
     git_support::assert_file_text(dir.path(), "same.txt", "main\n");
     assert!(snapshot.conflicts.is_empty());
-    service
+    let committed = service
         .commit(&mut repo, &CommitMessage::new("resolve from workbench"))
         .unwrap();
+    assert!(!committed.merge_in_progress);
+    let commit = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(commit.parent_count(), 2);
 }
 
 #[test]
