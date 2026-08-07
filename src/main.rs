@@ -150,6 +150,9 @@ pub(crate) const REMOTE_MENU_WIDTH: f32 = 170.0;
 pub(crate) const REMOTE_MENU_HEIGHT: f32 = 80.0;
 const CHANGE_MENU_WIDTH: f32 = 210.0;
 const CHANGE_MENU_HEIGHT: f32 = 255.0;
+const STAGED_CHANGE_MENU_HEIGHT: f32 = 325.0;
+const FILE_PATH_MENU_WIDTH: f32 = 180.0;
+const FILE_PATH_MENU_HEIGHT: f32 = 68.0;
 const CREDENTIAL_MENU_WIDTH: f32 = 180.0;
 const CREDENTIAL_MENU_HEIGHT: f32 = 150.0;
 pub(crate) const TAG_MENU_WIDTH: f32 = 170.0;
@@ -441,6 +444,13 @@ impl ChangeListIndexes {
 struct ChangeContextMenu {
     path: String,
     scope: DiffScope,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Debug)]
+struct FilePathContextMenu {
+    path: String,
     x: f32,
     y: f32,
 }
@@ -1833,6 +1843,18 @@ fn started_message_for_label_text(label: &str) -> String {
     }
 }
 
+/// 将 Git 的仓库相对路径转换为可复制、可交给系统文件管理器的绝对路径。
+fn repository_file_absolute_path(repo_path: &Path, file_path: &str) -> PathBuf {
+    let repo_path = if repo_path.is_absolute() {
+        repo_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(repo_path))
+            .unwrap_or_else(|_| repo_path.to_path_buf())
+    };
+    repo_path.join(file_path).components().collect()
+}
+
 pub(crate) struct RepositoryView {
     tx: Sender<UiEvent>,
     rx: Receiver<UiEvent>,
@@ -1890,6 +1912,7 @@ pub(crate) struct RepositoryView {
     pub(crate) branch_context_menu: Option<BranchContextMenu>,
     pub(crate) remote_context_menu: Option<RemoteContextMenu>,
     change_context_menu: Option<ChangeContextMenu>,
+    file_path_context_menu: Option<FilePathContextMenu>,
     credential_context_menu: Option<CredentialContextMenu>,
     pub(crate) tag_context_menu: Option<TagContextMenu>,
     pub(crate) stash_context_menu: Option<StashContextMenu>,
@@ -2055,6 +2078,7 @@ impl RepositoryView {
             branch_context_menu: None,
             remote_context_menu: None,
             change_context_menu: None,
+            file_path_context_menu: None,
             credential_context_menu: None,
             tag_context_menu: None,
             stash_context_menu: None,
@@ -2903,12 +2927,19 @@ impl RepositoryView {
                 diff,
             } => {
                 let toast_message = message.clone();
+                let keeps_remote_branch_dialog = matches!(
+                    self.active_dialog.as_ref(),
+                    Some(DialogState::RemoteBranchOperation { .. })
+                );
+                let should_refresh_repository =
+                    operation_requires_repository_refresh(&message) && !keeps_remote_branch_dialog;
                 let should_refresh_submodules = operation_refreshes_submodule_dialog(&message)
                     && self.active_dialog == Some(DialogState::SubmoduleManager);
                 let has_snapshot = snapshot.is_some();
                 let has_diff = diff.is_some();
                 let mut full_status_request = None;
                 let mut sync_request = None;
+                let mut repository_refresh_request = None;
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
@@ -2944,13 +2975,20 @@ impl RepositoryView {
                         this.scroll_local_branch_to_current();
                         this.reload_history_if_active();
                         if let Some(tab_id) = tab_id {
-                            full_status_request = this
-                                .repo_path
-                                .clone()
-                                .map(|path| (tab_id, path, this.repository_load_id));
-                            this.loading.status_full = true;
+                            if should_refresh_repository {
+                                repository_refresh_request =
+                                    this.repo_path.clone().map(|path| (tab_id, path));
+                            } else {
+                                full_status_request = this
+                                    .repo_path
+                                    .clone()
+                                    .map(|path| (tab_id, path, this.repository_load_id));
+                                this.loading.status_full = true;
+                            }
                         }
-                        sync_request = this.prepare_branch_sync_status_request();
+                        if !should_refresh_repository {
+                            sync_request = this.prepare_branch_sync_status_request();
+                        }
                     }
                     if let Some(diff) = diff {
                         let diff = Arc::new(diff);
@@ -2974,6 +3012,16 @@ impl RepositoryView {
                 }
                 if let Some((tab_id, path, remote, load_id, request_id)) = sync_request {
                     self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
+                }
+                if let Some((tab_id, path)) = repository_refresh_request {
+                    // 分支引用变化后重新走完整仓库加载，避免只应用操作快照时遗漏引用或状态更新。
+                    self.queue_repository_load(
+                        tab_id,
+                        path,
+                        "正在刷新分支状态",
+                        "分支状态已刷新",
+                        LoadPriority::Background,
+                    );
                 }
                 if should_notify_operation_finished(&toast_message, has_snapshot, has_diff) {
                     self.notify_completion(&toast_message, cx);
@@ -4574,6 +4622,7 @@ impl RepositoryView {
         self.branch_context_menu = None;
         self.remote_context_menu = None;
         self.change_context_menu = None;
+        self.file_path_context_menu = None;
         self.credential_context_menu = None;
         self.tag_context_menu = None;
         self.stash_context_menu = None;
@@ -6977,6 +7026,60 @@ impl RepositoryView {
         self.notify_success(self.status.clone(), cx);
     }
 
+    fn copy_file_absolute_path(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(repo_path) = self.repo_path.as_deref() else {
+            self.change_context_menu = None;
+            self.file_path_context_menu = None;
+            self.notify_warning("当前没有打开的仓库", cx);
+            return;
+        };
+        let absolute_path = repository_file_absolute_path(repo_path, &path);
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            absolute_path.to_string_lossy().into_owned(),
+        ));
+        self.change_context_menu = None;
+        self.file_path_context_menu = None;
+        self.status = "已复制文件绝对路径".into();
+        self.last_error = None;
+        self.notify_success(self.status.clone(), cx);
+    }
+
+    fn open_file_parent_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(repo_path) = self.repo_path.as_deref() else {
+            self.change_context_menu = None;
+            self.file_path_context_menu = None;
+            self.notify_warning("当前没有打开的仓库", cx);
+            return;
+        };
+        let absolute_path = repository_file_absolute_path(repo_path, &path);
+        let Some(parent) = absolute_path.parent() else {
+            self.change_context_menu = None;
+            self.file_path_context_menu = None;
+            self.notify_warning("无法确定文件所在目录", cx);
+            return;
+        };
+        if !parent.is_dir() {
+            self.change_context_menu = None;
+            self.file_path_context_menu = None;
+            self.notify_warning(format!("文件所在目录不存在：{}", parent.display()), cx);
+            return;
+        }
+        match system::open_directory(parent) {
+            Ok(()) => {
+                self.status = "已打开文件所在目录".into();
+                self.last_error = None;
+                self.notify_success(self.status.clone(), cx);
+            }
+            Err(err) => {
+                let message = format!("打开文件所在目录失败：{err}");
+                self.last_error = Some(message.clone());
+                self.notify_error(message, cx);
+            }
+        }
+        self.change_context_menu = None;
+        self.file_path_context_menu = None;
+    }
+
     pub(crate) fn copy_branch_name(&mut self, branch: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(branch));
         self.branch_context_menu = None;
@@ -7184,10 +7287,36 @@ impl RepositoryView {
         self.tag_context_menu = None;
         self.stash_context_menu = None;
         self.commit_context_menu = None;
+        self.file_path_context_menu = None;
         self.encoding_menu_target = None;
         self.active_dialog = None;
-        let (x, y) = clamped_menu_position(event, window, CHANGE_MENU_WIDTH, CHANGE_MENU_HEIGHT);
+        let menu_height = if scope == DiffScope::Staged {
+            STAGED_CHANGE_MENU_HEIGHT
+        } else {
+            CHANGE_MENU_HEIGHT
+        };
+        let (x, y) = clamped_menu_position(event, window, CHANGE_MENU_WIDTH, menu_height);
         self.change_context_menu = Some(ChangeContextMenu { path, scope, x, y });
+    }
+
+    pub(crate) fn open_file_path_context_menu(
+        &mut self,
+        path: String,
+        event: &MouseDownEvent,
+        window: &Window,
+    ) {
+        self.branch_context_menu = None;
+        self.remote_context_menu = None;
+        self.change_context_menu = None;
+        self.credential_context_menu = None;
+        self.tag_context_menu = None;
+        self.stash_context_menu = None;
+        self.commit_context_menu = None;
+        self.encoding_menu_target = None;
+        self.active_dialog = None;
+        let (x, y) =
+            clamped_menu_position(event, window, FILE_PATH_MENU_WIDTH, FILE_PATH_MENU_HEIGHT);
+        self.file_path_context_menu = Some(FilePathContextMenu { path, x, y });
     }
 
     fn mouse_down_inside_context_menu(&self, event: &MouseDownEvent) -> bool {
@@ -7198,7 +7327,21 @@ impl RepositoryView {
         }) || self.remote_context_menu.as_ref().is_some_and(|menu| {
             point_in_menu(x, y, menu.x, menu.y, REMOTE_MENU_WIDTH, REMOTE_MENU_HEIGHT)
         }) || self.change_context_menu.as_ref().is_some_and(|menu| {
-            point_in_menu(x, y, menu.x, menu.y, CHANGE_MENU_WIDTH, CHANGE_MENU_HEIGHT)
+            let height = if menu.scope == DiffScope::Staged {
+                STAGED_CHANGE_MENU_HEIGHT
+            } else {
+                CHANGE_MENU_HEIGHT
+            };
+            point_in_menu(x, y, menu.x, menu.y, CHANGE_MENU_WIDTH, height)
+        }) || self.file_path_context_menu.as_ref().is_some_and(|menu| {
+            point_in_menu(
+                x,
+                y,
+                menu.x,
+                menu.y,
+                FILE_PATH_MENU_WIDTH,
+                FILE_PATH_MENU_HEIGHT,
+            )
         }) || self.credential_context_menu.as_ref().is_some_and(|menu| {
             point_in_menu(
                 x,
@@ -7236,6 +7379,7 @@ impl RepositoryView {
         self.select_history_commit(oid.clone());
         self.branch_context_menu = None;
         self.change_context_menu = None;
+        self.file_path_context_menu = None;
         self.tag_context_menu = None;
         self.stash_context_menu = None;
         self.encoding_menu_target = None;
@@ -9854,6 +9998,25 @@ impl RepositoryView {
 
         menu_el = match menu.scope {
             DiffScope::Staged => menu_el
+                .child(context_menu_item_with_context(
+                    "复制绝对路径",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this, cx| this.copy_file_absolute_path(path.clone(), cx)
+                    },
+                    cx,
+                ))
+                .child(context_menu_item_with_context(
+                    "打开文件所在目录",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this, cx| this.open_file_parent_directory(path.clone(), cx)
+                    },
+                    cx,
+                ))
+                .child(menu_separator())
                 .child(context_menu_item(
                     "取消暂存选定文件",
                     selected_count > 0 && !self.busy,
@@ -9980,6 +10143,43 @@ impl RepositoryView {
         };
 
         menu_el.into_any_element()
+    }
+
+    fn render_file_path_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.file_path_context_menu.clone() else {
+            return div().into_any_element();
+        };
+
+        glass_menu()
+            .absolute()
+            .left(px(menu.x))
+            .top(px(menu.y))
+            .w(px(FILE_PATH_MENU_WIDTH))
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
+            .child(context_menu_item_with_context(
+                "复制绝对路径",
+                true,
+                {
+                    let path = menu.path.clone();
+                    move |this, cx| this.copy_file_absolute_path(path.clone(), cx)
+                },
+                cx,
+            ))
+            .child(context_menu_item_with_context(
+                "打开文件所在目录",
+                true,
+                {
+                    let path = menu.path.clone();
+                    move |this, cx| this.open_file_parent_directory(path.clone(), cx)
+                },
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_commit_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -13226,6 +13426,7 @@ impl Render for RepositoryView {
                 if this.branch_context_menu.is_some()
                     || this.remote_context_menu.is_some()
                     || this.change_context_menu.is_some()
+                    || this.file_path_context_menu.is_some()
                     || this.credential_context_menu.is_some()
                     || this.tag_context_menu.is_some()
                     || this.stash_context_menu.is_some()
@@ -13237,6 +13438,7 @@ impl Render for RepositoryView {
                     this.branch_context_menu = None;
                     this.remote_context_menu = None;
                     this.change_context_menu = None;
+                    this.file_path_context_menu = None;
                     this.credential_context_menu = None;
                     this.tag_context_menu = None;
                     this.stash_context_menu = None;
@@ -13281,6 +13483,7 @@ impl Render for RepositoryView {
             .child(self.render_branch_context_menu(cx))
             .child(self.render_remote_context_menu(cx))
             .child(self.render_change_context_menu(cx))
+            .child(self.render_file_path_context_menu(cx))
             .child(self.render_commit_context_menu(cx))
             .child(self.render_tag_context_menu(cx))
             .child(self.render_stash_context_menu(cx))
@@ -13575,6 +13778,28 @@ fn point_in_menu(x: f32, y: f32, menu_x: f32, menu_y: f32, width: f32, height: f
 
 fn should_notify_operation_finished(message: &str, has_snapshot: bool, has_diff: bool) -> bool {
     !(message == "差异已加载" && !has_snapshot && has_diff)
+}
+
+/// 这些操作会改变 HEAD、本地/远端分支引用或 upstream，需要在操作快照之外再完整刷新一次。
+fn operation_requires_repository_refresh(message: &str) -> bool {
+    matches!(
+        message,
+        "切换分支完成"
+            | "检出标签完成"
+            | "远端分支已拉取到本地"
+            | "分支已创建"
+            | "分支已重命名"
+            | "分支已删除"
+            | "远端分支已删除"
+            | "远端已删除"
+            | "拉取远程引用完成"
+            | "远端已刷新"
+            | "拉取完成"
+            | "变基拉取完成"
+            | "分支拉取完成"
+            | "推送完成"
+            | "upstream 已设置"
+    )
 }
 
 fn update_check_toast_message(_error: &str) -> Option<String> {

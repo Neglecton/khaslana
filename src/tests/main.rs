@@ -22,6 +22,20 @@ fn host_credential(secret: &str) -> GitCredential {
     }
 }
 
+#[test]
+fn repository_file_path_joins_repo_root_and_git_relative_path() {
+    let repo_path = if cfg!(windows) {
+        PathBuf::from(r"C:\work\repo")
+    } else {
+        PathBuf::from("/work/repo")
+    };
+
+    let absolute_path = repository_file_absolute_path(&repo_path, "src/main.rs");
+
+    assert!(absolute_path.is_absolute());
+    assert_eq!(absolute_path, repo_path.join("src").join("main.rs"));
+}
+
 fn credential_provider_with_store(
     store: Arc<MemoryCredentialStore>,
     bindings: Arc<Mutex<RemoteCredentialBindings>>,
@@ -324,6 +338,38 @@ fn update_check_result_stays_in_status_bar_without_toast() {
     assert_eq!(update_check_toast_message("当前已是最新版本"), None);
     assert_eq!(update_check_toast_message("更新检查失败"), None);
     assert_eq!(update_check_toast_message(""), None);
+}
+
+#[test]
+fn branch_reference_operations_require_repository_refresh() {
+    for message in [
+        "切换分支完成",
+        "远端分支已拉取到本地",
+        "分支已创建",
+        "分支已重命名",
+        "分支已删除",
+        "拉取远程引用完成",
+        "拉取完成",
+        "变基拉取完成",
+        "分支拉取完成",
+        "推送完成",
+        "upstream 已设置",
+    ] {
+        assert!(
+            operation_requires_repository_refresh(message),
+            "{message} 应触发仓库刷新"
+        );
+    }
+}
+
+#[test]
+fn ordinary_worktree_operations_do_not_require_repository_refresh() {
+    for message in ["暂存完成", "取消暂存完成", "差异已加载", "应用贮藏完成"] {
+        assert!(
+            !operation_requires_repository_refresh(message),
+            "{message} 不应触发仓库刷新"
+        );
+    }
 }
 
 #[test]

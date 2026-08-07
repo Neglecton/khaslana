@@ -548,6 +548,7 @@ impl RepositoryView {
     fn commit_file_row(&self, file: CommitFileChange, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.history_selected_file.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
+        let right_click_path = file.path.clone();
         let path_label = file
             .old_path
             .as_ref()
@@ -587,6 +588,14 @@ impl RepositoryView {
                 this.select_history_file(path.clone());
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.select_history_file(right_click_path.clone());
+                    this.open_file_path_context_menu(right_click_path.clone(), event, window);
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .flex_none()
