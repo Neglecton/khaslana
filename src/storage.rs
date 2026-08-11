@@ -38,6 +38,14 @@ pub struct DiffEncodingPreferences {
     pub repositories: BTreeMap<String, DiffEncodingChoice>,
 }
 
+/// 快捷键绑定：action_id → keystroke 字符串（如 "refresh" → "f5"）。
+/// 空 map 表示使用内置默认值（由 UI 层填充），持久化时只存用户自定义的完整映射。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutBindings {
+    #[serde(default)]
+    pub bindings: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SessionState {
     pub repo_paths: Vec<PathBuf>,
@@ -219,6 +227,20 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    /// 读取快捷键绑定；表为空时返回默认（空 map，由 UI 层填充内置默认值）。
+    pub fn load_shortcut_bindings(&self) -> Result<ShortcutBindings> {
+        let conn = self.lock_conn()?;
+        load_shortcut_bindings_from_conn(&conn)
+    }
+
+    /// 保存快捷键绑定（整体覆盖）。
+    pub fn save_shortcut_bindings(&self, bindings: &ShortcutBindings) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_shortcut_bindings_tx(&tx, bindings)?;
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn load_credential_records(&self) -> Result<Vec<CredentialRecord>> {
         let conn = self.lock_conn()?;
         load_credential_records_from_conn(&conn)
@@ -389,6 +411,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             mode TEXT NOT NULL,
             accent INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS shortcut_bindings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
 
@@ -863,6 +891,40 @@ fn save_external_merge_settings_tx(
         "INSERT OR REPLACE INTO external_merge_settings (id, enabled, payload, updated_at)
          VALUES (1, ?1, ?2, ?3)",
         params![if settings.enabled { 1 } else { 0 }, payload, now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_shortcut_bindings_from_conn(conn: &Connection) -> Result<ShortcutBindings> {
+    // 快捷键映射整体存为 JSON payload，便于后续增删动作而不改表结构。
+    conn.query_row(
+        "SELECT payload FROM shortcut_bindings WHERE id = 1",
+        [],
+        |row| {
+            let payload: String = row.get(0)?;
+            serde_json::from_str::<ShortcutBindings>(&payload).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(format!(
+                        "快捷键配置解析失败：{err}"
+                    ))),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|bindings| bindings.unwrap_or_default())
+}
+
+fn save_shortcut_bindings_tx(tx: &Transaction<'_>, bindings: &ShortcutBindings) -> Result<()> {
+    let payload = serde_json::to_string(bindings)
+        .map_err(|err| GitError::Message(format!("快捷键配置序列化失败：{err}")))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO shortcut_bindings (id, payload, updated_at) VALUES (1, ?1, ?2)",
+        params![payload, now_seconds()],
     )
     .map_err(storage_error)?;
     Ok(())

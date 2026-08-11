@@ -55,7 +55,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
-- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式等。
+- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
 - `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
 - `src/external_merge_view.rs`：外部合并工具设置弹窗，支持启用/禁用 IntelliJ IDEA 外部合并、配置 IDEA 命令路径、检测命令并在检测按钮显示成功/失败状态，以及开启选中冲突文件后自动打开 IDEA。
@@ -66,6 +66,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
+- `src/shortcuts_view.rs`：快捷键设置页 UI，包括 `format_keystroke`（keystroke → 显示文本）、录制态交互（按下组合键录入，冲突拒绝并提示）和恢复默认。
 - `src/history_view.rs`：提交历史 UI、提交图泳道分配与可调宽度渲染、提交文件列表、历史 diff。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
@@ -170,6 +171,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
 - 外部合并工具设置，包括是否启用 IntelliJ IDEA、是否选中冲突文件后自动打开以及可选 IDEA 命令路径。
 - 全局主题偏好，支持跟随系统、浅色和深色。
+- 快捷键绑定（`shortcut_bindings` 表，单行 JSON payload，action_id → keystroke 映射）。
 - 凭据记录索引等非密元数据。
 
 凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入。
@@ -281,10 +283,19 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 ### 5.9 设置中心
 
 - 工具栏「设置」按钮打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）。
-- 左侧 6 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置。
+- 左侧 7 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置、快捷键。
 - 右侧内容面板渲染对应分类的表单/列表，保存/取消逻辑不变。
 - 凭据管理的子弹窗（详情/表单/删除确认）经 `active_dialog` 分发，可叠加在设置中心之上；关闭子弹窗后回到设置中心。
 - 原工具栏的 6 个独立设置按钮已移除，统一由设置中心承载。
+
+### 5.10 快捷键
+
+- 基于 GPUI 的 Action + `bind_keys` 机制（与文本输入框同一套键位系统）。
+- 应用级快捷键通过 `actions!(app_action, [...])` 定义 12 个动作，在 `register_all_key_bindings` 中用 `!TextInput` 谓词注册（输入框内不劫持）。
+- 一期覆盖 12 个动作：刷新(F5)、获取(Ctrl+Shift+F)、拉取(Ctrl+Shift+L)、推送(Ctrl+Shift+P)、贮藏(Ctrl+Shift+S)、子模块(Ctrl+Shift+M)、设置(Ctrl+,)、工作区(Ctrl+1)、提交记录(Ctrl+2)、工作流(Ctrl+3)、在资源管理器中打开仓库(Ctrl+Shift+O)、以浏览器打开远端(Ctrl+Shift+B)。
+- 用户可在设置中心「快捷键」分类中录制新快捷键（按下组合键即录入）；冲突时拒绝并提示已被哪个动作占用；每条可单独恢复默认。
+- 快捷键绑定持久化到 `shortcut_bindings` 表（JSON payload），启动时加载并用默认值补齐缺失动作；用户修改后实时 `clear_key_bindings` + 重注册。
+- 新增快捷键动作时：在 `ShortcutAction` 枚举加变体 + `action_id`/`label`/`default_keystroke` + `actions!` 宏加对应 GPUI action + `register_all_key_bindings` 加 match 分支 + 根 render 加 `on_action`。
 
 ## 6. 开发命令
 

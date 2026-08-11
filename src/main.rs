@@ -14,6 +14,7 @@ mod proxy_view;
 mod rebase_view;
 mod remote_branch_operation;
 mod sidebar_view;
+mod shortcuts_view;
 mod ssh_credentials;
 mod stash_view;
 mod submodule_view;
@@ -58,7 +59,8 @@ use khaslana::{
     GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
     NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
     RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
-    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, SubmoduleInfo,
+    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, ShortcutBindings,
+    SubmoduleInfo,
     SubmoduleRemoteSyncStatus, TagName, ThemeMode, UpdatePreferences, credential_display_target,
     credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
     credential_record_label, credential_record_matches_remote_url, credential_scope_label,
@@ -124,6 +126,154 @@ actions!(
 );
 
 actions!(browse_content, [BrowseContentCopy, BrowseContentSelectAll,]);
+
+// 应用级快捷键动作：每个对应一个可配置快捷键的功能入口。
+// bind_keys 把按键映射到这些 action，on_action 在根元素上监听并分发到 RepositoryView 方法。
+// 命名加 Shortcut 前缀，避免与 ShortcutAction 枚举变体及其它类型冲突。
+actions!(
+    app_action,
+    [
+        ShortcutRefresh,         // 刷新
+        ShortcutFetch,           // 获取
+        ShortcutPull,            // 拉取
+        ShortcutPush,            // 推送
+        ShortcutOpenStash,       // 贮藏
+        ShortcutOpenSubmodule,   // 子模块
+        ShortcutOpenSettings,    // 设置
+        ShortcutSwitchToWorktree,   // 工作区
+        ShortcutSwitchToHistory,    // 提交记录
+        ShortcutSwitchToWorkflow,   // 工作流
+        ShortcutOpenInExplorer,     // 资源管理器打开仓库
+        ShortcutOpenRemoteInBrowser, // 浏览器打开远端
+    ]
+);
+
+/// 可配置快捷键的功能枚举，用于持久化与设置中心 UI。
+/// action_id 是序列化键（存入 ShortcutBindings），default_keystroke 是内置默认组合。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutAction {
+    Refresh,
+    Fetch,
+    Pull,
+    Push,
+    OpenStash,
+    OpenSubmodule,
+    OpenSettings,
+    SwitchToWorktree,
+    SwitchToHistory,
+    SwitchToWorkflow,
+    OpenInExplorer,
+    OpenRemoteInBrowser,
+}
+
+impl ShortcutAction {
+    /// 全部动作，按设置中心显示顺序。
+    pub(crate) const ALL: [ShortcutAction; 12] = [
+        ShortcutAction::Refresh,
+        ShortcutAction::Fetch,
+        ShortcutAction::Pull,
+        ShortcutAction::Push,
+        ShortcutAction::OpenStash,
+        ShortcutAction::OpenSubmodule,
+        ShortcutAction::OpenSettings,
+        ShortcutAction::SwitchToWorktree,
+        ShortcutAction::SwitchToHistory,
+        ShortcutAction::SwitchToWorkflow,
+        ShortcutAction::OpenInExplorer,
+        ShortcutAction::OpenRemoteInBrowser,
+    ];
+
+    /// 序列化键，存入 ShortcutBindings 的 BTreeMap key。
+    pub(crate) fn action_id(&self) -> &'static str {
+        match self {
+            ShortcutAction::Refresh => "refresh",
+            ShortcutAction::Fetch => "fetch",
+            ShortcutAction::Pull => "pull",
+            ShortcutAction::Push => "push",
+            ShortcutAction::OpenStash => "open_stash",
+            ShortcutAction::OpenSubmodule => "open_submodule",
+            ShortcutAction::OpenSettings => "open_settings",
+            ShortcutAction::SwitchToWorktree => "switch_to_worktree",
+            ShortcutAction::SwitchToHistory => "switch_to_history",
+            ShortcutAction::SwitchToWorkflow => "switch_to_workflow",
+            ShortcutAction::OpenInExplorer => "open_in_explorer",
+            ShortcutAction::OpenRemoteInBrowser => "open_remote_in_browser",
+        }
+    }
+
+    /// 用户可见的中文标签。
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            ShortcutAction::Refresh => "刷新",
+            ShortcutAction::Fetch => "获取",
+            ShortcutAction::Pull => "拉取",
+            ShortcutAction::Push => "推送",
+            ShortcutAction::OpenStash => "贮藏",
+            ShortcutAction::OpenSubmodule => "子模块",
+            ShortcutAction::OpenSettings => "设置",
+            ShortcutAction::SwitchToWorktree => "工作区",
+            ShortcutAction::SwitchToHistory => "提交记录",
+            ShortcutAction::SwitchToWorkflow => "工作流",
+            ShortcutAction::OpenInExplorer => "在资源管理器中打开仓库",
+            ShortcutAction::OpenRemoteInBrowser => "以浏览器打开当前远端",
+        }
+    }
+
+    /// 内置默认快捷键（GPUI keystroke 字符串格式）。
+    pub(crate) fn default_keystroke(&self) -> &'static str {
+        match self {
+            ShortcutAction::Refresh => "f5",
+            ShortcutAction::Fetch => "ctrl-shift-f",
+            ShortcutAction::Pull => "ctrl-shift-l",
+            ShortcutAction::Push => "ctrl-shift-p",
+            ShortcutAction::OpenStash => "ctrl-shift-s",
+            ShortcutAction::OpenSubmodule => "ctrl-shift-m",
+            ShortcutAction::OpenSettings => "ctrl-,",
+            ShortcutAction::SwitchToWorktree => "ctrl-1",
+            ShortcutAction::SwitchToHistory => "ctrl-2",
+            ShortcutAction::SwitchToWorkflow => "ctrl-3",
+            ShortcutAction::OpenInExplorer => "ctrl-shift-o",
+            ShortcutAction::OpenRemoteInBrowser => "ctrl-shift-b",
+        }
+    }
+
+    /// 用 action_id 反查枚举。
+    pub(crate) fn from_id(id: &str) -> Option<ShortcutAction> {
+        Self::ALL
+            .iter()
+            .find(|action| action.action_id() == id)
+            .copied()
+    }
+
+    /// 返回当前生效的 keystroke 的引用（优先用户绑定，回退默认 static）。
+    /// 注意：返回值生命周期绑到 `bindings`，因为 default 是 `&'static str` 可安全兼容。
+    pub(crate) fn keystroke<'a>(&self, bindings: &'a ShortcutBindings) -> &'a str {
+        match bindings.bindings.get(self.action_id()) {
+            Some(k) => k.as_str(),
+            None => self.default_keystroke(),
+        }
+    }
+}
+
+/// 构造包含全部 12 条默认快捷键的 ShortcutBindings。
+pub(crate) fn default_shortcut_bindings() -> ShortcutBindings {
+    let mut bindings = BTreeMap::new();
+    for action in ShortcutAction::ALL {
+        bindings.insert(action.action_id().to_string(), action.default_keystroke().to_string());
+    }
+    ShortcutBindings { bindings }
+}
+
+/// 查找快捷键冲突：返回已占用该 keystroke 的其它动作（排除 target 自身）。
+pub(crate) fn find_shortcut_conflict(
+    bindings: &ShortcutBindings,
+    target: ShortcutAction,
+    keystroke: &str,
+) -> Option<ShortcutAction> {
+    ShortcutAction::ALL.iter().find(|action| {
+        **action != target && action.keystroke(bindings) == keystroke
+    }).copied()
+}
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
 const DEFAULT_CHANGES_WIDTH: f32 = 330.0;
@@ -227,6 +377,7 @@ pub(crate) enum SettingsCategory {
     ExternalMerge,
     Theme,
     Update,
+    Shortcuts,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1774,8 +1925,10 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("cmd")
         .args(["/C", "start", url])
         .spawn();
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 pub(crate) fn perf_log(stage: &'static str, started: Instant, details: impl AsRef<str>) {
@@ -1903,6 +2056,10 @@ pub(crate) struct RepositoryView {
     pub(crate) active_dialog: Option<DialogState>,
     /// 设置中心当前分类；独立于 active_dialog，凭据子弹窗可叠加其上。
     pub(crate) settings_center: Option<SettingsCategory>,
+    /// 用户自定义快捷键绑定（action_id → keystroke）。
+    pub(crate) shortcut_bindings: ShortcutBindings,
+    /// 快捷键设置页中正在录制的动作；None 表示非录制态。
+    pub(crate) recording_shortcut: Option<ShortcutAction>,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -2069,6 +2226,8 @@ impl RepositoryView {
             progress_phase: 0,
             active_dialog: None,
             settings_center: None,
+            shortcut_bindings: Self::load_shortcut_bindings(&storage),
+            recording_shortcut: None,
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -2445,6 +2604,29 @@ impl RepositoryView {
             .load_update_preferences()
             .inspect_err(|err| tracing::warn!("update preferences load skipped: {err}"))
             .unwrap_or_default()
+    }
+
+    /// 加载快捷键绑定；存储为空或出错时回退全部默认值。
+    fn load_shortcut_bindings(storage: &khaslana::AppStorage) -> ShortcutBindings {
+        let stored = storage
+            .load_shortcut_bindings()
+            .inspect_err(|err| tracing::warn!("shortcut bindings load skipped: {err}"))
+            .unwrap_or_default();
+        // 合并：存储的绑定优先，缺失的动作用默认值补齐，保证新动作一定有快捷键。
+        let mut result = default_shortcut_bindings();
+        for (id, keystroke) in stored.bindings {
+            if ShortcutAction::from_id(&id).is_some() {
+                result.bindings.insert(id, keystroke);
+            }
+        }
+        result
+    }
+
+    /// 保存当前快捷键绑定到数据库。
+    fn save_shortcut_bindings(&self) {
+        if let Err(err) = self.storage.save_shortcut_bindings(&self.shortcut_bindings) {
+            tracing::warn!("shortcut bindings write skipped: {err}");
+        }
     }
 
     fn save_diff_encoding_preferences(&self) {
@@ -4808,7 +4990,7 @@ impl RepositoryView {
             SettingsCategory::ExternalMerge => {
                 self.reset_external_merge_form_from_settings();
             }
-            SettingsCategory::Theme | SettingsCategory::Update => {}
+            SettingsCategory::Theme | SettingsCategory::Update | SettingsCategory::Shortcuts => {}
         }
     }
 
@@ -5915,7 +6097,7 @@ impl RepositoryView {
         });
     }
 
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         let Some(tab_id) = self.active_tab_id() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -6495,7 +6677,7 @@ impl RepositoryView {
             .or_else(|| snapshot.remotes.first().map(|remote| remote.name.clone()));
     }
 
-    fn fetch(&mut self) {
+    pub(crate) fn fetch(&mut self) {
         let Some(remote) = self.current_remote() else {
             self.last_error = Some("当前仓库没有远端".into());
             return;
@@ -6513,7 +6695,7 @@ impl RepositoryView {
         });
     }
 
-    fn open_remote_branch_operation(&mut self, kind: RemoteBranchOperationKind) {
+    pub(crate) fn open_remote_branch_operation(&mut self, kind: RemoteBranchOperationKind) {
         if matches!(
             kind,
             RemoteBranchOperationKind::Pull | RemoteBranchOperationKind::Push
@@ -7078,6 +7260,48 @@ impl RepositoryView {
         }
         self.change_context_menu = None;
         self.file_path_context_menu = None;
+    }
+
+    /// 在系统资源管理器中打开当前仓库根目录（快捷键入口）。
+    pub(crate) fn open_repo_in_explorer(&mut self, cx: &mut Context<Self>) {
+        let Some(repo_path) = self.repo_path.as_deref().map(PathBuf::from) else {
+            self.notify_warning("当前没有打开的仓库", cx);
+            return;
+        };
+        self.close_popups();
+        match system::open_directory(&repo_path) {
+            Ok(()) => {
+                self.status = "已在资源管理器中打开仓库".into();
+                self.last_error = None;
+                self.notify_success(self.status.clone(), cx);
+            }
+            Err(err) => {
+                let message = format!("打开仓库目录失败：{err}");
+                self.last_error = Some(message.clone());
+                self.notify_error(message, cx);
+            }
+        }
+    }
+
+    /// 以默认浏览器打开当前远端的 URL（快捷键入口）。
+    pub(crate) fn open_remote_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(remote_name) = self.current_remote() else {
+            self.notify_warning("当前仓库没有远端", cx);
+            return;
+        };
+        // 先把 url 提取为 owned String，避免后续 self 操作与不可变借用冲突。
+        let url = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot.remotes.iter().find(|r| r.name == remote_name).map(|r| r.url.clone())
+        });
+        let Some(url) = url.filter(|u| !u.is_empty()) else {
+            self.notify_warning("远端 URL 为空或未找到", cx);
+            return;
+        };
+        self.close_popups();
+        open_url(&url);
+        self.status = format!("已在浏览器中打开 {url}");
+        self.last_error = None;
+        self.notify_success(self.status.clone(), cx);
     }
 
     pub(crate) fn copy_branch_name(&mut self, branch: String, cx: &mut Context<Self>) {
@@ -9775,6 +9999,7 @@ impl RepositoryView {
             (SettingsCategory::ExternalMerge, ToolbarIcon::Workflow, "合并工具"),
             (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
             (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
+            (SettingsCategory::Shortcuts, ToolbarIcon::Keyboard, "快捷键"),
         ];
 
         // 右侧内容面板根据当前分类渲染对应 body。
@@ -9785,6 +10010,7 @@ impl RepositoryView {
             SettingsCategory::ExternalMerge => self.render_external_merge_settings_dialog(window, cx).into_any_element(),
             SettingsCategory::Theme => self.render_theme_settings_dialog(window, cx).into_any_element(),
             SettingsCategory::Update => self.render_update_settings_dialog(cx).into_any_element(),
+            SettingsCategory::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
         };
         // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
         let settings_content_handle = self.scroll_handle("settings-center-content");
@@ -13414,6 +13640,7 @@ impl Render for RepositoryView {
         self.drain_pending_events(cx);
 
         app_shell_surface()
+            .id("app-root")
             .relative()
             .flex()
             .flex_col()
@@ -13925,6 +14152,145 @@ pub(crate) fn build_repo_switcher_sections(
 #[path = "tests/main.rs"]
 mod app_tests;
 
+/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
+/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
+fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings) {
+    cx.clear_key_bindings();
+    // 基础键位：文本输入框和浏览内容区。
+    cx.bind_keys([
+        KeyBinding::new("backspace", TextBackspace, Some("TextInput")),
+        KeyBinding::new("delete", TextDelete, Some("TextInput")),
+        KeyBinding::new("left", TextLeft, Some("TextInput")),
+        KeyBinding::new("right", TextRight, Some("TextInput")),
+        KeyBinding::new("up", TextUp, Some("TextInput")),
+        KeyBinding::new("down", TextDown, Some("TextInput")),
+        KeyBinding::new("shift-left", TextSelectLeft, Some("TextInput")),
+        KeyBinding::new("shift-right", TextSelectRight, Some("TextInput")),
+        KeyBinding::new("shift-up", TextSelectUp, Some("TextInput")),
+        KeyBinding::new("shift-down", TextSelectDown, Some("TextInput")),
+        KeyBinding::new("home", TextHome, Some("TextInput")),
+        KeyBinding::new("end", TextEnd, Some("TextInput")),
+        KeyBinding::new("cmd-enter", TextSubmit, Some("TextInput")),
+        KeyBinding::new("ctrl-enter", TextSubmit, Some("TextInput")),
+        KeyBinding::new("cmd-a", TextSelectAll, Some("TextInput")),
+        KeyBinding::new("cmd-c", TextCopy, Some("TextInput")),
+        KeyBinding::new("cmd-v", TextPaste, Some("TextInput")),
+        KeyBinding::new("cmd-x", TextCut, Some("TextInput")),
+        KeyBinding::new("ctrl-a", TextSelectAll, Some("TextInput")),
+        KeyBinding::new("ctrl-c", TextCopy, Some("TextInput")),
+        KeyBinding::new("ctrl-v", TextPaste, Some("TextInput")),
+        KeyBinding::new("ctrl-x", TextCut, Some("TextInput")),
+        KeyBinding::new("cmd-c", BrowseContentCopy, Some("BrowseContent")),
+        KeyBinding::new("cmd-a", BrowseContentSelectAll, Some("BrowseContent")),
+        KeyBinding::new("ctrl-c", BrowseContentCopy, Some("BrowseContent")),
+        KeyBinding::new("ctrl-a", BrowseContentSelectAll, Some("BrowseContent")),
+    ]);
+    // 应用级快捷键：全局生效（无 context 谓词）。
+    // 不用 !TextInput 谓词：GPUI 的 context 谓词在焦点路径上无 key_context 时求值为 false，
+    // 会导致快捷键完全不触发。改为 None（始终匹配），输入框内的拦截由各 handler 自行判断。
+    for action in ShortcutAction::ALL {
+        let keystroke = action.keystroke(bindings);
+        let binding = match action {
+            ShortcutAction::Refresh => KeyBinding::new(keystroke, ShortcutRefresh, None),
+            ShortcutAction::Fetch => KeyBinding::new(keystroke, ShortcutFetch, None),
+            ShortcutAction::Pull => KeyBinding::new(keystroke, ShortcutPull, None),
+            ShortcutAction::Push => KeyBinding::new(keystroke, ShortcutPush, None),
+            ShortcutAction::OpenStash => KeyBinding::new(keystroke, ShortcutOpenStash, None),
+            ShortcutAction::OpenSubmodule => KeyBinding::new(keystroke, ShortcutOpenSubmodule, None),
+            ShortcutAction::OpenSettings => KeyBinding::new(keystroke, ShortcutOpenSettings, None),
+            ShortcutAction::SwitchToWorktree => KeyBinding::new(keystroke, ShortcutSwitchToWorktree, None),
+            ShortcutAction::SwitchToHistory => KeyBinding::new(keystroke, ShortcutSwitchToHistory, None),
+            ShortcutAction::SwitchToWorkflow => KeyBinding::new(keystroke, ShortcutSwitchToWorkflow, None),
+            ShortcutAction::OpenInExplorer => KeyBinding::new(keystroke, ShortcutOpenInExplorer, None),
+            ShortcutAction::OpenRemoteInBrowser => KeyBinding::new(keystroke, ShortcutOpenRemoteInBrowser, None),
+        };
+        cx.bind_keys([binding]);
+    }
+}
+
+/// 注册全局快捷键 action 监听器，通过 weak entity 在回调中安全更新 RepositoryView。
+/// 使用 App::on_action（全局监听器），不依赖焦点路径，保证快捷键在任何非输入框焦点下都生效。
+fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutRefresh, cx| {
+            let _ = weak.update(cx, |this, cx| { this.refresh(); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutFetch, cx| {
+            let _ = weak.update(cx, |this, cx| { this.fetch(); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutPull, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.open_remote_branch_operation(RemoteBranchOperationKind::Pull);
+                cx.notify();
+            });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutPush, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.open_remote_branch_operation(RemoteBranchOperationKind::Push);
+                cx.notify();
+            });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutOpenStash, cx| {
+            let _ = weak.update(cx, |this, cx| { this.open_stash_dialog(); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutOpenSubmodule, cx| {
+            let _ = weak.update(cx, |this, cx| { this.open_submodule_manager(); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutOpenSettings, cx| {
+            let _ = weak.update(cx, |this, cx| { this.open_settings_center(); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutSwitchToWorktree, cx| {
+            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::Worktree); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutSwitchToHistory, cx| {
+            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::History); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutSwitchToWorkflow, cx| {
+            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::Workflow); cx.notify(); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutOpenInExplorer, cx| {
+            let _ = weak.update(cx, |this, cx| { this.open_repo_in_explorer(cx); });
+        }
+    });
+    cx.on_action({
+        let weak = weak.clone();
+        move |_a: &ShortcutOpenRemoteInBrowser, cx| {
+            let _ = weak.update(cx, |this, cx| { this.open_remote_in_browser(cx); });
+        }
+    });
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -13940,34 +14306,12 @@ fn main() {
                 Locale::new("zh-CN").expect("zh-CN locale is valid"),
             ));
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
-            cx.bind_keys([
-                KeyBinding::new("backspace", TextBackspace, Some("TextInput")),
-                KeyBinding::new("delete", TextDelete, Some("TextInput")),
-                KeyBinding::new("left", TextLeft, Some("TextInput")),
-                KeyBinding::new("right", TextRight, Some("TextInput")),
-                KeyBinding::new("up", TextUp, Some("TextInput")),
-                KeyBinding::new("down", TextDown, Some("TextInput")),
-                KeyBinding::new("shift-left", TextSelectLeft, Some("TextInput")),
-                KeyBinding::new("shift-right", TextSelectRight, Some("TextInput")),
-                KeyBinding::new("shift-up", TextSelectUp, Some("TextInput")),
-                KeyBinding::new("shift-down", TextSelectDown, Some("TextInput")),
-                KeyBinding::new("home", TextHome, Some("TextInput")),
-                KeyBinding::new("end", TextEnd, Some("TextInput")),
-                KeyBinding::new("cmd-enter", TextSubmit, Some("TextInput")),
-                KeyBinding::new("ctrl-enter", TextSubmit, Some("TextInput")),
-                KeyBinding::new("cmd-a", TextSelectAll, Some("TextInput")),
-                KeyBinding::new("cmd-c", TextCopy, Some("TextInput")),
-                KeyBinding::new("cmd-v", TextPaste, Some("TextInput")),
-                KeyBinding::new("cmd-x", TextCut, Some("TextInput")),
-                KeyBinding::new("ctrl-a", TextSelectAll, Some("TextInput")),
-                KeyBinding::new("ctrl-c", TextCopy, Some("TextInput")),
-                KeyBinding::new("ctrl-v", TextPaste, Some("TextInput")),
-                KeyBinding::new("ctrl-x", TextCut, Some("TextInput")),
-                KeyBinding::new("cmd-c", BrowseContentCopy, Some("BrowseContent")),
-                KeyBinding::new("cmd-a", BrowseContentSelectAll, Some("BrowseContent")),
-                KeyBinding::new("ctrl-c", BrowseContentCopy, Some("BrowseContent")),
-                KeyBinding::new("ctrl-a", BrowseContentSelectAll, Some("BrowseContent")),
-            ]);
+            // 注册全部键盘绑定：基础键位（TextInput/BrowseContent）+ 应用级快捷键（从持久化加载）。
+            let shortcut_bindings = khaslana::AppStorage::open_default()
+                .ok()
+                .map(|storage| RepositoryView::load_shortcut_bindings(&storage))
+                .unwrap_or_else(default_shortcut_bindings);
+            register_all_key_bindings(cx, &shortcut_bindings);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -14001,6 +14345,8 @@ fn main() {
                             })
                             .unwrap_or(true)
                     });
+                    // 注册全局快捷键监听器：不依赖焦点路径，在 action 冒泡到顶层时触发。
+                    register_shortcut_listeners(cx, view.downgrade());
                     window.focus(&view.read(cx).focus_handle(cx));
                     view
                 },

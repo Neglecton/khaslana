@@ -24,8 +24,8 @@ pub use git::{
 pub use proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 pub use storage::{
     AppStorage, DiffEncodingPreferences, LegacyImportSummary, LegacyStoragePaths,
-    RemoteCredentialBinding, RemoteCredentialBindings, SessionState, ThemeMode, UpdatePreferences,
-    default_database_path, default_legacy_storage_paths, legacy_storage_paths,
+    RemoteCredentialBinding, RemoteCredentialBindings, SessionState, ShortcutBindings, ThemeMode,
+    UpdatePreferences, default_database_path, default_legacy_storage_paths, legacy_storage_paths,
 };
 pub use types::*;
 pub use workflow::{

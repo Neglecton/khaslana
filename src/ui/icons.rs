@@ -29,6 +29,7 @@ pub(crate) enum ToolbarIcon {
     ChevronRight,
     Update,
     Settings,
+    Keyboard,
 }
 
 impl ToolbarIcon {
@@ -59,6 +60,7 @@ impl ToolbarIcon {
             Self::ChevronRight => "icons/chevron-right.svg",
             Self::Update => "icons/update.svg",
             Self::Settings => "icons/settings.svg",
+            Self::Keyboard => "icons/keyboard.svg",
         }
     }
 }
