@@ -49,7 +49,7 @@ pub(crate) fn format_keystroke(keystroke: &str) -> String {
 
 /// 把 KeyDownEvent 的 keystroke 转为 GPUI 绑定格式的字符串（如 "ctrl-shift-f"）。
 /// 修饰键按 ctrl > alt > shift > platform 排序，主键小写。
-fn keystroke_to_string(event: &KeyDownEvent) -> String {
+pub(crate) fn keystroke_to_string(event: &KeyDownEvent) -> String {
     let ks = &event.keystroke;
     let mut parts = Vec::new();
     if ks.modifiers.control {
@@ -82,32 +82,6 @@ impl RepositoryView {
             .flex()
             .flex_col()
             .gap_3()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if let Some(action) = this.recording_shortcut {
-                    // Esc 取消录制。
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.recording_shortcut = None;
-                        cx.notify();
-                        return;
-                    }
-                    let ks = keystroke_to_string(event);
-                    // 冲突检查：若已被其它动作占用则拒绝并提示。
-                    if let Some(conflict) = crate::find_shortcut_conflict(&this.shortcut_bindings, action, &ks) {
-                        this.recording_shortcut = None;
-                        this.notify_warning(
-                            format!("快捷键 {} 已被「{}」占用", format_keystroke(&ks), conflict.label()),
-                            cx,
-                        );
-                        return;
-                    }
-                    // 通过检查，更新绑定。
-                    this.shortcut_bindings.bindings.insert(action.action_id().to_string(), ks);
-                    this.recording_shortcut = None;
-                    this.save_shortcut_bindings();
-                    crate::register_all_key_bindings(&mut cx.deref_mut(), &this.shortcut_bindings);
-                    cx.notify();
-                }
-            }))
             // 说明文字
             .child(
                 div()
@@ -161,35 +135,81 @@ impl RepositoryView {
                             .flex()
                             .flex_none()
                             .gap_1()
-                            .child(self.button(
-                                if is_recording { "取消" } else { "重新绑定" },
-                                true,
-                                move |this, _window, _cx| {
-                                    if this.recording_shortcut == Some(action_val) {
-                                        this.recording_shortcut = None;
-                                    } else {
-                                        this.recording_shortcut = Some(action_val);
-                                    }
-                                },
-                                cx,
-                            ))
+                            // 重新绑定 / 取消按钮：自绘并用唯一 id，避免 button 组件 label 相同导致 id 冲突。
+                            .child(
+                                div()
+                                    .id(format!("shortcut-rebind-{}", action_val.action_id()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .min_h(px(28.0))
+                                    .px_3()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(rgb(ui_theme::BORDER))
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .bg(rgb(ui_theme::ACCENT))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        if this.recording_shortcut == Some(action_val) {
+                                            // 取消录制，恢复正常绑定。
+                                            this.recording_shortcut = None;
+                                            crate::register_all_key_bindings(
+                                                &mut cx.deref_mut(),
+                                                &this.shortcut_bindings,
+                                                false,
+                                            );
+                                        } else {
+                                            // 进入录制态：夺取焦点到设置中心面板（使 keydown dispatch_path 进入 overlay），
+                                            // 跳过快捷键绑定（使按键不匹配 action，keydown 能正常到达 capture_key_down）。
+                                            this.recording_shortcut = Some(action_val);
+                                            window.focus(&this.settings_center_focus);
+                                            crate::register_all_key_bindings(
+                                                &mut cx.deref_mut(),
+                                                &this.shortcut_bindings,
+                                                true,
+                                            );
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(if is_recording { "取消" } else { "重新绑定" }),
+                            )
                             .when(!is_default, |this_row| {
-                                this_row.child(self.button(
-                                    "恢复默认",
-                                    true,
-                                    move |this, _window, cx| {
-                                        this.shortcut_bindings.bindings.insert(
-                                            action_val.action_id().to_string(),
-                                            action_val.default_keystroke().to_string(),
-                                        );
-                                        this.save_shortcut_bindings();
-                                        crate::register_all_key_bindings(
-                                            &mut cx.deref_mut(),
-                                            &this.shortcut_bindings,
-                                        );
-                                    },
-                                    cx,
-                                ))
+                                this_row.child(
+                                    div()
+                                        .id(format!("shortcut-reset-{}", action_val.action_id()))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .min_h(px(28.0))
+                                        .px_3()
+                                        .py_1()
+                                        .border_1()
+                                        .border_color(rgb(ui_theme::BORDER))
+                                        .rounded(px(ui_theme::RADIUS_XS))
+                                        .bg(rgb(ui_theme::ACCENT))
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(ui_theme::FOREGROUND))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.shortcut_bindings.bindings.insert(
+                                                action_val.action_id().to_string(),
+                                                action_val.default_keystroke().to_string(),
+                                            );
+                                            this.save_shortcut_bindings();
+                                            crate::register_all_key_bindings(
+                                                &mut cx.deref_mut(),
+                                                &this.shortcut_bindings,
+                                                false,
+                                            );
+                                            cx.notify();
+                                        }))
+                                        .child("恢复默认"),
+                                )
                             }),
                     )
                     .into_any_element()

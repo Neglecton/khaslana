@@ -2060,6 +2060,8 @@ pub(crate) struct RepositoryView {
     pub(crate) shortcut_bindings: ShortcutBindings,
     /// 快捷键设置页中正在录制的动作；None 表示非录制态。
     pub(crate) recording_shortcut: Option<ShortcutAction>,
+    /// 设置中心面板的焦点句柄，录制态时夺取焦点使 keydown dispatch_path 进入 overlay。
+    settings_center_focus: FocusHandle,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -2228,6 +2230,7 @@ impl RepositoryView {
             settings_center: None,
             shortcut_bindings: Self::load_shortcut_bindings(&storage),
             recording_shortcut: None,
+            settings_center_focus: cx.focus_handle(),
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -10026,6 +10029,7 @@ impl RepositoryView {
             .child(
                 div()
                     .id("settings-center-panel")
+                    .track_focus(&self.settings_center_focus)
                     .w(px(900.0))
                     // 固定高度，弹窗大小不随分类内容多少变化；内容超出由右侧内容区滚动。
                     .h(px(640.0))
@@ -13676,6 +13680,51 @@ impl Render for RepositoryView {
                     cx.notify();
                 }
             }))
+            // 录制态时在 capture 阶段截获全部按键：stop_propagation 阻止 action dispatch，
+            // 使快捷键录制逻辑能在按键到达 action listener 之前处理；
+            // capture 从根向下传播，不依赖焦点路径。
+            .when(self.recording_shortcut.is_some(), |this| {
+                this.capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                    // Esc 取消录制。
+                    if event.keystroke.key.as_str() == "escape" {
+                        this.recording_shortcut = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if let Some(action) = this.recording_shortcut {
+                        let ks = shortcuts_view::keystroke_to_string(event);
+                        // 冲突检查：若已被其它动作占用则拒绝并提示。
+                        if let Some(conflict) =
+                            find_shortcut_conflict(&this.shortcut_bindings, action, &ks)
+                        {
+                            this.recording_shortcut = None;
+                            this.notify_warning(
+                                format!(
+                                    "快捷键 {} 已被「{}」占用",
+                                    shortcuts_view::format_keystroke(&ks),
+                                    conflict.label()
+                                ),
+                                cx,
+                            );
+                        } else {
+                            // 通过检查，更新绑定。
+                            this.shortcut_bindings
+                                .bindings
+                                .insert(action.action_id().to_string(), ks);
+                            this.recording_shortcut = None;
+                            this.save_shortcut_bindings();
+                            crate::register_all_key_bindings(
+                                &mut cx.deref_mut(),
+                                &this.shortcut_bindings,
+                                false,
+                            );
+                            cx.notify();
+                        }
+                    }
+                    cx.stop_propagation();
+                }))
+            })
             .child(self.render_toolbar(window, cx))
             .child(
                 div()
@@ -14154,7 +14203,10 @@ mod app_tests;
 
 /// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
 /// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
-fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings) {
+/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
+/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
+/// `skip_shortcuts` 为 true 时仅注册基础键位（录制态避免按键匹配到 action 导致 keydown 被吞）。
+fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_shortcuts: bool) {
     cx.clear_key_bindings();
     // 基础键位：文本输入框和浏览内容区。
     cx.bind_keys([
@@ -14186,10 +14238,9 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings) {
         KeyBinding::new("ctrl-a", BrowseContentSelectAll, Some("BrowseContent")),
     ]);
     // 应用级快捷键：全局生效（无 context 谓词）。
-    // 不用 !TextInput 谓词：GPUI 的 context 谓词在焦点路径上无 key_context 时求值为 false，
-    // 会导致快捷键完全不触发。改为 None（始终匹配），输入框内的拦截由各 handler 自行判断。
-    for action in ShortcutAction::ALL {
-        let keystroke = action.keystroke(bindings);
+    if !skip_shortcuts {
+        for action in ShortcutAction::ALL {
+            let keystroke = action.keystroke(bindings);
         let binding = match action {
             ShortcutAction::Refresh => KeyBinding::new(keystroke, ShortcutRefresh, None),
             ShortcutAction::Fetch => KeyBinding::new(keystroke, ShortcutFetch, None),
@@ -14206,27 +14257,36 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings) {
         };
         cx.bind_keys([binding]);
     }
+    }
 }
 
 /// 注册全局快捷键 action 监听器，通过 weak entity 在回调中安全更新 RepositoryView。
 /// 使用 App::on_action（全局监听器），不依赖焦点路径，保证快捷键在任何非输入框焦点下都生效。
+/// 设置中心打开时（含快捷键录制态），除「设置」外的全部快捷键都不触发主视图动作。
 fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutRefresh, cx| {
-            let _ = weak.update(cx, |this, cx| { this.refresh(); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.refresh(); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutFetch, cx| {
-            let _ = weak.update(cx, |this, cx| { this.fetch(); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.fetch(); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutPull, cx| {
             let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
                 this.open_remote_branch_operation(RemoteBranchOperationKind::Pull);
                 cx.notify();
             });
@@ -14236,6 +14296,7 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutPush, cx| {
             let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
                 this.open_remote_branch_operation(RemoteBranchOperationKind::Push);
                 cx.notify();
             });
@@ -14244,49 +14305,78 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutOpenStash, cx| {
-            let _ = weak.update(cx, |this, cx| { this.open_stash_dialog(); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.open_stash_dialog(); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutOpenSubmodule, cx| {
-            let _ = weak.update(cx, |this, cx| { this.open_submodule_manager(); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.open_submodule_manager(); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutOpenSettings, cx| {
-            let _ = weak.update(cx, |this, cx| { this.open_settings_center(); cx.notify(); });
+            // 设置中心已打开时按设置快捷键 -> 关闭（toggle 语义）；否则打开。
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() {
+                    this.close_settings_center();
+                } else {
+                    this.open_settings_center();
+                }
+                cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToWorktree, cx| {
-            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::Worktree); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.set_main_mode(MainMode::Worktree); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToHistory, cx| {
-            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::History); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.set_main_mode(MainMode::History); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToWorkflow, cx| {
-            let _ = weak.update(cx, |this, cx| { this.set_main_mode(MainMode::Workflow); cx.notify(); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.set_main_mode(MainMode::Workflow); cx.notify();
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutOpenInExplorer, cx| {
-            let _ = weak.update(cx, |this, cx| { this.open_repo_in_explorer(cx); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.open_repo_in_explorer(cx);
+            });
         }
     });
     cx.on_action({
         let weak = weak.clone();
         move |_a: &ShortcutOpenRemoteInBrowser, cx| {
-            let _ = weak.update(cx, |this, cx| { this.open_remote_in_browser(cx); });
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() { return; }
+                this.open_remote_in_browser(cx);
+            });
         }
     });
 }
@@ -14311,7 +14401,7 @@ fn main() {
                 .ok()
                 .map(|storage| RepositoryView::load_shortcut_bindings(&storage))
                 .unwrap_or_else(default_shortcut_bindings);
-            register_all_key_bindings(cx, &shortcut_bindings);
+            register_all_key_bindings(cx, &shortcut_bindings, false);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
