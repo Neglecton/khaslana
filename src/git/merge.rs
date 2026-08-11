@@ -25,6 +25,17 @@ impl GitService {
         self.merge_annotated(repo, &annotated, &branch.0)?;
         drop(annotated);
         drop(reference);
+        // 无冲突的正常非快进合并：自动提交（双父提交），不保留 merge 会话。
+        if merge_in_progress(repo) {
+            let message = merge_message(repo)
+                .unwrap_or_else(|| format!("Merge branch '{}'", branch.0));
+            let mut merge_head_ids = Vec::new();
+            repo.mergehead_foreach(|oid| {
+                merge_head_ids.push(*oid);
+                true
+            })?;
+            self.commit_merge(repo, &CommitMessage::new(message), &merge_head_ids)?;
+        }
         let message = if merge_in_progress(repo) {
             format!("{} 的合并结果已写入暂存区", branch.0)
         } else {
@@ -74,8 +85,7 @@ impl GitService {
             return Err(GitError::Conflicts(self.conflicts(repo)?));
         }
 
-        // 即使没有冲突也保留真实 Merge 会话，合并结果作为已暂存变更交给用户检查，
-        // 只有用户点击“完成合并”后才创建双父提交。
+        // 无冲突的正常合并：由 merge_branch 自动提交（需要 &mut Repository 调用 mergehead_foreach）。
         Ok(())
     }
 

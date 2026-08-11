@@ -1447,24 +1447,20 @@ fn merge_success() {
     git_support::commit_all(&repo, "main");
     let original_head = repo.head().unwrap().target().unwrap();
 
+    // 无冲突的非快进合并：自动创建双父提交，不保留 merge 会话。
     let snapshot = service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
     assert!(dir.path().join("feature.txt").exists());
     assert!(service.conflicts(&repo).unwrap().is_empty());
-    assert!(snapshot.merge_in_progress);
-    assert_eq!(repo.state(), RepositoryState::Merge);
-    assert_eq!(repo.head().unwrap().target(), Some(original_head));
-    assert!(snapshot.changes.iter().any(|change| {
-        change.path == "feature.txt" && change.staged.is_some()
-    }));
-    assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().parent_count(), 1);
-
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("finish merge"))
-        .unwrap();
+    assert!(!snapshot.merge_in_progress);
     assert_eq!(repo.state(), RepositoryState::Clean);
-    assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().parent_count(), 2);
+    assert_ne!(repo.head().unwrap().target(), Some(original_head));
+    assert!(snapshot.changes.is_empty());
+    assert_eq!(
+        repo.head().unwrap().peel_to_commit().unwrap().parent_count(),
+        2
+    );
 }
 
 #[test]
@@ -3126,9 +3122,6 @@ fn commit_graph_records_merge_parents() {
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
-        .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
 
     let commits = service.commit_graph(&repo, 0, 20).unwrap();
@@ -3330,9 +3323,6 @@ fn uncommit_to_staged_rejects_merge_commit() {
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
-        .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
 
     let error = service
@@ -3409,9 +3399,6 @@ fn revert_commit_rejects_merge_commit() {
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
-        .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
 
     let error = service
@@ -3444,9 +3431,6 @@ fn revert_merge_commit_with_first_parent_creates_revert_commit() {
 
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
-        .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
         .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
 
@@ -3502,9 +3486,6 @@ fn revert_merge_commit_rejects_dirty_worktree() {
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
-        .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
     git_support::write_file(dir.path(), "scratch.txt", "dirty\n");
 
@@ -3539,9 +3520,6 @@ fn revert_merge_commit_reports_conflicts() {
     git_support::commit_all(&repo, "main");
     service
         .merge_branch(&mut repo, &BranchName::new("feature"))
-        .unwrap();
-    service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
         .unwrap();
     let merge_oid = repo.head().unwrap().target().unwrap();
 
@@ -3581,13 +3559,10 @@ fn merge_commit_files_use_first_parent_diff() {
     git_support::write_file(dir.path(), "main.txt", "main\n");
     git_support::commit_all(&repo, "main");
 
-    let pending_snapshot = service
+    let snapshot = service
         .merge_branch(&mut repo, &BranchName::new("feature"))
         .unwrap();
-    assert!(pending_snapshot.merge_in_progress);
-    let snapshot = service
-        .finish_merge(&mut repo, &CommitMessage::new("merge feature"))
-        .unwrap();
+    assert!(!snapshot.merge_in_progress);
     assert_eq!(snapshot.head.as_deref(), Some("main"));
 
     let merge_oid = repo.head().unwrap().target().unwrap().to_string();
