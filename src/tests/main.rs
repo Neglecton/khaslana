@@ -721,12 +721,7 @@ fn non_merge_conflict_state_still_opens_conflict_mode() {
     let mut mode = MainMode::History;
     let mut state = ConflictWorkbenchState::default();
 
-    sync_conflict_state_from_paths(
-        &mut mode,
-        &mut state,
-        &["conflict.txt".into()],
-        true,
-    );
+    sync_conflict_state_from_paths(&mut mode, &mut state, &["conflict.txt".into()], true);
 
     assert_eq!(mode, MainMode::Conflict);
     assert_eq!(state.selected_path.as_deref(), Some("conflict.txt"));

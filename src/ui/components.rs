@@ -1039,13 +1039,13 @@ impl RepositoryView {
             .child(toolbar_icon(icon, icon_color))
     }
 
-    pub(crate) fn primary_button(
+    pub(crate) fn primary_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
         &self,
         label: &'static str,
         enabled: bool,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_click: T,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<T> {
         self.app_button(
             label,
             None,
@@ -1067,16 +1067,16 @@ impl RepositoryView {
         self.app_button(label, None, None, ButtonTone::Danger, enabled, on_click, cx)
     }
 
-    fn app_button(
+    fn app_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
         &self,
         label: &'static str,
         icon: Option<ToolbarIcon>,
         badge: Option<usize>,
         tone: ButtonTone,
         enabled: bool,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_click: T,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<T> {
         self.app_button_with_click_event(
             label,
             icon,
@@ -1088,16 +1088,18 @@ impl RepositoryView {
         )
     }
 
-    fn app_button_with_click_event(
+    fn app_button_with_click_event<
+        T: Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+    >(
         &self,
         label: &'static str,
         icon: Option<ToolbarIcon>,
         badge: Option<usize>,
         tone: ButtonTone,
         enabled: bool,
-        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        on_click: T,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<T> {
         let palette = app_button_palette(tone, enabled);
         let disabled_reason = self.disabled_reason(enabled, "当前状态不可用");
         let bg_color = if enabled { palette.bg } else { theme::ACCENT };

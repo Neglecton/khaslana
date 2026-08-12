@@ -19,6 +19,14 @@ use crate::types::{DiffEncodingChoice, GitError, Result};
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
 const SCHEMA_VERSION: i64 = 5;
 
+/// 旧数据目录（`%APPDATA%\Khaslana`）下出现该标记文件，表示数据已迁移到便携目录；
+/// 启动解析路径时强制走便携路径，即使旧库文件仍在。
+const PORTABLE_MIGRATED_MARKER: &str = ".migrated_to_portable";
+/// 旧数据目录下出现该标记文件，表示用户已同意迁移，下次启动时在打开数据库前完成搬运。
+const PORTABLE_PENDING_MARKER: &str = ".pending_portable_migration";
+/// schema_meta 中记录「用户已忽略便携迁移提示」的键。
+const PORTABLE_MIGRATION_DISMISSED_KEY: &str = "portable_migration_dismissed";
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RemoteCredentialBindings {
     #[serde(default)]
@@ -133,6 +141,32 @@ impl AppStorage {
             .ok_or_else(|| GitError::Message("无法定位本地配置数据库目录".to_string()))?;
         recreate_database_file(&path)?;
         Self::open(path)
+    }
+
+    /// 读取 schema_meta 中的任意键值。
+    pub fn get_meta_value(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        get_meta_value_from_conn(&conn, key)
+    }
+
+    /// 写入 schema_meta 中的任意键值（INSERT OR REPLACE）。
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        set_meta_value_on_conn(&conn, key, value)
+    }
+
+    /// 是否已永久忽略「迁移到便携目录」提示。
+    pub fn portable_migration_dismissed(&self) -> bool {
+        self.get_meta_value(PORTABLE_MIGRATION_DISMISSED_KEY)
+            .unwrap_or(None)
+            .as_deref()
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
+    /// 标记永久忽略「迁移到便携目录」提示。
+    pub fn mark_portable_migration_dismissed(&self) -> Result<()> {
+        self.set_meta_value(PORTABLE_MIGRATION_DISMISSED_KEY, "1")
     }
 
     pub fn load_session_state(&self) -> Result<Option<SessionState>> {
@@ -308,12 +342,72 @@ impl AppStorage {
     }
 }
 
+/// 旧版默认数据目录（Windows 下为 `%APPDATA%\Khaslana`），仅用于回退兼容与便携迁移来源定位。
+pub fn legacy_database_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "Khaslana").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+/// 旧版默认数据库文件路径（`<旧目录>/khaslana.sqlite3`）。
+pub fn legacy_database_path() -> Option<PathBuf> {
+    legacy_database_dir().map(|dir| dir.join(DB_FILE_NAME))
+}
+
+/// 便携数据目录，位于可执行文件同级的 `data/` 子目录。
+pub fn portable_database_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("data")))
+}
+
+/// 便携数据库文件路径（`<可执行文件目录>/data/khaslana.sqlite3`）。
+pub fn portable_database_path() -> Option<PathBuf> {
+    portable_database_dir().map(|dir| dir.join(DB_FILE_NAME))
+}
+
+/// 迁移完成标记文件路径（写入旧目录）。存在则表示数据已迁移到便携目录。
+pub fn portable_migrated_marker() -> Option<PathBuf> {
+    legacy_database_dir().map(|dir| dir.join(PORTABLE_MIGRATED_MARKER))
+}
+
+/// 待迁移标记文件路径（写入旧目录）。存在则表示用户已同意迁移，下次启动时执行搬运。
+pub fn portable_pending_marker() -> Option<PathBuf> {
+    legacy_database_dir().map(|dir| dir.join(PORTABLE_PENDING_MARKER))
+}
+
+/// 根据可执行文件位置与旧目录状态，决定本次启动应使用的数据库文件路径。
+///
+/// 解析顺序：
+/// 1. 旧目录存在已迁移标记 → 强制走便携路径（即使旧库文件仍在）；
+/// 2. 旧库文件存在 → 继续使用旧路径（老用户兼容，不被动迁移）；
+/// 3. 两者都不满足 → 使用便携路径（新机器/新安装），由 [`AppStorage::open`] 负责创建。
+fn pick_active_path(
+    legacy: Option<PathBuf>,
+    portable: Option<PathBuf>,
+    legacy_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let migrated = legacy_dir
+        .as_ref()
+        .map(|dir| dir.join(PORTABLE_MIGRATED_MARKER).exists())
+        .unwrap_or(false);
+    if migrated {
+        return portable.or(legacy);
+    }
+    if legacy.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        return legacy;
+    }
+    portable.or(legacy)
+}
+
+/// 应用当前应使用的数据库文件路径（默认便携，兼容回退到旧路径）。
 pub fn default_database_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "Khaslana").map(|dirs| dirs.config_dir().join(DB_FILE_NAME))
+    let legacy = legacy_database_path();
+    let portable = portable_database_path();
+    let legacy_dir = legacy_database_dir();
+    pick_active_path(legacy, portable, legacy_dir)
 }
 
 pub fn default_legacy_storage_paths() -> Option<LegacyStoragePaths> {
-    ProjectDirs::from("", "", "Khaslana").map(|dirs| legacy_storage_paths(dirs.config_dir()))
+    legacy_database_dir().map(|dir| legacy_storage_paths(&dir))
 }
 
 pub fn legacy_storage_paths(config_dir: &Path) -> LegacyStoragePaths {
@@ -324,6 +418,122 @@ pub fn legacy_storage_paths(config_dir: &Path) -> LegacyStoragePaths {
         network_proxy: config_dir.join("network-proxy.json"),
         credentials: config_dir.join("credentials.json"),
     }
+}
+
+/// 待执行便携迁移的启动期结果，用于决定是否向用户反馈。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// 没有待迁移标记，本次启动无需搬运。
+    Noop,
+    /// 迁移成功完成。
+    Migrated,
+    /// 迁移失败（旧库未动），记录原因供 UI 反馈。
+    Failed(String),
+}
+
+/// 应用启动最早期（打开任何数据库连接之前）调用。
+///
+/// 检测旧目录下的待迁移标记文件，若存在则把旧库与 updates 目录搬运到便携目录，
+/// 验证便携库可读后删除旧数据并写入已迁移标记。整个过程不 panic，失败仅记录日志，
+/// 并清除待迁移标记以避免启动循环；旧库保持原样，下次启动仍会提示用户。
+pub fn apply_pending_portable_migration() -> MigrationOutcome {
+    let Some(pending) = portable_pending_marker() else {
+        return MigrationOutcome::Noop;
+    };
+    if !pending.exists() {
+        return MigrationOutcome::Noop;
+    }
+    let outcome = match run_pending_portable_migration() {
+        Ok(()) => MigrationOutcome::Migrated,
+        Err(message) => {
+            tracing::warn!("portable storage migration failed: {message}");
+            MigrationOutcome::Failed(message)
+        }
+    };
+    // 无论成功失败都清除 pending 标记：成功时迁移已完成，失败时避免下次启动循环重试。
+    let _ = fs::remove_file(&pending);
+    outcome
+}
+
+fn run_pending_portable_migration() -> std::result::Result<(), String> {
+    let legacy_dir = legacy_database_dir().ok_or_else(|| "无法定位旧数据目录".to_string())?;
+    let portable_dir = portable_database_dir().ok_or_else(|| "无法定位便携数据目录".to_string())?;
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = portable_dir.join(DB_FILE_NAME);
+    let migrated_marker = legacy_dir.join(PORTABLE_MIGRATED_MARKER);
+
+    perform_portable_migration_files(
+        &legacy_db,
+        &portable_db,
+        &legacy_dir.join("updates"),
+        &portable_dir.join("updates"),
+        &migrated_marker,
+    )
+    .map_err(|err| err.to_string())
+}
+
+/// 执行便携迁移的纯文件操作：拷贝旧库与 updates 目录到便携目录，验证新库可读后，
+/// 写入迁移标记并删除旧数据。失败时不会写标记、不会删旧库，保证旧数据可继续使用。
+fn perform_portable_migration_files(
+    src_db: &Path,
+    dst_db: &Path,
+    src_updates: &Path,
+    dst_updates: &Path,
+    migrated_marker: &Path,
+) -> std::io::Result<()> {
+    if !src_db.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "旧数据库文件不存在",
+        ));
+    }
+    if let Some(parent) = dst_db.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // 先拷贝到临时文件再重命名，避免中途失败留下半成品便携库。
+    let staging_db = dst_db.with_extension("sqlite3.migrating");
+    fs::copy(src_db, &staging_db)?;
+    copy_dir_recursive(src_updates, dst_updates)?;
+    // 验证新库可打开且核心表存在，确保拷贝结果可用。
+    {
+        let conn = Connection::open(&staging_db)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        conn.query_row("SELECT count(*) FROM schema_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    }
+    fs::rename(&staging_db, dst_db)?;
+    // 验证通过后才写迁移标记并清理旧数据；删除失败可忽略（标记已决定后续走便携路径）。
+    if let Some(parent) = migrated_marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(migrated_marker, [])?;
+    let _ = fs::remove_file(src_db);
+    if src_updates.exists() {
+        let _ = fs::remove_dir_all(src_updates);
+    }
+    Ok(())
+}
+
+/// 递归拷贝目录；源目录不存在时视为空操作。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let dest = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&path, &dest)?;
+        } else {
+            fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {
@@ -907,9 +1117,7 @@ fn load_shortcut_bindings_from_conn(conn: &Connection) -> Result<ShortcutBinding
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Text,
-                    Box::new(StorageConversionError(format!(
-                        "快捷键配置解析失败：{err}"
-                    ))),
+                    Box::new(StorageConversionError(format!("快捷键配置解析失败：{err}"))),
                 )
             })
         },
@@ -1018,6 +1226,25 @@ fn now_seconds() -> i64 {
 
 fn storage_error(err: rusqlite::Error) -> GitError {
     GitError::Message(format!("本地配置数据库错误：{err}"))
+}
+
+fn get_meta_value_from_conn(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM schema_meta WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(storage_error)
+}
+
+fn set_meta_value_on_conn(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 fn network_proxy_mode_to_db(mode: NetworkProxyMode) -> &'static str {

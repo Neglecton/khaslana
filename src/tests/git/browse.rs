@@ -317,7 +317,10 @@ fn browse_compare_files_excludes_current_branch_only_changes() {
     let files = svc
         .browse_compare_files(&repo, &feature.commit_oid)
         .unwrap();
-    let paths = files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>();
+    let paths = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
 
     // 仅被当前分支改动的文件不应出现。
     assert!(

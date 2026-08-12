@@ -13,8 +13,8 @@ mod operation_blocker_view;
 mod proxy_view;
 mod rebase_view;
 mod remote_branch_operation;
-mod sidebar_view;
 mod shortcuts_view;
+mod sidebar_view;
 mod ssh_credentials;
 mod stash_view;
 mod submodule_view;
@@ -60,11 +60,11 @@ use khaslana::{
     NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
     RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
     RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, ShortcutBindings,
-    SubmoduleInfo,
-    SubmoduleRemoteSyncStatus, TagName, ThemeMode, UpdatePreferences, credential_display_target,
-    credential_key_filename, credential_kind_label, credential_record_is_compatible_with_url,
-    credential_record_label, credential_record_matches_remote_url, credential_scope_label,
-    normalize_remote_url, test_credential_connection,
+    SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, ThemeMode, UpdatePreferences,
+    credential_display_target, credential_key_filename, credential_kind_label,
+    credential_record_is_compatible_with_url, credential_record_label,
+    credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
+    test_credential_connection,
     update::{self, UpdateCheckResult, UpdateManifest, UpdatePlatformAsset},
 };
 use lru::LruCache;
@@ -133,17 +133,17 @@ actions!(browse_content, [BrowseContentCopy, BrowseContentSelectAll,]);
 actions!(
     app_action,
     [
-        ShortcutRefresh,         // 刷新
-        ShortcutFetch,           // 获取
-        ShortcutPull,            // 拉取
-        ShortcutPush,            // 推送
-        ShortcutOpenStash,       // 贮藏
-        ShortcutOpenSubmodule,   // 子模块
-        ShortcutOpenSettings,    // 设置
-        ShortcutSwitchToWorktree,   // 工作区
-        ShortcutSwitchToHistory,    // 提交记录
-        ShortcutSwitchToWorkflow,   // 工作流
-        ShortcutOpenInExplorer,     // 资源管理器打开仓库
+        ShortcutRefresh,             // 刷新
+        ShortcutFetch,               // 获取
+        ShortcutPull,                // 拉取
+        ShortcutPush,                // 推送
+        ShortcutOpenStash,           // 贮藏
+        ShortcutOpenSubmodule,       // 子模块
+        ShortcutOpenSettings,        // 设置
+        ShortcutSwitchToWorktree,    // 工作区
+        ShortcutSwitchToHistory,     // 提交记录
+        ShortcutSwitchToWorkflow,    // 工作流
+        ShortcutOpenInExplorer,      // 资源管理器打开仓库
         ShortcutOpenRemoteInBrowser, // 浏览器打开远端
     ]
 );
@@ -259,7 +259,10 @@ impl ShortcutAction {
 pub(crate) fn default_shortcut_bindings() -> ShortcutBindings {
     let mut bindings = BTreeMap::new();
     for action in ShortcutAction::ALL {
-        bindings.insert(action.action_id().to_string(), action.default_keystroke().to_string());
+        bindings.insert(
+            action.action_id().to_string(),
+            action.default_keystroke().to_string(),
+        );
     }
     ShortcutBindings { bindings }
 }
@@ -270,9 +273,10 @@ pub(crate) fn find_shortcut_conflict(
     target: ShortcutAction,
     keystroke: &str,
 ) -> Option<ShortcutAction> {
-    ShortcutAction::ALL.iter().find(|action| {
-        **action != target && action.keystroke(bindings) == keystroke
-    }).copied()
+    ShortcutAction::ALL
+        .iter()
+        .find(|action| **action != target && action.keystroke(bindings) == keystroke)
+        .copied()
 }
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
@@ -455,6 +459,8 @@ pub(crate) enum DialogState {
     UpdateNoWritePermission {
         version: String,
     },
+    // ── 便携数据目录迁移提示 ──
+    PortableMigrationPrompt,
 }
 
 #[derive(Clone, Debug)]
@@ -776,9 +782,13 @@ struct RepoSwitcherAnchor {
 }
 
 /// 由触发器按钮锚点计算下拉菜单左上角：水平对齐按钮左缘，垂直紧贴按钮下方，并钳制在视口内。
-fn repo_switcher_menu_origin(anchor: &RepoSwitcherAnchor, viewport_width: f32, viewport_height: f32) -> (f32, f32) {
-    let max_x =
-        (viewport_width - REPO_SWITCHER_MENU_WIDTH - MENU_VIEWPORT_MARGIN).max(MENU_VIEWPORT_MARGIN);
+fn repo_switcher_menu_origin(
+    anchor: &RepoSwitcherAnchor,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> (f32, f32) {
+    let max_x = (viewport_width - REPO_SWITCHER_MENU_WIDTH - MENU_VIEWPORT_MARGIN)
+        .max(MENU_VIEWPORT_MARGIN);
     let max_y = (viewport_height - REPO_SWITCHER_MENU_HEIGHT - MENU_VIEWPORT_MARGIN)
         .max(MENU_VIEWPORT_MARGIN);
     (
@@ -794,8 +804,14 @@ fn point_in_repo_switcher(
     menu: &RepoSwitcherMenu,
     anchor: Option<&RepoSwitcherAnchor>,
 ) -> bool {
-    point_in_menu(x, y, menu.x, menu.y, REPO_SWITCHER_MENU_WIDTH, REPO_SWITCHER_MENU_HEIGHT)
-        || anchor.is_some_and(|anchor| point_in_menu(x, y, anchor.x, anchor.y, anchor.w, anchor.h))
+    point_in_menu(
+        x,
+        y,
+        menu.x,
+        menu.y,
+        REPO_SWITCHER_MENU_WIDTH,
+        REPO_SWITCHER_MENU_HEIGHT,
+    ) || anchor.is_some_and(|anchor| point_in_menu(x, y, anchor.x, anchor.y, anchor.w, anchor.h))
 }
 
 fn column_splitter_accepts_mouse_events(active_dialog: bool) -> bool {
@@ -887,9 +903,8 @@ fn sync_conflict_state_from_paths(
     conflict_paths: &[String],
     auto_open_conflict_mode: bool,
 ) {
-    let entering_conflicts = !conflict_paths.is_empty()
-        && state.selected_path.is_none()
-        && state.files.is_empty();
+    let entering_conflicts =
+        !conflict_paths.is_empty() && state.selected_path.is_none() && state.files.is_empty();
     state
         .files
         .retain(|path, _| conflict_paths.iter().any(|candidate| candidate == path));
@@ -2337,7 +2352,72 @@ impl RepositoryView {
         if view.update_preferences.auto_check {
             view.start_update_check();
         }
+        // 老用户首次进入便携版本时，提示把数据从 C 盘迁移到程序同级目录。
+        view.maybe_prompt_portable_migration();
         view
+    }
+
+    /// 检测当前是否需要提供「迁移到便携目录」入口。
+    /// 仅当应用当前仍在旧目录（C 盘）运行、且未在排队待迁移时返回真；
+    /// 一旦已切换到便携目录（新机器或迁移完成后），即返回假，设置中心入口随之隐藏。
+    /// 不检查「不再提示」标记：即使用户曾选择保持现状，仍可从设置中心手动触发迁移。
+    fn portable_migration_available(&self) -> bool {
+        let (Some(active), Some(portable)) = (
+            khaslana::default_database_path(),
+            khaslana::portable_database_path(),
+        ) else {
+            return false;
+        };
+        // 当前已启用便携目录（新机器或已完成迁移）→ 无需迁移入口。
+        if active == portable {
+            return false;
+        }
+        // 已排队待迁移（下次启动搬运）→ 不重复显示。
+        if khaslana::portable_pending_marker().is_some_and(|p| p.exists()) {
+            return false;
+        }
+        // 当前激活路径（旧目录）的库确实存在 → 可迁移。
+        active.exists()
+    }
+
+    /// 检测是否应提示用户把数据从旧目录（C 盘）迁移到便携目录。
+    fn maybe_prompt_portable_migration(&mut self) {
+        if !self.portable_migration_available() {
+            return;
+        }
+        if self.storage.portable_migration_dismissed() {
+            return;
+        }
+        self.active_dialog = Some(DialogState::PortableMigrationPrompt);
+    }
+
+    /// 用户确认迁移：写入待迁移标记后重启应用，下次启动在打开数据库前完成搬运。
+    fn confirm_portable_migration(&mut self) {
+        let _ = self
+            .storage
+            .set_meta_value("pending_portable_migration", "1");
+        if let Some(marker) = khaslana::portable_pending_marker() {
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&marker, []);
+        }
+        self.active_dialog = None;
+        Self::relaunch_app();
+    }
+
+    /// 用户保持现状：永久忽略便携迁移提示。
+    fn dismiss_portable_migration(&mut self) {
+        let _ = self.storage.mark_portable_migration_dismissed();
+        self.active_dialog = None;
+    }
+
+    /// 重启应用：启动新实例后立即退出当前进程。
+    fn relaunch_app() {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("khaslana.exe"));
+        let exe_str = exe.to_string_lossy().to_string();
+        let _ = std::process::Command::new(&exe_str).spawn();
+        std::process::exit(0);
     }
 
     pub(crate) fn scroll_handle(&self, id: &'static str) -> ScrollHandle {
@@ -7294,7 +7374,11 @@ impl RepositoryView {
         };
         // 先把 url 提取为 owned String，避免后续 self 操作与不可变借用冲突。
         let url = self.snapshot.as_ref().and_then(|snapshot| {
-            snapshot.remotes.iter().find(|r| r.name == remote_name).map(|r| r.url.clone())
+            snapshot
+                .remotes
+                .iter()
+                .find(|r| r.name == remote_name)
+                .map(|r| r.url.clone())
         });
         let Some(url) = url.filter(|u| !u.is_empty()) else {
             self.notify_warning("远端 URL 为空或未找到", cx);
@@ -7586,12 +7670,9 @@ impl RepositoryView {
             .commit_context_menu
             .as_ref()
             .is_some_and(|menu| point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height))
-            || self
-                .repo_switcher_menu
-                .as_ref()
-                .is_some_and(|menu| {
-                    point_in_repo_switcher(x, y, menu, self.repo_switcher_anchor.as_ref())
-                })
+            || self.repo_switcher_menu.as_ref().is_some_and(|menu| {
+                point_in_repo_switcher(x, y, menu, self.repo_switcher_anchor.as_ref())
+            })
     }
 
     pub(crate) fn open_commit_context_menu(
@@ -9990,16 +10071,28 @@ impl RepositoryView {
     }
 
     /// 设置中心 overlay：左导航 + 右内容面板。
-    fn render_settings_center_overlay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_settings_center_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(category) = self.settings_center else {
             return div().into_any_element();
         };
 
         let categories = [
-            (SettingsCategory::Credentials, ToolbarIcon::Credentials, "凭据管理"),
+            (
+                SettingsCategory::Credentials,
+                ToolbarIcon::Credentials,
+                "凭据管理",
+            ),
             (SettingsCategory::Proxy, ToolbarIcon::Proxy, "网络代理"),
             (SettingsCategory::Ai, ToolbarIcon::Ai, "AI 设置"),
-            (SettingsCategory::ExternalMerge, ToolbarIcon::Workflow, "合并工具"),
+            (
+                SettingsCategory::ExternalMerge,
+                ToolbarIcon::Workflow,
+                "合并工具",
+            ),
             (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
             (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
             (SettingsCategory::Shortcuts, ToolbarIcon::Keyboard, "快捷键"),
@@ -10007,11 +10100,21 @@ impl RepositoryView {
 
         // 右侧内容面板根据当前分类渲染对应 body。
         let body: gpui::AnyElement = match category {
-            SettingsCategory::Credentials => self.render_credential_manager_dialog(cx).into_any_element(),
-            SettingsCategory::Proxy => self.render_network_proxy_settings_dialog(window, cx).into_any_element(),
-            SettingsCategory::Ai => self.render_ai_provider_settings_dialog(window, cx).into_any_element(),
-            SettingsCategory::ExternalMerge => self.render_external_merge_settings_dialog(window, cx).into_any_element(),
-            SettingsCategory::Theme => self.render_theme_settings_dialog(window, cx).into_any_element(),
+            SettingsCategory::Credentials => {
+                self.render_credential_manager_dialog(cx).into_any_element()
+            }
+            SettingsCategory::Proxy => self
+                .render_network_proxy_settings_dialog(window, cx)
+                .into_any_element(),
+            SettingsCategory::Ai => self
+                .render_ai_provider_settings_dialog(window, cx)
+                .into_any_element(),
+            SettingsCategory::ExternalMerge => self
+                .render_external_merge_settings_dialog(window, cx)
+                .into_any_element(),
+            SettingsCategory::Theme => self
+                .render_theme_settings_dialog(window, cx)
+                .into_any_element(),
             SettingsCategory::Update => self.render_update_settings_dialog(cx).into_any_element(),
             SettingsCategory::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
         };
@@ -10117,11 +10220,20 @@ impl RepositoryView {
                                                 this.text_color(rgb(ui_theme::FOREGROUND))
                                                     .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                                             })
-                                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                                this.select_settings_category(cat);
-                                                cx.notify();
-                                            }))
-                                            .child(toolbar_icon(*icon, if is_active { ui_theme::PRIMARY } else { ui_theme::MUTED_FOREGROUND }))
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.select_settings_category(cat);
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(toolbar_icon(
+                                                *icon,
+                                                if is_active {
+                                                    ui_theme::PRIMARY
+                                                } else {
+                                                    ui_theme::MUTED_FOREGROUND
+                                                },
+                                            ))
                                             .child(*label)
                                             .into_any_element()
                                     })),
@@ -11972,6 +12084,9 @@ impl RepositoryView {
             DialogState::UpdateNoWritePermission { version } => self
                 .render_no_write_permission_dialog(&version, cx)
                 .into_any_element(),
+            DialogState::PortableMigrationPrompt => {
+                self.render_portable_migration_dialog(cx).into_any_element()
+            }
         };
 
         dialog_overlay()
@@ -12071,6 +12186,42 @@ impl RepositoryView {
                         "直接退出",
                         true,
                         |this, _, cx| this.exit_application(cx),
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_portable_migration_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.dialog_panel("迁移到便携目录", cx)
+            .w(px(540.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("检测到应用数据当前存放在 C 盘系统目录，是否迁移到程序所在目录？"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(
+                        "迁移后，数据库、更新缓存和工作流模板将统一保存在可执行文件同级的 \
+                         data/ 目录，便于整体备份并减少 C 盘占用。点击「迁移并重启」后应用将关闭，\
+                         并在下次启动时自动完成数据搬运。若选择「保持现状」，后续可在「设置」-「更新设置」中手动执行迁移。",
+                    ),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button(
+                        "保持现状",
+                        true,
+                        |this, _, _| this.dismiss_portable_migration(),
+                        cx,
+                    ))
+                    .child(self.primary_button(
+                        "迁移并重启",
+                        true,
+                        |this, _, _| this.confirm_portable_migration(),
                         cx,
                     )),
             )
@@ -12402,6 +12553,20 @@ impl RepositoryView {
     fn render_update_settings_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let auto_check = self.update_preferences.auto_check;
         let skipped = self.update_preferences.skipped_version.clone();
+        // 仅当存在可迁移的旧库时，在更新设置中常驻「迁移到便携目录」入口；
+        // dismiss 标记只抑制启动时的自动弹窗，不影响此处手动入口。
+        let migration_available = self.portable_migration_available();
+        let current_db_label = khaslana::default_database_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "未知".to_string());
+        let migrate_btn = self.primary_button(
+            "迁移到便携目录",
+            true,
+            |this, _, _| {
+                this.active_dialog = Some(DialogState::PortableMigrationPrompt);
+            },
+            cx,
+        );
 
         div()
             .flex()
@@ -12463,6 +12628,33 @@ impl RepositoryView {
                         ),
                     ),
             )
+            .when(migration_available, move |container| {
+                container.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_size(px(12.0))
+                        .child(
+                            div()
+                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .child("数据目录"),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(format!("当前：{current_db_label}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(
+                                    "可将数据从 C 盘系统目录迁移到程序所在目录，便于整体备份并减少 C 盘占用。",
+                                ),
+                        )
+                        .child(migrate_btn),
+                )
+            })
             .child(
                 dialog_actions()
                     .child(self.primary_button(
@@ -13231,27 +13423,23 @@ impl RepositoryView {
             .flex_col()
             .gap_3()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(self.primary_button(
-                                "添加凭据",
-                                !self.busy,
-                                |this, _, _| this.open_credential_form(),
-                                cx,
-                            ))
-                            .child(self.button(
-                                "刷新",
-                                !self.busy,
-                                |this, _, _| this.reload_credential_records("凭据列表已刷新"),
-                                cx,
-                            )),
-                    ),
+                div().flex().items_center().justify_between().child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.primary_button(
+                            "添加凭据",
+                            !self.busy,
+                            |this, _, _| this.open_credential_form(),
+                            cx,
+                        ))
+                        .child(self.button(
+                            "刷新",
+                            !self.busy,
+                            |this, _, _| this.reload_credential_records("凭据列表已刷新"),
+                            cx,
+                        )),
+                ),
             )
             .child(
                 div()
@@ -14241,22 +14429,36 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_sho
     if !skip_shortcuts {
         for action in ShortcutAction::ALL {
             let keystroke = action.keystroke(bindings);
-        let binding = match action {
-            ShortcutAction::Refresh => KeyBinding::new(keystroke, ShortcutRefresh, None),
-            ShortcutAction::Fetch => KeyBinding::new(keystroke, ShortcutFetch, None),
-            ShortcutAction::Pull => KeyBinding::new(keystroke, ShortcutPull, None),
-            ShortcutAction::Push => KeyBinding::new(keystroke, ShortcutPush, None),
-            ShortcutAction::OpenStash => KeyBinding::new(keystroke, ShortcutOpenStash, None),
-            ShortcutAction::OpenSubmodule => KeyBinding::new(keystroke, ShortcutOpenSubmodule, None),
-            ShortcutAction::OpenSettings => KeyBinding::new(keystroke, ShortcutOpenSettings, None),
-            ShortcutAction::SwitchToWorktree => KeyBinding::new(keystroke, ShortcutSwitchToWorktree, None),
-            ShortcutAction::SwitchToHistory => KeyBinding::new(keystroke, ShortcutSwitchToHistory, None),
-            ShortcutAction::SwitchToWorkflow => KeyBinding::new(keystroke, ShortcutSwitchToWorkflow, None),
-            ShortcutAction::OpenInExplorer => KeyBinding::new(keystroke, ShortcutOpenInExplorer, None),
-            ShortcutAction::OpenRemoteInBrowser => KeyBinding::new(keystroke, ShortcutOpenRemoteInBrowser, None),
-        };
-        cx.bind_keys([binding]);
-    }
+            let binding = match action {
+                ShortcutAction::Refresh => KeyBinding::new(keystroke, ShortcutRefresh, None),
+                ShortcutAction::Fetch => KeyBinding::new(keystroke, ShortcutFetch, None),
+                ShortcutAction::Pull => KeyBinding::new(keystroke, ShortcutPull, None),
+                ShortcutAction::Push => KeyBinding::new(keystroke, ShortcutPush, None),
+                ShortcutAction::OpenStash => KeyBinding::new(keystroke, ShortcutOpenStash, None),
+                ShortcutAction::OpenSubmodule => {
+                    KeyBinding::new(keystroke, ShortcutOpenSubmodule, None)
+                }
+                ShortcutAction::OpenSettings => {
+                    KeyBinding::new(keystroke, ShortcutOpenSettings, None)
+                }
+                ShortcutAction::SwitchToWorktree => {
+                    KeyBinding::new(keystroke, ShortcutSwitchToWorktree, None)
+                }
+                ShortcutAction::SwitchToHistory => {
+                    KeyBinding::new(keystroke, ShortcutSwitchToHistory, None)
+                }
+                ShortcutAction::SwitchToWorkflow => {
+                    KeyBinding::new(keystroke, ShortcutSwitchToWorkflow, None)
+                }
+                ShortcutAction::OpenInExplorer => {
+                    KeyBinding::new(keystroke, ShortcutOpenInExplorer, None)
+                }
+                ShortcutAction::OpenRemoteInBrowser => {
+                    KeyBinding::new(keystroke, ShortcutOpenRemoteInBrowser, None)
+                }
+            };
+            cx.bind_keys([binding]);
+        }
     }
 }
 
@@ -14268,8 +14470,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutRefresh, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.refresh(); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.refresh();
+                cx.notify();
             });
         }
     });
@@ -14277,8 +14482,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutFetch, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.fetch(); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.fetch();
+                cx.notify();
             });
         }
     });
@@ -14286,7 +14494,9 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutPull, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
+                if this.settings_center.is_some() {
+                    return;
+                }
                 this.open_remote_branch_operation(RemoteBranchOperationKind::Pull);
                 cx.notify();
             });
@@ -14296,7 +14506,9 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutPush, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
+                if this.settings_center.is_some() {
+                    return;
+                }
                 this.open_remote_branch_operation(RemoteBranchOperationKind::Push);
                 cx.notify();
             });
@@ -14306,8 +14518,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutOpenStash, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.open_stash_dialog(); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.open_stash_dialog();
+                cx.notify();
             });
         }
     });
@@ -14315,8 +14530,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutOpenSubmodule, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.open_submodule_manager(); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.open_submodule_manager();
+                cx.notify();
             });
         }
     });
@@ -14338,8 +14556,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToWorktree, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.set_main_mode(MainMode::Worktree); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.set_main_mode(MainMode::Worktree);
+                cx.notify();
             });
         }
     });
@@ -14347,8 +14568,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToHistory, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.set_main_mode(MainMode::History); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.set_main_mode(MainMode::History);
+                cx.notify();
             });
         }
     });
@@ -14356,8 +14580,11 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutSwitchToWorkflow, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
-                this.set_main_mode(MainMode::Workflow); cx.notify();
+                if this.settings_center.is_some() {
+                    return;
+                }
+                this.set_main_mode(MainMode::Workflow);
+                cx.notify();
             });
         }
     });
@@ -14365,7 +14592,9 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutOpenInExplorer, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
+                if this.settings_center.is_some() {
+                    return;
+                }
                 this.open_repo_in_explorer(cx);
             });
         }
@@ -14374,7 +14603,9 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
         let weak = weak.clone();
         move |_a: &ShortcutOpenRemoteInBrowser, cx| {
             let _ = weak.update(cx, |this, cx| {
-                if this.settings_center.is_some() { return; }
+                if this.settings_center.is_some() {
+                    return;
+                }
                 this.open_remote_in_browser(cx);
             });
         }
@@ -14390,6 +14621,9 @@ fn main() {
     Application::new()
         .with_assets(assets::AppAssets::new())
         .run(|cx: &mut App| {
+            // 启动最早期执行待处理的便携迁移（若用户上次已同意迁移）；
+            // 必须在打开任何数据库连接之前完成文件搬运。
+            let _ = khaslana::apply_pending_portable_migration();
             init_yororen_components(cx);
             cx.set_global(GlobalTheme::new(cx.window_appearance()));
             cx.set_global(I18n::with_embedded(

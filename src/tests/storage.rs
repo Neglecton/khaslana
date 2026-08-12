@@ -301,13 +301,158 @@ fn recent_repo_upsert_dedups_same_path() {
 #[test]
 fn recent_repo_load_orders_by_last_opened_desc() {
     let (_temp, storage) = temp_storage();
-    storage.upsert_recent_repo(Path::new("C:/repo/old")).unwrap();
+    storage
+        .upsert_recent_repo(Path::new("C:/repo/old"))
+        .unwrap();
     // now_seconds 为秒级精度，sleep 跨秒以保证 old 的时间戳严格早于 new。
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    storage.upsert_recent_repo(Path::new("C:/repo/new")).unwrap();
+    storage
+        .upsert_recent_repo(Path::new("C:/repo/new"))
+        .unwrap();
 
     let recent = storage.load_recent_repos().unwrap();
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].0, PathBuf::from("C:/repo/new"));
     assert_eq!(recent[1].0, PathBuf::from("C:/repo/old"));
+}
+
+// 旧目录存在「已迁移」标记时，即使旧库文件仍在，也强制走便携路径。
+#[test]
+fn pick_active_path_prefers_portable_when_migrated_marker_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    let portable_dir = tmp.path().join("portable");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::create_dir_all(&portable_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = portable_dir.join(DB_FILE_NAME);
+    fs::write(&legacy_db, b"legacy").unwrap();
+    fs::write(legacy_dir.join(PORTABLE_MIGRATED_MARKER), []).unwrap();
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            Some(portable_db.clone()),
+            Some(legacy_dir.to_path_buf()),
+        ),
+        Some(portable_db)
+    );
+}
+
+// 无迁移标记且旧库文件存在时，继续使用旧路径（老用户兼容）。
+#[test]
+fn pick_active_path_prefers_legacy_when_db_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = tmp.path().join("portable").join(DB_FILE_NAME);
+    fs::write(&legacy_db, b"legacy").unwrap();
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            Some(portable_db.clone()),
+            Some(legacy_dir.to_path_buf()),
+        ),
+        Some(legacy_db)
+    );
+}
+
+// 旧库文件不存在（新机器）时默认走便携路径。
+#[test]
+fn pick_active_path_defaults_to_portable_for_new_machine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = tmp.path().join("portable").join(DB_FILE_NAME);
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            Some(portable_db.clone()),
+            Some(legacy_dir.to_path_buf()),
+        ),
+        Some(portable_db)
+    );
+}
+
+// 便携为 None（current_exe 不可用）且无旧库时，回退旧路径兜底。
+#[test]
+fn pick_active_path_falls_back_to_legacy_without_portable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            None,
+            Some(legacy_dir.to_path_buf())
+        ),
+        Some(legacy_db)
+    );
+}
+
+// 完整迁移流程：拷贝旧库与 updates、验证新库可读、写迁移标记、删除旧数据。
+#[test]
+fn perform_portable_migration_files_copies_and_cleans_legacy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src_dir = tmp.path().join("legacy");
+    let dst_dir = tmp.path().join("portable");
+    fs::create_dir_all(&src_dir).unwrap();
+    let src_db = src_dir.join(DB_FILE_NAME);
+
+    // 创建一个合法的旧库（含 schema_meta 表），随后关闭连接以释放文件占用。
+    {
+        let _storage = AppStorage::open(&src_db).unwrap();
+    }
+    // 构造旧 updates 目录及一个下载文件。
+    let src_updates = src_dir.join("updates");
+    fs::create_dir_all(src_updates.join("downloads")).unwrap();
+    fs::write(src_updates.join("downloads").join("a.txt"), "payload").unwrap();
+
+    let dst_db = dst_dir.join(DB_FILE_NAME);
+    let dst_updates = dst_dir.join("updates");
+    let migrated_marker = src_dir.join(PORTABLE_MIGRATED_MARKER);
+
+    perform_portable_migration_files(
+        &src_db,
+        &dst_db,
+        &src_updates,
+        &dst_updates,
+        &migrated_marker,
+    )
+    .expect("migration should succeed");
+
+    assert!(dst_db.exists(), "便携库应已生成");
+    assert!(
+        dst_updates.join("downloads").join("a.txt").exists(),
+        "updates 应已拷贝"
+    );
+    assert!(migrated_marker.exists(), "应写入迁移完成标记");
+    assert!(!src_db.exists(), "旧库应已删除");
+    assert!(!src_updates.exists(), "旧 updates 应已删除");
+    // 新库应可打开且 schema_meta 表可用。
+    let conn = Connection::open(&dst_db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM schema_meta", [], |row| row.get(0))
+        .unwrap();
+    assert!(count >= 0);
+}
+
+// meta 通用读写与「忽略便携迁移提示」标记。
+#[test]
+fn meta_value_round_trip_and_portable_migration_dismissed() {
+    let (_temp, storage) = temp_storage();
+    assert!(!storage.portable_migration_dismissed());
+    storage.mark_portable_migration_dismissed().unwrap();
+    assert!(storage.portable_migration_dismissed());
+
+    assert_eq!(storage.get_meta_value("custom_meta_key").unwrap(), None);
+    storage
+        .set_meta_value("custom_meta_key", "value42")
+        .unwrap();
+    assert_eq!(
+        storage.get_meta_value("custom_meta_key").unwrap(),
+        Some("value42".to_string())
+    );
 }

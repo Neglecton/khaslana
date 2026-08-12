@@ -157,8 +157,7 @@ fn compare_visible_row_count_exceeds_file_count_for_nested_paths() {
 
     for file in &files {
         let present = rows.iter().any(|row| {
-            row.path == file.path
-                && matches!(row.kind, CompareTreeRowKind::File { .. })
+            row.path == file.path && matches!(row.kind, CompareTreeRowKind::File { .. })
         });
         assert!(present, "文件叶子未出现在展平行中: {}", file.path);
     }

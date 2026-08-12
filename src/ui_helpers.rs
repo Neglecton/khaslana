@@ -729,9 +729,19 @@ fn repo_initials(name: &str) -> String {
         .filter(|seg| !seg.is_empty())
         .collect::<Vec<_>>();
     if segments.len() >= 2 {
-        let first = segments[0].chars().next().map(|ch| ch.to_uppercase().to_string());
-        let second = segments[1].chars().next().map(|ch| ch.to_uppercase().to_string());
-        return format!("{}{}", first.unwrap_or_default(), second.unwrap_or_default());
+        let first = segments[0]
+            .chars()
+            .next()
+            .map(|ch| ch.to_uppercase().to_string());
+        let second = segments[1]
+            .chars()
+            .next()
+            .map(|ch| ch.to_uppercase().to_string());
+        return format!(
+            "{}{}",
+            first.unwrap_or_default(),
+            second.unwrap_or_default()
+        );
     }
     let Some(word) = segments.first().copied() else {
         return "?".to_string();

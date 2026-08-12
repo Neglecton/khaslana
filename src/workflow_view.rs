@@ -945,7 +945,13 @@ fn workflow_progress_entry(event: &WorkflowProgressEvent) -> WorkflowLogEntry {
     }
 }
 
+/// 工作流模板目录，统一指向便携数据目录下的 `workflows/` 子目录。
 pub(crate) fn workflow_templates_dir() -> Option<PathBuf> {
+    khaslana::portable_database_dir().map(|dir| dir.join("workflows"))
+}
+
+/// 旧版工作流模板目录（`~/.khaslana/workflows`），仅用于一次性便携迁移的来源。
+fn legacy_workflow_templates_dir() -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| workflow_templates_dir_from_home(dirs.home_dir()))
 }
 
@@ -960,7 +966,55 @@ fn ensure_workflow_templates_dir(dir: &Path) -> std::io::Result<()> {
 fn load_workflow_templates() -> Result<Vec<WorkflowTemplateItem>, String> {
     let dir = workflow_templates_dir().ok_or_else(|| "无法定位工作流模板目录".to_string())?;
     ensure_workflow_templates_dir(&dir).map_err(|err| format!("工作流模板目录创建失败：{err}"))?;
+    // 一次性便携迁移：便携目录下没有模板文件、且旧目录存在模板时，把旧模板拷贝过来。
+    migrate_legacy_workflow_templates(&dir);
     load_workflow_templates_from_dir(&dir)
+}
+
+/// 若便携工作流目录为空且旧目录存在模板文件，递归拷贝一次。
+/// 幂等：便携目录已有模板则跳过，且同名文件不覆盖。
+fn migrate_legacy_workflow_templates(portable_dir: &Path) {
+    if dir_has_workflow_template(portable_dir) {
+        return;
+    }
+    let Some(legacy_dir) = legacy_workflow_templates_dir() else {
+        return;
+    };
+    if !legacy_dir.exists() || !dir_has_workflow_template(&legacy_dir) {
+        return;
+    }
+    let _ = copy_workflow_templates(&legacy_dir, portable_dir);
+}
+
+fn dir_has_workflow_template(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if is_workflow_template_path(&entry.path())
+            && entry.metadata().map(|m| m.is_file()).unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 递归拷贝工作流模板文件（仅 `.json5`/`.jsonc`），同名文件跳过不覆盖。
+fn copy_workflow_templates(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        let dest = dst.join(entry.file_name());
+        if metadata.is_dir() {
+            copy_workflow_templates(&path, &dest)?;
+        } else if is_workflow_template_path(&path) && !dest.exists() {
+            fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn load_workflow_templates_from_dir(dir: &Path) -> Result<Vec<WorkflowTemplateItem>, String> {

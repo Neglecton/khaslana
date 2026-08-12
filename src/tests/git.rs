@@ -1458,7 +1458,11 @@ fn merge_success() {
     assert_ne!(repo.head().unwrap().target(), Some(original_head));
     assert!(snapshot.changes.is_empty());
     assert_eq!(
-        repo.head().unwrap().peel_to_commit().unwrap().parent_count(),
+        repo.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent_count(),
         2
     );
 }
@@ -1509,7 +1513,14 @@ fn fast_forward_merge_keeps_index_clean() {
     assert!(service.status_full(&repo).unwrap().is_empty());
     assert!(!snapshot.merge_in_progress);
     assert_eq!(repo.state(), RepositoryState::Clean);
-    assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().parent_count(), 1);
+    assert_eq!(
+        repo.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent_count(),
+        1
+    );
 }
 
 #[test]
@@ -1631,7 +1642,12 @@ fn reopened_merge_can_restore_message_and_finish() {
 
     assert_eq!(reopened.state(), RepositoryState::Clean);
     assert_eq!(
-        reopened.head().unwrap().peel_to_commit().unwrap().parent_count(),
+        reopened
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent_count(),
         2
     );
     git_support::assert_file_text(dir.path(), "same.txt", "feature\n");

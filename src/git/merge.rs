@@ -27,8 +27,8 @@ impl GitService {
         drop(reference);
         // 无冲突的正常非快进合并：自动提交（双父提交），不保留 merge 会话。
         if merge_in_progress(repo) {
-            let message = merge_message(repo)
-                .unwrap_or_else(|| format!("Merge branch '{}'", branch.0));
+            let message =
+                merge_message(repo).unwrap_or_else(|| format!("Merge branch '{}'", branch.0));
             let mut merge_head_ids = Vec::new();
             repo.mergehead_foreach(|oid| {
                 merge_head_ids.push(*oid);

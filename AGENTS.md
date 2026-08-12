@@ -162,7 +162,15 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 ### 4.5 持久化数据
 
-应用使用 `directories::ProjectDirs::from("", "", "Khaslana")` 生成配置目录，主程序持久化数据统一写入 `khaslana.sqlite3`。当前数据库保存：
+默认情况下，主程序持久化数据存放在**可执行文件同级的 `data/` 目录**下的 `khaslana.sqlite3`（便携目录，由 `std::env::current_exe` 推导）。为兼容老版本升级，启动时按以下优先级解析当前应使用的库路径（`default_database_path`）：
+
+1. 旧目录（`directories::ProjectDirs::from("", "", "Khaslana")` 的 `config_dir`，Windows 下为 `%APPDATA%\Khaslana`）存在 `.migrated_to_portable` 标记 → 强制走便携路径；
+2. 旧库文件存在 → 继续使用旧路径（老用户兼容，不被动迁移）；
+3. 两者都不满足 → 使用便携路径（新机器/新安装），由 `AppStorage::open` 自动创建。
+
+C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪后弹窗询问是否「迁移到便携目录」。用户确认后写入待迁移标记 `.pending_portable_migration` 并重启应用，下次启动最早期（打开任何连接之前）由 `apply_pending_portable_migration` 把旧库与 `updates/` 目录搬运到便携目录，验证新库可读后删除旧数据并写入 `.migrated_to_portable` 标记；用户选择「保持现状」则把 `portable_migration_dismissed` 写入 `schema_meta`，永久不再提示。工作流模板目录同样便携化到 `data/workflows/`，首次加载时若便携目录为空且旧目录 `~/.khaslana/workflows` 存在模板则一次性拷贝。
+
+当前数据库保存：
 
 - 打开过的仓库路径和当前激活仓库。
 - 最近打开过的仓库路径及最后打开时间（`recent_repositories` 表，供仓库切换下拉排序）。
@@ -173,8 +181,9 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 - 全局主题偏好，支持跟随系统、浅色和深色。
 - 快捷键绑定（`shortcut_bindings` 表，单行 JSON payload，action_id → keystroke 映射）。
 - 凭据记录索引等非密元数据。
+- 便携迁移相关标记（`portable_migration_dismissed` 等），存在 `schema_meta` 表。
 
-凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入。
+凭据密文不写入 SQLite，而是通过系统 Keyring 保存。`credentials.rs` 中的密钥服务名需要保持兼容，改动时必须加迁移或回归测试。旧版 JSON 文件不由主程序兼容读取，需要迁移时使用 `cargo run --bin migrate_storage` 一次性导入；`migrate_storage` 的默认 `--db` 目标会跟随上述路径解析（老用户→旧库，新机器→便携库）。
 
 ## 5. 当前用户可见功能
 

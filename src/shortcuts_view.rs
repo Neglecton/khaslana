@@ -72,10 +72,7 @@ pub(crate) fn keystroke_to_string(event: &KeyDownEvent) -> String {
 
 impl RepositoryView {
     /// 快捷键设置页 body。
-    pub(crate) fn render_shortcuts_settings(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(crate) fn render_shortcuts_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let recording = self.recording_shortcut;
 
         div()
@@ -247,11 +244,8 @@ mod tests {
         // 默认绑定中 refresh=f5, fetch=ctrl-shift-f。
         let bindings = crate::default_shortcut_bindings();
         // 给 refresh 绑定 ctrl-shift-f（fetch 的默认）应冲突到 fetch。
-        let conflict = crate::find_shortcut_conflict(
-            &bindings,
-            ShortcutAction::Refresh,
-            "ctrl-shift-f",
-        );
+        let conflict =
+            crate::find_shortcut_conflict(&bindings, ShortcutAction::Refresh, "ctrl-shift-f");
         assert_eq!(conflict, Some(ShortcutAction::Fetch));
     }
 
@@ -259,11 +253,7 @@ mod tests {
     fn find_conflict_no_self_conflict() {
         let bindings = crate::default_shortcut_bindings();
         // 一个动作的当前绑定不与自己冲突。
-        let conflict = crate::find_shortcut_conflict(
-            &bindings,
-            ShortcutAction::Refresh,
-            "f5",
-        );
+        let conflict = crate::find_shortcut_conflict(&bindings, ShortcutAction::Refresh, "f5");
         assert_eq!(conflict, None);
     }
 }

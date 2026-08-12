@@ -23,9 +23,12 @@ pub use git::{
 };
 pub use proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 pub use storage::{
-    AppStorage, DiffEncodingPreferences, LegacyImportSummary, LegacyStoragePaths,
+    AppStorage, DiffEncodingPreferences, LegacyImportSummary, LegacyStoragePaths, MigrationOutcome,
     RemoteCredentialBinding, RemoteCredentialBindings, SessionState, ShortcutBindings, ThemeMode,
-    UpdatePreferences, default_database_path, default_legacy_storage_paths, legacy_storage_paths,
+    UpdatePreferences, apply_pending_portable_migration, default_database_path,
+    default_legacy_storage_paths, legacy_database_dir, legacy_database_path, legacy_storage_paths,
+    portable_database_dir, portable_database_path, portable_migrated_marker,
+    portable_pending_marker,
 };
 pub use types::*;
 pub use workflow::{

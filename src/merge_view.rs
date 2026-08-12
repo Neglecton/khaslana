@@ -70,11 +70,9 @@ impl RepositoryView {
         merge_in_progress: bool,
         merge_message: Option<String>,
     ) {
-        if let Some(message) = merge_message_update(
-            was_in_progress,
-            merge_in_progress,
-            merge_message.as_deref(),
-        ) {
+        if let Some(message) =
+            merge_message_update(was_in_progress, merge_in_progress, merge_message.as_deref())
+        {
             if merge_in_progress {
                 self.commit_message.set_value(message);
             } else {
