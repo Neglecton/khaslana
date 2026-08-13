@@ -48,8 +48,8 @@ use gpui::{
     Focusable, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
     ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, point, prelude::*, px,
-    size, uniform_list,
+    WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, img, point, prelude::*,
+    px, size, uniform_list,
 };
 use khaslana::{
     AiProviderSettings, AiReviewResult, BranchKind, BranchName, BranchSyncStatus,
@@ -91,7 +91,7 @@ use ui::{
         dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
         input_frame, list_row_surface, mode_pill, segmented_button, toggle_box,
     },
-    icons::{ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
+    icons::{OauthBrand, ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
     theme as ui_theme,
 };
 use ui_helpers::*;
@@ -374,16 +374,35 @@ enum CredentialFormMode {
     Ssh,
 }
 
-/// GitHub OAuth Device Flow 登录的 UI 状态（仿 SshCredentialDiscoveryState）。
+/// OAuth 快速登录的服务商。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OAuthProvider {
+    Github,
+    Gitee,
+}
+
+impl OAuthProvider {
+    fn label(self) -> &'static str {
+        match self {
+            OAuthProvider::Github => "GitHub",
+            OAuthProvider::Gitee => "Gitee",
+        }
+    }
+}
+
+/// OAuth 快速登录的 UI 状态（仿 SshCredentialDiscoveryState，支持 GitHub/Gitee）。
 #[derive(Clone, Debug, Default)]
-struct GithubLoginFlowState {
+struct OAuthLoginFlowState {
     loading: bool,
+    /// 当前正在登录的服务商（loading=true 时有意义）。
+    provider: Option<OAuthProvider>,
     /// 自增请求号，用于忽略过期/取消后的迟到事件。
     request_id: u64,
+    /// GitHub Device Flow 的用户验证码（Gitee 授权码流没有）。
     user_code: Option<String>,
     verification_uri: Option<String>,
     error: Option<String>,
-    /// 后台轮询任务的取消标记；UI 取消登录时置位。
+    /// 后台登录任务的取消标记；UI 取消登录时置位。
     cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -1627,18 +1646,22 @@ pub(crate) enum UiEvent {
     UpdateInstallFailed {
         error: String,
     },
-    // ── GitHub OAuth Device Flow 登录 ──
-    DeviceCodeReceived {
+    // ── OAuth 快速登录（GitHub Device Flow / Gitee 授权码流）──
+    OAuthLoginReady {
         request_id: u64,
-        user_code: String,
-        verification_uri: String,
+        provider: OAuthProvider,
+        /// 浏览器要打开的地址（GitHub：设备验证页；Gitee：授权页）。
+        url: String,
+        /// GitHub 的用户验证码（Gitee 为 None）。
+        user_code: Option<String>,
     },
-    GithubLoginSucceeded {
+    OAuthLoginSucceeded {
         request_id: u64,
+        provider: OAuthProvider,
         username: String,
         token: String,
     },
-    GithubLoginFailed {
+    OAuthLoginFailed {
         request_id: u64,
         error: String,
     },
@@ -1967,9 +1990,18 @@ pub(crate) fn send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
 /// 在系统默认浏览器中打开 URL。
 fn open_url(url: &str) {
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", url])
-        .spawn();
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：不弹出黑色 cmd 控制台窗口。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // raw_arg 绕过 Rust 对参数的自动引号转义，避免内层引号被二次转义导致 start 报错；
+        // URL 整体加双引号，让 cmd 不把查询串里的 & 当命令分隔符（&code=...&state=...）；
+        // 空标题 "" 防止 start 把引号包裹的目标当成窗口标题而被吞掉。
+        let _ = std::process::Command::new("cmd")
+            .raw_arg(format!("/C start \"\" \"{url}\""))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -2133,7 +2165,7 @@ pub(crate) struct RepositoryView {
     credential_form_mode: CredentialFormMode,
     credential_use_ssh_agent: bool,
     pub(crate) ssh_credential_discovery: SshCredentialDiscoveryState,
-    github_login_flow: GithubLoginFlowState,
+    oauth_login_flow: OAuthLoginFlowState,
     browse_content_focus: FocusHandle,
     clone_url: TextFieldState,
     clone_path: TextFieldState,
@@ -2301,7 +2333,7 @@ impl RepositoryView {
             credential_form_mode: CredentialFormMode::Https,
             credential_use_ssh_agent: false,
             ssh_credential_discovery: SshCredentialDiscoveryState::default(),
-            github_login_flow: GithubLoginFlowState::default(),
+            oauth_login_flow: OAuthLoginFlowState::default(),
             browse_content_focus: cx.focus_handle(),
             clone_url: TextFieldState::new(cx, "远程仓库 URL"),
             clone_path: TextFieldState::new(cx, "克隆到父文件夹"),
@@ -3396,60 +3428,78 @@ impl RepositoryView {
                     self.last_error = Some(error);
                 }
             }
-            UiEvent::DeviceCodeReceived {
+            UiEvent::OAuthLoginReady {
                 request_id,
+                provider,
+                url,
                 user_code,
-                verification_uri,
             } => {
-                if request_id == self.github_login_flow.request_id {
-                    self.github_login_flow.user_code = Some(user_code);
-                    self.github_login_flow.verification_uri = Some(verification_uri.clone());
-                    open_url(&verification_uri);
-                    self.status = "请在浏览器中完成 GitHub 登录".into();
+                if request_id == self.oauth_login_flow.request_id {
+                    self.oauth_login_flow.user_code = user_code;
+                    self.oauth_login_flow.verification_uri = Some(url.clone());
+                    open_url(&url);
+                    self.status = format!("请在浏览器中完成{}登录", provider.label());
                 }
             }
-            UiEvent::GithubLoginSucceeded {
+            UiEvent::OAuthLoginSucceeded {
                 request_id,
+                provider,
                 username,
                 token,
             } => {
-                if request_id == self.github_login_flow.request_id {
-                    self.github_login_flow.loading = false;
-                    self.github_login_flow.user_code = None;
-                    self.github_login_flow.verification_uri = None;
-                    self.github_login_flow.cancel = None;
+                if request_id == self.oauth_login_flow.request_id {
+                    let (host_url, note) = match provider {
+                        OAuthProvider::Github => ("github.com", "GitHub 登录成功，凭据已保存"),
+                        OAuthProvider::Gitee => (
+                            "gitee.com",
+                            "Gitee 登录成功，凭据已保存（令牌约 1 天过期，过期后重新登录）",
+                        ),
+                    };
+                    let provider_label = provider.label();
+                    self.oauth_login_flow.loading = false;
+                    self.oauth_login_flow.provider = None;
+                    self.oauth_login_flow.user_code = None;
+                    self.oauth_login_flow.verification_uri = None;
+                    self.oauth_login_flow.cancel = None;
                     // 把令牌当作 PAT 填入 HTTPS 凭据表单并直接保存，用户无需手动录入。
                     self.credential_form_mode = CredentialFormMode::Https;
                     self.credential_username.set_value(username.clone());
                     self.credential_secret.set_value(token);
                     if self.credential_display_name.value.trim().is_empty()
-                        || !self.credential_display_name.value.contains("GitHub")
+                        || !self.credential_display_name.value.contains(provider_label)
                     {
                         self.credential_display_name
-                            .set_value(format!("GitHub · {username}"));
+                            .set_value(format!("{provider_label} · {username}"));
                     }
                     if !self
                         .credential_remote_url
                         .value
                         .to_ascii_lowercase()
-                        .contains("github.com")
+                        .contains(host_url)
                     {
-                        self.credential_remote_url.set_value("https://github.com");
+                        self.credential_remote_url
+                            .set_value(format!("https://{host_url}"));
                     }
                     self.credential_scope = CredentialScope::Host;
                     self.save_credential_form();
-                    self.notify_success("GitHub 登录成功，凭据已保存", cx);
+                    self.notify_success(note, cx);
                 }
             }
-            UiEvent::GithubLoginFailed { request_id, error } => {
-                if request_id == self.github_login_flow.request_id {
-                    self.github_login_flow.loading = false;
-                    self.github_login_flow.user_code = None;
-                    self.github_login_flow.verification_uri = None;
-                    self.github_login_flow.cancel = None;
-                    self.github_login_flow.error = Some(error.clone());
+            UiEvent::OAuthLoginFailed { request_id, error } => {
+                if request_id == self.oauth_login_flow.request_id {
+                    let label = self
+                        .oauth_login_flow
+                        .provider
+                        .map(|p| p.label())
+                        .unwrap_or("OAuth");
+                    self.oauth_login_flow.loading = false;
+                    self.oauth_login_flow.provider = None;
+                    self.oauth_login_flow.user_code = None;
+                    self.oauth_login_flow.verification_uri = None;
+                    self.oauth_login_flow.cancel = None;
+                    self.oauth_login_flow.error = Some(error.clone());
                     self.last_error = Some(error.clone());
-                    self.notify_error(format!("GitHub 登录失败：{error}"), cx);
+                    self.notify_error(format!("{label} 登录失败：{error}"), cx);
                 }
             }
             UiEvent::CredentialSshKeyFileSelected { path } => {
@@ -5636,18 +5686,19 @@ impl RepositoryView {
                 .max(1);
             self.ssh_credential_discovery.loading = false;
         }
-        // 作废可能进行中的 GitHub 设备码登录：递增请求号让迟到事件被忽略，并停止后台轮询。
-        if self.github_login_flow.loading {
-            self.github_login_flow.request_id =
-                self.github_login_flow.request_id.wrapping_add(1).max(1);
-            self.github_login_flow.loading = false;
+        // 作废可能进行中的 OAuth 登录：递增请求号让迟到事件被忽略，并停止后台任务。
+        if self.oauth_login_flow.loading {
+            self.oauth_login_flow.request_id =
+                self.oauth_login_flow.request_id.wrapping_add(1).max(1);
+            self.oauth_login_flow.loading = false;
         }
-        if let Some(cancel) = self.github_login_flow.cancel.take() {
+        if let Some(cancel) = self.oauth_login_flow.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
-        self.github_login_flow.user_code = None;
-        self.github_login_flow.verification_uri = None;
-        self.github_login_flow.error = None;
+        self.oauth_login_flow.provider = None;
+        self.oauth_login_flow.user_code = None;
+        self.oauth_login_flow.verification_uri = None;
+        self.oauth_login_flow.error = None;
         self.credential_form_mode = CredentialFormMode::Https;
         self.credential_scope = CredentialScope::RemoteUrl;
         self.credential_use_ssh_agent = false;
@@ -5764,26 +5815,32 @@ impl RepositoryView {
         });
     }
 
+    /// OAuth 登录公共前置：递增 request_id、置 loading、建取消标记。返回 (request_id, cancel)。
+    fn begin_oauth_login(&mut self, provider: OAuthProvider) -> (u64, Arc<AtomicBool>) {
+        self.oauth_login_flow.request_id = self.oauth_login_flow.request_id.wrapping_add(1).max(1);
+        let request_id = self.oauth_login_flow.request_id;
+        self.oauth_login_flow.loading = true;
+        self.oauth_login_flow.provider = Some(provider);
+        self.oauth_login_flow.error = None;
+        self.oauth_login_flow.user_code = None;
+        self.oauth_login_flow.verification_uri = None;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.oauth_login_flow.cancel = Some(cancel.clone());
+        self.last_error = None;
+        (request_id, cancel)
+    }
+
     /// 启动 GitHub OAuth Device Flow 登录：后台请求设备码 → 显示并打开浏览器 → 轮询令牌。
     pub(crate) fn start_github_login(&mut self) {
-        if self.github_login_flow.loading {
+        if self.oauth_login_flow.loading {
             return;
         }
         if !oauth::is_configured() {
             self.last_error = Some("尚未配置 GitHub OAuth Client ID，请联系维护者".into());
             return;
         }
-        self.github_login_flow.request_id =
-            self.github_login_flow.request_id.wrapping_add(1).max(1);
-        let request_id = self.github_login_flow.request_id;
-        self.github_login_flow.loading = true;
-        self.github_login_flow.error = None;
-        self.github_login_flow.user_code = None;
-        self.github_login_flow.verification_uri = None;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.github_login_flow.cancel = Some(cancel.clone());
+        let (request_id, cancel) = self.begin_oauth_login(OAuthProvider::Github);
         self.status = "正在请求 GitHub 设备码...".into();
-        self.last_error = None;
         // 复用全局代理设置，与 AI/更新等网络请求保持一致。
         let proxy_url = self
             .proxy_settings
@@ -5794,7 +5851,7 @@ impl RepositoryView {
             let device = match oauth::request_device_code(proxy_url.clone()) {
                 Ok(d) => d,
                 Err(error) => {
-                    send_ui_event(&tx, UiEvent::GithubLoginFailed { request_id, error });
+                    send_ui_event(&tx, UiEvent::OAuthLoginFailed { request_id, error });
                     return;
                 }
             };
@@ -5805,10 +5862,11 @@ impl RepositoryView {
             let expires_in = device.expires_in;
             send_ui_event(
                 &tx,
-                UiEvent::DeviceCodeReceived {
+                UiEvent::OAuthLoginReady {
                     request_id,
-                    user_code: user_code.clone(),
-                    verification_uri: verification_uri.clone(),
+                    provider: OAuthProvider::Github,
+                    url: verification_uri,
+                    user_code: Some(user_code),
                 },
             );
             // 2. 轮询令牌（取消由 UI 通过 cancel 标记触发）。
@@ -5824,31 +5882,76 @@ impl RepositoryView {
                     match oauth::fetch_login(proxy_url, &token) {
                         Ok(username) => send_ui_event(
                             &tx,
-                            UiEvent::GithubLoginSucceeded {
+                            UiEvent::OAuthLoginSucceeded {
                                 request_id,
+                                provider: OAuthProvider::Github,
                                 username,
                                 token,
                             },
                         ),
                         Err(error) => {
-                            send_ui_event(&tx, UiEvent::GithubLoginFailed { request_id, error })
+                            send_ui_event(&tx, UiEvent::OAuthLoginFailed { request_id, error })
                         }
                     }
                 }
-                Err(error) => send_ui_event(&tx, UiEvent::GithubLoginFailed { request_id, error }),
+                Err(error) => send_ui_event(&tx, UiEvent::OAuthLoginFailed { request_id, error }),
             }
         });
     }
 
-    /// 取消进行中的 GitHub 登录。
-    pub(crate) fn cancel_github_login(&mut self) {
-        if let Some(cancel) = self.github_login_flow.cancel.take() {
+    /// 启动 Gitee OAuth 授权码流登录：本地回调收 code → broker 换 token → 取登录名。
+    pub(crate) fn start_gitee_login(&mut self) {
+        if self.oauth_login_flow.loading {
+            return;
+        }
+        if !oauth::is_gitee_configured() {
+            self.last_error = Some("尚未配置 Gitee 登录服务（broker URL），详见 AGENTS.md".into());
+            return;
+        }
+        let (request_id, cancel) = self.begin_oauth_login(OAuthProvider::Gitee);
+        self.status = "正在等待浏览器完成 Gitee 授权...".into();
+        let proxy_url = self
+            .proxy_settings
+            .proxy_url_for_target("https://gitee.com/");
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Long, move || {
+            let result = oauth::gitee_run_code_flow(proxy_url, cancel.as_ref(), |url| {
+                // 本地回调监听已就绪，通知 UI 打开浏览器（验证码仅 GitHub 有，Gitee 为 None）。
+                send_ui_event(
+                    &tx,
+                    UiEvent::OAuthLoginReady {
+                        request_id,
+                        provider: OAuthProvider::Gitee,
+                        url: url.to_string(),
+                        user_code: None,
+                    },
+                );
+            });
+            match result {
+                Ok((token, username)) => send_ui_event(
+                    &tx,
+                    UiEvent::OAuthLoginSucceeded {
+                        request_id,
+                        provider: OAuthProvider::Gitee,
+                        username,
+                        token,
+                    },
+                ),
+                Err(error) => send_ui_event(&tx, UiEvent::OAuthLoginFailed { request_id, error }),
+            }
+        });
+    }
+
+    /// 取消进行中的 OAuth 登录。
+    pub(crate) fn cancel_oauth_login(&mut self) {
+        if let Some(cancel) = self.oauth_login_flow.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
-        self.github_login_flow.loading = false;
-        self.github_login_flow.user_code = None;
-        self.github_login_flow.verification_uri = None;
-        self.status = "已取消 GitHub 登录".into();
+        self.oauth_login_flow.loading = false;
+        self.oauth_login_flow.provider = None;
+        self.oauth_login_flow.user_code = None;
+        self.oauth_login_flow.verification_uri = None;
+        self.status = "已取消登录".into();
     }
 
     fn save_credential_form(&mut self) {
@@ -13450,14 +13553,52 @@ impl RepositoryView {
             )
     }
 
-    /// GitHub Device Flow 登录区：按钮 + 进行中的验证码/取消面板 + 错误提示。
-    fn render_github_login_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let flow = &self.github_login_flow;
-        let button_label = if flow.loading {
-            "登录中..."
-        } else {
-            "通过浏览器登录"
-        };
+    /// OAuth 品牌矩形按钮：显示带文字的品牌 logo（按当前主题选浅/深变体），点击触发登录。
+    /// 两个按钮用统一固定宽度，避免 logo 长宽比不同导致不等宽。
+    fn oauth_brand_button(
+        &self,
+        brand: OauthBrand,
+        enabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let icon_h = 18.0_f32;
+        let icon_w = icon_h * brand.aspect();
+        // 按当前主题取适配的 logo 变体。GPUI 的 svg() 只能按 text_color 做单色 alpha 蒙版，
+        // 会丢掉品牌色（Gitee 红、彩色文字）；改用 img() 走 render_single_frame，保留 SVG 原始 fill。
+        div()
+            .id(brand.id_str())
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(140.0))
+            .h(px(36.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .border_1()
+            .border_color(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::CARD))
+            .child(
+                img(brand.lockup_path())
+                    .h(px(icon_h))
+                    .w(px(icon_w))
+                    .flex_none(),
+            )
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        on_click(this, window, cx);
+                        cx.notify();
+                    }))
+            })
+            .when(!enabled, |this| this.opacity(0.5))
+    }
+
+    /// OAuth 快速登录区：品牌按钮 + 进行中的验证码/取消面板 + 错误提示。
+    fn render_oauth_login_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let flow = &self.oauth_login_flow;
+        let github_enabled = !flow.loading && !self.busy;
+        let gitee_enabled = github_enabled && oauth::is_gitee_configured();
         let mut panel = div()
             .flex()
             .flex_col()
@@ -13471,37 +13612,32 @@ impl RepositoryView {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
-                                    .child("GitHub 快速登录"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                    .child("通过浏览器授权获取访问令牌，无需手动填写 PAT"),
-                            ),
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("快速登录"),
                     )
-                    .child(self.button(
-                        button_label,
-                        !flow.loading && !self.busy,
+                    .child(self.oauth_brand_button(
+                        OauthBrand::Github,
+                        github_enabled,
                         |this, _, _| this.start_github_login(),
+                        cx,
+                    ))
+                    .child(self.oauth_brand_button(
+                        OauthBrand::Gitee,
+                        gitee_enabled,
+                        |this, _, _| this.start_gitee_login(),
                         cx,
                     )),
             );
 
-        // 进行中：显示验证码 + 取消按钮。
         if flow.loading {
+            let provider_label = flow.provider.map(|p| p.label()).unwrap_or("OAuth");
             if let Some(code) = flow.user_code.clone() {
+                // GitHub Device Flow：显示用户验证码 + 取消。
                 panel = panel.child(
                     div()
                         .flex()
@@ -13511,7 +13647,9 @@ impl RepositoryView {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                .child("已在浏览器打开 GitHub，请确认验证码后完成登录："),
+                                .child(format!(
+                                    "已在浏览器打开{provider_label}，请确认验证码后完成登录："
+                                )),
                         )
                         .child(
                             div()
@@ -13529,19 +13667,29 @@ impl RepositoryView {
                                 .child(self.button(
                                     "取消",
                                     !self.busy,
-                                    |this, _, _| this.cancel_github_login(),
+                                    |this, _, _| this.cancel_oauth_login(),
                                     cx,
                                 )),
                         ),
                 );
             } else {
+                // Gitee 授权码流（或设备码尚未到位）：等待浏览器授权。
                 panel = panel.child(
                     div()
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .child("正在请求设备码..."),
+                        .child(format!("请在浏览器中完成{provider_label}登录...")),
                 );
             }
+        } else if !oauth::is_gitee_configured() {
+            panel = panel.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(
+                        "Gitee 登录需由维护者部署令牌交换服务（见 AGENTS.md）；GitHub 可直接使用。",
+                    ),
+            );
         }
 
         if let Some(error) = flow.error.clone() {
@@ -13588,7 +13736,7 @@ impl RepositoryView {
             )
             .when(
                 self.credential_form_mode == CredentialFormMode::Https,
-                |this| this.child(self.render_github_login_section(cx)),
+                |this| this.child(self.render_oauth_login_section(cx)),
             )
             .when(
                 self.credential_form_mode == CredentialFormMode::Ssh,

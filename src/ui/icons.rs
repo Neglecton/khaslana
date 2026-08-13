@@ -1,6 +1,6 @@
 use gpui::{IntoElement, ParentElement, Radians, Styled, Transformation, div, px, svg};
 
-use super::theme::rgb;
+use super::theme::{ThemeVariant, active_variant, rgb};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolbarIcon {
@@ -67,6 +67,45 @@ impl ToolbarIcon {
 
 pub(crate) fn toolbar_icon(icon: ToolbarIcon, color: u32) -> impl IntoElement {
     toolbar_icon_with_size(icon, color, 15.0, 16.0)
+}
+
+/// OAuth 快速登录的品牌图标（带文字 logo 的 lockup）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OauthBrand {
+    Github,
+    Gitee,
+}
+
+impl OauthBrand {
+    pub(crate) fn id_str(self) -> &'static str {
+        match self {
+            OauthBrand::Github => "oauth-login-github",
+            OauthBrand::Gitee => "oauth-login-gitee",
+        }
+    }
+
+    /// 按指定主题返回带文字 logo 的 SVG 路径（品牌图标用固定 fill，靠浅/深变体适配）。
+    pub(crate) fn lockup_path_for(self, variant: ThemeVariant) -> &'static str {
+        match (self, variant) {
+            (OauthBrand::Github, ThemeVariant::Light) => "icons/github_lockup_light.svg",
+            (OauthBrand::Github, ThemeVariant::Dark) => "icons/github_lockup_dark.svg",
+            (OauthBrand::Gitee, ThemeVariant::Light) => "icons/gitee_lockup_light.svg",
+            (OauthBrand::Gitee, ThemeVariant::Dark) => "icons/gitee_lockup_dark.svg",
+        }
+    }
+
+    /// 当前主题下的路径。
+    pub(crate) fn lockup_path(self) -> &'static str {
+        self.lockup_path_for(active_variant())
+    }
+
+    /// 原始宽高比（宽/高），用于按固定高度等比缩放 logo。
+    pub(crate) fn aspect(self) -> f32 {
+        match self {
+            OauthBrand::Github => 416.0 / 95.0,
+            OauthBrand::Gitee => 178.0 / 56.0,
+        }
+    }
 }
 
 /// 可指定图标和槽位大小的版本，用于行内按钮等小尺寸场景

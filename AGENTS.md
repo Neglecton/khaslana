@@ -54,7 +54,9 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
-- `src/oauth.rs`：GitHub OAuth Device Flow 服务层，包括设备码请求、令牌轮询（含 `authorization_pending`/`slow_down`/取消/过期处理）和用令牌换取登录名；纯同步 `ureq` 实现，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。
+- `src/oauth.rs`：OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。GitHub 走设备流（设备码请求、令牌轮询含 `authorization_pending`/`slow_down`/取消/过期、用令牌换取登录名）；Gitee 走授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调服务器用 `std::net` 手写、收 code → POST 给 broker 换 token → 取登录名）。纯同步 `ureq`，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。客户端不含 Gitee `client_secret`（公开分发会泄露），token 交换由部署在边缘平台的 broker 代办（见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`）。
+- Gitee OAuth 令牌交换 broker：实现位于独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker)（`edge-functions/gitee.js`，部署到腾讯云 EdgeOne 边缘函数或任意 serverless 平台），持有 `GITEE_CLIENT_SECRET` 环境变量，替客户端用授权码向 Gitee 换 access_token。客户端只持 `GITEE_OAUTH_CLIENT_ID` + `GITEE_BROKER_URL`（`src/oauth.rs` 常量，二者均非空时 Gitee 登录按钮启用）。后续若新增其它 serverless 服务，也统一放进该仓库。
+- `assets/icons/github_lockup_{light,dark}.svg`、`assets/icons/gitee_lockup_{light,dark}.svg`：GitHub/Gitee 带文字品牌图标，按主题选浅/深变体，用于「添加凭据」的 OAuth 快速登录按钮（`OauthBrand`，`src/ui/icons.rs`）。品牌图标用固定 fill（Gitee 为红 + 黑/白多色），GPUI 的 `svg()` 只能做单色 alpha 蒙版会丢色，故按钮通过 `img()`（`render_single_frame`）渲染以保留原始配色，由 `ui_theme::active_variant()` 决定取哪个文件。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
@@ -267,7 +269,9 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 ### 5.6 凭据
 
 - HTTPS 用户名 + 密码/PAT
-- GitHub 快速登录：在添加 HTTPS 凭据时点击「通过浏览器登录」，走 OAuth Device Flow（请求设备码 → 自动打开浏览器并预填验证码 → 后台轮询拿 access_token → 取登录名并自动保存），用户无需手动录入 PAT。`GITHUB_OAUTH_CLIENT_ID` 为编译期常量，需维护者在 GitHub 注册 OAuth App 并勾选 Device Flow 后填入 `src/oauth.rs`。令牌按 `repo workflow` scope 申请，覆盖私有/公有仓库读写与工作流文件推送。受限组织（开启 OAuth App Access Restrictions）的私有库需组织 Owner 审批该 OAuth App 后才能访问。
+- OAuth 快速登录：在添加 HTTPS 凭据时点击品牌矩形按钮（GitHub/Gitee 带文字 logo，按当前主题选浅/深变体），浏览器授权后自动取登录名并保存，无需手动录入 PAT。
+  - GitHub：OAuth Device Flow（请求设备码 → 自动打开浏览器并预填验证码 → 后台轮询拿 access_token → 取登录名）。`GITHUB_OAUTH_CLIENT_ID` 为编译期常量，需维护者在 GitHub 注册 OAuth App 并勾选 Device Flow 后填入 `src/oauth.rs`。scope `repo workflow`，覆盖私有/公有仓库读写与工作流文件推送。受限组织（开启 OAuth App Access Restrictions）的私有库需组织 Owner 审批该 OAuth App 后才能访问。
+  - Gitee：授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调收 code → POST 给 broker 换 token → 取登录名）。Gitee 不支持 Device Flow/PKCE，公开客户端不能内置 `client_secret`，故 token 交换由部署在边缘平台的 broker 代办（独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`），客户端只持 `GITEE_OAUTH_CLIENT_ID` + `GITEE_BROKER_URL`（二者均非空时 Gitee 按钮启用）。scope `projects user_info`。**Gitee access_token 约 1 天过期（平台限制）**，过期后 git 操作会认证失败，重新点击 Gitee 登录即可刷新（MVP 手动续期，自动刷新留作后续）。
 - SSH key + passphrase
 - 可使用 SSH agent
 - 新增 SSH 凭据时自动检测 `~/.ssh`、SSH config 和 SSH Agent，可一键选择已有身份，也可通过文件框手动选择私钥

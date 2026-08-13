@@ -1,14 +1,19 @@
-//! GitHub OAuth Device Flow 服务层。
+//! OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。
 //!
-//! 通过 OAuth 2.0 设备授权流程（RFC 8628）获取用户 access_token，作为 git HTTPS
-//! 认证密码，替代用户手动录入 PAT。仅使用同步 `ureq` 客户端，供后台任务线程阻塞调用，
-//! 不引入异步运行时；代理设置由调用方传入，与 AI/更新等网络请求保持一致。
+//! 通过浏览器授权获取用户 access_token，作为 git HTTPS 认证密码，替代用户手动录入
+//! PAT。仅使用同步 `ureq` 客户端，供后台任务线程阻塞调用，不引入异步运行时；代理设置
+//! 由调用方传入，与 AI/更新等网络请求保持一致。
 //!
-//! Device Flow 无需 client_secret，也不需要本地回调服务器，最适合桌面应用。
-//! 维护者需在 GitHub 注册一个 OAuth App 并勾选 "Enable Device Flow"。
+//! - GitHub：Device Flow（RFC 8628），无需 client_secret、无需本地回调服务器。维护者
+//!   需在 GitHub 注册 OAuth App 并勾选 "Enable Device Flow"。
+//! - Gitee：授权码流 + 本地回调（127.0.0.1:17890）。Gitee 不支持 Device Flow/PKCE，
+//!   公开客户端不能内置 client_secret，故 token 交换由部署在 EdgeOne 等边缘平台的
+//!   broker 代办（见独立仓库 khaslana-broker 的 `edge-functions/gitee.js`），客户端只持 client_id + broker URL。
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -200,6 +205,252 @@ struct GithubUser {
     login: Option<String>,
 }
 
+// ── Gitee OAuth 授权码流（本地回调 + broker 代换 token）─────────────────────
+
+/// Gitee OAuth App 的 Client ID（公开标识，可放客户端）。
+const GITEE_OAUTH_CLIENT_ID: &str =
+    "078a2744281d89a8527ba545243ee9b7d9840a1f1465000c8ab9945ba2f07911";
+/// broker（EdgeOne 边缘函数，见独立仓库 khaslana-broker 的 `edge-functions/gitee.js`）URL。部署后填入；为空时 Gitee 登录禁用。
+/// broker 持有 client_secret，替客户端用授权码换 token，避免把 secret 放进公开发布的客户端。
+const GITEE_BROKER_URL: &str = "https://khaslana-broker.suhoan.cn/gitee";
+/// 本地回调服务器监听端口与回调地址（必须在 Gitee OAuth 应用里原样登记）。
+const GITEE_CALLBACK_PORT: u16 = 17890;
+const GITEE_REDIRECT_URI: &str = "http://localhost:17890/callback";
+/// Gitee OAuth scope：`projects` 仓库读写，`user_info` 取登录名。
+const GITEE_OAUTH_SCOPES: &str = "projects user_info";
+
+const GITEE_AUTHORIZE_URL: &str = "https://gitee.com/oauth/authorize";
+const GITEE_USER_API: &str = "https://gitee.com/api/v5/user";
+
+/// Gitee 快速登录是否就绪：需要 client_id 和 broker URL 均已配置。
+pub(crate) fn is_gitee_configured() -> bool {
+    !GITEE_OAUTH_CLIENT_ID.trim().is_empty() && !GITEE_BROKER_URL.trim().is_empty()
+}
+
+/// 构造 Gitee 授权页地址（浏览器打开，用户登录授权后回调到本地 17890）。
+pub(crate) fn gitee_authorize_url(state: &str) -> String {
+    format!(
+        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
+        GITEE_AUTHORIZE_URL,
+        GITEE_OAUTH_CLIENT_ID,
+        url_encode(GITEE_REDIRECT_URI),
+        url_encode(GITEE_OAUTH_SCOPES),
+        url_encode(state),
+    )
+}
+
+/// 运行 Gitee 授权码流：本地回调收 code → broker 换 token → 取登录名。
+///
+/// `on_ready` 在本地监听就绪后回调一次（用于打开浏览器，避免浏览器早于监听）。
+/// 成功返回 `(access_token, 登录名)`。
+pub(crate) fn gitee_run_code_flow<F>(
+    proxy_url: Option<String>,
+    cancel: &AtomicBool,
+    on_ready: F,
+) -> Result<(String, String), String>
+where
+    F: FnOnce(&str),
+{
+    let state = random_state();
+    // 1. 绑定本地回调监听。
+    let listener = TcpListener::bind(("127.0.0.1", GITEE_CALLBACK_PORT))
+        .map_err(|e| format!("无法监听本地回调端口 {GITEE_CALLBACK_PORT}：{e}（可能被占用）"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置回调监听非阻塞失败：{e}"))?;
+
+    let authorize_url = gitee_authorize_url(&state);
+    // 2. 监听已就绪，通知调用方打开浏览器。
+    on_ready(&authorize_url);
+
+    // 3. 等待回调，最多 180s，期间响应取消。
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let code = loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("等待浏览器授权超时".into());
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                if let Some((code, cb_state, err)) = read_callback_request(&mut stream) {
+                    let _ = respond_callback_success(&mut stream);
+                    if let Some(err) = err {
+                        return Err(format!("Gitee 拒绝授权：{err}"));
+                    }
+                    if cb_state.as_deref() != Some(state.as_str()) {
+                        return Err("授权 state 校验失败，已放弃以防 CSRF".into());
+                    }
+                    break code.ok_or_else(|| "回调未携带授权码".to_string())?;
+                }
+                // 没读到有效请求行：继续等下一个连接。
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("回调监听错误：{e}")),
+        }
+    };
+
+    // 4. 通过 broker 用 code 换 token（客户端不带 client_secret）。
+    let token = exchange_via_broker(proxy_url.clone(), &code)?;
+    // 5. 取登录名。
+    let login = fetch_gitee_login(proxy_url, &token)?;
+    Ok((token, login))
+}
+
+/// 读取回调 HTTP 请求，解析出 `(code, state, error)`。
+fn read_callback_request(
+    stream: &mut TcpStream,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let mut buf = [0u8; 4096];
+    let n = stream.read(&mut buf).ok()?;
+    let req = std::str::from_utf8(&buf[..n]).ok()?;
+    // 请求行形如：GET /callback?code=xxx&state=yyy HTTP/1.1
+    let request_line = req.lines().next()?;
+    let path = request_line.split_whitespace().nth(1)?;
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    Some((
+        query_param(query, "code"),
+        query_param(query, "state"),
+        query_param(query, "error"),
+    ))
+}
+
+/// 回一个最小 HTML 告知用户登录成功、可关闭页面。
+fn respond_callback_success(stream: &mut TcpStream) -> std::io::Result<()> {
+    let body = "<!doctype html><meta charset='utf-8'><title>登录成功</title>\
+<body style='font-family:sans-serif;text-align:center;margin-top:60px'>\
+登录成功，可以关闭此页面返回 Khaslana。</body>";
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()
+}
+
+/// 通过 broker 用授权码换 token（broker 持有 client_secret 向 Gitee 交换）。
+fn exchange_via_broker(proxy_url: Option<String>, code: &str) -> Result<String, String> {
+    let agent = build_agent(proxy_url);
+    let body = serde_json::json!({
+        "code": code,
+        "redirect_uri": GITEE_REDIRECT_URI,
+    });
+    let resp = agent
+        .post(GITEE_BROKER_URL)
+        .set("Accept", "application/json")
+        .send_json(body)
+        .map_err(|e| format!("令牌交换失败（broker）：{e}"))?;
+    let parsed: BrokerTokenResponse = resp
+        .into_json()
+        .map_err(|e| format!("解析令牌响应失败：{e}"))?;
+    parsed.access_token.ok_or_else(|| {
+        // 优先用 Gitee 返回的中文 error_description，便于用户理解。
+        parsed
+            .error_description
+            .or(parsed.error)
+            .unwrap_or_else(|| "broker 未返回令牌".to_string())
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct BrokerTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// 用 access_token 获取 Gitee 登录名（作为 git 认证用户名）。
+fn fetch_gitee_login(proxy_url: Option<String>, token: &str) -> Result<String, String> {
+    let agent = build_agent(proxy_url);
+    let resp = agent
+        .get(GITEE_USER_API)
+        .query("access_token", token)
+        .call()
+        .map_err(|e| format!("获取 Gitee 用户信息失败：{e}"))?;
+    let user: GiteeUser = resp
+        .into_json()
+        .map_err(|e| format!("解析 Gitee 用户信息失败：{e}"))?;
+    user.login.ok_or_else(|| "Gitee 未返回登录名".into())
+}
+
+#[derive(Debug, Deserialize)]
+struct GiteeUser {
+    login: Option<String>,
+}
+
+/// 生成一个简单的 CSRF state（时间戳 + 进程内计数），loopback 场景足够。
+fn random_state() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}{n:x}")
+}
+
+/// 在查询串中取某个 key 的值（已百分号解码）。
+fn query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// 百分号解码（`%XX` 与 `+`→空格）。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(byte) =
+                    u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+                {
+                    out.push(byte);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 把字符串编码为 application/x-www-form-urlencoded 片段（仅保留 unreserved 字符）。
+fn url_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +582,80 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let err = poll_for_token(None, "dc".into(), 5, 900, &cancel).unwrap_err();
         assert_eq!(err, "已取消");
+    }
+
+    #[test]
+    fn gitee_authorize_url_contains_required_params() {
+        let url = gitee_authorize_url("xyz");
+        assert!(url.starts_with("https://gitee.com/oauth/authorize?"));
+        assert!(url.contains("client_id="));
+        // redirect_uri 的冒号/斜杠必须被编码
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A17890%2Fcallback"));
+        // scope 的空格必须被编码
+        assert!(url.contains("scope=projects%20user_info"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("state=xyz"));
+    }
+
+    #[test]
+    fn url_encode_encodes_spaces_and_specials() {
+        assert_eq!(url_encode("a b"), "a%20b");
+        assert_eq!(url_encode("https://x"), "https%3A%2F%2Fx");
+        assert_eq!(url_encode("ab-_~1"), "ab-_~1");
+    }
+
+    #[test]
+    fn query_param_and_percent_decode() {
+        let q = "code=abc&state=xyz123";
+        assert_eq!(query_param(q, "code").as_deref(), Some("abc"));
+        assert_eq!(query_param(q, "state").as_deref(), Some("xyz123"));
+        assert!(query_param(q, "missing").is_none());
+
+        // 百分号解码
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("%E4%B8%AD"), "中");
+    }
+
+    #[test]
+    fn read_callback_request_parses_code_and_state() {
+        // 模拟一段回调 HTTP 请求。
+        let req = "GET /callback?code=abcdef&state=st123 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        // read_callback_request 需要一个真实 TcpStream，这里用内存管道不现实，
+        // 因此直接验证其依赖的查询解析逻辑。
+        let path = req.lines().next().unwrap();
+        let p = path.split_whitespace().nth(1).unwrap();
+        let query = p.split_once('?').map(|(_, q)| q).unwrap_or("");
+        assert_eq!(query_param(query, "code").as_deref(), Some("abcdef"));
+        assert_eq!(query_param(query, "state").as_deref(), Some("st123"));
+    }
+
+    #[test]
+    fn broker_token_response_parses_success_and_error() {
+        let ok: BrokerTokenResponse =
+            serde_json::from_str(r#"{"access_token":"gtoken","token_type":"bearer"}"#).unwrap();
+        assert_eq!(ok.access_token.as_deref(), Some("gtoken"));
+        assert!(ok.error.is_none());
+
+        let err: BrokerTokenResponse =
+            serde_json::from_str(r#"{"error":"invalid_grant","error_description":"bad code"}"#)
+                .unwrap();
+        assert!(err.access_token.is_none());
+        assert_eq!(err.error.as_deref(), Some("invalid_grant"));
+    }
+
+    #[test]
+    fn parse_gitee_user() {
+        let u: GiteeUser = serde_json::from_str(r#"{"login":"someone","id":42}"#).unwrap();
+        assert_eq!(u.login.as_deref(), Some("someone"));
+    }
+
+    #[test]
+    fn random_state_is_uniqueish_and_nonempty() {
+        let a = random_state();
+        let b = random_state();
+        assert!(!a.is_empty());
+        // 计数器递增，两次不同
+        assert_ne!(a, b);
     }
 }

@@ -150,6 +150,8 @@ Khaslana 支持三类凭据策略：
 
 HTTPS 凭据支持用户名 + 密码 / PAT；SSH 凭据支持私钥、passphrase 和 SSH agent。
 
+添加 HTTPS 凭据时可通过浏览器一键登录 GitHub / Gitee 自动获取登录名与令牌，免去手动录入 PAT。GitHub 走 OAuth Device Flow，无需额外服务即可使用；Gitee 走授权码流，因公开分发的客户端不能内置 `client_secret`，需要自部署一个持有 secret 的 broker，部署步骤见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker)。未部署 broker 时 Gitee 一键登录不可用，但仍可手动填写 PAT。
+
 ### 网络代理
 
 代理设置为全局应用配置，支持：
