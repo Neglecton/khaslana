@@ -9,7 +9,7 @@ use khaslana::{FileDiff, StashFileChange};
 
 use crate::{
     CHANGE_ROW_HEIGHT, DialogState, DiffHeaderTarget, EncodingMenuTarget, FieldId, MainMode,
-    RepositoryView, ResizeTarget, ScrollbarMode, UiEvent, change_state_color, dialog_actions,
+    RepositoryView, ResizeTarget, ScrollbarMode, UiEvent, change_state_badge, dialog_actions,
     menu_separator, perf_log, placeholder_row, scrollable_uniform_frame, section_header,
     send_ui_event, tasks::TaskKind, ui::theme as ui_theme,
 };
@@ -409,8 +409,6 @@ impl RepositoryView {
             .filter(|old_path| old_path.as_str() != file.path.as_str())
             .map(|old_path| format!("{old_path} -> {}", file.path))
             .unwrap_or_else(|| file.path.clone());
-        let state = file.status.label();
-        let state_color = change_state_color(&file.status);
 
         div()
             .id(format!("stash-file-{}", file.path))
@@ -442,15 +440,7 @@ impl RepositoryView {
                 this.select_stash_file(path.clone(), false);
                 cx.notify();
             }))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(24.0))
-                    .text_size(px(11.0))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(state_color))
-                    .child(state),
-            )
+            .child(change_state_badge(Some(&file.status)))
             .child(
                 div()
                     .flex_1()

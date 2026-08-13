@@ -18,7 +18,7 @@ use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
     ui::theme as ui_theme,
     ui_helpers::{
-        ScrollbarMode, change_state_color, placeholder_row, scrollable_uniform_frame,
+        ScrollbarMode, change_state_badge, placeholder_row, scrollable_uniform_frame,
         section_header,
     },
 };
@@ -425,9 +425,9 @@ impl RepositoryView {
                     .as_deref()
                     .map(|selected| selected == Path::new(&row.path))
                     .unwrap_or(false);
-                let status_label = status.label();
-                let status_color = change_state_color(&status);
                 let display = compare_file_leaf_display(&row.name, old_path.as_deref());
+                // 状态徽章需在 status move 进 file_for_click 之前构建（ChangeState 非 Copy）
+                let status_badge = change_state_badge(Some(&status));
                 let file_for_click = BrowseCompareFile {
                     path: row.path.clone(),
                     old_path,
@@ -467,20 +467,7 @@ impl RepositoryView {
                             cx.notify();
                         }),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(22.0))
-                            .py_0p5()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(status_color))
-                            .text_size(px(10.0))
-                            .font_family("Consolas, monospace")
-                            .text_color(rgb(status_color))
-                            .text_align(gpui::TextAlign::Center)
-                            .child(status_label),
-                    )
+                    .child(status_badge)
                     .child(
                         div()
                             .flex_none()

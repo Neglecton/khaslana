@@ -772,28 +772,46 @@ pub(crate) fn diff_scope_id(scope: &DiffScope) -> &'static str {
     }
 }
 
+/// Git 状态 → 区分色（GitHub 风格：绿增 / 蓝改 / 红删 / 亮红冲突 / 橙更名 / 灰未跟踪）。
+/// 文件列表的状态字母、徽章底色、描边均统一取此色，保证各视图配色一致。
 pub(crate) fn change_state_color(state: &ChangeState) -> u32 {
     match state {
         ChangeState::Added => ui_theme::GIT_ADDED,
-        ChangeState::Modified => ui_theme::COLOR_WARNING_FOREGROUND,
-        ChangeState::Deleted | ChangeState::Conflicted => ui_theme::DESTRUCTIVE,
-        ChangeState::Renamed => ui_theme::PRIMARY,
-        ChangeState::Typechange => ui_theme::PRIMARY,
-        ChangeState::Untracked => ui_theme::MUTED_FOREGROUND,
+        ChangeState::Modified => ui_theme::GIT_MODIFIED,
+        ChangeState::Deleted => ui_theme::GIT_REMOVED,
+        // 冲突用最醒目的危险红，区别于普通删除
+        ChangeState::Conflicted => ui_theme::DESTRUCTIVE,
+        ChangeState::Renamed | ChangeState::Typechange => ui_theme::GIT_RENAMED,
+        ChangeState::Untracked => ui_theme::GIT_UNTRACKED,
     }
 }
 
-/// 设计图：变更行状态字母 badge 的背景色
-/// M → PRIMARY, A → GIT_ADDED, ? → GIT_UNTRACKED, D → DESTRUCTIVE
+/// 变更行状态徽章的背景色，与文字色统一（不再与 `change_state_color` 分歧）。
 pub(crate) fn change_state_badge_bg(state: &ChangeState) -> u32 {
-    match state {
-        ChangeState::Modified => ui_theme::PRIMARY,
-        ChangeState::Added => ui_theme::GIT_ADDED,
-        ChangeState::Deleted | ChangeState::Conflicted => ui_theme::DESTRUCTIVE,
-        ChangeState::Renamed => ui_theme::PRIMARY,
-        ChangeState::Typechange => ui_theme::PRIMARY,
-        ChangeState::Untracked => ui_theme::GIT_UNTRACKED,
-    }
+    change_state_color(state)
+}
+
+/// 统一的 Git 状态徽章：圆角填充底色 + 白色加粗字母。
+/// 工作区变更、提交文件、贮藏文件、分支比较文件列表共用，保证视觉一致。
+pub(crate) fn change_state_badge(state: Option<&ChangeState>) -> impl IntoElement + use<> {
+    // 无状态（如工作区未取到状态）时显示灰色占位徽章
+    let (label, bg) = match state {
+        Some(s) => (s.label(), change_state_color(s)),
+        None => (" ", ui_theme::GIT_UNTRACKED),
+    };
+    div()
+        .flex_none()
+        .w(px(20.0))
+        .py(px(1.0))
+        .rounded(px(ui_theme::RADIUS_XS))
+        .bg(rgb(bg))
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(label)
 }
 
 pub(crate) fn context_menu_item(

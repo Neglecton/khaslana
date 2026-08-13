@@ -11336,12 +11336,6 @@ impl RepositoryView {
             DiffScope::Staged => change.staged.as_ref(),
             DiffScope::Unstaged => change.unstaged.as_ref(),
         };
-        let state_label = state.map(|state| state.label()).unwrap_or(" ");
-        // 设计图：状态 badge 背景色
-        // M → PRIMARY, A → GIT_ADDED, ? → GIT_UNTRACKED, D → DESTRUCTIVE
-        let badge_bg = state
-            .map(change_state_badge_bg)
-            .unwrap_or(ui_theme::MUTED_FOREGROUND);
         let is_staged = scope == DiffScope::Staged;
 
         // 行内图标按钮：plus（暂存）或 minus（取消暂存）
@@ -11411,20 +11405,8 @@ impl RepositoryView {
                 cx.notify();
             }),
         )
-        // 设计图：状态字母 badge — 圆角 pill，白字，状态色背景
-        .child(
-            div()
-                .flex_none()
-                .px(px(5.0))
-                .py(px(1.0))
-                .rounded(px(ui_theme::RADIUS_XS))
-                .bg(rgb(badge_bg))
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
-                .justify_center()
-                .child(state_label),
-        )
+        // 状态徽章：圆角填充底色 + 白色加粗字母（统一 Git 状态色）
+        .child(change_state_badge(state))
         .child(
             div()
                 .flex_1()

@@ -2,22 +2,31 @@ use super::*;
 
 #[test]
 fn change_state_color_uses_semantic_status_colors() {
+    // GitHub 风格 Git 状态区分色：绿增 / 蓝改 / 红删 / 亮红冲突 / 橙更名 / 灰未跟踪
     assert_eq!(change_state_color(&ChangeState::Added), ui_theme::GIT_ADDED);
     assert_eq!(
         change_state_color(&ChangeState::Modified),
-        ui_theme::COLOR_WARNING_FOREGROUND
+        ui_theme::GIT_MODIFIED
     );
     assert_eq!(
         change_state_color(&ChangeState::Deleted),
-        ui_theme::DESTRUCTIVE
+        ui_theme::GIT_REMOVED
     );
     assert_eq!(
         change_state_color(&ChangeState::Conflicted),
         ui_theme::DESTRUCTIVE
     );
     assert_eq!(
+        change_state_color(&ChangeState::Renamed),
+        ui_theme::GIT_RENAMED
+    );
+    assert_eq!(
+        change_state_color(&ChangeState::Typechange),
+        ui_theme::GIT_RENAMED
+    );
+    assert_eq!(
         change_state_color(&ChangeState::Untracked),
-        ui_theme::MUTED_FOREGROUND
+        ui_theme::GIT_UNTRACKED
     );
 }
 

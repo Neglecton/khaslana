@@ -104,6 +104,8 @@ theme_tokens! {
     28: GIT_MODIFIED => 0x0066FF, 0x58A6FF;
     29: GIT_REMOVED => 0xCF222E, 0xFF7B72;
     30: GIT_UNTRACKED => 0x8B949E, 0xA8A8B0;
+    // 重命名 / 类型变更：橙（浅色深橙、深色橙，白字可读）
+    91: GIT_RENAMED => 0xBC4C00, 0xDB6D28;
 
     // ── Diff 配色 ──────────────────────────────────────────
     31: DIFF_ADDED_BG => 0xE6F4EA, 0x183A27;

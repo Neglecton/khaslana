@@ -7,7 +7,7 @@ use khaslana::{CommitFileChange, CommitInfo, CommitRefInfo, CommitRefKind};
 
 use crate::{
     CHANGE_ROW_HEIGHT, DiffHeaderTarget, EncodingMenuTarget, RepositoryView, ResizeTarget,
-    ScrollbarMode, author_avatar, change_state_color, column_splitter_accepts_mouse_events,
+    ScrollbarMode, author_avatar, change_state_badge, column_splitter_accepts_mouse_events,
     column_splitter_should_clear_resize, commit_time_label, history_scope_button, placeholder_row,
     scrollable_uniform_frame, section_header, section_header_action,
     ui::{
@@ -555,8 +555,6 @@ impl RepositoryView {
             .filter(|old_path| old_path.as_str() != file.path.as_str())
             .map(|old_path| format!("{old_path} -> {}", file.path))
             .unwrap_or_else(|| file.path.clone());
-        let state = file.status.label();
-        let state_color = change_state_color(&file.status);
 
         div()
             .id(format!("commit-file-{}", file.path))
@@ -596,15 +594,7 @@ impl RepositoryView {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(24.0))
-                    .text_size(px(11.0))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(state_color))
-                    .child(state),
-            )
+            .child(change_state_badge(Some(&file.status)))
             .child(
                 div()
                     .flex_1()
