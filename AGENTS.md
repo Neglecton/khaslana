@@ -54,6 +54,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
+- `src/oauth.rs`：GitHub OAuth Device Flow 服务层，包括设备码请求、令牌轮询（含 `authorization_pending`/`slow_down`/取消/过期处理）和用令牌换取登录名；纯同步 `ureq` 实现，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
@@ -266,6 +267,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 ### 5.6 凭据
 
 - HTTPS 用户名 + 密码/PAT
+- GitHub 快速登录：在添加 HTTPS 凭据时点击「通过浏览器登录」，走 OAuth Device Flow（请求设备码 → 自动打开浏览器并预填验证码 → 后台轮询拿 access_token → 取登录名并自动保存），用户无需手动录入 PAT。`GITHUB_OAUTH_CLIENT_ID` 为编译期常量，需维护者在 GitHub 注册 OAuth App 并勾选 Device Flow 后填入 `src/oauth.rs`。令牌按 `repo workflow` scope 申请，覆盖私有/公有仓库读写与工作流文件推送。受限组织（开启 OAuth App Access Restrictions）的私有库需组织 Owner 审批该 OAuth App 后才能访问。
 - SSH key + passphrase
 - 可使用 SSH agent
 - 新增 SSH 凭据时自动检测 `~/.ssh`、SSH config 和 SSH Agent，可一键选择已有身份，也可通过文件框手动选择私钥
