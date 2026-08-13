@@ -49,7 +49,7 @@ fn take_pending_external_merge_path() -> Option<String> {
         .and_then(|mut pending| pending.take())
 }
 
-fn clear_pending_external_merge_path() {
+pub(crate) fn clear_pending_external_merge_path() {
     if let Ok(mut pending) = pending_external_merge_path_cell().lock() {
         *pending = None;
     }
@@ -146,12 +146,6 @@ impl RepositoryView {
             .child(
                 dialog_actions()
                     .child(self.button(
-                        "取消",
-                        !self.busy,
-                        |this, _, _| this.cancel_external_merge_settings(),
-                        cx,
-                    ))
-                    .child(self.button(
                         detection_label,
                         !self.busy,
                         |this, _, _| this.test_external_merge_settings_from_form(),
@@ -160,7 +154,10 @@ impl RepositoryView {
                     .child(self.primary_button(
                         save_label,
                         !self.busy,
-                        |this, _, _| this.save_external_merge_settings_from_form_and_resume(),
+                        |this, _, cx| {
+                            this.save_external_merge_settings_from_form_and_resume();
+                            this.notify_settings_save("合并工具设置已保存", cx);
+                        },
                         cx,
                     )),
             )
@@ -239,16 +236,10 @@ impl RepositoryView {
             .map(|path| format!("合并工具设置已保存：{}", path.display()))
             .unwrap_or_else(|| "合并工具设置已保存".into());
         self.last_error = None;
-        self.active_dialog = None;
 
         if let Some(path) = take_pending_external_merge_path() {
             self.start_external_merge_operation(path);
         }
-    }
-
-    pub(crate) fn cancel_external_merge_settings(&mut self) {
-        clear_pending_external_merge_path();
-        self.close_dialog();
     }
 
     pub(crate) fn set_external_merge_enabled_form_with_detection(&mut self, enabled: bool) {

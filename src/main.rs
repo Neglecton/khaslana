@@ -5168,6 +5168,23 @@ impl RepositoryView {
     /// 关闭设置中心。
     pub(crate) fn close_settings_center(&mut self) {
         self.settings_center = None;
+        // 关闭设置中心时清掉可能残留的「保存并继续」待处理冲突路径，
+        // 等价于原外部合并「取消」按钮的清理职责。
+        external_merge_view::clear_pending_external_merge_path();
+    }
+
+    /// 设置页保存后按 `last_error` 提示成功/失败（各 save 失败置 Some、成功置 None）。
+    /// 成功不关闭页面，失败把具体错误带进 toast。
+    fn notify_settings_save(
+        &mut self,
+        success_msg: impl Into<gpui::SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(err) = self.last_error.clone() {
+            self.notify_error(format!("保存失败：{err}"), cx);
+        } else {
+            self.notify_success(success_msg, cx);
+        }
     }
 
     fn open_credential_manager(&mut self) {
@@ -5209,13 +5226,6 @@ impl RepositoryView {
         self.save_proxy_settings();
         self.status = "代理设置已保存".into();
         self.last_error = None;
-    }
-
-    pub(crate) fn save_network_proxy_settings_and_close(&mut self) {
-        self.save_network_proxy_settings();
-        if self.last_error.is_none() {
-            self.close_settings_center();
-        }
     }
 
     pub(crate) fn open_external_merge_settings(&mut self) {
@@ -5520,13 +5530,6 @@ impl RepositoryView {
         self.save_ai_provider_settings();
         self.status = "AI 设置已保存".into();
         self.last_error = None;
-    }
-
-    pub(crate) fn save_ai_provider_settings_from_form_and_close(&mut self) {
-        self.save_ai_provider_settings_from_form();
-        if self.last_error.is_none() {
-            self.active_dialog = None;
-        }
     }
 
     pub(crate) fn test_network_proxy_settings(&mut self) {
@@ -12837,8 +12840,7 @@ impl RepositoryView {
                         self.update_preferences.skipped_version.is_some(),
                         |this, _, _| this.clear_skipped_version(),
                         cx,
-                    ))
-                    .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx)),
+                    )),
             )
     }
 

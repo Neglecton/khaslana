@@ -75,7 +75,6 @@ impl RepositoryView {
             )
             .child(
                 dialog_actions()
-                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
                     .child(self.button(
                         "测试代理",
                         !self.busy,
@@ -85,7 +84,10 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "保存",
                         !self.busy,
-                        |this, _, _| this.save_network_proxy_settings_and_close(),
+                        |this, _, cx| {
+                            this.save_network_proxy_settings();
+                            this.notify_settings_save("代理设置已保存", cx);
+                        },
                         cx,
                     )),
             )

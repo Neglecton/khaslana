@@ -87,8 +87,6 @@ impl RepositoryView {
             })
             .child(
                 dialog_actions()
-                    // 取消按钮始终可用，即使测试连接进行中也能关闭弹窗。
-                    .child(self.button("取消", true, |this, _, _| this.close_dialog(), cx))
                     .child(self.button(
                         "测试连接",
                         !self.busy,
@@ -98,7 +96,10 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "保存",
                         !self.busy,
-                        |this, _, _| this.save_ai_provider_settings_from_form_and_close(),
+                        |this, _, cx| {
+                            this.save_ai_provider_settings_from_form();
+                            this.notify_settings_save("AI 设置已保存", cx);
+                        },
                         cx,
                     )),
             )

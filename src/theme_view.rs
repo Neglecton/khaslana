@@ -5,7 +5,7 @@ use yororen_ui::theme::{GlobalTheme, Theme, ThemeSet};
 use crate::{
     RepositoryView,
     ui::{
-        components::{dialog_actions, segmented_button},
+        components::segmented_button,
         theme::{self as ui_theme, ThemeVariant, rgb},
     },
 };
@@ -191,12 +191,6 @@ impl RepositoryView {
                             .child(theme_variant_label(active_variant)),
                     ),
             )
-            .child(dialog_actions().child(self.button(
-                "关闭",
-                true,
-                |this, _, _| this.close_dialog(),
-                cx,
-            )))
     }
 }
 
