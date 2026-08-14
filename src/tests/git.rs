@@ -3976,3 +3976,85 @@ fn drop_stash_removes_entry() {
     assert!(snapshot.stashes.is_empty());
     assert!(service.stashes(&mut repo).unwrap().is_empty());
 }
+
+/// 构造开发者 A/B 分叉场景：裸远端含 main（seed 提交）；
+/// A 已克隆、提交 a.txt 并推送；B（返回的工作仓库）已本地提交 b.txt 但未拉取/推送。
+fn diverged_dev_pair() -> (TempDir, TempDir, Repository, GitService) {
+    let (remote_dir, service) = create_bare_remote_with_seed("README.md", "seed\n");
+
+    let clone_to = |parent: &TempDir, name: &str| -> Repository {
+        let path = parent.path().join(name);
+        service
+            .clone_repo(
+                &git_support::path_url(remote_dir.path()),
+                &RepoPath::new(&path),
+            )
+            .unwrap();
+        let repo = Repository::open(&path).unwrap();
+        git_support::configure_user(&repo);
+        repo
+    };
+
+    // 开发者 B：克隆到与远端同步的基线，随后本地提交。
+    let b_dir = TempDir::new().unwrap();
+    let mut b_repo = clone_to(&b_dir, "b");
+    git_support::write_file(b_repo.workdir().unwrap(), "b.txt", "from B\n");
+    git_support::commit_all(&b_repo, "B 的提交");
+
+    // 开发者 A：克隆、提交并推送（B 未拉取）。
+    let a_dir = TempDir::new().unwrap();
+    let mut a_repo = clone_to(&a_dir, "a");
+    git_support::write_file(a_repo.workdir().unwrap(), "a.txt", "from A\n");
+    git_support::commit_all(&a_repo, "A 的提交");
+    service
+        .push(&mut a_repo, &RemoteName::new("origin"))
+        .unwrap();
+
+    (remote_dir, b_dir, b_repo, service)
+}
+
+// 推送被远端按引用拒绝（non-fast-forward）必须显式报错并引导拉取；
+// 修复前 push_update_reference 未注册，此场景静默返回 Ok。
+#[test]
+fn push_rejected_by_remote_surfaces_non_fast_forward_error() {
+    let (_remote_dir, _b_dir, mut b_repo, service) = diverged_dev_pair();
+
+    let error = service
+        .push(&mut b_repo, &RemoteName::new("origin"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("non-fast-forward"),
+        "应包含 non-fast-forward 原因，实际：{error}"
+    );
+    assert!(error.contains("请先拉取"), "应包含拉取引导，实际：{error}");
+}
+
+// B 的完整恢复路径：拉取的非快进干净合并自动提交双父提交（不留待确认会话，
+// 用户不会再看到"完成合并/中止合并"界面），随后推送成功。
+#[test]
+fn pull_clean_merge_auto_commits_and_push_succeeds() {
+    let (_remote_dir, b_dir, mut b_repo, service) = diverged_dev_pair();
+
+    let snapshot = service
+        .pull(&mut b_repo, &RemoteName::new("origin"))
+        .unwrap();
+
+    assert!(!snapshot.merge_in_progress, "干净合并不应留下合并会话");
+    assert!(snapshot.conflicts.is_empty());
+    let parent_count = b_repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .parent_count();
+    assert_eq!(parent_count, 2, "拉取的干净合并应自动提交双父提交");
+    // 双方改动都进入工作区。
+    git_support::assert_file_text(b_dir.path(), "b/a.txt", "from A\n");
+    git_support::assert_file_text(b_dir.path(), "b/b.txt", "from B\n");
+
+    service
+        .push(&mut b_repo, &RemoteName::new("origin"))
+        .unwrap();
+}

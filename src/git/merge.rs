@@ -26,16 +26,7 @@ impl GitService {
         drop(annotated);
         drop(reference);
         // 无冲突的正常非快进合并：自动提交（双父提交），不保留 merge 会话。
-        if merge_in_progress(repo) {
-            let message =
-                merge_message(repo).unwrap_or_else(|| format!("Merge branch '{}'", branch.0));
-            let mut merge_head_ids = Vec::new();
-            repo.mergehead_foreach(|oid| {
-                merge_head_ids.push(*oid);
-                true
-            })?;
-            self.commit_merge(repo, &CommitMessage::new(message), &merge_head_ids)?;
-        }
+        self.complete_clean_merge(repo, &branch.0)?;
         let message = if merge_in_progress(repo) {
             format!("{} 的合并结果已写入暂存区", branch.0)
         } else {
@@ -43,6 +34,31 @@ impl GitService {
         };
         self.progress.emit(OperationEvent::Finished(message));
         self.snapshot_after_operation(repo)
+    }
+
+    /// 完成无冲突的非快进合并：处于合并态（MERGE_HEAD 存在，即合并结果已
+    /// 暂存等待提交）时，收集 MERGE_HEAD 父提交并创建双父提交，成功后清理
+    /// 合并状态；不在合并态（快进/已最新）则原样返回。
+    ///
+    /// pull 系列与显式合并共用：干净合并不留待确认会话，避免用户把
+    /// “完成合并/中止合并”界面误认为冲突处理模式。提交失败时状态保留，
+    /// 可通过“完成合并”重试（`cleanup_state` 仅提交成功后执行）。
+    pub(super) fn complete_clean_merge(
+        &self,
+        repo: &mut Repository,
+        merge_label: &str,
+    ) -> Result<()> {
+        if !merge_in_progress(repo) {
+            return Ok(());
+        }
+        let message =
+            merge_message(repo).unwrap_or_else(|| format!("Merge branch '{merge_label}'"));
+        let mut merge_head_ids = Vec::new();
+        repo.mergehead_foreach(|oid| {
+            merge_head_ids.push(*oid);
+            true
+        })?;
+        self.commit_merge(repo, &CommitMessage::new(message), &merge_head_ids)
     }
 
     pub(super) fn merge_annotated(

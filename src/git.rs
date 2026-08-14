@@ -62,6 +62,11 @@ pub(crate) const FULL_FILE_MAX_BYTES: u64 = 3 * 1024 * 1024;
 /// 全文差异过大时返回的错误文案，UI 据此识别并回退到紧凑差异。
 pub const FULL_FILE_TOO_LARGE_MESSAGE: &str = "文件过大，无法显示全文视图";
 
+/// 推送被远端按 non-fast-forward 拒绝的统一文案（客户端预检查与服务器
+/// 状态报告两条路径共用），引导用户先拉取。
+pub(crate) const NON_FAST_FORWARD_PUSH_MESSAGE: &str =
+    "推送被拒绝（non-fast-forward）：远端分支有新提交，请先拉取并解决后再推送";
+
 /// 全文差异的字节预检：仅在请求全文（`full_context`）时，于分配逐行 String 之前
 /// 检查新旧侧文件体积，超过 `FULL_FILE_MAX_BYTES` 则直接返回错误。
 ///
@@ -773,6 +778,8 @@ impl GitService {
         self.merge_annotated(repo, &annotated, &format!("{}/{}", remote.0, branch))?;
         drop(annotated);
         drop(remote_ref);
+        // 非快进干净合并自动提交，不保留待确认会话。
+        self.complete_clean_merge(repo, &format!("{}/{}", remote.0, branch))?;
 
         self.progress
             .emit(OperationEvent::Finished(format!("已拉取 {}", remote.0)));
@@ -801,6 +808,8 @@ impl GitService {
         )?;
         drop(annotated);
         drop(remote_ref);
+        // 非快进干净合并自动提交，不保留待确认会话。
+        self.complete_clean_merge(repo, &format!("{}/{}", remote.0, remote_branch.0))?;
 
         self.progress.emit(OperationEvent::Finished(format!(
             "已拉取 {}/{}",
@@ -880,6 +889,9 @@ impl GitService {
             drop(upstream_branch);
             drop(local_branch);
             self.merge_annotated(repo, &annotated, &format!("{remote}/{remote_branch}"))?;
+            drop(annotated);
+            // 非快进干净合并自动提交，不保留待确认会话。
+            self.complete_clean_merge(repo, &format!("{remote}/{remote_branch}"))?;
         }
 
         self.progress.emit(OperationEvent::Finished(format!(
@@ -942,7 +954,16 @@ impl GitService {
         let result = remote_handle.push(&[refspec.as_str()], Some(&mut options));
         drop(remote_handle);
         drop(options);
-        result?;
+        // 常规 non-fast-forward（未拉取远端新提交、或已 fetch 未合并）会被
+        // libgit2 在传输前的客户端检查拦下，返回英文 NotFastForward 错误；
+        // 统一映射为中文引导，与 push_update_reference 回调的文案一致。
+        match result {
+            Ok(()) => {}
+            Err(err) if err.code() == git2::ErrorCode::NotFastForward => {
+                return Err(GitError::Message(NON_FAST_FORWARD_PUSH_MESSAGE.into()));
+            }
+            Err(err) => return Err(err.into()),
+        }
 
         if set_upstream && let Ok(mut local) = repo.find_branch(&local_branch.0, BranchType::Local)
         {
@@ -2127,6 +2148,22 @@ impl GitService {
                 allowed_types,
                 context,
             )
+        });
+
+        // libgit2 对“服务器按引用拒绝”的推送（non-fast-forward、分支保护、
+        // hook 拒绝、权限不足）不返回错误，拒绝原因只经本回调的 status 暴露；
+        // 不注册则被拒推送会静默“成功”。回调仅在 push 时触发，fetch/clone 不受影响。
+        callbacks.push_update_reference(|refname, status| match status {
+            None => Ok(()),
+            Some(msg) if msg.contains("non-fast-forward") || msg.contains("fetch first") => {
+                Err(git2::Error::from_str(NON_FAST_FORWARD_PUSH_MESSAGE))
+            }
+            Some(msg) => {
+                let branch = refname.strip_prefix("refs/heads/").unwrap_or(refname);
+                Err(git2::Error::from_str(&format!(
+                    "远端拒绝推送 {branch}：{msg}"
+                )))
+            }
         });
         callbacks
     }
