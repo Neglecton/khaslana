@@ -373,6 +373,75 @@ fn ordinary_worktree_operations_do_not_require_repository_refresh() {
 }
 
 #[test]
+fn commit_creating_operations_affect_commit_history() {
+    for message in [
+        "提交完成",
+        "提交并推送完成",
+        "合并操作已完成",
+        "合并已完成",
+        "合并已中止",
+        "变基完成",
+        "变基已中止",
+        "分支已重置",
+        "回滚提交完成",
+        "撤销合并完成",
+        "提交已还原到暂存区",
+    ] {
+        assert!(
+            operation_affects_commit_history(message),
+            "{message} 应触发提交历史后台刷新"
+        );
+    }
+}
+
+#[test]
+fn history_untouched_operations_do_not_affect_commit_history() {
+    // 不改提交历史的操作不触发后台刷新
+    for message in [
+        "暂存完成",
+        "取消暂存完成",
+        "差异已加载",
+        "已贮藏当前修改",
+        "应用贮藏完成",
+    ] {
+        assert!(
+            !operation_affects_commit_history(message),
+            "{message} 不应触发提交历史后台刷新"
+        );
+    }
+}
+
+#[test]
+fn commit_history_and_repository_refresh_message_lists_are_disjoint() {
+    // 两个名单互不重叠：引用类操作走完整仓库重载（RepositoryFastLoaded 统一刷历史），
+    // 提交/HEAD 类操作走 OperationFinished 直接刷历史。
+    for message in [
+        "提交完成",
+        "提交并推送完成",
+        "合并操作已完成",
+        "合并已完成",
+        "合并已中止",
+        "变基完成",
+        "变基已中止",
+        "分支已重置",
+        "回滚提交完成",
+        "撤销合并完成",
+        "提交已还原到暂存区",
+    ] {
+        assert!(
+            !operation_requires_repository_refresh(message),
+            "{message} 不应同时出现在仓库刷新名单中"
+        );
+    }
+    for message in ["切换分支完成", "拉取完成", "推送完成", "upstream 已设置"] {
+        assert!(
+            !operation_affects_commit_history(message),
+            "{message} 不应同时出现在提交历史刷新名单中"
+        );
+    }
+}
+
+#[test]
 fn context_menu_position_opens_from_cursor_when_space_allows() {
     assert_eq!(
         context_menu_position(120.0, 160.0, 800.0, 600.0, 170.0, 110.0),

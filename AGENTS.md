@@ -149,7 +149,14 @@ UI 线程通过 `async-channel` 接收后台线程发回的 `UiEvent`。重型 G
 
 - `HISTORY_PAGE_SIZE = 50`
 
-历史分页会复用当前 tab 内存中的 refs/tags 映射缓存，仓库刷新、切换仓库或清理历史时失效。
+历史分页（append）会复用当前 tab 内存中的 refs/tags 映射缓存；全量刷新（append=false）不复用、总是重建 refs，保证切换分支、提交等操作后 HEAD/分支/标签徽章与最新仓库状态一致。
+
+提交历史自动刷新策略（不需要人工点击刷新）：
+
+- 会创建/移动提交或 HEAD 的操作（提交、提交并推送、合并、变基、reset、revert、uncommit，见 `operation_affects_commit_history` 消息名单）完成后，经 `OperationFinished` 调用 `reload_history_after_change`：正在查看历史页或已有历史列表时无论当前视图都立即后台重载；历史列表为空且不在历史页时不预加载，等进入历史页再拉。
+- 引用类操作（切换分支、拉取、推送、分支增删改等，见 `operation_requires_repository_refresh`）走完整仓库重载，由 `RepositoryFastLoaded` 统一调用 `reload_history_after_change` 刷新历史。
+- `ensure_history_loaded` 在进入历史页时若历史被标记陈旧（`history_refreshing`）也会重新拉取，兜底失败重试与跨标签页陈旧；刷新期间旧列表保持可见（stale-while-revalidate）。
+- `RepoTabState.history_load_seq` 是提交列表请求序号，每次 `load_history_page` 递增并随 `HistoryCommitsLoaded` 事件回传：仅最新一代请求（seq 匹配）能应用数据和复位加载标志，旧一代晚到的结果被丢弃；`HistoryLoadFailed` 无论 load_id 是否匹配都复位加载标志，避免操作作废在飞请求后加载标志永久卡死、后续历史加载被静默吞掉。
 
 超大 diff 缓存保护：
 
@@ -246,6 +253,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 提交图列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位），可见泳道数随列宽动态计算，超出以省略号提示
 - 提交图泳道不按加载窗口剪枝，保证线条跨行连续、跨页加载时上方布局不抖动
 - 提交引用标签，包括本地分支、远端分支、tag、HEAD
+- 切换分支、提交、合并、变基、拉取、推送等操作完成后自动后台刷新提交记录和引用标签（含 HEAD），无需人工刷新
 - 分页加载更多
 - 查看提交文件列表
 - 查看指定提交文件 diff

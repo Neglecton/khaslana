@@ -1106,6 +1106,8 @@ struct RepoTabState {
     pub(crate) history_refreshing: bool,
     pub(crate) history_scope: HistoryScope,
     pub(crate) history_refs_cache: Option<HistoryRefsCache>,
+    /// 提交列表请求序号：每次发起加载递增，用于丢弃旧一代请求晚到的结果
+    pub(crate) history_load_seq: u64,
     pub(crate) history_graph_rows: Vec<history_view::CommitGraphRow>,
     pub(crate) stash_preview: StashPreviewState,
     pub(crate) branch_sync_status: Option<BranchSyncStatus>,
@@ -1156,6 +1158,7 @@ impl RepoTabState {
             history_refreshing: false,
             history_scope: HistoryScope::default(),
             history_refs_cache: None,
+            history_load_seq: 0,
             history_graph_rows: Vec::new(),
             stash_preview: StashPreviewState::default(),
             branch_sync_status: None,
@@ -1457,6 +1460,7 @@ pub(crate) enum UiEvent {
         has_more: bool,
         scope: HistoryScope,
         load_id: u64,
+        seq: u64,
     },
     HistoryFilesLoaded {
         tab_id: RepoTabId,
@@ -3165,7 +3169,9 @@ impl RepositoryView {
                         );
                         this.sync_conflict_mode_with_snapshot();
                         this.scroll_local_branch_to_current();
-                        this.reload_history_if_active();
+                        // 仓库（重）加载后历史引用已变：已有历史列表时不受视图限制地后台刷新，
+                        // 覆盖切换分支/拉取/推送等引用类操作；初始打开（列表为空）不预加载。
+                        this.reload_history_after_change();
                     }
                 });
             }
@@ -3262,6 +3268,7 @@ impl RepositoryView {
                 );
                 let should_refresh_repository =
                     operation_requires_repository_refresh(&message) && !keeps_remote_branch_dialog;
+                let affects_commit_history = operation_affects_commit_history(&message);
                 let should_refresh_submodules = operation_refreshes_submodule_dialog(&message)
                     && self.active_dialog == Some(DialogState::SubmoduleManager);
                 let has_snapshot = snapshot.is_some();
@@ -3302,7 +3309,13 @@ impl RepositoryView {
                         this.sync_conflict_mode_with_snapshot();
                         this.refresh_history();
                         this.scroll_local_branch_to_current();
-                        this.reload_history_if_active();
+                        if affects_commit_history {
+                            // 创建/移动提交或 HEAD 的操作：无论当前视图都后台刷新
+                            // 提交记录及其 HEAD/分支/标签徽章，不再需要人工刷新。
+                            this.reload_history_after_change();
+                        } else {
+                            this.reload_history_if_active();
+                        }
                         if let Some(tab_id) = tab_id {
                             if should_refresh_repository {
                                 repository_refresh_request =
@@ -3517,50 +3530,59 @@ impl RepositoryView {
                 has_more,
                 scope,
                 load_id,
+                seq,
             } => {
                 self.with_tab_context(tab_id, |this| {
-                    if load_id == this.repository_load_id && scope == this.history_scope {
+                    // 仅最新一代请求（seq 匹配）复位加载标志并应用数据；
+                    // 旧一代晚到的结果直接丢弃，避免覆盖新数据。
+                    // seq 匹配但 load_id 失配（操作作废了本次请求）也要复位标志，
+                    // 否则 history_loading.commits 永久为 true 会吞掉后续所有历史加载。
+                    if seq == this.history_load_seq {
                         this.history_loading.commits = false;
-                        this.history_refs_cache = Some(refs_cache);
-                        this.history_has_more = has_more;
-                        if append {
-                            this.history_commits.extend(commits);
-                        } else {
-                            this.history_commits = commits;
-                            let was_refreshing = this.history_refreshing;
-                            if was_refreshing {
-                                // 刷新时保留选中提交（若仍存在于新列表）
-                                let still_exists =
-                                    this.history_selected_commit.as_ref().is_some_and(|oid| {
-                                        this.history_commits.iter().any(|c| c.oid == oid.as_str())
-                                    });
-                                if !still_exists {
+                        if load_id == this.repository_load_id && scope == this.history_scope {
+                            this.history_refs_cache = Some(refs_cache);
+                            this.history_has_more = has_more;
+                            if append {
+                                this.history_commits.extend(commits);
+                            } else {
+                                this.history_commits = commits;
+                                let was_refreshing = this.history_refreshing;
+                                if was_refreshing {
+                                    // 刷新时保留选中提交（若仍存在于新列表）
+                                    let still_exists =
+                                        this.history_selected_commit.as_ref().is_some_and(|oid| {
+                                            this.history_commits
+                                                .iter()
+                                                .any(|c| c.oid == oid.as_str())
+                                        });
+                                    if !still_exists {
+                                        this.history_selected_commit = None;
+                                    }
+                                    // 详情可能已过时，清空以重新加载
+                                    this.history_files.clear();
+                                    this.history_selected_file = None;
+                                    this.history_diff = None;
+                                } else {
+                                    // 非刷新（scope 切换/初始加载）：全部重置
                                     this.history_selected_commit = None;
+                                    this.history_files.clear();
+                                    this.history_selected_file = None;
+                                    this.history_diff = None;
                                 }
-                                // 详情可能已过时，清空以重新加载
-                                this.history_files.clear();
-                                this.history_selected_file = None;
-                                this.history_diff = None;
-                            } else {
-                                // 非刷新（scope 切换/初始加载）：全部重置
-                                this.history_selected_commit = None;
-                                this.history_files.clear();
-                                this.history_selected_file = None;
-                                this.history_diff = None;
+                                this.history_refreshing = false;
                             }
-                            this.history_refreshing = false;
-                        }
-                        this.history_graph_rows =
-                            history_view::commit_graph_rows(&this.history_commits);
+                            this.history_graph_rows =
+                                history_view::commit_graph_rows(&this.history_commits);
 
-                        if this.history_selected_commit.is_none() {
-                            if let Some(commit) = this.history_commits.first() {
-                                this.select_history_commit(commit.oid.clone());
+                            if this.history_selected_commit.is_none() {
+                                if let Some(commit) = this.history_commits.first() {
+                                    this.select_history_commit(commit.oid.clone());
+                                } else {
+                                    this.status = "当前分支暂无提交记录".to_string();
+                                }
                             } else {
-                                this.status = "当前分支暂无提交记录".to_string();
+                                this.status = "提交记录已加载".to_string();
                             }
-                        } else {
-                            this.status = "提交记录已加载".to_string();
                         }
                     }
                 });
@@ -3683,11 +3705,14 @@ impl RepositoryView {
                 load_id,
             } => {
                 self.with_tab_context(tab_id, |this| {
+                    // 失败（包括被 load_id 作废的陈旧失败）都要复位加载标志，
+                    // 否则操作开始 bump load_id 后若操作失败，标志永久卡住，
+                    // 后续所有历史/贮藏预览加载都会被在飞守卫静默吞掉。
+                    this.history_loading = HistoryLoading::default();
+                    this.history_refreshing = false;
+                    this.stash_preview.loading_files = false;
+                    this.stash_preview.loading_diff = false;
                     if load_id == this.repository_load_id {
-                        this.history_loading = HistoryLoading::default();
-                        this.history_refreshing = false;
-                        this.stash_preview.loading_files = false;
-                        this.stash_preview.loading_diff = false;
                         this.status = if this.main_mode == MainMode::Stash {
                             "贮藏预览加载失败".to_string()
                         } else {
@@ -4025,7 +4050,8 @@ impl RepositoryView {
                     this.reset_uniform_scroll("diff-scroll");
                     this.refresh_history();
                     this.scroll_local_branch_to_current();
-                    this.reload_history_if_active();
+                    // 工作流可能执行拉取/提交等操作，历史列表存在时后台刷新
+                    this.reload_history_after_change();
                     full_status_request = this
                         .repo_path
                         .clone()
@@ -8700,10 +8726,23 @@ impl RepositoryView {
         }
     }
 
+    /// 历史可能已过时：正在查看历史页或已有历史列表时立即后台刷新，
+    /// 不受当前视图限制；历史列表为空且不在历史页（用户从未看过历史）时
+    /// 保持现状，等进入历史页时由 ensure_history_loaded 拉取，避免预加载。
+    fn reload_history_after_change(&mut self) {
+        if self.repo_path.is_some()
+            && !self.history_loading.commits
+            && (self.main_mode == MainMode::History || !self.history_commits.is_empty())
+        {
+            self.load_history_page(false);
+        }
+    }
+
     fn ensure_history_loaded(&mut self) {
         if self.main_mode == MainMode::History
             && self.repo_path.is_some()
-            && self.history_commits.is_empty()
+            // 列表为空时首载；被标记陈旧（操作后未在后台刷新）时重新拉取
+            && (self.history_commits.is_empty() || self.history_refreshing)
             && !self.history_loading.commits
         {
             self.load_history_page(false);
@@ -8726,13 +8765,21 @@ impl RepositoryView {
         let service = self.service_for_tab(tab_id);
         let tx = self.tx.clone();
         let scope = self.history_scope;
-        let refs_cache = self.history_refs_cache.clone();
+        // 仅分页（append）复用 refs 缓存；全量刷新传 None 重建，
+        // 保证切换分支、提交等操作后 HEAD/分支/标签徽章与最新仓库状态一致。
+        let refs_cache = if append {
+            self.history_refs_cache.clone()
+        } else {
+            None
+        };
         let offset = if append {
             self.history_commits.len()
         } else {
             0
         };
         let load_id = self.repository_load_id;
+        self.history_load_seq += 1;
+        let seq = self.history_load_seq;
         self.history_loading.commits = true;
         self.status = if append {
             "正在加载更多提交记录".to_string()
@@ -8775,6 +8822,7 @@ impl RepositoryView {
                     has_more,
                     scope,
                     load_id,
+                    seq,
                 })
             })();
 
@@ -14692,6 +14740,27 @@ fn operation_requires_repository_refresh(message: &str) -> bool {
             | "分支拉取完成"
             | "推送完成"
             | "upstream 已设置"
+    )
+}
+
+/// 这些操作会创建/移动提交或 HEAD，但不触发完整仓库重载；
+/// 完成后需不受当前视图限制地后台刷新提交记录及其 HEAD/分支/标签徽章。
+/// 引用类操作（切换分支、拉取、推送等）见 `operation_requires_repository_refresh`，
+/// 它们走完整仓库重载路径，由 `RepositoryFastLoaded` 统一刷新历史。
+fn operation_affects_commit_history(message: &str) -> bool {
+    matches!(
+        message,
+        "提交完成"
+            | "提交并推送完成"
+            | "合并操作已完成"
+            | "合并已完成"
+            | "合并已中止"
+            | "变基完成"
+            | "变基已中止"
+            | "分支已重置"
+            | "回滚提交完成"
+            | "撤销合并完成"
+            | "提交已还原到暂存区"
     )
 }
 
