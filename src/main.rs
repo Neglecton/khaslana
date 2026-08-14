@@ -11827,7 +11827,12 @@ impl RepositoryView {
         header_target: DiffHeaderTarget,
         empty_message: String,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        // 二进制文件不渲染逐行 diff（也不显示「Binary files ... differ」原始行），
+        // 直接显示信息占位卡片，含文件大小/新增删除信息。
+        if let Some(diff) = diff.as_deref().filter(|diff| diff.is_binary) {
+            return binary_diff_placeholder(diff).into_any_element();
+        }
         let model = diff_render_model_for(diff.as_deref(), headers_expanded);
         let row_count = model.row_count;
         let content_present = diff.is_some() && row_count > 0;
@@ -11886,6 +11891,7 @@ impl RepositoryView {
             content_present,
             cx,
         )
+        .into_any_element()
     }
 
     fn render_diff_row(
@@ -11976,8 +11982,11 @@ impl RepositoryView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(self.full_file_toggle_button(target, cx))
-                    .child(self.encoding_button(diff, target, cx)),
+                    // 二进制文件没有全文/编码差异可言，隐藏这两个工具按钮
+                    .when(!diff.is_some_and(|diff| diff.is_binary), |this| {
+                        this.child(self.full_file_toggle_button(target, cx))
+                            .child(self.encoding_button(diff, target, cx))
+                    }),
             )
     }
 

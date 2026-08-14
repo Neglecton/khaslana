@@ -2686,6 +2686,124 @@ fn diff_for_staged_file() {
 }
 
 #[test]
+fn diff_reports_file_sizes_for_text_and_binary() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "one\n");
+    git_support::commit_all(&repo, "initial");
+
+    // 修改后的文本文件：两侧大小都存在（0 字节也是合法大小，不能用 0 判断缺失）
+    git_support::write_file(dir.path(), "file.txt", "one\ntwo\n");
+    service
+        .stage_path(&mut repo, Path::new("file.txt"))
+        .unwrap();
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("file.txt"),
+            DiffScope::Staged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(!diff.is_binary);
+    assert_eq!(diff.old_size, Some("one\n".len() as u64));
+    assert_eq!(diff.new_size, Some("one\ntwo\n".len() as u64));
+
+    // 新增的二进制文件（含 NUL 字节）：旧侧 None、新侧有大小且带二进制标记
+    let binary_body: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x0D, 0x0A];
+    git_support::write_bytes(dir.path(), "image.bin", binary_body);
+    service
+        .stage_path(&mut repo, Path::new("image.bin"))
+        .unwrap();
+    let binary_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("image.bin"),
+            DiffScope::Staged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(binary_diff.is_binary);
+    assert_eq!(binary_diff.old_size, None);
+    assert_eq!(binary_diff.new_size, Some(binary_body.len() as u64));
+
+    // 未跟踪的二进制文件（如新建的 docx，ZIP 头内含 NUL）：include_untracked
+    // 不加载内容，靠嗅探判定；旧侧无文件、新侧大小来自 stat。
+    let docx_body: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, 0x08, 0x00];
+    git_support::write_bytes(dir.path(), "notes.docx", docx_body);
+    let untracked_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("notes.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(untracked_diff.is_binary);
+    assert_eq!(untracked_diff.old_size, None);
+    assert_eq!(untracked_diff.new_size, Some(docx_body.len() as u64));
+
+    // 空的 .docx（右键新建未写入内容，0 字节）：内容检测无 NUL 可查，
+    // 暂存与否都靠扩展名兜底判定为二进制（用户实测场景）。
+    git_support::write_bytes(dir.path(), "empty.docx", &[]);
+    service
+        .stage_path(&mut repo, Path::new("empty.docx"))
+        .unwrap();
+    let empty_staged_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("empty.docx"),
+            DiffScope::Staged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(empty_staged_diff.is_binary);
+    assert_eq!(empty_staged_diff.old_size, None);
+    assert_eq!(empty_staged_diff.new_size, Some(0));
+
+    git_support::write_bytes(dir.path(), "empty_untracked.docx", &[]);
+    let empty_untracked_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("empty_untracked.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(empty_untracked_diff.is_binary);
+    assert_eq!(empty_untracked_diff.old_size, None);
+    assert_eq!(empty_untracked_diff.new_size, Some(0));
+}
+
+#[test]
+fn binary_extension_fallback_matches_known_binary_formats() {
+    use crate::git::path_has_binary_extension;
+    for path in [
+        "a.docx",
+        "A.DOCX",
+        "assets/logo.png",
+        "lib.dll",
+        "archive.tar.gz",
+    ] {
+        assert!(
+            path_has_binary_extension(path),
+            "{path} 应判定为二进制扩展名"
+        );
+    }
+    // svg 是文本格式，txt/md/rs 是普通文本，无扩展名不做兜底
+    for path in ["icon.svg", "a.txt", "a.md", "a.rs", "noext"] {
+        assert!(
+            !path_has_binary_extension(path),
+            "{path} 不应判定为二进制扩展名"
+        );
+    }
+}
+
+#[test]
 fn diff_uses_three_context_lines() {
     let (dir, mut repo, service) = git_support::init_repo();
     let original = (1..=12)

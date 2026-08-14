@@ -77,6 +77,64 @@ fn guard_full_file_size(diff: &git2::Diff<'_>, full_context: bool) -> Result<()>
     Ok(())
 }
 
+/// 读取 diff 单侧文件的真实大小。delta 自带的 `size` 不可靠（树条目不携带大小，
+/// libgit2 只在加载过内容时才回填），因此：
+/// - 零 oid（工作区文件）：`size` 来自 stat，直接采用；
+/// - 有 oid（树/index blob）：优先读 blob 对象头；读不到时退回 delta size
+///   （如空文件 oid 是空内容散列，但对象库里未必存在该 blob 对象）。
+/// 缺失侧（Added/Untracked 的旧侧、Deleted 的新侧）由调用方按 delta 状态跳过。
+fn delta_side_size(repo: &Repository, file: git2::DiffFile<'_>) -> Option<u64> {
+    let id = file.id();
+    if id.is_zero() {
+        Some(file.size())
+    } else {
+        Some(
+            repo.find_blob(id)
+                .map(|blob| blob.size() as u64)
+                .unwrap_or(file.size()),
+        )
+    }
+}
+
+/// 未跟踪文件的二进制嗅探：工作区 diff 用 `include_untracked` 但不带
+/// `show_untracked_content`，libgit2 不会加载内容，也就不会设置 BINARY 标志；
+/// 手动读工作区文件前 8KB 查 NUL 字节（与 browse_file_content 的判定规则一致）。
+fn workdir_file_is_binary(repo: &Repository, rel_path: &Path) -> bool {
+    let Some(workdir) = repo.workdir() else {
+        return false;
+    };
+    let Ok(mut file) = std::fs::File::open(workdir.join(rel_path)) else {
+        return false;
+    };
+    let mut buf = [0u8; 8192];
+    let Ok(read) = std::io::Read::read(&mut file, &mut buf) else {
+        return false;
+    };
+    buf[..read].contains(&0)
+}
+
+/// 已知二进制格式的扩展名兜底：内容检测（NUL 嗅探 / libgit2 BINARY 标志）对
+/// 空文件无能为力（新建即空的 .docx 等占位文件），按扩展名判定更符合直觉。
+/// 有内容时内容检测总是先命中，这里只补空文件和极少数无 NUL 二进制的场景。
+fn path_has_binary_extension(path: &str) -> bool {
+    const BINARY_EXTENSIONS: &[&str] = &[
+        // 压缩包 / Office 文档
+        "zip", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "pdf", "7z", "rar", "gz", "jar",
+        // 图片（svg 是文本，不在列）
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tif", "tiff", // 音视频
+        "mp3", "mp4", "avi", "mov", "wmv", "flac", "ogg", "wav", "mkv",
+        // 可执行 / 库 / 字体
+        "exe", "dll", "so", "dylib", "msi", "ttf", "otf", "woff", "woff2",
+    ];
+    let Some(ext) = path
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+    else {
+        return false;
+    };
+    BINARY_EXTENSIONS.contains(&ext.as_str())
+}
+
 /// 根据是否请求全文视图选择上下文行数。
 fn diff_context_lines(full_context: bool) -> u32 {
     if full_context {
@@ -1315,7 +1373,7 @@ impl GitService {
         };
 
         guard_full_file_size(&diff, full_context)?;
-        self.file_diff_from_diff(diff, path_to_git(path), scope, encoding)
+        self.file_diff_from_diff(repo, diff, path_to_git(path), scope, encoding)
     }
 
     pub fn commit_history(
@@ -1786,7 +1844,7 @@ impl GitService {
         let commit = self.find_commit_by_oid(repo, commit_oid)?;
         let diff = self.commit_diff(repo, &commit, Some(path), full_context)?;
         guard_full_file_size(&diff, full_context)?;
-        self.file_diff_from_diff(diff, path_to_git(path), DiffScope::Staged, encoding)
+        self.file_diff_from_diff(repo, diff, path_to_git(path), DiffScope::Staged, encoding)
     }
 
     pub(crate) fn find_commit_by_oid<'repo>(
@@ -1822,6 +1880,7 @@ impl GitService {
 
     pub(crate) fn file_diff_from_diff(
         &self,
+        repo: &Repository,
         diff: git2::Diff<'_>,
         path: String,
         scope: DiffScope,
@@ -1838,13 +1897,35 @@ impl GitService {
         let mut raw_lines = Vec::new();
         let mut encoding_sample = Vec::new();
         let mut is_binary = false;
+        let mut old_size = None;
+        let mut new_size = None;
         for delta in diff.deltas() {
-            if delta.flags().contains(git2::DiffFlags::BINARY) {
-                is_binary = true;
+            let status = delta.status();
+            // 未跟踪文件不加载内容，需手动嗅探是否二进制。
+            if status == git2::Delta::Untracked {
+                if let Some(path) = delta.new_file().path() {
+                    is_binary = is_binary || workdir_file_is_binary(repo, path);
+                }
+            }
+            // 按状态区分缺失侧：Added/Untracked 无旧文件，Deleted 无新文件。
+            if status != git2::Delta::Added && status != git2::Delta::Untracked {
+                old_size = delta_side_size(repo, delta.old_file());
+            }
+            if status != git2::Delta::Deleted {
+                new_size = delta_side_size(repo, delta.new_file());
             }
         }
 
-        diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        diff.print(DiffFormat::Patch, |delta, _hunk, line| {
+            // 二进制标记在补丁生成时才可靠：libgit2 只有加载内容后才在 delta 上
+            // 回填 BINARY 标志（树→index diff 创建阶段不会读取 blob）。
+            // 'B' origin 是无 show_binary 时的 "Binary files ... differ" 行，同样视为二进制并跳过该行。
+            if delta.flags().contains(git2::DiffFlags::BINARY) || line.origin() == 'B' {
+                is_binary = true;
+            }
+            if line.origin() == 'B' {
+                return true;
+            }
             let kind = match line.origin() {
                 '+' => DiffLineKind::Added,
                 '-' => DiffLineKind::Removed,
@@ -1894,10 +1975,14 @@ impl GitService {
             ),
         );
 
+        // 扩展名兜底：空文件（如新建即空的 .docx）内容检测无能为力，按已知二进制扩展名判定
+        let is_binary = is_binary || path_has_binary_extension(&path);
         Ok(FileDiff {
             path,
             scope,
             is_binary,
+            old_size,
+            new_size,
             encoding: DiffEncodingInfo {
                 requested: encoding,
                 resolved: resolved_encoding,

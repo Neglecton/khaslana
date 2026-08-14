@@ -220,6 +220,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 查看工作区 diff
 - 差异区域支持全文/紧凑切换：切换按钮位于标题栏编码按钮旁，开启后展示整份文件并保留增删行高亮
 - 大 diff 使用虚拟列表渲染
+- 选中二进制文件时差异区域显示居中信息占位卡片（`binary_diff_placeholder`，`src/ui_helpers.rs`）：说明无法以文本展示差异，并按新增/删除/修改给出文件大小（`FileDiff.old_size`/`new_size`，由 `file_diff_from_diff` 按 delta 状态填充，Added/Untracked 旧侧为 None、Deleted 新侧为 None；oid 侧读 blob 对象头，工作区侧用 stat 尺寸）；同时隐藏无意义的「全文切换」「编码」按钮。工作区、历史、贮藏和分支比较的差异区域共用同一渲染，行为一致。二进制判定有三路：`diff.print` 回调里的 `DiffFlags::BINARY`/`'B'` 行（补丁生成时才可靠）、未跟踪文件（`include_untracked` 不加载内容、无 BINARY 标志）的 8KB NUL 嗅探 `workdir_file_is_binary`、以及已知二进制扩展名兜底 `path_has_binary_extension`（内容检测对空文件无能为力，如右键新建即空的 .docx）
 - diff 头部可折叠
 - diff 编码可选
 - diff 区域支持左右滑动查看长行

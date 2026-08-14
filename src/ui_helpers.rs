@@ -6,7 +6,7 @@ use gpui::{
     Pixels, Point, ScrollHandle, SharedString, UniformListScrollHandle, Window, canvas, div, fill,
     point, prelude::*, px,
 };
-use khaslana::{ChangeState, DiffLineKind, DiffScope};
+use khaslana::{ChangeState, DiffLineKind, DiffScope, FileDiff};
 
 use crate::ui::theme::{rgb, rgba};
 use crate::{DiffHeaderTarget, RepositoryView, ui::theme as ui_theme};
@@ -656,6 +656,90 @@ pub(crate) fn placeholder_row(text: &'static str) -> impl IntoElement {
         .text_color(rgb(COLOR_TEXT_FAINT))
         .line_height(px(18.0))
         .child(text)
+}
+
+/// 把字节数格式化为人类可读大小（1024 进制）：`512 B`、`1 KB`、`1.5 KB`、`1.2 MB`。
+/// 一位小数，整数时不带 `.0`。
+pub(crate) fn format_byte_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        return format!("{bytes} B");
+    }
+    // 整数不带小数位，其余保留一位
+    let text = if (value - value.round()).abs() < f64::EPSILON {
+        format!("{}", value.round() as u64)
+    } else {
+        format!("{value:.1}")
+    };
+    format!("{text} {}", UNITS[unit])
+}
+
+/// 差异区域选中二进制文件时的居中信息占位卡片：
+/// 说明无法以文本展示差异，并按新增/删除/修改给出文件大小信息（若可用）。
+pub(crate) fn binary_diff_placeholder(diff: &FileDiff) -> impl IntoElement + use<> {
+    let size_label = match (diff.old_size, diff.new_size) {
+        (None, Some(new_size)) => format!("新增文件 · {}", format_byte_size(new_size)),
+        (Some(old_size), None) => format!("已删除 · 原大小 {}", format_byte_size(old_size)),
+        (Some(old_size), Some(new_size)) if old_size == new_size => {
+            format!("大小 {}", format_byte_size(new_size))
+        }
+        (Some(old_size), Some(new_size)) => format!(
+            "{} → {}",
+            format_byte_size(old_size),
+            format_byte_size(new_size)
+        ),
+        (None, None) => String::new(),
+    };
+    div()
+        .id("binary-diff-placeholder")
+        .flex()
+        .flex_1()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .items_center()
+        .justify_center()
+        .p_4()
+        .bg(rgb(ui_theme::CARD))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .px_8()
+                .py_5()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(ui_theme::BORDER))
+                .bg(rgb(ui_theme::TILE))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .child("二进制文件"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child("无法以文本形式展示差异"),
+                )
+                .when(!size_label.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(size_label),
+                    )
+                }),
+        )
 }
 
 pub(crate) fn commit_time_label(seconds: i64) -> String {

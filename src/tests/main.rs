@@ -87,6 +87,8 @@ fn make_sample_diff(lines: Vec<khaslana::DiffLine>) -> FileDiff {
         path: "a.txt".into(),
         scope: DiffScope::Unstaged,
         is_binary: false,
+        old_size: None,
+        new_size: None,
         encoding: khaslana::DiffEncodingInfo {
             requested: DiffEncodingChoice::Auto,
             resolved: DiffEncodingChoice::Utf8,
@@ -935,6 +937,8 @@ fn test_diff(lines: Vec<khaslana::DiffLine>, is_binary: bool) -> FileDiff {
         path: "file.txt".to_string(),
         scope: DiffScope::Unstaged,
         is_binary,
+        old_size: None,
+        new_size: None,
         encoding: khaslana::DiffEncodingInfo {
             requested: DiffEncodingChoice::Utf8,
             resolved: DiffEncodingChoice::Utf8,
@@ -998,6 +1002,20 @@ fn diff_render_rows_track_headers_and_empty_states() {
         diff_render_rows_for(None, false),
         vec![DiffRenderRow::Empty]
     );
+}
+
+#[test]
+fn format_byte_size_uses_binary_units_with_one_decimal() {
+    assert_eq!(format_byte_size(0), "0 B");
+    assert_eq!(format_byte_size(512), "512 B");
+    assert_eq!(format_byte_size(1024), "1 KB");
+    assert_eq!(format_byte_size(1024 + 512), "1.5 KB");
+    assert_eq!(format_byte_size(1024 * 1024), "1 MB");
+    assert_eq!(
+        format_byte_size((1.2 * 1024.0 * 1024.0 * 1024.0) as u64),
+        "1.2 GB"
+    );
+    assert_eq!(format_byte_size(3 * 1024 * 1024), "3 MB");
 }
 
 fn switcher_tab(key: &str, name: &str, last_active: i64, tab_id: u64) -> RepoSwitcherTabInput {

@@ -130,6 +130,7 @@ impl GitService {
         {
             super::guard_full_file_size(&diff, full_context)?;
             return self.file_diff_from_diff(
+                repo,
                 diff,
                 super::path_to_git(path),
                 DiffScope::Staged,
@@ -149,7 +150,13 @@ impl GitService {
         let diff =
             repo.diff_tree_to_tree(base_tree.as_ref(), Some(&stash_tree), Some(&mut options))?;
         super::guard_full_file_size(&diff, full_context)?;
-        self.file_diff_from_diff(diff, super::path_to_git(path), DiffScope::Staged, encoding)
+        self.file_diff_from_diff(
+            repo,
+            diff,
+            super::path_to_git(path),
+            DiffScope::Staged,
+            encoding,
+        )
     }
 
     fn ensure_stash_index(&self, repo: &mut Repository, index: usize) -> Result<()> {

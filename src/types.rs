@@ -286,6 +286,10 @@ pub struct FileDiff {
     pub path: String,
     pub scope: DiffScope,
     pub is_binary: bool,
+    /// 旧侧文件大小（字节）；新增文件（Added delta）为 None。
+    pub old_size: Option<u64>,
+    /// 新侧文件大小（字节）；删除文件（Deleted delta）为 None。
+    pub new_size: Option<u64>,
     pub encoding: DiffEncodingInfo,
     pub lines: Vec<DiffLine>,
 }

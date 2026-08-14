@@ -294,7 +294,13 @@ impl GitService {
             repo.diff_tree_to_tree(base_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
 
         super::guard_full_file_size(&diff, full_context)?;
-        self.file_diff_from_diff(diff, super::path_to_git(path), DiffScope::Staged, encoding)
+        self.file_diff_from_diff(
+            repo,
+            diff,
+            super::path_to_git(path),
+            DiffScope::Staged,
+            encoding,
+        )
     }
 }
 
