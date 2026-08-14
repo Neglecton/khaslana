@@ -16,6 +16,10 @@ use crate::types::{GitError, Result};
 
 // ── 数据结构 ──────────────────────────────────────────────────────────────
 
+/// 更新包下载的体积上限（字节）。manifest 声明的 size 或服务器返回的
+/// Content-Length 超过该值直接拒绝，防止被劫持的下载源无限流写满磁盘。
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
 /// 从 `khaslana-update.json` 反序列化的更新清单。
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct UpdateManifest {
@@ -140,10 +144,14 @@ pub fn download_update(
     let downloads_dir = config_dir.join("updates").join("downloads");
     fs::create_dir_all(&downloads_dir)?;
 
-    let zip_filename = format!(
-        "khaslana-v{}-windows-x86_64.zip",
-        asset.archive_url.rsplit('/').next().unwrap_or("unknown")
-    );
+    // 直接使用 URL 末段作为文件名（即发布产物名，如 khaslana-v0.2.0-windows-x86_64.zip）。
+    let zip_filename = asset
+        .archive_url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("khaslana-update.zip")
+        .to_string();
     let zip_path = downloads_dir.join(&zip_filename);
     let part_path = zip_path.with_extension("zip.part");
 
@@ -188,7 +196,7 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<bool> {
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
-    let actual = format!("{:x}", digest);
+    let actual = digest_hex(&digest);
     Ok(actual == expected)
 }
 
@@ -217,8 +225,14 @@ pub fn prepare_staging(zip_path: &Path, version: &str, config_dir: &Path) -> Res
             .map_err(|err| GitError::Message(format!("更新包读取条目失败：{err}")))?;
         let entry_name = entry.name().to_string();
 
-        // 安全检查：跳过绝对路径和路径遍历
-        if entry_name.starts_with('/') || entry_name.contains("..") {
+        // 安全检查：跳过绝对路径、路径遍历，以及 Windows 盘符/反斜杠条目
+        // （如 `C:evil`、`..\evil`，`PathBuf::join` 对带盘符前缀的相对路径
+        // 会截断基础路径，导致写出 staging 目录之外）。
+        if entry_name.starts_with('/')
+            || entry_name.contains("..")
+            || entry_name.contains(':')
+            || entry_name.contains('\\')
+        {
             continue;
         }
 
@@ -264,10 +278,10 @@ fn fetch_manifest(
 
     for source in sources {
         let proxy_url = proxy_settings.proxy_url_for_target(source);
-        let agent = build_agent(proxy_url, 15);
+        let agent = build_agent(proxy_url, 15)?;
 
         match agent.get(source).call() {
-            Ok(response) => match response.into_json::<UpdateManifest>() {
+            Ok(mut response) => match response.body_mut().read_json::<UpdateManifest>() {
                 Ok(manifest) => return Ok(manifest),
                 Err(err) => {
                     last_err = Some(GitError::Message(format!(
@@ -289,18 +303,32 @@ fn fetch_manifest(
 }
 
 /// 构建带代理和超时的 ureq Agent。
-fn build_agent(proxy_url: Option<String>, timeout_secs: u64) -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout_read(std::time::Duration::from_secs(timeout_secs))
-        .timeout_write(std::time::Duration::from_secs(timeout_secs));
-
-    if let Some(url) = proxy_url {
-        if let Ok(proxy) = ureq::Proxy::new(&url) {
-            builder = builder.proxy(proxy);
-        }
-    }
-
-    builder.build()
+///
+/// 代理 URL 无效时返回错误而不是静默直连：用户显式配置的代理被绕过会暴露
+/// 真实网络路径，必须让请求失败并提示。未配置时显式传 `None`，关闭 ureq 3
+/// 默认的环境变量代理自动检测，保证应用内代理设置优先。
+fn build_agent(proxy_url: Option<String>, timeout_secs: u64) -> Result<ureq::Agent> {
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let proxy = match proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => Some(
+            ureq::Proxy::new(url)
+                .map_err(|err| GitError::Message(format!("代理配置无效，已取消更新请求：{err}")))?,
+        ),
+        None => None,
+    };
+    // 按阶段设置超时（而非 timeout_global）：慢速下载大文件时只要数据持续
+    // 到达就不应中断，与 ureq 2 的 timeout_read/timeout_write 每阶段语义一致。
+    let builder = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_response(Some(timeout))
+        .timeout_recv_body(Some(timeout))
+        .timeout_send_body(Some(timeout))
+        .proxy(proxy);
+    Ok(builder.build().new_agent())
 }
 
 /// 流式下载文件并同时计算 SHA-256。
@@ -319,20 +347,28 @@ fn download_file(
     // 下载可能较慢，使用更长超时（120s 读）
     let agent = build_agent(proxy_url, 120);
 
-    let response = agent
+    let response = agent?
         .get(url)
         .call()
         .map_err(|err| GitError::Message(format!("下载更新包失败（{url}）：{err}")))?;
 
-    // 尝试从 Content-Length 获取总大小
+    // 尝试从 Content-Length 获取总大小，并施加体积上限。
     let content_length = response
-        .header("Content-Length")
-        .and_then(|v| v.parse::<u64>().ok())
+        .headers()
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(total_size);
+    if content_length > MAX_DOWNLOAD_BYTES {
+        return Err(GitError::Message(format!(
+            "更新包体积异常（{content_length} 字节，上限 {MAX_DOWNLOAD_BYTES}），已取消下载"
+        )));
+    }
 
     let mut file = fs::File::create(dest)?;
     let mut hasher = Sha256::new();
-    let mut reader = response.into_reader();
+    let mut body = response.into_body();
+    let mut reader = body.as_reader();
     let mut buf = [0u8; 8192];
     let mut downloaded: u64 = 0;
     let mut progress_counter: u64 = 0;
@@ -347,6 +383,12 @@ fn download_file(
         file.write_all(&buf[..n])?;
         hasher.update(&buf[..n]);
         downloaded += n as u64;
+        // 服务器未提供或谎报 Content-Length 时按实际字节数兜底截断。
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(GitError::Message(format!(
+                "更新包下载超出体积上限（{MAX_DOWNLOAD_BYTES} 字节），已取消"
+            )));
+        }
         progress_counter += 1;
         if progress_counter >= PROGRESS_REPORT_INTERVAL {
             progress_counter = 0;
@@ -362,7 +404,16 @@ fn download_file(
     }
 
     let digest = hasher.finalize();
-    Ok(format!("{:x}", digest))
+    Ok(digest_hex(&digest))
+}
+
+/// 把 SHA-256 摘要字节编码为小写十六进制字符串。
+fn digest_hex(digest: &[u8]) -> String {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 // ── 单元测试 ──────────────────────────────────────────────────────────────

@@ -188,21 +188,17 @@ impl ChatClient {
             stream: false,
         };
 
-        let agent = self.build_agent();
-        let body_value = serde_json::to_value(&body)
-            .map_err(|err| GitError::Message(format!("AI 请求体序列化失败：{err}")))?;
-        let response = agent
+        let agent = self.build_agent()?;
+        let mut response = agent
             .post(&url)
-            .set(
-                "Authorization",
-                &format!("Bearer {}", self.settings.api_key),
-            )
-            .set("Content-Type", "application/json")
-            .send_json(body_value)
+            .header("Authorization", format!("Bearer {}", self.settings.api_key))
+            .header("Content-Type", "application/json")
+            .send_json(&body)
             .map_err(|err| GitError::Message(format!("AI 请求失败：{err}")))?;
 
         let parsed: ChatCompletionsResponse = response
-            .into_json()
+            .body_mut()
+            .read_json()
             .map_err(|err| GitError::Message(format!("AI 响应解析失败：{err}")))?;
 
         let choice = parsed
@@ -268,21 +264,17 @@ impl ChatClient {
             stream: true,
         };
 
-        let agent = self.build_streaming_agent();
-        let body_value = serde_json::to_value(&body)
-            .map_err(|err| GitError::Message(format!("AI 请求体序列化失败：{err}")))?;
+        let agent = self.build_streaming_agent()?;
         let response = agent
             .post(&url)
-            .set(
-                "Authorization",
-                &format!("Bearer {}", self.settings.api_key),
-            )
-            .set("Content-Type", "application/json")
-            .send_json(body_value)
+            .header("Authorization", format!("Bearer {}", self.settings.api_key))
+            .header("Content-Type", "application/json")
+            .send_json(&body)
             .map_err(|err| GitError::Message(format!("AI 请求失败：{err}")))?;
 
         // 逐行读取 SSE 流，累积完整 content 与 reasoning_content。
-        let reader = BufReader::new(response.into_reader());
+        let mut body = response.into_body();
+        let reader = BufReader::new(body.as_reader());
         let mut full_content = String::new();
         let mut full_reasoning = String::new();
         for line in reader.lines() {
@@ -324,36 +316,39 @@ impl ChatClient {
         Ok(ChatResult { content, reasoning })
     }
 
-    fn build_streaming_agent(&self) -> ureq::Agent {
-        // 流式场景不设整体超时：把 request_timeout_secs 当作读空闲超时，
-        // 长输出只要持续有数据就不算超时。
-        let mut builder = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(30))
-            .timeout_read(std::time::Duration::from_secs(
-                self.settings.request_timeout_secs.max(1),
-            ));
-        if let Some(proxy_url) = self.proxy_url.as_deref() {
-            if !proxy_url.trim().is_empty() {
-                if let Ok(proxy) = ureq::Proxy::new(proxy_url) {
-                    builder = builder.proxy(proxy);
-                }
-            }
-        }
-        builder.build()
+    fn build_streaming_agent(&self) -> KhaslanaResult<ureq::Agent> {
+        // 流式场景不设整体超时：把 request_timeout_secs 当作读空闲超时
+        // （ureq 3 的 timeout_recv_body 按每次读分别计算），长输出只要
+        // 持续有数据就不算超时。
+        let timeout = std::time::Duration::from_secs(self.settings.request_timeout_secs.max(1));
+        let builder = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(30)))
+            .timeout_recv_body(Some(timeout))
+            .proxy(resolve_proxy(self.proxy_url.as_deref())?);
+        Ok(builder.build().new_agent())
     }
 
-    fn build_agent(&self) -> ureq::Agent {
-        let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(
-            self.settings.request_timeout_secs.max(1),
-        ));
-        if let Some(proxy_url) = self.proxy_url.as_deref() {
-            if !proxy_url.trim().is_empty() {
-                if let Ok(proxy) = ureq::Proxy::new(proxy_url) {
-                    builder = builder.proxy(proxy);
-                }
-            }
-        }
-        builder.build()
+    fn build_agent(&self) -> KhaslanaResult<ureq::Agent> {
+        let timeout = std::time::Duration::from_secs(self.settings.request_timeout_secs.max(1));
+        let builder = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(resolve_proxy(self.proxy_url.as_deref())?);
+        Ok(builder.build().new_agent())
+    }
+}
+
+/// 把用户配置的代理 URL 解析为 ureq 代理。
+///
+/// - 未配置时返回 `None`，显式关闭 ureq 3 默认的环境变量代理自动检测，
+///   保证应用内“不使用代理”设置生效（系统代理模式由调用方读取环境变量后传入）。
+/// - URL 无效时返回错误而不是静默直连：用户显式配置的代理被绕过会暴露
+///   真实网络路径，必须让请求失败并提示（例如 SOCKS5 代理写错协议前缀）。
+fn resolve_proxy(proxy_url: Option<&str>) -> KhaslanaResult<Option<ureq::Proxy>> {
+    match proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => ureq::Proxy::new(url)
+            .map(Some)
+            .map_err(|err| GitError::Message(format!("代理配置无效，已取消 AI 请求：{err}"))),
+        None => Ok(None),
     }
 }
 

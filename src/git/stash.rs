@@ -128,7 +128,7 @@ impl GitService {
         if let Some(diff) =
             self.stash_untracked_diff_for_path(repo, &stash_commit, path, full_context)?
         {
-            super::guard_full_file_size(&diff, full_context)?;
+            super::guard_full_file_size(repo, &diff, full_context)?;
             return self.file_diff_from_diff(
                 repo,
                 diff,
@@ -149,7 +149,7 @@ impl GitService {
             .pathspec(path);
         let diff =
             repo.diff_tree_to_tree(base_tree.as_ref(), Some(&stash_tree), Some(&mut options))?;
-        super::guard_full_file_size(&diff, full_context)?;
+        super::guard_full_file_size(repo, &diff, full_context)?;
         self.file_diff_from_diff(
             repo,
             diff,

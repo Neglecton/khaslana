@@ -245,9 +245,8 @@ impl<'a> WorkflowExecutor<'a> {
                 let resolved_step = step.resolve(&mut resolver)?;
                 let summary = resolved_step.summary();
                 // 对只读步骤（如 FilterBranches）在预览阶段即可计算明细并写入步骤输出，
-                // 让后续步骤在预览时也能引用筛选结果。
-                let details = preview_step_details(&resolved_step, self.service, repo)?;
-                record_preview_output(&resolved_step, self.service, repo, &context)?;
+                // 让后续步骤在预览时也能引用筛选结果；明细与输出一次计算共用。
+                let details = record_preview_output(&resolved_step, self.service, repo, &context)?;
                 preview_state.apply(&resolved_step);
                 resolver.set_preview_current_branch(preview_state.current_branch.clone());
                 Ok(WorkflowPreviewStep {
@@ -1256,43 +1255,17 @@ fn select_branches_for_deletion(
 
 /// 预览阶段为已解析步骤生成明细行。
 /// 仅 FilterBranches 需要计算实际命中清单（只读），其它步骤返回空。
-fn preview_step_details(
-    step: &ResolvedWorkflowStep,
-    service: &GitService,
-    repo: &Repository,
-) -> Result<Vec<String>> {
-    match step {
-        ResolvedWorkflowStep::FilterBranches {
-            pattern,
-            date_format,
-            date_group,
-            older_than_months,
-            skip_current,
-            ..
-        } => {
-            let plan = select_branches_for_deletion(
-                service,
-                repo,
-                pattern,
-                date_format,
-                date_group,
-                *older_than_months,
-                *skip_current,
-            )?;
-            Ok(deletion_plan_details(&plan, "命中"))
-        }
-        _ => Ok(Vec::new()),
-    }
-}
-
 /// 预览阶段把只读步骤的输出写入 context，让后续步骤在预览时也能引用。
 /// 目前仅 FilterBranches 会产生输出（命中分支数组）。
+///
+/// 同时返回该步骤的明细行：FilterBranches 的明细与输出同源于分支筛选，
+/// 一次计算两处共用，避免每个步骤把全量分支扫描 + 逐分支正则匹配跑两遍。
 fn record_preview_output(
     step: &ResolvedWorkflowStep,
     service: &GitService,
     repo: &Repository,
     context: &WorkflowEvalContext,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if let ResolvedWorkflowStep::FilterBranches {
         output,
         pattern,
@@ -1311,9 +1284,11 @@ fn record_preview_output(
             *older_than_months,
             *skip_current,
         )?;
+        let details = deletion_plan_details(&plan, "命中");
         context.record_output(output.clone(), plan.matched);
+        return Ok(details);
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

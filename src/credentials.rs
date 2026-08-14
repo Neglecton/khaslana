@@ -283,7 +283,8 @@ impl CredentialStore for MemoryCredentialStore {
         };
         let mut updated = record.clone();
         updated.last_used = Some(now_seconds());
-        updated.updated_at = updated.last_used.unwrap_or(updated.updated_at);
+        // updated_at 保持创建/修改语义（与 Keyring 版一致），避免每次读取都
+        // 覆写导致列表排序漂移。
         let mut index = self
             .index
             .lock()
@@ -487,8 +488,14 @@ impl KeyringCredentialStore {
             .lock()
             .map_err(|_| GitError::Credential("系统凭据管理器初始化状态异常".into()))?;
         if !*initialized {
-            keyring::use_native_store(false)
-                .map_err(|err| GitError::Credential(format!("系统凭据管理器不可用：{err:?}")))?;
+            // keyring 4.1：平台原生凭据库由 v1 API 一次性初始化并注册为
+            // keyring-core 默认库；store_status() 触发初始化并返回可用性。
+            // 不可用时报错，禁止任何明文回退。
+            if let Err(err) = keyring::Entry::store_status() {
+                return Err(GitError::Credential(format!(
+                    "系统凭据管理器不可用：{err:?}"
+                )));
+            }
             *initialized = true;
         }
         Ok(())
@@ -648,7 +655,12 @@ impl CredentialStore for KeyringCredentialStore {
         entry
             .set_password(&credential.secret_for_keyring())
             .map_err(|err| GitError::Credential(format!("系统凭据写入失败：{err:?}")))?;
-        self.save_index(&index)?;
+        if let Err(err) = self.save_index(&index) {
+            // 索引写失败时回滚刚写入的 keyring 条目，避免产生 UI 不可见、
+            // 也无法删除的孤儿 secret。
+            let _ = entry.delete_credential();
+            return Err(err);
+        }
         Ok(record)
     }
 
@@ -684,17 +696,21 @@ impl CredentialStore for KeyringCredentialStore {
             .iter()
             .find(|record| record.id == record_id)
             .cloned();
-        index.records.retain(|record| record.id != record_id);
-        self.save_index(&index)?;
-        if let Some(record) = removed {
-            let entry = Self::entry_for_record(record_id, &record.username)?;
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring_core::Error::NoEntry) => {}
-                Err(err) => {
-                    return Err(GitError::Credential(format!("系统凭据删除失败：{err:?}")));
-                }
+        let Some(record) = removed else {
+            return Ok(());
+        };
+        // 先删系统凭据库中的 secret，成功后再提交索引变更。
+        // 若顺序相反，Keyring 删除失败时索引已更新，secret 会变成 UI 不可见、
+        // 也无法重试删除的永久孤儿条目。
+        let entry = Self::entry_for_record(record_id, &record.username)?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+            Err(err) => {
+                return Err(GitError::Credential(format!("系统凭据删除失败：{err:?}")));
             }
         }
+        index.records.retain(|record| record.id != record_id);
+        self.save_index(&index)?;
         Ok(())
     }
 
@@ -894,10 +910,12 @@ fn git_ssh_command_for_credential(credential: &GitCredential) -> Option<String> 
     };
     let options = "-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15";
     Some(match private_key_path.as_deref() {
-        Some(path) => format!(
-            "ssh -i \"{}\" -o IdentitiesOnly=yes {options}",
-            path.replace('"', "\\\"")
-        ),
+        Some(path) => {
+            // GIT_SSH_COMMAND 经 shell 执行：路径用单引号包裹，' 本身以 '\'' 转义。
+            // 双引号方案无法阻止 $()、反引号等展开。
+            let escaped_path = format!("'{}'", path.replace('\'', "'\\''"));
+            format!("ssh -i {escaped_path} -o IdentitiesOnly=yes {options}")
+        }
         None => format!("ssh {options}"),
     })
 }

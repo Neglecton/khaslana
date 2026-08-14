@@ -167,7 +167,11 @@ impl ConflictFileView {
             if block.start > prefix {
                 block.start = prefix;
             }
-            block.end = add_signed(block.end, delta).max(block.start);
+            // 块尾随编辑区长度差平移后可能落在多字节字符中间（例如把 ASCII
+            // 中段改成多字节文本），后续按字节 replace_range 会 panic；
+            // 吸附到最近的字符边界。
+            block.end =
+                clamp_to_char_boundary(&new_draft, add_signed(block.end, delta).max(block.start));
             block.status = ConflictBlockStatus::Unresolved;
         }
 
@@ -214,6 +218,18 @@ fn add_signed(value: usize, delta: isize) -> usize {
     }
 }
 
+/// 把字节偏移吸附到不超过它的最近 UTF-8 字符边界。
+/// 越界或本身就在边界上时原样返回（钳制到文本长度）。
+fn clamp_to_char_boundary(text: &str, mut offset: usize) -> usize {
+    if offset >= text.len() {
+        return text.len();
+    }
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
 fn shared_prefix_len(left: &str, right: &str) -> usize {
     let mut prefix = 0;
     let mut left_iter = left.char_indices();
@@ -244,4 +260,54 @@ fn shared_suffix_len(left: &str, right: &str) -> usize {
         }
     }
     suffix
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_draft_clamps_block_end_to_char_boundary() {
+        let mut view = ConflictFileView {
+            path: "f".into(),
+            kind: ConflictFileKind::Text,
+            draft: "XabY".into(),
+            ours_text: String::new(),
+            theirs_text: String::new(),
+            blocks: vec![ConflictBlock {
+                base: None,
+                ours: "Xa".into(),
+                theirs: String::new(),
+                start: 0,
+                end: 2,
+                ours_start: 0,
+                ours_end: 2,
+                theirs_start: 0,
+                theirs_end: 2,
+                status: ConflictBlockStatus::Unresolved,
+                has_manual_edits: false,
+            }],
+            draft_status: ConflictDraftStatus::Clean,
+            fallback_reason: None,
+        };
+
+        // 把编辑区内的 ASCII 段替换为多字节字符：块尾平移 +1 后落在“中”
+        // （3 字节）内部，必须吸附到字符边界，否则后续按字节 replace_range
+        // 会 panic。
+        view.set_draft("X中Y".into());
+
+        assert_eq!(view.draft, "X中Y");
+        assert!(view.draft.is_char_boundary(view.blocks[0].start));
+        assert!(view.draft.is_char_boundary(view.blocks[0].end));
+        assert!(view.blocks[0].start <= view.blocks[0].end);
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_snaps_backwards() {
+        // “中”占 1..4，字节 3 在其内部，应吸附到 1。
+        assert_eq!(clamp_to_char_boundary("a中b", 3), 1);
+        assert_eq!(clamp_to_char_boundary("a中b", 4), 4);
+        assert_eq!(clamp_to_char_boundary("a中b", 99), 5);
+        assert_eq!(clamp_to_char_boundary("a中b", 0), 0);
+    }
 }

@@ -167,6 +167,22 @@ pub(crate) fn run_intellij_idea_merge_with_command(
     let theirs = read_conflict_blob(repo, conflict.their.as_ref())?;
 
     let merge_dir = create_merge_temp_dir()?;
+    let result = run_external_merge(command, path, &merge_dir, &ancestor, &ours, &theirs);
+    // 无论成功失败都清理临时目录：里面是冲突文件的三方明文内容，
+    // 长期残留既有隐私问题也会无限累积磁盘垃圾。
+    let _ = fs::remove_dir_all(&merge_dir);
+    result
+}
+
+/// 用外部命令执行三方合并：写临时文件 → 调用 IDEA merge → 读回结果。
+fn run_external_merge(
+    command: &Path,
+    path: &Path,
+    merge_dir: &Path,
+    ancestor: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+) -> Result<Vec<u8>> {
     let file_name = path
         .file_name()
         .and_then(OsStr::to_str)

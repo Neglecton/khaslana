@@ -40,16 +40,26 @@ pub(crate) fn is_configured() -> bool {
 }
 
 /// 构建带代理和超时的 ureq Agent（与代理设置保持一致）。
-fn build_agent(proxy_url: Option<String>) -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_secs(20))
-        .timeout_write(Duration::from_secs(20));
-    if let Some(url) = proxy_url
-        && let Ok(proxy) = ureq::Proxy::new(&url)
-    {
-        builder = builder.proxy(proxy);
-    }
-    builder.build()
+///
+/// 代理 URL 无效时返回错误而不是静默直连：用户显式配置的代理被绕过会暴露
+/// 真实网络路径，必须让请求失败并提示。未配置时显式传 `None`，关闭 ureq 3
+/// 默认的环境变量代理自动检测（系统代理模式由调用方读取环境变量后传入）。
+fn build_agent(proxy_url: Option<String>) -> Result<ureq::Agent, String> {
+    let proxy = proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            ureq::Proxy::new(url).map_err(|err| format!("代理配置无效，已取消 OAuth 请求：{err}"))
+        })
+        .transpose()?;
+    let builder = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(20)))
+        .timeout_recv_body(Some(Duration::from_secs(20)))
+        .timeout_send_body(Some(Duration::from_secs(20)))
+        .proxy(proxy);
+    Ok(builder.build().new_agent())
 }
 
 /// 设备码请求响应。
@@ -78,16 +88,17 @@ impl DeviceCodeResponse {
 
 /// 请求设备码。
 pub(crate) fn request_device_code(proxy_url: Option<String>) -> Result<DeviceCodeResponse, String> {
-    let agent = build_agent(proxy_url);
-    let resp = agent
+    let agent = build_agent(proxy_url)?;
+    let mut resp = agent
         .post(DEVICE_CODE_URL)
-        .set("Accept", "application/json")
-        .send_form(&[
+        .header("Accept", "application/json")
+        .send_form([
             ("client_id", GITHUB_OAUTH_CLIENT_ID),
             ("scope", GITHUB_OAUTH_SCOPES),
         ])
         .map_err(|e| format!("请求设备码失败：{e}"))?;
-    resp.into_json::<DeviceCodeResponse>()
+    resp.body_mut()
+        .read_json::<DeviceCodeResponse>()
         .map_err(|e| format!("解析设备码响应失败：{e}"))
 }
 
@@ -129,6 +140,27 @@ fn classify_token(parsed: TokenResponse, interval: &mut u64) -> Result<Option<St
     }
 }
 
+/// 轮询令牌专用 Agent：关闭“HTTP 状态码转错误”，因为 GitHub 在待定/过期时
+/// 返回 400 且错误详情在响应体里，需要拿到完整响应自行解析。
+fn build_token_poll_agent(proxy_url: Option<String>) -> Result<ureq::Agent, String> {
+    let proxy = proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            ureq::Proxy::new(url).map_err(|err| format!("代理配置无效，已取消 OAuth 请求：{err}"))
+        })
+        .transpose()?;
+    let builder = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(20)))
+        .timeout_recv_body(Some(Duration::from_secs(20)))
+        .timeout_send_body(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .proxy(proxy);
+    Ok(builder.build().new_agent())
+}
+
 /// 轮询 access token，直到成功、被取消或设备码过期。
 ///
 /// `interval` 为初始轮询间隔（来自设备码响应），遇到 `slow_down` 会自动递增。
@@ -140,7 +172,7 @@ pub(crate) fn poll_for_token(
     expires_in: u64,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
-    let agent = build_agent(proxy_url);
+    let agent = build_token_poll_agent(proxy_url)?;
     let deadline = Instant::now() + Duration::from_secs(expires_in);
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -157,19 +189,21 @@ pub(crate) fn poll_for_token(
             std::thread::sleep(Duration::from_secs(1));
         }
 
+        // 400 响应（如 unsupported_grant_type）的 body 里也带 error 字段，
+        // 因此不做状态码判断，统一尝试解析响应体。
         let parsed_opt = match agent
             .post(TOKEN_URL)
-            .set("Accept", "application/json")
-            .send_form(&[
+            .header("Accept", "application/json")
+            .send_form([
                 ("client_id", GITHUB_OAUTH_CLIENT_ID),
                 ("device_code", &device_code),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ]) {
-            Ok(resp) => resp.into_json::<TokenResponse>().ok(),
-            // HTTP 错误（如 400 unsupported_grant_type）也尝试解析 body 中的 error。
-            Err(ureq::Error::Status(_, resp)) => resp.into_json::<TokenResponse>().ok(),
-            Err(ureq::Error::Transport(err)) => {
-                tracing::warn!(target: "khaslana::oauth", "轮询令牌网络错误：{err}");
+            Ok(mut resp) => resp.body_mut().read_json::<TokenResponse>().ok(),
+            // http_status_as_error 已关闭，能走到 Err 的都是网络层错误；
+            // 瞬时失败等待下一轮重试（受 expires_in 兜底）。
+            Err(err) => {
+                tracing::warn!(target: "khaslana::oauth", "轮询令牌请求错误：{err}");
                 None
             }
         };
@@ -186,16 +220,17 @@ pub(crate) fn poll_for_token(
 
 /// 用 access token 获取用户登录名（作为 git 认证的用户名）。
 pub(crate) fn fetch_login(proxy_url: Option<String>, token: &str) -> Result<String, String> {
-    let agent = build_agent(proxy_url);
-    let resp = agent
+    let agent = build_agent(proxy_url)?;
+    let mut resp = agent
         .get(USER_URL)
-        .set("Accept", "application/json")
-        .set("Authorization", &format!("token {token}"))
-        .set("User-Agent", "Khaslana")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "Khaslana")
         .call()
         .map_err(|e| format!("获取用户信息失败：{e}"))?;
     let user: GithubUser = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| format!("解析用户信息失败：{e}"))?;
     user.login.ok_or_else(|| "GitHub 未返回登录名".into())
 }
@@ -302,15 +337,47 @@ where
 }
 
 /// 读取回调 HTTP 请求，解析出 `(code, state, error)`。
+///
+/// 循环读取直到收齐请求头（`\r\n\r\n`）或超长放弃，避免 TCP 分片时单次 read
+/// 读不完整就误判为无效请求。同时校验 Host 头必须是本机回调地址，防止
+/// 恶意网页借 DNS rebinding 把伪造请求投给本地端口。
 fn read_callback_request(
     stream: &mut TcpStream,
 ) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).ok()?;
-    let req = std::str::from_utf8(&buf[..n]).ok()?;
+    const MAX_REQUEST_BYTES: usize = 8192;
+    let mut buf: Vec<u8> = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    loop {
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= MAX_REQUEST_BYTES {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    let req = std::str::from_utf8(&buf).ok()?;
     // 请求行形如：GET /callback?code=xxx&state=yyy HTTP/1.1
     let request_line = req.lines().next()?;
     let path = request_line.split_whitespace().nth(1)?;
+
+    // Host 校验：只接受本机回调地址，阻断 DNS rebinding 场景下
+    // 攻击者域名指向本机端口的伪造回调。
+    let host_ok = req.lines().skip(1).any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case("host") {
+            return false;
+        }
+        let host = value.trim();
+        host == "localhost:17890" || host == "127.0.0.1:17890"
+    });
+    if !host_ok {
+        return None;
+    }
+
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
     Some((
         query_param(query, "code"),
@@ -335,18 +402,19 @@ fn respond_callback_success(stream: &mut TcpStream) -> std::io::Result<()> {
 
 /// 通过 broker 用授权码换 token（broker 持有 client_secret 向 Gitee 交换）。
 fn exchange_via_broker(proxy_url: Option<String>, code: &str) -> Result<String, String> {
-    let agent = build_agent(proxy_url);
+    let agent = build_agent(proxy_url)?;
     let body = serde_json::json!({
         "code": code,
         "redirect_uri": GITEE_REDIRECT_URI,
     });
-    let resp = agent
+    let mut resp = agent
         .post(GITEE_BROKER_URL)
-        .set("Accept", "application/json")
-        .send_json(body)
+        .header("Accept", "application/json")
+        .send_json(&body)
         .map_err(|e| format!("令牌交换失败（broker）：{e}"))?;
     let parsed: BrokerTokenResponse = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| format!("解析令牌响应失败：{e}"))?;
     parsed.access_token.ok_or_else(|| {
         // 优先用 Gitee 返回的中文 error_description，便于用户理解。
@@ -365,15 +433,19 @@ struct BrokerTokenResponse {
 }
 
 /// 用 access_token 获取 Gitee 登录名（作为 git 认证用户名）。
+///
+/// token 走 `Authorization: token` 头而不是 URL query，避免令牌进入
+/// 服务端/中间层访问日志。
 fn fetch_gitee_login(proxy_url: Option<String>, token: &str) -> Result<String, String> {
-    let agent = build_agent(proxy_url);
-    let resp = agent
+    let agent = build_agent(proxy_url)?;
+    let mut resp = agent
         .get(GITEE_USER_API)
-        .query("access_token", token)
+        .header("Authorization", format!("token {token}"))
         .call()
         .map_err(|e| format!("获取 Gitee 用户信息失败：{e}"))?;
     let user: GiteeUser = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| format!("解析 Gitee 用户信息失败：{e}"))?;
     user.login.ok_or_else(|| "Gitee 未返回登录名".into())
 }
@@ -383,15 +455,23 @@ struct GiteeUser {
     login: Option<String>,
 }
 
-/// 生成一个简单的 CSRF state（时间戳 + 进程内计数），loopback 场景足够。
+/// 生成 CSRF state：128 位 OS CSPRNG 随机数，足够不可预测。
+///
+/// CSPRNG 不可用时退化为时间戳+计数器方案（仅削弱防伪造强度，不阻断登录）。
 fn random_state() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}{n:x}")
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_ok() {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    } else {
+        tracing::warn!(target: "khaslana::oauth", "CSPRNG 不可用，state 退化为时间戳方案");
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{nanos:x}{n:x}")
+    }
 }
 
 /// 在查询串中取某个 key 的值（已百分号解码）。

@@ -83,6 +83,29 @@ pub(crate) fn widest_browse_line_index(lines: &[String]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// 按内容身份缓存的最宽行扫描（见 `BrowseState::widest_line_cache`）。
+/// 大文件打开期间每帧重算是 O(总字符)，拖动行选区等高频重绘会明显卡顿。
+fn cached_widest_browse_line_index(
+    content: &Option<std::sync::Arc<khaslana::BrowseFileContent>>,
+    cache: &std::cell::RefCell<Option<((usize, usize), Option<usize>)>>,
+) -> Option<usize> {
+    let key = content.as_ref().map(|content| {
+        (
+            std::sync::Arc::as_ptr(content) as usize,
+            content.lines.len(),
+        )
+    });
+    let mut cache = cache.borrow_mut();
+    if cache.as_ref().map(|(cached, _)| *cached) != key {
+        let value = content
+            .as_ref()
+            .map(|content| widest_browse_line_index(&content.lines))
+            .flatten();
+        *cache = key.map(|key| (key, value));
+    }
+    cache.as_ref().and_then(|(_, value)| *value)
+}
+
 impl RepositoryView {
     pub(crate) fn render_browse_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -543,6 +566,14 @@ impl RepositoryView {
                     if !this.browse.selecting {
                         return;
                     }
+                    // 按住拖出内容区后释放鼠标时，mouse_up 不会经过本元素，
+                    // selecting 会卡在 true：此后纯 hover 也持续改选区。
+                    // 依赖事件自带的按键状态复位，与滚动条拖拽同一套模式。
+                    if !event.dragging() {
+                        this.browse.selecting = false;
+                        cx.notify();
+                        return;
+                    }
                     let line_count = this
                         .browse
                         .content
@@ -604,8 +635,9 @@ impl RepositoryView {
                     }),
                 )
                 .track_scroll(&list_handle)
-                .with_width_from_item(widest_browse_line_index(
-                    content.as_ref().map(|c| c.lines.as_slice()).unwrap_or(&[]),
+                .with_width_from_item(cached_widest_browse_line_index(
+                    &content,
+                    &self.browse.widest_line_cache,
                 ))
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)

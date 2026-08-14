@@ -681,8 +681,19 @@ pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
         let mut connectors = Vec::new();
 
         if let Some(first_parent) = commit.parents.first() {
-            lanes[lane] = Some(first_parent.clone());
-            connectors.push(lane);
+            // 分叉汇合：first parent 已占据其它泳道时，当前泳道并入该泳道并
+            // 释放。若无条件写入当前泳道，parent 会同时占据两条泳道——父提交
+            // 行只清理第一条匹配，另一条成为幽灵泳道，贯穿竖线画到列表末尾。
+            if let Some(existing) = lanes
+                .iter()
+                .position(|oid| oid.as_deref() == Some(first_parent.as_str()))
+            {
+                connectors.push(existing);
+                lanes[lane] = None;
+            } else {
+                lanes[lane] = Some(first_parent.clone());
+                connectors.push(lane);
+            }
         } else {
             lanes[lane] = None;
         }
@@ -1037,6 +1048,27 @@ mod tests {
         assert!(!rows[0].connected_from_top);
         assert!(!rows[1].connected_from_top);
         assert!(rows[2].connected_from_top);
+    }
+
+    // 分叉的两个分支 tip 汇合到同一父提交时，后到的 tip 并入父提交已有泳道，
+    // 自身泳道释放——否则父提交行之后会残留幽灵竖线贯穿到列表末尾。
+    #[test]
+    fn fork_rejoining_parent_releases_lane() {
+        let commits = vec![
+            test_commit("main-tip", &["base"]),
+            test_commit("feature-tip", &["base"]),
+            test_commit("base", &["root"]),
+            test_commit("root", &[]),
+        ];
+
+        let rows = commit_graph_rows(&commits);
+
+        // feature-tip 行并入 base 所在泳道 0，自身泳道在行内仍可见（画圆点）。
+        assert!(rows[1].lanes.contains(&1));
+        assert_eq!(rows[1].connectors, vec![0]);
+        // base 行及之后：幽灵泳道不应残留。
+        assert_eq!(rows[2].lanes, vec![0]);
+        assert_eq!(rows[3].lanes, vec![0]);
     }
 
     // 合并提交的第二父提交尚未分页加载时，其泳道不应被剪掉：引入行画斜线但不画悬空顶部竖线，

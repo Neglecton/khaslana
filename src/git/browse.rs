@@ -152,6 +152,18 @@ impl GitService {
         let entry = tree
             .get_path(path)
             .map_err(|_| GitError::Message(format!("文件不存在: {}", path.display())))?;
+
+        // 大文件保护：先读 ODB 对象头取体积（不加载内容），超大文件直接报错，
+        // 避免几百 MB 的 blob 为了一次判断先整体 inflate 到堆。
+        if let Ok(odb) = repo.odb()
+            && let Ok((size, _)) = odb.read_header(entry.id())
+            && size as u64 > super::FULL_FILE_MAX_BYTES
+        {
+            return Err(GitError::Message(
+                super::FULL_FILE_TOO_LARGE_MESSAGE.to_string(),
+            ));
+        }
+
         let blob = entry
             .to_object(repo)?
             .into_blob()
@@ -293,7 +305,7 @@ impl GitService {
         let diff =
             repo.diff_tree_to_tree(base_tree.as_ref(), Some(&target_tree), Some(&mut options))?;
 
-        super::guard_full_file_size(&diff, full_context)?;
+        super::guard_full_file_size(repo, &diff, full_context)?;
         self.file_diff_from_diff(
             repo,
             diff,

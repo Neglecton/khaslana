@@ -446,8 +446,17 @@ fn ssh_username_prefers_remote_url_identity() {
 fn system_git_ssh_command_uses_selected_key_and_strict_host_check() {
     let credential = ssh_credential(CredentialScope::Host, "C:/Users/me/.ssh/id_ed25519");
     let command = git_ssh_command_for_credential(&credential).unwrap();
-    assert!(command.contains("-i \"C:/Users/me/.ssh/id_ed25519\""));
+    // 路径用单引号包裹（' 本身以 '\'' 转义），防止 $()、反引号等 shell 展开。
+    assert!(command.contains("-i 'C:/Users/me/.ssh/id_ed25519'"));
     assert!(command.contains("IdentitiesOnly=yes"));
     assert!(command.contains("BatchMode=yes"));
     assert!(command.contains("StrictHostKeyChecking=yes"));
+}
+
+#[test]
+fn system_git_ssh_command_escapes_single_quotes_in_key_path() {
+    let credential = ssh_credential(CredentialScope::Host, "C:/odd'name/key");
+    let command = git_ssh_command_for_credential(&credential).unwrap();
+    // 单引号路径内的 ' 必须转义为 '\''，否则会提前闭合引号。
+    assert!(command.contains("-i 'C:/odd'\\''name/key'"));
 }

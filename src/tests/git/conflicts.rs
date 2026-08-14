@@ -500,3 +500,42 @@ fn intellij_external_merge_handles_chinese_paths() {
     assert!(snapshot.conflicts.is_empty());
     git_support::assert_file_text(dir.path(), "目录/同名.txt", "feature\n");
 }
+
+#[test]
+fn parse_diff3_treats_separator_like_content_as_content() {
+    // BASE 段里出现 `========`（RST/Markdown 风格下划线）时，
+    // 不能被误判为 `=======` 块边界（整行精确匹配，非前缀匹配）。
+    let text = "before\n<<<<<<< OURS\nours line\n||||||| BASE\nbase line\n========\n=======\n>>>>>>> THEIRS\nafter\n";
+    let (draft, ours_text, theirs_text, blocks) = parse_diff3_conflict_text(text).unwrap();
+
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].base.as_deref(), Some("base line\n========\n"));
+    assert_eq!(blocks[0].ours, "ours line\n");
+    assert_eq!(blocks[0].theirs, "");
+    // draft 初始采用 ours 侧内容，其余视图同理。
+    assert_eq!(draft, "before\nours line\nafter\n");
+    assert_eq!(ours_text, "before\nours line\nafter\n");
+    assert_eq!(theirs_text, "before\nafter\n");
+}
+
+#[test]
+fn parse_diff3_rejects_marker_prefixed_content_as_marker() {
+    // 以标记为前缀的正文行（如 `<<<<<<< OTHER`）不能当作 OURS 开始标记。
+    let text = "intro\n<<<<<<< OTHER branch\ntail\n";
+    let (draft, _, _, blocks) = parse_diff3_conflict_text(text).unwrap();
+
+    assert!(blocks.is_empty());
+    assert_eq!(draft, text);
+}
+
+#[test]
+fn parse_diff3_supports_crlf_endings() {
+    let text =
+        "a\r\n<<<<<<< OURS\r\no\r\n||||||| BASE\r\nb\r\n=======\r\nt\r\n>>>>>>> THEIRS\r\nz\r\n";
+    let (draft, _, _, blocks) = parse_diff3_conflict_text(text).unwrap();
+
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].ours, "o\r\n");
+    assert_eq!(blocks[0].theirs, "t\r\n");
+    assert_eq!(draft, "a\r\no\r\nz\r\n");
+}

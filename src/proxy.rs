@@ -204,8 +204,13 @@ fn validate_optional_proxy_url(value: &str, kind: ProxyFieldKind) -> Result<()> 
 }
 
 fn validate_proxy_url(value: &str, kind: ProxyFieldKind) -> Result<()> {
-    if value.contains('\0') {
-        return Err(GitError::Message("代理地址不能包含空字符".into()));
+    // 控制字符和空白会原样进入 libcurl/ureq 的 URL 解析：curl 可能拒绝，
+    // ureq 解析失败时该请求会被取消，都会让代理静默失效。
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(GitError::Message("代理地址不能包含控制字符或空白".into()));
     }
     let lower = value.trim().to_ascii_lowercase();
     let valid = match kind {

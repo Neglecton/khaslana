@@ -87,6 +87,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// 替换文件：先尝试直接 copy；失败时 rename-and-replace fallback。
 ///
 /// Windows 上如果目标文件被短暂锁定，rename 旧文件后 copy 新文件可以成功。
+/// fallback 的 copy 失败时必须先把旧文件放回原位再报错，否则目标位置
+/// 既没有新文件也没有旧文件，安装彻底损坏。
 fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     match fs::copy(src, dst) {
         Ok(_) => Ok(()),
@@ -95,9 +97,22 @@ fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
             let old = dst.with_extension("old");
             let _ = fs::remove_file(&old);
             fs::rename(dst, &old)?;
-            let result = fs::copy(src, dst);
-            let _ = fs::remove_file(&old); // 清理旧文件
-            result.map(|_| ())
+            match fs::copy(src, dst) {
+                Ok(_) => {
+                    let _ = fs::remove_file(&old); // 清理旧文件
+                    Ok(())
+                }
+                Err(err) => {
+                    // 恢复旧文件到原位，保留现场供人工修复。
+                    if let Err(restore_err) = fs::rename(&old, dst) {
+                        eprintln!(
+                            "警告：恢复旧文件失败（{restore_err}），旧文件保留在 {}",
+                            old.display()
+                        );
+                    }
+                    Err(err)
+                }
+            }
         }
     }
 }
@@ -115,8 +130,12 @@ fn wait_for_process_exit(pid: u32, max_seconds: u64) -> Result<(), Box<dyn std::
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // tasklist 输出中如果进程不存在，会显示 "INFO: No tasks are running..."
-        // 如果存在，会显示进程名和 PID
-        if !stdout.contains(&pid.to_string()) {
+        // 如果存在，会显示进程名和 PID。按整词比较 PID，避免 PID 123 匹配到 1234。
+        let pid_str = pid.to_string();
+        let process_running = stdout
+            .lines()
+            .any(|line| line.split_whitespace().any(|token| token == pid_str));
+        if !process_running {
             return Ok(());
         }
 

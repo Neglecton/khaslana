@@ -64,13 +64,24 @@ pub const FULL_FILE_TOO_LARGE_MESSAGE: &str = "文件过大，无法显示全文
 
 /// 全文差异的字节预检：仅在请求全文（`full_context`）时，于分配逐行 String 之前
 /// 检查新旧侧文件体积，超过 `FULL_FILE_MAX_BYTES` 则直接返回错误。
-fn guard_full_file_size(diff: &git2::Diff<'_>, full_context: bool) -> Result<()> {
+///
+/// 尺寸不能直接用 delta 自带的 `size`：树对树 diff（历史/贮藏/分支比较）的
+/// delta size 恒为 0（树条目不携带大小），预检会形同虚设，因此经
+/// `delta_side_size` 读 ODB 对象头取真实大小。
+fn guard_full_file_size(
+    repo: &Repository,
+    diff: &git2::Diff<'_>,
+    full_context: bool,
+) -> Result<()> {
     if !full_context {
         return Ok(());
     }
-    let too_large = diff
-        .deltas()
-        .any(|delta| delta.old_file().size().max(delta.new_file().size()) > FULL_FILE_MAX_BYTES);
+    let too_large = diff.deltas().any(|delta| {
+        [delta.old_file(), delta.new_file()]
+            .into_iter()
+            .filter_map(|file| delta_side_size(repo, file))
+            .any(|size| size > FULL_FILE_MAX_BYTES)
+    });
     if too_large {
         return Err(GitError::Message(FULL_FILE_TOO_LARGE_MESSAGE.into()));
     }
@@ -80,7 +91,8 @@ fn guard_full_file_size(diff: &git2::Diff<'_>, full_context: bool) -> Result<()>
 /// 读取 diff 单侧文件的真实大小。delta 自带的 `size` 不可靠（树条目不携带大小，
 /// libgit2 只在加载过内容时才回填），因此：
 /// - 零 oid（工作区文件）：`size` 来自 stat，直接采用；
-/// - 有 oid（树/index blob）：优先读 blob 对象头；读不到时退回 delta size
+/// - 有 oid（树/index blob）：读 ODB 对象头（不加载 blob 内容，避免大对象
+///   为取尺寸先整体 inflate 到堆）；读不到时退回 delta size
 ///   （如空文件 oid 是空内容散列，但对象库里未必存在该 blob 对象）。
 /// 缺失侧（Added/Untracked 的旧侧、Deleted 的新侧）由调用方按 delta 状态跳过。
 fn delta_side_size(repo: &Repository, file: git2::DiffFile<'_>) -> Option<u64> {
@@ -89,8 +101,8 @@ fn delta_side_size(repo: &Repository, file: git2::DiffFile<'_>) -> Option<u64> {
         Some(file.size())
     } else {
         Some(
-            repo.find_blob(id)
-                .map(|blob| blob.size() as u64)
+            repo.odb()
+                .and_then(|odb| odb.read_header(id).map(|(size, _)| size.max(0) as u64))
                 .unwrap_or(file.size()),
         )
     }
@@ -285,7 +297,7 @@ impl GitService {
             conflicts: Vec::new(),
             merge_in_progress: merge_in_progress(repo),
             merge_message: merge_message(repo),
-            rebase_in_progress: false,
+            rebase_in_progress: rebase_in_progress(repo),
         })
     }
 
@@ -473,30 +485,34 @@ impl GitService {
             let Some(name) = branch.name()? else {
                 continue;
             };
+            // 只解析一次 upstream：既取显示名，也取 ahead/behind 的目标提交。
             let upstream = if branch_type == BranchType::Local {
-                branch
-                    .upstream()
-                    .ok()
-                    .and_then(|upstream| upstream.name().ok().flatten().map(str::to_string))
+                branch.upstream().ok()
             } else {
                 None
             };
-            let (ahead, behind) = if branch_type == BranchType::Local {
-                match (branch.get().target(), branch.upstream().ok()) {
-                    (Some(local_oid), Some(upstream_branch)) => {
-                        match upstream_branch.get().target() {
-                            Some(upstream_oid) => {
-                                let (ahead, behind) =
-                                    repo.graph_ahead_behind(local_oid, upstream_oid)?;
-                                (Some(ahead), Some(behind))
-                            }
-                            None => (None, None),
+            let upstream_name = upstream
+                .as_ref()
+                .and_then(|u| u.name().ok().flatten().map(str::to_string));
+            let (ahead, behind) = match (
+                branch.get().target(),
+                upstream.as_ref().and_then(|u| u.get().target()),
+            ) {
+                (Some(local_oid), Some(upstream_oid)) => {
+                    // 单个分支的 upstream 元数据异常（对象库缺提交、悬空引用等）
+                    // 不应让整个仓库无法打开：降级为无 ahead/behind 并记录告警。
+                    match repo.graph_ahead_behind(local_oid, upstream_oid) {
+                        Ok((ahead, behind)) => (Some(ahead), Some(behind)),
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "khaslana::git",
+                                "分支 {name} 的 upstream ahead/behind 计算失败：{err}"
+                            );
+                            (None, None)
                         }
                     }
-                    _ => (None, None),
                 }
-            } else {
-                (None, None)
+                _ => (None, None),
             };
             branches.push(BranchInfo {
                 name: name.to_string(),
@@ -505,7 +521,7 @@ impl GitService {
                     BranchType::Remote => BranchKind::Remote,
                 },
                 is_head: branch.is_head(),
-                upstream,
+                upstream: upstream_name,
                 ahead,
                 behind,
             });
@@ -552,7 +568,9 @@ impl GitService {
         let mut changes = BTreeMap::<String, WorktreeChange>::new();
 
         for entry in statuses.iter() {
-            let path = entry.path()?.to_string();
+            // 非 UTF-8 文件名不能让整个仓库状态加载失败：按字节读取并做
+            // 有损转换（无法显示的字节替换为 U+FFFD 占位）。
+            let path = String::from_utf8_lossy(entry.path_bytes()).into_owned();
             let status = entry.status();
             let change = changes
                 .entry(path.clone())
@@ -1303,6 +1321,14 @@ impl GitService {
         if merge::merge_in_progress(repo) {
             return self.finish_merge(repo, message);
         }
+        // 变基进行中不允许普通提交：会以单亲 HEAD 创建提交挪走分支，
+        // 随后的 cleanup_state 还会删除 rebase-merge 状态目录，剩余待重放
+        // 提交直接丢失。变基期间应通过 rebase_continue 推进。
+        if rebase_in_progress(repo) {
+            return Err(GitError::Message(
+                "变基进行中，请通过变基状态条继续/跳过/中止，不能直接提交".into(),
+            ));
+        }
 
         let message = message.0.trim();
         if message.is_empty() {
@@ -1372,7 +1398,7 @@ impl GitService {
             DiffScope::Unstaged => repo.diff_index_to_workdir(None, Some(&mut options))?,
         };
 
-        guard_full_file_size(&diff, full_context)?;
+        guard_full_file_size(repo, &diff, full_context)?;
         self.file_diff_from_diff(repo, diff, path_to_git(path), scope, encoding)
     }
 
@@ -1843,7 +1869,7 @@ impl GitService {
     ) -> Result<FileDiff> {
         let commit = self.find_commit_by_oid(repo, commit_oid)?;
         let diff = self.commit_diff(repo, &commit, Some(path), full_context)?;
-        guard_full_file_size(&diff, full_context)?;
+        guard_full_file_size(repo, &diff, full_context)?;
         self.file_diff_from_diff(repo, diff, path_to_git(path), DiffScope::Staged, encoding)
     }
 

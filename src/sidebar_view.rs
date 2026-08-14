@@ -71,9 +71,11 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let snapshot = self.snapshot.as_ref();
+        // 引用快照分支列表，不做整表 clone：大仓库远端分支上千条，
+        // 每帧深拷贝再过滤会放大任何触发重绘的操作。
         let branches = snapshot
-            .map(|snapshot| snapshot.branches.clone())
-            .unwrap_or_default();
+            .map(|snapshot| snapshot.branches.as_slice())
+            .unwrap_or(&[]);
         let local_search = if self.sidebar_local_branch_search_open {
             self.sidebar_local_branch_search.value.trim()
         } else {
@@ -96,12 +98,12 @@ impl RepositoryView {
         } else {
             Some("没有匹配的远端分支")
         };
-        let local_rows = filter_sidebar_branches(&branches, BranchKind::Local, local_search)
+        let local_rows = filter_sidebar_branches(branches, BranchKind::Local, local_search)
             .into_iter()
             .map(|branch| self.branch_row(branch, cx).into_any_element())
             .collect::<Vec<_>>();
         let remote_branch_rows =
-            filter_sidebar_branches(&branches, BranchKind::Remote, remote_branch_search)
+            filter_sidebar_branches(branches, BranchKind::Remote, remote_branch_search)
                 .into_iter()
                 .map(|branch| self.branch_row(branch, cx).into_any_element())
                 .collect::<Vec<_>>();

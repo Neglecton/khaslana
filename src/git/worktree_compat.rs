@@ -272,7 +272,15 @@ pub(super) fn save_stash_preserving_locked_directories(
         if flags.contains(StashFlags::INCLUDE_UNTRACKED) {
             checkout.remove_untracked(true);
         }
-        checkout_tree_preserving_locked_directories(repo, &target, &mut checkout)?;
+        if let Err(err) = checkout_tree_preserving_locked_directories(repo, &target, &mut checkout)
+        {
+            // stash 条目已创建成功，失败的是工作区清理：如实说明，用户重试前
+            // 会知道已产生一条贮藏，避免盲目重试堆出重复贮藏。
+            let short_oid = &stash_oid.to_string()[..7.min(stash_oid.to_string().len())];
+            return Err(git2::Error::from_str(&format!(
+                "贮藏已创建（{short_oid}），但清理工作区失败：{err}；可先处理占用后重试或手动丢弃工作区改动"
+            )));
+        }
         Ok(stash_oid)
     }
 

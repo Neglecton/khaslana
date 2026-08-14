@@ -17,14 +17,15 @@ json5 = "1"
 keyring = "4"
 keyring-core = "1"
 bstr = "1"
-lru = "0.16"
+getrandom = "0.3"
+lru = "0.18"
 rayon = "1"
 regex = "1"
 semver = "1"
-sha2 = "0.10"
-zip = "2"
+sha2 = "0.11"
+zip = "8"
 rfd = "0.17"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,8 +34,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # AI 功能用的轻量同步 HTTP 客户端；后台线程阻塞调用，避免引入 async runtime。
-ureq = { version = "2", features = ["json"] }
+# socks-proxy 让 OAuth/AI/更新请求跟随用户的 SOCKS5 代理设置，缺失时 SOCKS 代理会静默退化为直连。
+ureq = { version = "3", features = ["json", "socks-proxy"] }
 unicode-segmentation = "1"
+# 0.3 改为 headless + renderer 架构（component 模块移除、Theme 结构重排），
+# 升级需重写组件接入层，暂留 0.2 系最新版本。
 yororen_ui = "0.2"
 
 [target.'cfg(windows)'.dependencies]

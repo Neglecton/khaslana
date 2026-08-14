@@ -212,7 +212,7 @@ impl RepositoryView {
 
     /// 测试 AI 连接：发送一个最小请求。
     pub(crate) fn test_ai_connection(&mut self) {
-        if self.busy {
+        if self.busy || self.global_busy_tab.is_some() {
             self.last_error = Some("已有操作正在运行".into());
             return;
         }
@@ -221,9 +221,7 @@ impl RepositoryView {
             self.last_error = Some(err.to_string());
             return;
         }
-        self.busy = true;
-        self.status = "正在测试 AI 连接".into();
-        self.last_error = None;
+        self.begin_global_test_busy("正在测试 AI 连接");
 
         let proxy_url = self
             .proxy_settings

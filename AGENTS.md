@@ -33,6 +33,9 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 系统目录：`directories`
 - 文件对话框：`rfd`
 - 日志：`tracing`、`tracing-subscriber`
+- HTTP 客户端：`ureq 3`（http-crate 风格 API，启用 `json` + `socks-proxy` feature；`socks-proxy` 缺失时 SOCKS5 代理会静默退化为直连，不可移除）。代理 URL 解析失败时各调用方报错而非静默直连；未配置代理时显式传 `None` 关闭 ureq 3 默认的环境变量代理自动检测，保证应用内代理设置优先
+- 随机数：`getrandom`，OAuth CSRF state 用 OS CSPRNG
+- `yororen_ui` 暂留 `0.2` 系：`0.3` 重构为 headless + renderer 架构（`component` 模块移除、Theme 结构重排），升级需重写组件接入层
 - Windows 资源：`embed-resource`，通过 `build.rs` 嵌入 `assets/app.ico`
 
 ## 3. 目录和文件职责
@@ -54,7 +57,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
-- `src/oauth.rs`：OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。GitHub 走设备流（设备码请求、令牌轮询含 `authorization_pending`/`slow_down`/取消/过期、用令牌换取登录名）；Gitee 走授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调服务器用 `std::net` 手写、收 code → POST 给 broker 换 token → 取登录名）。纯同步 `ureq`，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。客户端不含 Gitee `client_secret`（公开分发会泄露），token 交换由部署在边缘平台的 broker 代办（见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`）。
+- `src/oauth.rs`：OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。GitHub 走设备流（设备码请求、令牌轮询含 `authorization_pending`/`slow_down`/取消/过期、用令牌换取登录名；轮询 Agent 关闭 `http_status_as_error`，因 GitHub 待定/过期返回 400 且详情在响应体里）；Gitee 走授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调服务器用 `std::net` 手写、循环读齐请求头、校验 Host 为本机回调地址、state 用 OS CSPRNG 128 位随机 → 收 code → POST 给 broker 换 token → 取登录名，登录名请求的 token 走 `Authorization` 头而非 URL query）。纯同步 `ureq 3`，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。客户端不含 Gitee `client_secret`（公开分发会泄露），token 交换由部署在边缘平台的 broker 代办（见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`）。
 - Gitee OAuth 令牌交换 broker：实现位于独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker)（`edge-functions/gitee.js`，部署到腾讯云 EdgeOne 边缘函数或任意 serverless 平台），持有 `GITEE_CLIENT_SECRET` 环境变量，替客户端用授权码向 Gitee 换 access_token。客户端只持 `GITEE_OAUTH_CLIENT_ID` + `GITEE_BROKER_URL`（`src/oauth.rs` 常量，二者均非空时 Gitee 登录按钮启用）。后续若新增其它 serverless 服务，也统一放进该仓库。
 - `assets/icons/github_lockup_{light,dark}.svg`、`assets/icons/gitee_lockup_{light,dark}.svg`：GitHub/Gitee 带文字品牌图标，按主题选浅/深变体，用于「添加凭据」的 OAuth 快速登录按钮（`OauthBrand`，`src/ui/icons.rs`）。品牌图标用固定 fill（Gitee 为红 + 黑/白多色），GPUI 的 `svg()` 只能做单色 alpha 蒙版会丢色，故按钮通过 `img()`（`render_single_frame`）渲染以保留原始配色，由 `ui_theme::active_variant()` 决定取哪个文件。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
@@ -143,7 +146,7 @@ UI 线程通过 `async-channel` 接收后台线程发回的 `UiEvent`。重型 G
 
 - `MAX_CONCURRENT_REPO_LOADS = 2`
 
-后台阻塞任务统一通过 `src/tasks.rs` 的 `TaskExecutor` 调度，短任务池用于打开、刷新、状态、历史和 diff 等本地查询，长任务池用于 clone、fetch、pull、push、子模块远端检查和工作流等可能阻塞网络或凭据回调的操作。新增后台 Git / IO 任务不要直接散落 `thread::spawn`，文件选择对话框、UI tick 和测试线程除外。
+后台阻塞任务统一通过 `src/tasks.rs` 的 `TaskExecutor` 调度，短任务池用于打开、刷新、状态、历史和 diff 等本地查询，长任务池用于 clone、fetch、pull、push、子模块远端检查和工作流等可能阻塞网络或凭据回调的操作。任务体统一包一层 `catch_unwind`：rayon 会静默吞掉任务 panic，若不兜底，对应 tab 的 busy/加载标志和仓库加载槽位会永久卡死；panic 时发 `UiEvent::BackgroundTaskPanicked` 由 UI 统一复位并提示。新增后台 Git / IO 任务不要直接散落 `thread::spawn`，文件选择对话框、UI tick 和测试线程除外。
 
 历史分页大小：
 
@@ -167,7 +170,7 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 全文差异视图常量（在 `src/git.rs` 中定义）：
 
 - `FULL_FILE_CONTEXT_LINES = 10_000_000`：全文视图拉满 diff 上下文行数，让 libgit2 输出整份文件作为上下文，改动行依旧高亮。不能使用 `u32::MAX`，libgit2 会将其当作 0。
-- `FULL_FILE_MAX_BYTES = 3 * 1024 * 1024`：全文视图的字节预检阈值，新旧侧文件体积超过该值则不生成全文差异，避免超大文件在分配逐行 String 时内存暴涨。
+- `FULL_FILE_MAX_BYTES = 3 * 1024 * 1024`：全文视图的字节预检阈值，新旧侧文件体积超过该值则不生成全文差异，避免超大文件在分配逐行 String 时内存暴涨。预检经 `delta_side_size` 读 ODB 对象头取真实大小——树对树 diff（历史/贮藏/分支比较）的 delta 自带 size 恒为 0，直接用会让预检形同虚设。
 - `FULL_FILE_TOO_LARGE_MESSAGE`：全文过大时返回的错误文案，UI 据此自动回退到紧凑差异。
 
 ### 4.5 持久化数据

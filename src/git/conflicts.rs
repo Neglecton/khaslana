@@ -274,8 +274,34 @@ fn write_conflict_result_bytes(repo: &Repository, path: &Path, result: &[u8]) ->
 }
 
 fn blob_is_binary(repo: &Repository, entry: &git2::IndexEntry) -> Result<bool> {
+    // 先读 ODB 对象头取体积：超过全文视图阈值的 blob 直接按二进制处理
+    // （无法用文本合并编辑器），避免大对象为嗅探 NUL 先整体 inflate 到堆；
+    // 小对象才加载内容并只检查前 8KB。
+    if let Ok(odb) = repo.odb()
+        && let Ok((size, _)) = odb.read_header(entry.id)
+        && size as u64 > super::FULL_FILE_MAX_BYTES
+    {
+        return Ok(true);
+    }
     let blob = repo.find_blob(entry.id)?;
-    Ok(blob.content().contains(&0))
+    let sample = &blob.content()[..blob.content().len().min(8 * 1024)];
+    Ok(sample.contains(&0))
+}
+
+/// 去掉行尾 `\n` / `\r\n`，得到标记行比较用的纯文本。
+fn trim_line_ending(line: &str) -> &str {
+    line.strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line)
+}
+
+/// 判断是否为 libgit2 生成的冲突分隔标记行。
+///
+/// 标记是整行的固定文本（`<<<<<<< OURS` 等），必须整行精确匹配而不是
+/// `starts_with`——正常内容行完全可能以 `=======` 开头（RST/Markdown
+/// 标题下划线、分隔线），前缀匹配会把它误判为块边界，导致三栏解析错位。
+fn is_marker_line(line: &str, marker: &str) -> bool {
+    trim_line_ending(line) == marker
 }
 
 fn parse_diff3_conflict_text(
@@ -290,7 +316,7 @@ fn parse_diff3_conflict_text(
 
     while index < lines.len() {
         let line = lines[index];
-        if !line.starts_with("<<<<<<< OURS") {
+        if !is_marker_line(line, "<<<<<<< OURS") {
             draft.push_str(line);
             ours_text.push_str(line);
             theirs_text.push_str(line);
@@ -300,7 +326,7 @@ fn parse_diff3_conflict_text(
 
         index += 1;
         let ours_start = index;
-        while index < lines.len() && !lines[index].starts_with("||||||| BASE") {
+        while index < lines.len() && !is_marker_line(lines[index], "||||||| BASE") {
             index += 1;
         }
         if index >= lines.len() {
@@ -310,7 +336,7 @@ fn parse_diff3_conflict_text(
 
         index += 1;
         let base_start = index;
-        while index < lines.len() && !lines[index].starts_with("=======") {
+        while index < lines.len() && !is_marker_line(lines[index], "=======") {
             index += 1;
         }
         if index >= lines.len() {
@@ -320,7 +346,7 @@ fn parse_diff3_conflict_text(
 
         index += 1;
         let theirs_start = index;
-        while index < lines.len() && !lines[index].starts_with(">>>>>>> THEIRS") {
+        while index < lines.len() && !is_marker_line(lines[index], ">>>>>>> THEIRS") {
             index += 1;
         }
         if index >= lines.len() {

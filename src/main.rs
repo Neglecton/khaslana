@@ -771,6 +771,39 @@ fn widest_diff_row_index(diff: Option<&FileDiff>, model: &DiffRenderModel) -> Op
         .map(|(row_index, _)| row_index)
 }
 
+/// `widest_diff_row_index` 的单槽缓存键：diff 的 Arc 地址 + 行数 + 头部展开态。
+/// 行数参与比较可排除 Arc 地址复用导致的误命中；最坏情况也只是水平宽度测量
+/// 略有偏差（纯视觉量），换来的是大 diff 打开期间每帧省去 O(总字符) 扫描。
+type WidestDiffRowKey = (usize, usize, bool);
+
+#[derive(Default)]
+struct WidestDiffRowCache {
+    key: Option<WidestDiffRowKey>,
+    value: Option<usize>,
+}
+
+/// 按 diff 身份缓存最宽行扫描结果；diff 变化或头部展开切换时重算。
+fn cached_widest_diff_row_index(
+    diff: Option<&Arc<FileDiff>>,
+    headers_expanded: bool,
+    model: &DiffRenderModel,
+    cache: &RefCell<WidestDiffRowCache>,
+) -> Option<usize> {
+    let key = diff.map(|diff| {
+        (
+            Arc::as_ptr(diff) as usize,
+            diff.lines.len(),
+            headers_expanded,
+        )
+    });
+    let mut cache = cache.borrow_mut();
+    if cache.key != key {
+        cache.key = key;
+        cache.value = widest_diff_row_index(diff.map(|diff| diff.as_ref()), model);
+    }
+    cache.value
+}
+
 fn line_index_for_byte_offset(text: &str, offset: usize) -> usize {
     let clamped = offset.min(text.len());
     text[..clamped]
@@ -1038,6 +1071,9 @@ pub(crate) struct BrowseState {
     pub selecting: bool,
     pub sel_start: Option<usize>,
     pub sel_end: Option<usize>,
+    /// 内容视图最宽行扫描缓存：((Arc 地址, 行数), 最宽行索引)。
+    /// 内容未变时每帧免 O(总字符) 扫描；行数参与比较可排除 Arc 地址复用误命中。
+    pub widest_line_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
 }
 
 impl BrowseState {
@@ -1659,6 +1695,13 @@ pub(crate) enum UiEvent {
     UpdateInstallFailed {
         error: String,
     },
+    // ── 后台任务异常兜底 ──
+    /// 后台任务 panic（TaskExecutor catch_unwind 捕获）。
+    /// rayon 会静默吞掉 panic，若不兜底，对应 tab 的 busy/加载标志和仓库
+    /// 加载槽位会永久卡死；UI 收到此事件后统一复位。
+    BackgroundTaskPanicked {
+        message: String,
+    },
     // ── OAuth 快速登录（GitHub Device Flow / Gitee 授权码流）──
     OAuthLoginReady {
         request_id: u64,
@@ -2002,6 +2045,13 @@ pub(crate) fn send_ui_event(tx: &Sender<UiEvent>, event: UiEvent) {
 
 /// 在系统默认浏览器中打开 URL。
 fn open_url(url: &str) {
+    // raw_arg 会绕过 Rust 的参数转义：URL 位于 cmd 的双引号内时 `&` 等符号
+    // 是字面量，但 URL 内出现 `"` 会提前闭合引号、向 cmd 注入命令分隔符，
+    // 控制字符同理。remote 配置可写入任意 URL，这里统一拒绝。
+    if url.contains(['"', '\r', '\n', '\t']) {
+        tracing::warn!(target: "khaslana", "拒绝打开含特殊字符的 URL：{url}");
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -2116,6 +2166,11 @@ pub(crate) struct RepositoryView {
     pub(crate) theme_accent: usize,
     tabs: Vec<RepoTabState>,
     active_tab: Option<RepoTabId>,
+    /// 全局测试类操作（代理/凭据/AI 连接测试）借用 busy 的来源 tab。
+    /// 这些操作不属于任何 tab，busy 却经 DerefMut 落在发起时的活动 tab 上；
+    /// 记录来源 tab 并在完成事件中定向复位，避免测试期间切换仓库把复位
+    /// 写到错误的 tab、原 tab 的工具栏永久禁用。
+    global_busy_tab: Option<RepoTabId>,
     next_tab_id: u64,
     fallback_tab: RepoTabState,
     restoring_session: bool,
@@ -2135,6 +2190,8 @@ pub(crate) struct RepositoryView {
     resizing_history_graph_width: Option<ResizeState>,
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
     uniform_scroll_handles: RefCell<HashMap<String, UniformListScrollHandle>>,
+    /// 差异区域最宽行扫描的单槽缓存（见 `cached_widest_diff_row_index`）。
+    widest_diff_row_cache: RefCell<WidestDiffRowCache>,
     pub(crate) scrollbar_drag: Option<ScrollbarDragState>,
     pending_credential: Option<PendingCredential>,
     pending_credentials: VecDeque<PendingCredential>,
@@ -2267,7 +2324,7 @@ impl RepositoryView {
         };
         Self::spawn_event_pump(rx.clone(), cx);
         Self::spawn_ui_tick(tx.clone());
-        let tasks = TaskExecutor::new();
+        let tasks = TaskExecutor::new(tx.clone());
 
         Self {
             tx,
@@ -2289,6 +2346,7 @@ impl RepositoryView {
             theme_accent,
             tabs: Vec::new(),
             active_tab: None,
+            global_busy_tab: None,
             next_tab_id: 1,
             fallback_tab: {
                 let mut tab = RepoTabState::new(RepoTabId(0), None);
@@ -2315,6 +2373,7 @@ impl RepositoryView {
             resizing_history_graph_width: None,
             scroll_handles: RefCell::new(HashMap::new()),
             uniform_scroll_handles: RefCell::new(HashMap::new()),
+            widest_diff_row_cache: RefCell::new(WidestDiffRowCache::default()),
             scrollbar_drag: None,
             pending_credential: None,
             pending_credentials: VecDeque::new(),
@@ -2661,6 +2720,17 @@ impl RepositoryView {
         }
         self.close_popups();
         self.tabs.remove(index);
+        // 清理该 tab 的滚动句柄：句柄按 `tab-{id}:` 前缀入表，不随 tab 关闭
+        // 移除会长期缓慢积累（频繁开合仓库时无上限）。
+        {
+            let prefix = format!("tab-{}:", tab_id.0);
+            self.scroll_handles
+                .borrow_mut()
+                .retain(|key, _| !key.starts_with(&prefix));
+            self.uniform_scroll_handles
+                .borrow_mut()
+                .retain(|key, _| !key.starts_with(&prefix));
+        }
         let mut retained = VecDeque::new();
         while let Some(pending) = self.pending_credentials.pop_front() {
             if pending.tab_id == Some(tab_id) {
@@ -3037,6 +3107,23 @@ impl RepositoryView {
         }
     }
 
+    /// 全局测试类操作开始借用 busy：记录发起时的活动 tab 并置 busy。
+    fn begin_global_test_busy(&mut self, status: &str) {
+        self.global_busy_tab = self.active_tab;
+        self.busy = true;
+        self.status = status.into();
+        self.last_error = None;
+    }
+
+    /// 复位全局测试借用的 tab busy；tab 已在测试期间关闭时静默忽略。
+    fn end_global_test_busy(&mut self) {
+        if let Some(tab_id) = self.global_busy_tab.take() {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.busy = false;
+            }
+        }
+    }
+
     fn disabled_reason(&self, enabled: bool, fallback: &'static str) -> Option<&'static str> {
         if enabled {
             None
@@ -3049,17 +3136,21 @@ impl RepositoryView {
         }
     }
 
-    fn enqueue_credential_request(&mut self, pending: PendingCredential) {
+    /// 入队凭据请求。返回 `true` 表示该请求被提升为当前待处理（此前没有
+    /// pending），`false` 表示已排队（当前表单保持不动，用户输入不丢失）。
+    fn enqueue_credential_request(&mut self, pending: PendingCredential) -> bool {
         if pending
             .tab_id
             .is_some_and(|tab_id| self.tab(tab_id).is_none())
         {
-            return;
+            return false;
         }
         if self.pending_credential.is_none() {
             self.pending_credential = Some(pending);
+            true
         } else {
             self.pending_credentials.push_back(pending);
+            false
         }
     }
 
@@ -3129,13 +3220,23 @@ impl RepositoryView {
             UiEvent::UiTick => {
                 self.progress_phase = self.progress_phase.wrapping_add(1);
                 let now = Instant::now();
+                let feedbacks_before = self.feedbacks.len();
                 self.feedbacks.retain(|feedback| !feedback.is_expired(now));
+                let feedbacks_expired = self.feedbacks.len() != feedbacks_before;
                 self.sync_conflict_editor_into_state();
                 self.handle_tray_action(cx);
-                // 操作遮罩层有延迟显示阈值；UiTick 到达阈值时触发重绘让遮罩层出现。
-                if self.active_operation_blocker_message().is_some() {
+                // 空闲期不做全窗口重绘（UiTick 每 420ms 一次，无条件 notify 会让
+                // 应用常驻 2.4Hz 重绘并触发渲染路径里的重复计算）：只在时态内容
+                // 变化时通知——底部进度线在动画（有加载中操作）、操作遮罩到延迟
+                // 阈值需要显示、或有过期反馈被移除。托盘动作无需重绘。
+                if self.has_active_loading()
+                    || self.active_operation_blocker_message().is_some()
+                    || feedbacks_expired
+                {
                     cx.notify();
                 }
+                // UiTick 不走事件末尾的统一 notify。
+                return;
             }
             UiEvent::OperationStarted { tab_id, message } => {
                 self.apply_status_event(tab_id, |this| {
@@ -3430,7 +3531,7 @@ impl RepositoryView {
             }
             UiEvent::CredentialRecordsLoaded { records, message } => {
                 let toast_message = message.clone();
-                self.busy = false;
+                self.end_global_test_busy();
                 self.operation_blocker = OperationBlocker::None;
                 self.operation_blocker_started = None;
                 self.credential_records = records;
@@ -3985,6 +4086,10 @@ impl RepositoryView {
             }
             UiEvent::OperationFailed { tab_id, error } => {
                 let toast_message = error.clone();
+                // 全局测试失败路径带 tab_id=None：定向复位借用的来源 tab。
+                if tab_id.is_none() {
+                    self.end_global_test_busy();
+                }
                 self.apply_status_event(tab_id, |this| {
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
@@ -4016,16 +4121,20 @@ impl RepositoryView {
                     this.status = "需要凭据".to_string();
                 });
                 self.notify_toast(AppToastKind::Info, "远端操作需要凭据，请在右上角填写", cx);
-                self.enqueue_credential_request(PendingCredential {
+                let pending = PendingCredential {
                     tab_id,
                     request,
                     response_tx,
-                });
-                self.prepare_current_credential_prompt();
+                };
+                // 仅当请求被提升为当前待处理时才准备表单：排队中的请求不能
+                // 重置表单——那会用旧请求的参数覆盖用户正在输入的内容。
+                if self.enqueue_credential_request(pending) {
+                    self.prepare_current_credential_prompt();
+                }
             }
             UiEvent::ProxyTestFinished { message } => {
                 let toast_message = message.clone();
-                self.busy = false;
+                self.end_global_test_busy();
                 self.operation_blocker = OperationBlocker::None;
                 self.operation_blocker_started = None;
                 self.status = message;
@@ -4165,12 +4274,12 @@ impl RepositoryView {
                 self.ai_commit_buffer.clear();
                 self.ai_review_buffer.clear();
                 self.ai_review_reasoning_buffer.clear();
-                // 测试连接失败时也要解锁 busy，否则弹窗按钮永久禁用。
-                self.busy = false;
+                // 测试连接失败时也要解锁借用的 busy，否则按钮永久禁用。
+                self.end_global_test_busy();
                 self.last_error = Some(error);
             }
             UiEvent::AiConnectionTested { message } => {
-                self.busy = false;
+                self.end_global_test_busy();
                 self.status = message.clone();
                 self.last_error = None;
                 self.notify_completion(&message, cx);
@@ -4225,6 +4334,22 @@ impl RepositoryView {
                 self.update_error = Some(error.clone());
                 self.status = "更新失败".into();
                 self.notify_toast(AppToastKind::Error, format!("更新失败：{error}"), cx);
+            }
+            UiEvent::BackgroundTaskPanicked { message } => {
+                // 无法定位具体是哪个任务 panic：保守复位所有 tab 的 busy/加载
+                // 标志与仓库加载槽位（序号守卫会丢弃迟到的旧结果，复位是安全的）。
+                for tab in self.tabs.iter_mut() {
+                    tab.busy = false;
+                    tab.loading = RepositoryLoading::default();
+                    tab.history_loading = HistoryLoading::default();
+                }
+                self.active_repository_loads = 0;
+                self.status = "后台任务异常".into();
+                self.notify_toast(
+                    AppToastKind::Error,
+                    format!("后台任务异常退出，已复位操作状态：{message}"),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -5587,7 +5712,12 @@ impl RepositoryView {
         });
     }
 
-    pub(crate) fn install_update(&mut self, staging_dir: &Path, _version: &str) {
+    pub(crate) fn install_update(
+        &mut self,
+        staging_dir: &Path,
+        _version: &str,
+        cx: &mut Context<Self>,
+    ) {
         // 检查写入权限
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("khaslana.exe"));
         let exe_dir = current_exe
@@ -5625,7 +5755,7 @@ impl RepositoryView {
         let backup_dir_str = backup_dir.to_string_lossy().to_string();
         let pid_str = pid.to_string();
 
-        let _ = Command::new(&new_updater_str)
+        if let Err(err) = Command::new(&new_updater_str)
             .args([
                 "--pid",
                 &pid_str,
@@ -5639,7 +5769,20 @@ impl RepositoryView {
                 &backup_dir_str,
                 "--restart",
             ])
-            .spawn();
+            .spawn()
+        {
+            // updater 启动失败（杀软拦截、staging 目录被清理等）：留在当前
+            // 版本并提示，不退出应用——静默退出会让用户误以为更新已安装。
+            self.active_dialog = None;
+            self.update_error = Some(format!("更新器启动失败：{err}"));
+            self.status = "更新失败".into();
+            self.notify_toast(
+                AppToastKind::Error,
+                format!("更新器启动失败：{err}，已保留当前版本"),
+                cx,
+            );
+            return;
+        }
 
         std::process::exit(0);
     }
@@ -5700,7 +5843,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn test_network_proxy_settings(&mut self) {
-        if self.busy {
+        if self.busy || self.global_busy_tab.is_some() {
             self.last_error = Some("已有操作正在运行".into());
             return;
         }
@@ -5724,9 +5867,7 @@ impl RepositoryView {
 
         self.proxy_settings = settings;
         self.save_proxy_settings();
-        self.busy = true;
-        self.status = "正在测试代理连接".into();
-        self.last_error = None;
+        self.begin_global_test_busy("正在测试代理连接");
         let service = self.service_for_tab(tab_id);
         let tx = self.tx.clone();
         self.tasks.spawn(TaskKind::Long, move || {
@@ -6436,7 +6577,7 @@ impl RepositoryView {
     }
 
     fn test_credential_record(&mut self, record_id: String) {
-        if self.busy {
+        if self.busy || self.global_busy_tab.is_some() {
             self.last_error = Some("已有操作正在运行".into());
             return;
         }
@@ -6449,9 +6590,7 @@ impl RepositoryView {
             self.last_error = Some("凭据记录不存在".into());
             return;
         };
-        self.busy = true;
-        self.status = "正在测试凭据连接".to_string();
-        self.last_error = None;
+        self.begin_global_test_busy("正在测试凭据连接");
         let store: Arc<dyn CredentialStore> = self.credential_store.clone();
         let tx = self.tx.clone();
         self.tasks.spawn(TaskKind::Long, move || {
@@ -12044,8 +12183,14 @@ impl RepositoryView {
         let row_count = model.row_count;
         let content_present = diff.is_some() && row_count > 0;
         // 以内容最宽的文本行作为列表水平宽度的测量基准，保证长行也能左右滚动。
-        let width_measure_index =
-            widest_diff_row_index(diff.as_deref(), &model).or_else(|| row_count.checked_sub(1));
+        // 结果按 diff 身份缓存：大 diff（上限 2 万行）每帧重算是 O(总字符) 扫描。
+        let width_measure_index = cached_widest_diff_row_index(
+            diff.as_ref(),
+            headers_expanded,
+            &model,
+            &self.widest_diff_row_cache,
+        )
+        .or_else(|| row_count.checked_sub(1));
         let handle = self.uniform_scroll_handle(scroll_id);
         let list_handle = handle.clone();
         let model_for_list = model.clone();
@@ -13289,9 +13434,9 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "立即重启",
                         true,
-                        move |this, _, _| {
+                        move |this, _, cx| {
                             if let Some(dir) = staging_dir.clone() {
-                                this.install_update(&dir, &version_owned);
+                                this.install_update(&dir, &version_owned, cx);
                             } else {
                                 this.update_error = Some("staging 目录丢失".into());
                             }
@@ -14789,11 +14934,26 @@ fn now_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// `normalize_repo_path` 的进程级缓存。canonicalize 是磁盘 IO（Windows 上为
+/// 打开文件句柄的 GetFinalPathNameByHandle），仓库切换下拉打开期间每帧都会对
+/// 全部 tab + 最近仓库逐个调用，不缓存会造成持续磁盘访问与下拉卡顿。
+/// 键为原始路径，条目数以实际访问过的仓库路径为上界，无需淘汰。
+static REPO_PATH_CACHE: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
 fn normalize_repo_path(path: &Path) -> String {
-    fs::canonicalize(path)
+    let mut guard = REPO_PATH_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(cached) = cache.get(path) {
+        return cached.clone();
+    }
+    let normalized = fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
-        .to_lowercase()
+        .to_lowercase();
+    cache.insert(path.to_path_buf(), normalized.clone());
+    normalized
 }
 
 fn infer_clone_directory_name(url: &str) -> Option<String> {
