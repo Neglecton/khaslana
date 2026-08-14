@@ -242,6 +242,10 @@ fn repo_switcher_hit_test_covers_menu_and_trigger() {
     assert!(point_in_repo_switcher(180.0, 20.0, &menu, Some(&anchor)));
     // 菜单宽 320（x∈[120,440]）、高 480（y∈[40,520]）；500 在菜单与按钮右侧之外。
     assert!(!point_in_repo_switcher(500.0, 300.0, &menu, Some(&anchor)));
+    // 四周 4px 容差：菜单左缘常与分栏分割线重合，边缘上的点击视为菜单内部
+    assert!(point_in_repo_switcher(117.5, 60.0, &menu, Some(&anchor))); // 左缘内 2.5px
+    assert!(point_in_repo_switcher(442.0, 60.0, &menu, Some(&anchor))); // 右缘外 2px
+    assert!(!point_in_repo_switcher(114.0, 60.0, &menu, Some(&anchor))); // 容差之外
 }
 
 #[test]
@@ -278,8 +282,11 @@ fn submodule_dialog_refreshes_after_all_update_modes() {
 
 #[test]
 fn column_splitter_mouse_events_are_blocked_while_dialog_is_open() {
-    assert!(column_splitter_accepts_mouse_events(false));
-    assert!(!column_splitter_accepts_mouse_events(true));
+    assert!(column_splitter_accepts_mouse_events(false, false));
+    assert!(!column_splitter_accepts_mouse_events(true, false));
+    // 弹层菜单（无遮罩）打开时同样不响应，避免抢走弹层边缘容差区的交互
+    assert!(!column_splitter_accepts_mouse_events(false, true));
+    assert!(!column_splitter_accepts_mouse_events(true, true));
 }
 
 #[test]
@@ -1083,4 +1090,100 @@ fn repo_switcher_sections_recent_excludes_open_tabs() {
     assert_eq!(sections.recent.len(), 1);
     assert_eq!(sections.recent[0].path_key, "z");
     assert_eq!(sections.recent[0].tab_id, None);
+}
+
+#[test]
+fn repo_switcher_search_matches_name_and_path_case_insensitively() {
+    let repo = |name: &str, full_path: &str| RepoSwitcherRepo {
+        path_key: full_path.to_string(),
+        name: name.to_string(),
+        full_path: full_path.to_string(),
+        tab_id: None,
+        active: false,
+    };
+    // 名称匹配（大小写不敏感）
+    assert!(repo_switcher_repo_matches_query(
+        &repo("Khaslana", "C:/x/k"),
+        "KHAS"
+    ));
+    // 完整路径子串匹配
+    assert!(repo_switcher_repo_matches_query(
+        &repo("other", "D:/devProjects/workplace/khaslana"),
+        "workplace/khas"
+    ));
+    // 空白查询恒匹配
+    assert!(repo_switcher_repo_matches_query(&repo("a", "C:/a"), ""));
+    assert!(repo_switcher_repo_matches_query(&repo("a", "C:/a"), "   "));
+    // 不匹配
+    assert!(!repo_switcher_repo_matches_query(
+        &repo("alpha", "C:/a"),
+        "zzz"
+    ));
+}
+
+#[test]
+fn repo_switcher_filter_sections_filters_both_areas() {
+    let tabs = vec![
+        switcher_tab("khaslana", "khaslana", 20, 1),
+        switcher_tab("other", "other", 10, 2),
+    ];
+    let recent = vec![
+        switcher_recent("khaslana-broker", "khaslana-broker", 5),
+        switcher_recent("unrelated", "unrelated", 4),
+    ];
+    let sections = build_repo_switcher_sections(None, tabs, recent);
+
+    // 命中 khas：打开区 1 项、最近区 1 项，功能区保持不动
+    let filtered = filter_repo_switcher_sections(sections.clone(), "khas");
+    assert_eq!(filtered.open.len(), 1);
+    assert_eq!(filtered.open[0].path_key, "khaslana");
+    assert_eq!(filtered.recent.len(), 1);
+    assert_eq!(filtered.recent[0].path_key, "khaslana-broker");
+    assert_eq!(
+        filtered.actions,
+        vec![RepoSwitcherAction::Clone, RepoSwitcherAction::Open]
+    );
+
+    // 空查询原样返回
+    let unfiltered = filter_repo_switcher_sections(sections.clone(), "  ");
+    assert_eq!(unfiltered.open.len(), 2);
+    assert_eq!(unfiltered.recent.len(), 2);
+
+    // 无匹配清空两区
+    let none = filter_repo_switcher_sections(sections, "zzz");
+    assert!(none.open.is_empty());
+    assert!(none.recent.is_empty());
+}
+
+#[test]
+fn repo_switcher_filter_ranks_name_matches_before_path_matches() {
+    // build 按最后活动排序：alpha(30) > khaslana(20) > repos-tool(10)；
+    // query "repos" 三者路径都命中（C:/repos/...），其中仅 repos-tool 名称命中。
+    let tabs = vec![
+        switcher_tab("alpha", "alpha", 30, 1),
+        switcher_tab("khaslana", "khaslana", 20, 2),
+        switcher_tab("repos-tool", "repos-tool", 10, 3),
+    ];
+    let sections = build_repo_switcher_sections(None, tabs, vec![]);
+    let filtered = filter_repo_switcher_sections(sections, "repos");
+
+    // 名称命中的排在最前，仅路径命中的保持原有相对顺序跟在后面
+    assert_eq!(filtered.open.len(), 3);
+    assert_eq!(filtered.open[0].path_key, "repos-tool");
+    assert_eq!(filtered.open[1].path_key, "alpha");
+    assert_eq!(filtered.open[2].path_key, "khaslana");
+}
+
+#[test]
+fn repo_switcher_highlight_wraps_and_handles_empty_list() {
+    // 空列表恒 None
+    assert_eq!(next_repo_switcher_highlight(0, None, 1), None);
+    assert_eq!(next_repo_switcher_highlight(0, Some(0), 1), None);
+    // 无高亮：↓ 取第一项，↑ 取最后一项
+    assert_eq!(next_repo_switcher_highlight(3, None, 1), Some(0));
+    assert_eq!(next_repo_switcher_highlight(3, None, -1), Some(2));
+    // 有高亮：循环环绕
+    assert_eq!(next_repo_switcher_highlight(3, Some(0), -1), Some(2));
+    assert_eq!(next_repo_switcher_highlight(3, Some(2), 1), Some(0));
+    assert_eq!(next_repo_switcher_highlight(3, Some(1), 1), Some(2));
 }

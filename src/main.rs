@@ -348,6 +348,7 @@ enum FieldId {
     ConflictEditor,
     RemoteBranchName,
     RemoteBranchSearch,
+    RepoSwitcherSearch,
     SidebarLocalBranchSearch,
     SidebarRemoteBranchSearch,
     ProxyHttpUrl,
@@ -838,22 +839,30 @@ fn point_in_repo_switcher(
     menu: &RepoSwitcherMenu,
     anchor: Option<&RepoSwitcherAnchor>,
 ) -> bool {
+    // 命中判定比菜单绘制区域四周多留容差：菜单锚定在触发按钮正下方，左缘常与
+    // 侧边栏分栏分割线重合，点在边框/阴影上（1-2px 偏差）不应被判为菜单外部
+    // 而关闭菜单并触发分割线拖拽。
+    const EDGE_TOLERANCE: f32 = 4.0;
     point_in_menu(
         x,
         y,
-        menu.x,
-        menu.y,
-        REPO_SWITCHER_MENU_WIDTH,
-        REPO_SWITCHER_MENU_HEIGHT,
+        menu.x - EDGE_TOLERANCE,
+        menu.y - EDGE_TOLERANCE,
+        REPO_SWITCHER_MENU_WIDTH + EDGE_TOLERANCE * 2.0,
+        REPO_SWITCHER_MENU_HEIGHT + EDGE_TOLERANCE * 2.0,
     ) || anchor.is_some_and(|anchor| point_in_menu(x, y, anchor.x, anchor.y, anchor.w, anchor.h))
 }
 
-fn column_splitter_accepts_mouse_events(active_dialog: bool) -> bool {
-    !active_dialog
+/// 分栏分割线是否响应鼠标：弹窗打开（有全屏遮罩）或任一弹出菜单/下拉打开时
+/// 不响应。弹层无遮罩，菜单边缘容差区内的点击会物理落在分割线上，若仍响应
+/// 会显示拖拽光标并可拖动，抢走本应属于弹层的交互。
+fn column_splitter_accepts_mouse_events(active_dialog: bool, popup_menu_open: bool) -> bool {
+    !active_dialog && !popup_menu_open
 }
 
-fn column_splitter_should_clear_resize(active_dialog: bool, resizing: bool) -> bool {
-    active_dialog && resizing
+/// 遮挡层（弹窗或弹层菜单）打开时中止进行中的分割线拖拽，避免残留按下状态。
+fn column_splitter_should_clear_resize(overlay_open: bool, resizing: bool) -> bool {
+    overlay_open && resizing
 }
 
 #[cfg(test)]
@@ -2164,6 +2173,12 @@ pub(crate) struct RepositoryView {
     repo_switcher_anchor: Option<RepoSwitcherAnchor>,
     /// 仓库切换下拉展开时缓存的最近仓库列表（toggle 时同步加载，渲染时纯读）。
     repo_switcher_recent: Vec<(PathBuf, i64)>,
+    /// 仓库切换下拉顶部的搜索框，输入即过滤打开/最近项目列表。
+    repo_switcher_search: TextFieldState,
+    /// 搜索框是否展开：默认只显示「搜索仓库」按钮，点击后替换为输入框 + 小叉。
+    repo_switcher_search_open: bool,
+    /// 键盘导航高亮的仓库行（打开区在前、最近区在后的扁平索引）；文本变化时复位。
+    repo_switcher_highlight: Option<usize>,
     save_credential: bool,
     credential_scope: CredentialScope,
     credential_form_mode: CredentialFormMode,
@@ -2332,6 +2347,9 @@ impl RepositoryView {
             repo_switcher_menu: None,
             repo_switcher_anchor: None,
             repo_switcher_recent: Vec::new(),
+            repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
+            repo_switcher_search_open: false,
+            repo_switcher_highlight: None,
             save_credential: false,
             credential_scope: CredentialScope::RemoteUrl,
             credential_form_mode: CredentialFormMode::Https,
@@ -4613,6 +4631,8 @@ impl RepositoryView {
             }
         } else if matches!(field, FieldId::RemoteBranchSearch) {
             self.remote_branch_operation.branch_dropdown_open = false;
+        } else if matches!(field, FieldId::RepoSwitcherSearch) {
+            self.confirm_repo_switcher_highlight();
         } else if matches!(
             field,
             FieldId::ProxyHttpUrl | FieldId::ProxyHttpsUrl | FieldId::ProxySocks5Url
@@ -4651,6 +4671,10 @@ impl RepositoryView {
     fn notify_text_field_changed(&mut self, field: FieldId) {
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
+        }
+        // 仓库切换搜索词变化即重新过滤列表，键盘高亮复位（输入/退格/粘贴/剪切都会走到这里）
+        if matches!(field, FieldId::RepoSwitcherSearch) {
+            self.repo_switcher_highlight = None;
         }
     }
 
@@ -4706,20 +4730,62 @@ impl RepositoryView {
     }
 
     fn text_up(&mut self, _: &TextUp, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx)
-            && Self::is_multiline_field(field)
-        {
-            self.field_mut(field).move_vertical(-1, false);
-            cx.notify();
+        if let Some(field) = self.focused_text_field(window, cx) {
+            // 仓库切换下拉搜索框：↑↓ 用作列表键盘导航（单行框无竖向光标移动）
+            if matches!(field, FieldId::RepoSwitcherSearch) {
+                self.move_repo_switcher_highlight(-1);
+                cx.notify();
+                return;
+            }
+            if Self::is_multiline_field(field) {
+                self.field_mut(field).move_vertical(-1, false);
+                cx.notify();
+            }
         }
     }
 
     fn text_down(&mut self, _: &TextDown, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx)
-            && Self::is_multiline_field(field)
-        {
-            self.field_mut(field).move_vertical(1, false);
-            cx.notify();
+        if let Some(field) = self.focused_text_field(window, cx) {
+            if matches!(field, FieldId::RepoSwitcherSearch) {
+                self.move_repo_switcher_highlight(1);
+                cx.notify();
+                return;
+            }
+            if Self::is_multiline_field(field) {
+                self.field_mut(field).move_vertical(1, false);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 移动仓库切换下拉的键盘高亮（在过滤后的打开+最近扁平列表上环绕）。
+    fn move_repo_switcher_highlight(&mut self, delta: i32) {
+        let sections = self.repo_switcher_filtered_sections();
+        let len = sections.open.len() + sections.recent.len();
+        self.repo_switcher_highlight =
+            next_repo_switcher_highlight(len, self.repo_switcher_highlight, delta);
+    }
+
+    /// 回车确认仓库切换下拉的高亮项：有高亮取高亮项，否则取第一项；
+    /// 已打开项切换标签页，最近项打开仓库。
+    fn confirm_repo_switcher_highlight(&mut self) {
+        if self.repo_switcher_menu.is_none() {
+            return;
+        }
+        let sections = self.repo_switcher_filtered_sections();
+        let mut visible = sections.open.into_iter().chain(sections.recent);
+        let repo = match self.repo_switcher_highlight {
+            Some(index) => visible.nth(index),
+            None => visible.next(),
+        };
+        let Some(repo) = repo else {
+            return;
+        };
+        self.close_repo_switcher();
+        if let Some(tab_id) = repo.tab_id {
+            self.activate_tab(tab_id);
+        } else {
+            self.open_repo(PathBuf::from(&repo.full_path));
         }
     }
 
@@ -4907,6 +4973,7 @@ impl RepositoryView {
             (FieldId::ConflictEditor, &self.conflict_editor),
             (FieldId::RemoteBranchName, &self.remote_branch_name),
             (FieldId::RemoteBranchSearch, &self.remote_branch_search),
+            (FieldId::RepoSwitcherSearch, &self.repo_switcher_search),
             (
                 FieldId::SidebarLocalBranchSearch,
                 &self.sidebar_local_branch_search,
@@ -4950,6 +5017,7 @@ impl RepositoryView {
             FieldId::ConflictEditor => &self.conflict_editor,
             FieldId::RemoteBranchName => &self.remote_branch_name,
             FieldId::RemoteBranchSearch => &self.remote_branch_search,
+            FieldId::RepoSwitcherSearch => &self.repo_switcher_search,
             FieldId::SidebarLocalBranchSearch => &self.sidebar_local_branch_search,
             FieldId::SidebarRemoteBranchSearch => &self.sidebar_remote_branch_search,
             FieldId::ProxyHttpUrl => &self.proxy_http_url,
@@ -4982,6 +5050,7 @@ impl RepositoryView {
             FieldId::ConflictEditor => &mut self.conflict_editor,
             FieldId::RemoteBranchName => &mut self.remote_branch_name,
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
+            FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
             FieldId::SidebarRemoteBranchSearch => &mut self.sidebar_remote_branch_search,
             FieldId::ProxyHttpUrl => &mut self.proxy_http_url,
@@ -5058,13 +5127,13 @@ impl RepositoryView {
         self.commit_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
-        self.repo_switcher_menu = None;
+        self.close_repo_switcher();
     }
 
     /// 切换仓库切换下拉的展开/收起；展开时菜单固定在触发器按钮正下方（按记录的锚点定位）。
     pub(crate) fn toggle_repo_switcher(&mut self, window: &Window) {
         if self.repo_switcher_menu.is_some() {
-            self.repo_switcher_menu = None;
+            self.close_repo_switcher();
             return;
         }
         // 展开时同步加载最近仓库列表（SQLite 本地查询 < 1ms），渲染时纯读缓存。
@@ -5082,10 +5151,32 @@ impl RepositoryView {
             })
             .unwrap_or((MENU_VIEWPORT_MARGIN, MENU_VIEWPORT_MARGIN));
         self.repo_switcher_menu = Some(RepoSwitcherMenu { x, y });
+        // 搜索默认收起为「搜索仓库」按钮；清掉上一次的搜索词与键盘高亮。
+        self.repo_switcher_search_open = false;
+        self.repo_switcher_search.clear();
+        self.repo_switcher_highlight = None;
     }
 
     pub(crate) fn close_repo_switcher(&mut self) {
         self.repo_switcher_menu = None;
+        self.repo_switcher_search_open = false;
+        self.repo_switcher_search.clear();
+        self.repo_switcher_highlight = None;
+    }
+
+    /// 是否有任一弹出菜单（仓库切换下拉、各类右键菜单、编码菜单）打开。
+    /// 弹层没有全屏遮罩，期间分栏分割线等底层交互应暂停，避免抢走弹层边缘的点击。
+    fn any_popup_menu_open(&self) -> bool {
+        self.repo_switcher_menu.is_some()
+            || self.branch_context_menu.is_some()
+            || self.remote_context_menu.is_some()
+            || self.change_context_menu.is_some()
+            || self.file_path_context_menu.is_some()
+            || self.credential_context_menu.is_some()
+            || self.tag_context_menu.is_some()
+            || self.stash_context_menu.is_some()
+            || self.commit_context_menu.is_some()
+            || self.encoding_menu_target.is_some()
     }
 
     pub(crate) fn toggle_sidebar_section(&mut self, section: SidebarSection) {
@@ -8045,7 +8136,9 @@ impl RepositoryView {
     }
 
     fn start_resize_column(&mut self, target: ResizeTarget, event: &MouseDownEvent) {
-        self.close_popups();
+        // 注意：不要在这里 close_popups——根层 capture_any_mouse_down 已对真正的
+        // 菜单外部点击统一关闭弹层；菜单边缘容差区内的点击命中判定视为菜单内部
+        //（菜单保持打开），此处若再关会把容差区内落在分割线上的点击重新误杀。
         let state = ResizeState {
             start_x: event.position.x.into(),
             start_y: event.position.y.into(),
@@ -9452,6 +9545,13 @@ impl RepositoryView {
                 this.submit_focused_field(id);
                 cx.stop_propagation();
             }
+            // 仓库切换下拉搜索框：Esc 直接关闭下拉
+            if event.keystroke.key.as_str() == "escape" && matches!(id, FieldId::RepoSwitcherSearch)
+            {
+                this.close_repo_switcher();
+                cx.notify();
+                cx.stop_propagation();
+            }
         }))
         .on_mouse_down(
             MouseButton::Left,
@@ -10159,18 +10259,12 @@ impl RepositoryView {
     }
 
     /// 仓库切换下拉 overlay：IDEA 式三区结构（功能 / 打开项目 / 最近项目）。
-    fn render_repo_switcher_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(menu) = self.repo_switcher_menu.as_ref() else {
-            return div().into_any_element();
-        };
-        let menu = menu.clone();
-
-        // 构建纯函数输入。
+    /// 组装并按当前搜索词过滤仓库切换下拉的分区数据（渲染与键盘导航共用）。
+    fn repo_switcher_filtered_sections(&self) -> RepoSwitcherSections {
         let active_key = self
             .active_tab
             .and_then(|id| self.tab(id))
             .and_then(|tab| tab.path_key());
-        let active_key_ref = active_key.as_deref();
 
         let tabs: Vec<RepoSwitcherTabInput> = self
             .tabs
@@ -10204,7 +10298,25 @@ impl RepositoryView {
             })
             .collect();
 
-        let sections = build_repo_switcher_sections(active_key_ref, tabs, recent);
+        let sections = build_repo_switcher_sections(active_key.as_deref(), tabs, recent);
+        filter_repo_switcher_sections(sections, self.repo_switcher_search.value.as_str())
+    }
+
+    fn render_repo_switcher_menu(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(menu) = self.repo_switcher_menu.as_ref() else {
+            return div().into_any_element();
+        };
+        let menu = menu.clone();
+
+        let query_active = !self.repo_switcher_search.value.trim().is_empty();
+        let sections = self.repo_switcher_filtered_sections();
+        // 键盘高亮的扁平索引：打开区在前、最近区在后
+        let highlight = self.repo_switcher_highlight;
+        let recent_start = sections.open.len();
 
         // 下拉内容区的滚动句柄，内容超出最大高度时滚动并绘制滚动条。
         let switcher_handle = self.scroll_handle("repo-switcher-scroll");
@@ -10215,7 +10327,7 @@ impl RepositoryView {
             .w_full()
             .overflow_y_scroll()
             .track_scroll(&switcher_handle)
-            // ── 功能区 ──
+            // ── 功能区：克隆 / 打开 / 搜索仓库 ──
             .child(self.repo_switcher_action_item(
                 "repo-switcher-clone",
                 ToolbarIcon::Clone,
@@ -10236,22 +10348,92 @@ impl RepositoryView {
                 },
                 cx,
             ))
+            // 搜索仓库：默认为按钮，点击展开输入框 + 小叉
+            .when(!self.repo_switcher_search_open, |this| {
+                this.child(self.repo_switcher_action_item(
+                    "repo-switcher-search-toggle",
+                    ToolbarIcon::Search,
+                    "搜索仓库",
+                    |this, window, _cx| {
+                        this.repo_switcher_search_open = true;
+                        window.focus(&this.repo_switcher_search.focus);
+                    },
+                    cx,
+                ))
+            })
+            .when(self.repo_switcher_search_open, |this| {
+                this.child(
+                    div()
+                        .id("repo-switcher-search-row")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .child(div().flex_1().min_w(px(0.0)).child(self.input(
+                            FieldId::RepoSwitcherSearch,
+                            false,
+                            window,
+                            cx,
+                        )))
+                        .child(
+                            div()
+                                .id("repo-switcher-search-close")
+                                .flex_none()
+                                .size(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .text_size(px(12.0))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    // 收起输入框，恢复「搜索仓库」按钮并取消过滤
+                                    this.repo_switcher_search_open = false;
+                                    this.repo_switcher_search.clear();
+                                    this.repo_switcher_highlight = None;
+                                    cx.notify();
+                                }))
+                                .child("✕"),
+                        ),
+                )
+            })
             // ── 打开项目区 ──
             .when(!sections.open.is_empty(), |this| {
                 this.child(self.repo_switcher_section_header("打开项目"))
-                    .children(sections.open.iter().map(|repo| {
-                        self.repo_switcher_repo_item(repo.clone(), cx)
+                    .children(sections.open.iter().enumerate().map(|(index, repo)| {
+                        self.repo_switcher_repo_item(repo.clone(), highlight == Some(index), cx)
                             .into_any_element()
                     }))
             })
             // ── 最近项目区 ──
             .when(!sections.recent.is_empty(), |this| {
                 this.child(self.repo_switcher_section_header("最近的项目"))
-                    .children(sections.recent.iter().map(|repo| {
-                        self.repo_switcher_repo_item(repo.clone(), cx)
-                            .into_any_element()
+                    .children(sections.recent.iter().enumerate().map(|(index, repo)| {
+                        self.repo_switcher_repo_item(
+                            repo.clone(),
+                            highlight == Some(recent_start + index),
+                            cx,
+                        )
+                        .into_any_element()
                     }))
             })
+            // ── 搜索无结果占位 ──
+            .when(
+                query_active && sections.open.is_empty() && sections.recent.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_4()
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child("没有匹配的仓库"),
+                    )
+                },
+            )
             .into_any_element();
 
         // 外层仅做定位与最大高度约束，滚动与滚动条交给 scrollable_frame_when。
@@ -10315,10 +10497,12 @@ impl RepositoryView {
             .child(label)
     }
 
-    /// 下拉仓库行：头像 + 名称 + 完整路径；已打开项 hover 显示关闭按钮。
+    /// 下拉仓库行：头像 + 名称 + 完整路径；已打开项 hover 显示关闭按钮；
+    /// 键盘导航高亮行使用与 hover 相同的背景常亮（活动仓库仍用选中色优先）。
     fn repo_switcher_repo_item(
         &self,
         repo: RepoSwitcherRepo,
+        highlighted: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let path_for_click = repo.full_path.clone();
@@ -10336,6 +10520,9 @@ impl RepositoryView {
             .py_2()
             .cursor_pointer()
             .when(is_active, |this| this.bg(rgb(ui_theme::ACCENT)))
+            .when(!is_active && highlighted, |this| {
+                this.bg(rgb(ui_theme::SECONDARY))
+            })
             .when(!is_active, |this| {
                 this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             })
@@ -11520,6 +11707,12 @@ impl RepositoryView {
         let entity = cx.entity();
         let active = self.resize_state(target).is_some();
         let horizontal = target == ResizeTarget::HistoryTop;
+        // 弹窗或弹层菜单打开期间分割线不响应：不显示拖拽光标、不高亮、不响应鼠标，
+        // 避免弹层边缘容差区内的悬停/点击被分割线抢走。
+        let interactive = column_splitter_accepts_mouse_events(
+            self.active_dialog.is_some(),
+            self.any_popup_menu_open(),
+        );
 
         div()
             .flex_none()
@@ -11531,17 +11724,19 @@ impl RepositoryView {
                     this.w(px(8.0)).h_full()
                 }
             })
-            .cursor(if horizontal {
-                CursorStyle::ResizeRow
-            } else {
-                CursorStyle::ResizeColumn
+            .when(interactive, |this| {
+                this.cursor(if horizontal {
+                    CursorStyle::ResizeRow
+                } else {
+                    CursorStyle::ResizeColumn
+                })
+                .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             })
             .bg(if active {
                 rgb(ui_theme::PRIMARY)
             } else {
                 rgb(ui_theme::CARD)
             })
-            .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseUpEvent, _window, cx| {
@@ -11591,6 +11786,7 @@ impl RepositoryView {
                                 entity.update(cx, |this, cx| {
                                     if !column_splitter_accepts_mouse_events(
                                         this.active_dialog.is_some(),
+                                        this.any_popup_menu_open(),
                                     ) {
                                         this.finish_resize_column(target);
                                         cx.notify();
@@ -11608,14 +11804,18 @@ impl RepositoryView {
                         window.on_mouse_event({
                             let entity = entity.clone();
                             move |event: &MouseMoveEvent, _, _, cx| {
-                                let (resizing, active_dialog) = {
+                                let (resizing, active_dialog, popup_open) = {
                                     let view = entity.read(cx);
                                     (
                                         view.resize_state(target).is_some(),
                                         view.active_dialog.is_some(),
+                                        view.any_popup_menu_open(),
                                     )
                                 };
-                                if column_splitter_should_clear_resize(active_dialog, resizing) {
+                                if column_splitter_should_clear_resize(
+                                    active_dialog || popup_open,
+                                    resizing,
+                                ) {
                                     entity.update(cx, |this, cx| {
                                         this.finish_resize_column(target);
                                         cx.notify();
@@ -11624,7 +11824,10 @@ impl RepositoryView {
                                 }
                                 if !resizing
                                     || !event.dragging()
-                                    || !column_splitter_accepts_mouse_events(active_dialog)
+                                    || !column_splitter_accepts_mouse_events(
+                                        active_dialog,
+                                        popup_open,
+                                    )
                                 {
                                     return;
                                 }
@@ -11635,18 +11838,22 @@ impl RepositoryView {
                             }
                         });
                         window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
-                            let (resizing, active_dialog) = {
+                            let (resizing, active_dialog, popup_open) = {
                                 let view = entity.read(cx);
                                 (
                                     view.resize_state(target).is_some(),
                                     view.active_dialog.is_some(),
+                                    view.any_popup_menu_open(),
                                 )
                             };
                             if !resizing {
                                 return;
                             }
-                            if !column_splitter_accepts_mouse_events(active_dialog)
-                                && !column_splitter_should_clear_resize(active_dialog, resizing)
+                            if !column_splitter_accepts_mouse_events(active_dialog, popup_open)
+                                && !column_splitter_should_clear_resize(
+                                    active_dialog || popup_open,
+                                    resizing,
+                                )
                             {
                                 return;
                             }
@@ -14350,7 +14557,7 @@ impl Render for RepositoryView {
                     this.commit_context_menu = None;
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
-                    this.repo_switcher_menu = None;
+                    this.close_repo_switcher();
                     cx.notify();
                 }
             }))
@@ -14437,7 +14644,7 @@ impl Render for RepositoryView {
             .child(self.render_commit_context_menu(cx))
             .child(self.render_tag_context_menu(cx))
             .child(self.render_stash_context_menu(cx))
-            .child(self.render_repo_switcher_menu(cx))
+            .child(self.render_repo_switcher_menu(window, cx))
             .child(self.render_settings_center_overlay(window, cx))
             .child(self.render_dialogs(window, cx))
             .child(self.render_credential_context_menu(cx))
@@ -14890,6 +15097,75 @@ pub(crate) fn build_repo_switcher_sections(
         open,
         recent,
     }
+}
+
+/// 仓库切换下拉的搜索匹配：query trim + 小写后对名称和完整路径做子串匹配；
+/// 空 query 恒匹配（等价于不过滤）。
+pub(crate) fn repo_switcher_repo_matches_query(repo: &RepoSwitcherRepo, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    repo.name.to_lowercase().contains(&query) || repo.full_path.to_lowercase().contains(&query)
+}
+
+/// 名称是否命中搜索词（用于排序：名称命中排在仅路径命中的前面）。
+pub(crate) fn repo_switcher_repo_name_matches_query(repo: &RepoSwitcherRepo, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    !query.is_empty() && repo.name.to_lowercase().contains(&query)
+}
+
+/// 按搜索词过滤仓库切换下拉的打开/最近两区，区内名称命中排在仅路径命中之前
+///（稳定排序，同类内保持原有顺序）；功能区不参与过滤。
+pub(crate) fn filter_repo_switcher_sections(
+    sections: RepoSwitcherSections,
+    query: &str,
+) -> RepoSwitcherSections {
+    let query_trimmed = query.trim();
+    if query_trimmed.is_empty() {
+        return sections;
+    }
+    let mut open = sections
+        .open
+        .iter()
+        .filter(|repo| repo_switcher_repo_matches_query(repo, query_trimmed))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut recent = sections
+        .recent
+        .iter()
+        .filter(|repo| repo_switcher_repo_matches_query(repo, query_trimmed))
+        .cloned()
+        .collect::<Vec<_>>();
+    open.sort_by_key(|repo| !repo_switcher_repo_name_matches_query(repo, query_trimmed));
+    recent.sort_by_key(|repo| !repo_switcher_repo_name_matches_query(repo, query_trimmed));
+    RepoSwitcherSections {
+        actions: sections.actions,
+        open,
+        recent,
+    }
+}
+
+/// 键盘导航的高亮索引移动：列表为空 → None；无高亮时 ↓ 取第一项、↑ 取最后一项；
+/// 有高亮时循环环绕。
+pub(crate) fn next_repo_switcher_highlight(
+    len: usize,
+    current: Option<usize>,
+    delta: i32,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let next = match (current, delta.signum()) {
+        (None, d) if d > 0 => 0,
+        (None, _) => len - 1,
+        (Some(index), d) => {
+            let moved = index as i64 + d as i64;
+            let len = len as i64;
+            (moved.rem_euclid(len)) as usize
+        }
+    };
+    Some(next)
 }
 
 #[cfg(test)]

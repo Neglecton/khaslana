@@ -189,18 +189,26 @@ impl RepositoryView {
     /// 提交图列右侧的行内拖拽分割条：流式排布自动与图形列对齐，吞掉点击避免误选提交。
     fn render_history_graph_splitter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.resize_state(ResizeTarget::HistoryGraph).is_some();
+        // 弹窗或弹层菜单打开时不显示拖拽光标、不响应，与列分割线行为一致
+        let interactive = column_splitter_accepts_mouse_events(
+            self.active_dialog.is_some(),
+            self.any_popup_menu_open(),
+        );
         div()
             .flex_none()
             .relative()
             .w(px(GRAPH_SPLITTER_WIDTH))
             .h_full()
-            .cursor(CursorStyle::ResizeColumn)
+            .when(interactive, |this| this.cursor(CursorStyle::ResizeColumn))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     // 阻止冒泡到提交行的 on_click，避免拖拽分割条时误选中提交。
                     cx.stop_propagation();
-                    if this.active_dialog.is_some() {
+                    if !column_splitter_accepts_mouse_events(
+                        this.active_dialog.is_some(),
+                        this.any_popup_menu_open(),
+                    ) {
                         this.finish_resize_column(ResizeTarget::HistoryGraph);
                         cx.notify();
                         return;
@@ -237,14 +245,18 @@ impl RepositoryView {
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseMoveEvent, _, _, cx| {
-                        let (resizing, active_dialog) = {
+                        let (resizing, active_dialog, popup_open) = {
                             let view = entity.read(cx);
                             (
                                 view.resize_state(ResizeTarget::HistoryGraph).is_some(),
                                 view.active_dialog.is_some(),
+                                view.any_popup_menu_open(),
                             )
                         };
-                        if column_splitter_should_clear_resize(active_dialog, resizing) {
+                        if column_splitter_should_clear_resize(
+                            active_dialog || popup_open,
+                            resizing,
+                        ) {
                             entity.update(cx, |this, cx| {
                                 this.finish_resize_column(ResizeTarget::HistoryGraph);
                                 cx.notify();
@@ -253,7 +265,7 @@ impl RepositoryView {
                         }
                         if !resizing
                             || !event.dragging()
-                            || !column_splitter_accepts_mouse_events(active_dialog)
+                            || !column_splitter_accepts_mouse_events(active_dialog, popup_open)
                         {
                             return;
                         }
@@ -264,18 +276,22 @@ impl RepositoryView {
                     }
                 });
                 window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
-                    let (resizing, active_dialog) = {
+                    let (resizing, active_dialog, popup_open) = {
                         let view = entity.read(cx);
                         (
                             view.resize_state(ResizeTarget::HistoryGraph).is_some(),
                             view.active_dialog.is_some(),
+                            view.any_popup_menu_open(),
                         )
                     };
                     if !resizing {
                         return;
                     }
-                    if !column_splitter_accepts_mouse_events(active_dialog)
-                        && !column_splitter_should_clear_resize(active_dialog, resizing)
+                    if !column_splitter_accepts_mouse_events(active_dialog, popup_open)
+                        && !column_splitter_should_clear_resize(
+                            active_dialog || popup_open,
+                            resizing,
+                        )
                     {
                         return;
                     }
