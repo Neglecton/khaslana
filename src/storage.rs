@@ -60,15 +60,6 @@ pub struct SessionState {
     pub active_repo_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug)]
-pub struct LegacyStoragePaths {
-    pub session: PathBuf,
-    pub diff_encodings: PathBuf,
-    pub remote_credentials: PathBuf,
-    pub network_proxy: PathBuf,
-    pub credentials: PathBuf,
-}
-
 /// 更新偏好：自动检查开关和已跳过版本。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdatePreferences {
@@ -94,15 +85,6 @@ pub enum ThemeMode {
     System,
     Light,
     Dark,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct LegacyImportSummary {
-    pub session: bool,
-    pub diff_encodings: bool,
-    pub remote_credentials: bool,
-    pub network_proxy: bool,
-    pub credentials: bool,
 }
 
 pub struct AppStorage {
@@ -323,18 +305,6 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
-    pub fn import_legacy_json(
-        &self,
-        paths: &LegacyStoragePaths,
-        force: bool,
-    ) -> Result<LegacyImportSummary> {
-        let mut conn = self.lock_conn()?;
-        let tx = conn.transaction().map_err(storage_error)?;
-        let summary = import_legacy_json_tx(&tx, paths, force)?;
-        tx.commit().map_err(storage_error)?;
-        Ok(summary)
-    }
-
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -404,20 +374,6 @@ pub fn default_database_path() -> Option<PathBuf> {
     let portable = portable_database_path();
     let legacy_dir = legacy_database_dir();
     pick_active_path(legacy, portable, legacy_dir)
-}
-
-pub fn default_legacy_storage_paths() -> Option<LegacyStoragePaths> {
-    legacy_database_dir().map(|dir| legacy_storage_paths(&dir))
-}
-
-pub fn legacy_storage_paths(config_dir: &Path) -> LegacyStoragePaths {
-    LegacyStoragePaths {
-        session: config_dir.join("session.json"),
-        diff_encodings: config_dir.join("diff-encodings.json"),
-        remote_credentials: config_dir.join("remote-credentials.json"),
-        network_proxy: config_dir.join("network-proxy.json"),
-        credentials: config_dir.join("credentials.json"),
-    }
 }
 
 /// 待执行便携迁移的启动期结果，用于决定是否向用户反馈。
@@ -665,70 +621,6 @@ fn ensure_theme_accent_column(conn: &Connection) -> Result<()> {
         .map_err(storage_error)?;
     }
     Ok(())
-}
-
-fn import_legacy_json_tx(
-    tx: &Transaction<'_>,
-    paths: &LegacyStoragePaths,
-    force: bool,
-) -> Result<LegacyImportSummary> {
-    // 旧 JSON 只由迁移工具读取；主程序启动后只认 SQLite 当前态。
-    let mut summary = LegacyImportSummary::default();
-    if force || table_is_empty(tx, "session_repositories")? {
-        if let Some(state) = read_json::<SessionState>(&paths.session)? {
-            save_session_state_tx(tx, &state)?;
-            summary.session = true;
-        }
-    }
-    if force || table_is_empty(tx, "diff_encoding_preferences")? {
-        if let Some(preferences) = read_json::<DiffEncodingPreferences>(&paths.diff_encodings)? {
-            save_diff_encoding_preferences_tx(tx, &preferences)?;
-            summary.diff_encodings = true;
-        }
-    }
-    if force || table_is_empty(tx, "remote_credential_bindings")? {
-        if let Some(bindings) = read_json::<RemoteCredentialBindings>(&paths.remote_credentials)? {
-            save_remote_credential_bindings_tx(tx, &bindings)?;
-            summary.remote_credentials = true;
-        }
-    }
-    if force || table_is_empty(tx, "network_proxy_settings")? {
-        if let Some(settings) = read_json::<NetworkProxySettings>(&paths.network_proxy)? {
-            save_proxy_settings_tx(tx, &settings)?;
-            summary.network_proxy = true;
-        }
-    }
-    if force || table_is_empty(tx, "credential_records")? {
-        if let Some(index) = read_json::<CredentialIndex>(&paths.credentials)? {
-            save_credential_records_tx(tx, &index.records)?;
-            summary.credentials = true;
-        }
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('legacy_json_imported_at', ?1)",
-        params![now_seconds().to_string()],
-    )
-    .map_err(storage_error)?;
-    Ok(summary)
-}
-
-fn read_json<T>(path: &Path) -> Result<Option<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content).map(Some).map_err(|err| {
-        GitError::Message(format!("旧配置文件解析失败（{}）：{err}", path.display()))
-    })
-}
-
-fn table_is_empty(conn: &Connection, table: &str) -> Result<bool> {
-    let sql = format!("SELECT NOT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
-    conn.query_row(&sql, [], |row| row.get::<_, bool>(0))
-        .map_err(storage_error)
 }
 
 fn load_session_state_from_conn(conn: &Connection) -> Result<Option<SessionState>> {
@@ -1350,12 +1242,6 @@ fn stored_credential_kind_from_db(value: String) -> Result<StoredCredentialKind>
         "ssh_key" => Ok(StoredCredentialKind::SshKey),
         _ => Err(GitError::Message(format!("未知凭据类型：{value}"))),
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct CredentialIndex {
-    #[serde(default)]
-    records: Vec<CredentialRecord>,
 }
 
 #[derive(Debug)]

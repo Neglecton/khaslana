@@ -39,7 +39,7 @@ Khaslana 是一个面向日常开发工作流的桌面 Git 客户端。它使用
 - 支持 HTTPS 用户名密码 / PAT、SSH Key、SSH agent，并将密文保存到系统 Keyring。
 - 支持远端凭据绑定策略，工作流远端步骤可复用同一凭据机制。
 - 支持全局网络代理设置：禁用代理、使用 Git / 环境变量代理、自定义 HTTP / HTTPS / SOCKS5 代理。
-- 使用 SQLite 保存应用配置，并提供旧 JSON 配置迁移工具。
+- 使用 SQLite 保存应用配置。
 - 支持 JSON5 / JSONC 工作流模板，详见 [docs/workflows.md](docs/workflows.md)。
 
 ## 功能模块
@@ -103,40 +103,6 @@ SQLite 中保存：
 - 凭据记录索引。
 
 凭据密文不会写入 SQLite，而是保存在系统 Keyring 中；SQLite 只保存非敏感索引和匹配信息。
-
-### 旧 JSON 配置迁移
-
-项目提供独立迁移工具 `migrate_storage`，用于把旧版 JSON 配置一次性导入 SQLite。主程序不保留旧 JSON 兼容路径。
-
-默认迁移：
-
-```powershell
-cargo run --bin migrate_storage
-```
-
-强制重建 SQLite 并重新导入：
-
-```powershell
-cargo run --bin migrate_storage -- --force
-```
-
-指定旧配置目录和数据库路径：
-
-```powershell
-cargo run --bin migrate_storage -- --legacy-dir <旧配置目录> --db <数据库路径>
-```
-
-构建迁移工具：
-
-```powershell
-cargo build --release --bin migrate_storage
-```
-
-构建产物位于：
-
-```text
-target/release/migrate_storage.exe
-```
 
 ## 配置
 

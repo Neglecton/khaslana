@@ -146,44 +146,6 @@ fn credential_records_round_trip() {
 }
 
 #[test]
-fn legacy_json_imports_existing_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = legacy_storage_paths(temp.path());
-    fs::write(
-        &paths.session,
-        serde_json::to_string(&SessionState {
-            repo_paths: vec![PathBuf::from("C:/repo/a")],
-            active_repo_path: Some(PathBuf::from("C:/repo/a")),
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        &paths.network_proxy,
-        serde_json::to_string(&NetworkProxySettings {
-            mode: NetworkProxyMode::System,
-            custom: CustomProxySettings::default(),
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    let storage = AppStorage::open(temp.path().join("app.sqlite3")).unwrap();
-    let summary = storage.import_legacy_json(&paths, false).unwrap();
-
-    assert!(summary.session);
-    assert!(summary.network_proxy);
-    assert_eq!(
-        storage.load_session_state().unwrap().unwrap().repo_paths,
-        vec![PathBuf::from("C:/repo/a")]
-    );
-    assert_eq!(
-        storage.load_proxy_settings().unwrap().mode,
-        NetworkProxyMode::System
-    );
-}
-
-#[test]
 fn update_preferences_default() {
     let (_temp, storage) = temp_storage();
     // 空表返回默认值。
