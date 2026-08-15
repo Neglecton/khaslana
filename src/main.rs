@@ -4253,11 +4253,19 @@ impl RepositoryView {
             UiEvent::AiCommitMessageGenerated { message } => {
                 self.ai_commit_loading = false;
                 self.ai_commit_buffer.clear();
-                // 流式期间已逐段填入输入框，这里用最终结果做一次干净覆盖，
-                // 确保最终的 trim 和换行规范化。
-                self.commit_message.set_value(message);
-                self.status = "AI 已生成提交信息".into();
-                self.last_error = None;
+                // 兜底守卫：空结果不覆盖输入框（避免清掉用户草稿）并显式提示。
+                // 正常路径已在生成任务里按空正文报错，这里防御未来回归。
+                if message.trim().is_empty() {
+                    self.status = "AI 未返回提交信息".into();
+                    self.last_error = Some("AI 返回的提交信息为空".into());
+                    self.notify_error("AI 返回的提交信息为空", cx);
+                } else {
+                    // 流式期间已逐段填入输入框，这里用最终结果做一次干净覆盖，
+                    // 确保最终的 trim 和换行规范化。
+                    self.commit_message.set_value(message);
+                    self.status = "AI 已生成提交信息".into();
+                    self.last_error = None;
+                }
             }
             UiEvent::AiCommitMessageDelta { delta } => {
                 // 直接把增量追加到输入框，让用户实时看到生成内容，
@@ -4293,7 +4301,10 @@ impl RepositoryView {
                 self.ai_review_reasoning_buffer.clear();
                 // 测试连接失败时也要解锁借用的 busy，否则按钮永久禁用。
                 self.end_global_test_busy();
-                self.last_error = Some(error);
+                // 失败提示走右下角 toast + 状态栏双通道，仅靠状态栏小字极易被错过。
+                self.status = "AI 请求失败".into();
+                self.last_error = Some(error.clone());
+                self.notify_error(format!("AI 请求失败：{error}"), cx);
             }
             UiEvent::AiConnectionTested { message } => {
                 self.end_global_test_busy();

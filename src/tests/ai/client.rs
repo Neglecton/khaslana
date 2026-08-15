@@ -112,3 +112,43 @@ fn merge_reasoning_combines_and_filters() {
     );
     assert!(merge_reasoning(None, None).is_none());
 }
+
+// 生成结果空正文校验：正常内容（含 trim）/ 纯空白 / 仅思考过程 / 完全为空。
+fn chat_result_of(content: &str, reasoning: Option<&str>) -> ChatResult {
+    ChatResult {
+        content: content.to_string(),
+        reasoning: reasoning.map(str::to_string),
+    }
+}
+
+#[test]
+fn validate_generated_content_accepts_and_trims_normal_content() {
+    let result = chat_result_of("  feat: xxx\n", None);
+    let validated = validate_generated_content(&result, "空文案", "仅思考文案").unwrap();
+    assert_eq!(validated, "feat: xxx");
+}
+
+#[test]
+fn validate_generated_content_rejects_whitespace_only() {
+    let result = chat_result_of("   \n\t ", None);
+    let error = validate_generated_content(&result, "空文案", "仅思考文案")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "空文案");
+}
+
+#[test]
+fn validate_generated_content_rejects_reasoning_only_with_distinct_message() {
+    let result = chat_result_of("", Some("模型思考过程…"));
+    let error = validate_generated_content(&result, "空文案", "仅思考文案")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "仅思考文案");
+
+    // 纯空白的思考链视同没有。
+    let result = chat_result_of("", Some("   "));
+    let error = validate_generated_content(&result, "空文案", "仅思考文案")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "空文案");
+}

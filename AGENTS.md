@@ -15,7 +15,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
 - 网络代理设置，支持禁用、Git 配置/环境变量代理和自定义代理
-- AI 辅助：大模型供应商配置（OpenAI Chat Completions 兼容）、commit message 生成、分支对比 AI code review
+- AI 辅助：大模型供应商配置（OpenAI Chat Completions 兼容）、commit message 生成、分支对比 AI code review。生成结果空正文（完全为空/纯空白/仅返回思考过程）按错误处理并经 `validate_generated_content` 给出区分文案；AI 请求失败在状态栏与右下角 toast 双通道展示；SSE 流解析失败行会计数并记 warn 日志，0 有效块与「有块但无内容」错误文案不同
 - diff 编码自动识别与手动选择，支持 UTF-8、GB18030/GBK、Big5
 
 产品形态更接近“轻量但完整的 Git 桌面客户端”，适合继续补齐高频 Git 操作、冲突处理、搜索过滤和差异查看能力。

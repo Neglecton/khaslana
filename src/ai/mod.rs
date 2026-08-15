@@ -13,7 +13,9 @@ pub mod config;
 pub mod prompt;
 pub mod review;
 
-pub use client::{ChatClient, ChatResult, StreamDelta, split_reasoning};
+pub use client::{
+    ChatClient, ChatResult, StreamDelta, split_reasoning, validate_generated_content,
+};
 pub use config::{AiApiType, AiProviderSettings};
 pub use prompt::{ChatMessage, ChatRole, commit_message_prompts, review_prompts};
 pub use review::AiReviewResult;

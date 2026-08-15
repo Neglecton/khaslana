@@ -230,6 +230,8 @@ impl ChatClient {
         };
 
         let content = content.trim().to_string();
+        // 纯空白的思考链视同没有。
+        let reasoning = reasoning.filter(|reasoning| !reasoning.trim().is_empty());
         if content.is_empty() && reasoning.is_none() {
             return Err(GitError::Message("AI 返回了空内容".into()));
         }
@@ -277,10 +279,15 @@ impl ChatClient {
         let reader = BufReader::new(body.as_reader());
         let mut full_content = String::new();
         let mut full_reasoning = String::new();
+        // 诊断计数：有效数据块数 / 以 data: 开头却解析失败的行数（用于区分
+        // “供应商响应格式异常”与“有响应但没有内容”）。
+        let mut valid_chunks = 0usize;
+        let mut malformed_data_lines = 0usize;
         for line in reader.lines() {
             let line = line.map_err(|err| GitError::Message(format!("AI 流读取失败：{err}")))?;
             match parse_sse_line(&line) {
                 Some(SseLineResult::Chunk(chunk)) => {
+                    valid_chunks += 1;
                     for choice in chunk.choices {
                         if let Some(text) = choice.delta.content {
                             if !text.is_empty() {
@@ -297,8 +304,18 @@ impl ChatClient {
                     }
                 }
                 Some(SseLineResult::Done) => break,
-                None => {}
+                None => {
+                    if line.trim_start().starts_with("data:") {
+                        malformed_data_lines += 1;
+                    }
+                }
             }
+        }
+        if malformed_data_lines > 0 {
+            tracing::warn!(
+                target: "khaslana::ai",
+                "AI 响应流中有 {malformed_data_lines} 行 data 数据解析失败"
+            );
         }
 
         // 结束后统一剥离 `<think>`，与非流式逻辑一致。
@@ -307,10 +324,19 @@ impl ChatClient {
             (!full_reasoning.trim().is_empty()).then(|| full_reasoning.trim().to_string()),
             extra_reasoning,
         );
+        // 纯空白的思考链视同没有。
+        let reasoning = reasoning.filter(|reasoning| !reasoning.trim().is_empty());
 
         let content = content.trim().to_string();
         if content.is_empty() && reasoning.is_none() {
-            return Err(GitError::Message("AI 返回了空内容".into()));
+            return Err(GitError::Message(
+                if valid_chunks == 0 {
+                    "AI 响应流中没有有效数据块（供应商响应格式异常或响应被截断）"
+                } else {
+                    "AI 返回了空内容"
+                }
+                .into(),
+            ));
         }
 
         Ok(ChatResult { content, reasoning })
@@ -359,6 +385,34 @@ pub enum StreamDelta {
     Content(String),
     /// 思考链增量（DeepSeek 等 reasoning 模型原生流式字段）。
     Reasoning(String),
+}
+
+/// 生成类结果（提交信息/评审）的空正文校验：正文 trim 为空即视为失败，
+/// 区分「仅返回思考过程」与「完全为空」两种提示；正常时返回 trim 后的正文。
+///
+/// 传输层对「空」较宽松（有思考链即 Ok，评审面板需要展示思考过程），
+/// 而生成场景正文才是用户要的结果，由调用方按用途做严格校验。
+pub fn validate_generated_content(
+    result: &ChatResult,
+    empty_message: &str,
+    reasoning_only_message: &str,
+) -> KhaslanaResult<String> {
+    let content = result.content.trim();
+    if !content.is_empty() {
+        return Ok(content.to_string());
+    }
+    Err(GitError::Message(
+        if result
+            .reasoning
+            .as_deref()
+            .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        {
+            reasoning_only_message
+        } else {
+            empty_message
+        }
+        .into(),
+    ))
 }
 
 /// 单行 SSE 解析结果。

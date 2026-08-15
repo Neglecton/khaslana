@@ -192,7 +192,13 @@ impl RepositoryView {
                         );
                     }
                 })?;
-                Ok(result.content)
+                // 空正文按失败处理并给出可读提示：仅返回思考过程（reasoning 模型）
+                // 或完全为空时，避免按钮恢复后输入框无内容也无报错。
+                khaslana::ai::validate_generated_content(
+                    &result,
+                    "AI 返回的提交信息为空，请重试或检查模型配置",
+                    "AI 未返回提交信息正文（仅返回了思考过程），请重试或更换模型",
+                )
             })();
             match result {
                 Ok(message) => {
@@ -323,12 +329,17 @@ impl RepositoryView {
                     },
                 );
             });
-            match result {
-                Ok(result) => {
-                    let review = AiReviewResult {
-                        content: result.content,
-                        reasoning: result.reasoning,
-                    };
+            match result.and_then(|result| {
+                // 空正文按失败处理：避免空评审面板 +「AI 评审已生成」假成功。
+                khaslana::ai::validate_generated_content(
+                    &result,
+                    "AI 返回的评审内容为空，请重试或检查模型配置",
+                    "AI 未返回评审正文（仅返回了思考过程），请重试或更换模型",
+                )
+                .map(|content| (content, result.reasoning))
+            }) {
+                Ok((content, reasoning)) => {
+                    let review = AiReviewResult { content, reasoning };
                     crate::send_ui_event(&tx, crate::UiEvent::AiReviewGenerated { review });
                 }
                 Err(err) => {
