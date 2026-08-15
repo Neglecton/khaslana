@@ -12,9 +12,9 @@ use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{BIG5, Encoding, GB18030, UTF_8};
 use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{
-    BranchType, Cred, CredentialType, Delta, DiffFormat, DiffOptions, ErrorCode, FetchOptions,
-    FetchPrune, IndexAddOption, ProxyOptions, PushOptions, Reference, RemoteCallbacks, Repository,
-    ResetType, RevertOptions, Signature, Sort, Status, StatusOptions,
+    BranchType, CherrypickOptions, Cred, CredentialType, Delta, DiffFormat, DiffOptions, ErrorCode,
+    FetchOptions, FetchPrune, IndexAddOption, ProxyOptions, PushOptions, Reference,
+    RemoteCallbacks, Repository, ResetType, RevertOptions, Signature, Sort, Status, StatusOptions,
 };
 
 use crate::credentials::{CredentialProvider, CredentialRequest, to_git_credential};
@@ -38,8 +38,8 @@ mod worktree_compat;
 
 use worktree_compat::{
     checkout_head_preserving_locked_directories, checkout_index_preserving_locked_directories,
-    checkout_tree_preserving_locked_directories, reset_preserving_locked_directories,
-    revert_preserving_locked_directories,
+    checkout_tree_preserving_locked_directories, cherrypick_preserving_locked_directories,
+    reset_preserving_locked_directories, revert_preserving_locked_directories,
 };
 
 #[cfg(test)]
@@ -1108,6 +1108,131 @@ impl GitService {
         self.snapshot_after_operation(repo)
     }
 
+    /// 创建标签。`message` 为 Some 时创建附注标签（tagger 为当前用户），
+    /// 否则创建轻量标签；`target_oid` 缺省指向 HEAD。
+    pub fn create_tag(
+        &self,
+        repo: &mut Repository,
+        tag: &TagName,
+        target_oid: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<RepositorySnapshot> {
+        validate_tag_name(&tag.0)?;
+        if repo.find_reference(&format!("refs/tags/{}", tag.0)).is_ok() {
+            return Err(GitError::Message(format!("标签已存在：{}", tag.0)));
+        }
+        let target = match target_oid {
+            Some(oid) => self.find_commit_by_oid(repo, oid)?,
+            None => repo.head()?.peel_to_commit()?,
+        };
+        let message = message.filter(|message| !message.trim().is_empty());
+        self.progress
+            .emit(OperationEvent::Started("正在创建标签".into()));
+        match message {
+            Some(message) => {
+                let tagger = signature(repo)?;
+                repo.tag(&tag.0, target.as_object(), &tagger, message.trim(), false)?;
+            }
+            None => {
+                repo.tag_lightweight(&tag.0, target.as_object(), false)?;
+            }
+        }
+        drop(target);
+        self.progress
+            .emit(OperationEvent::Finished("标签已创建".into()));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// 删除本地标签。
+    pub fn delete_tag(&self, repo: &mut Repository, tag: &TagName) -> Result<RepositorySnapshot> {
+        if repo
+            .find_reference(&format!("refs/tags/{}", tag.0))
+            .is_err()
+        {
+            return Err(GitError::Message(format!("标签不存在：{}", tag.0)));
+        }
+        self.progress
+            .emit(OperationEvent::Started("正在删除标签".into()));
+        repo.tag_delete(&tag.0)?;
+        self.progress
+            .emit(OperationEvent::Finished("标签已删除".into()));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// 推送本地标签到远端（`git push <remote> <tag>`）。
+    pub fn push_tag(
+        &self,
+        repo: &mut Repository,
+        remote: &RemoteName,
+        tag: &TagName,
+    ) -> Result<RepositorySnapshot> {
+        validate_tag_name(&tag.0)?;
+        if repo
+            .find_reference(&format!("refs/tags/{}", tag.0))
+            .is_err()
+        {
+            return Err(GitError::Message(format!("本地标签不存在：{}", tag.0)));
+        }
+        self.progress.emit(OperationEvent::Started(format!(
+            "正在推送标签 {} 到 {}",
+            tag.0, remote.0
+        )));
+        self.push_tag_refspec(
+            repo,
+            remote,
+            format!("refs/tags/{}:refs/tags/{}", tag.0, tag.0),
+        )?;
+        self.progress
+            .emit(OperationEvent::Finished("标签已推送".into()));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// 删除远端标签（`git push <remote> :refs/tags/<tag>`），危险操作需 UI 确认。
+    pub fn delete_remote_tag(
+        &self,
+        repo: &mut Repository,
+        remote: &RemoteName,
+        tag: &TagName,
+    ) -> Result<RepositorySnapshot> {
+        validate_tag_name(&tag.0)?;
+        self.progress.emit(OperationEvent::Started(format!(
+            "正在删除远端标签 {}/{}",
+            remote.0, tag.0
+        )));
+        self.push_tag_refspec(repo, remote, format!(":refs/tags/{}", tag.0))?;
+        // 删除后同步远端引用缓存（与删除远端分支一致）。
+        self.fetch_remote_refs(repo, remote)?;
+        self.progress
+            .emit(OperationEvent::Finished("远端标签已删除".into()));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// tag 推送/删除共用的 refspec 执行：与分支推送同一套凭据、代理与
+    /// 拒绝上报（push_update_reference 回调）。
+    fn push_tag_refspec(
+        &self,
+        repo: &mut Repository,
+        remote: &RemoteName,
+        refspec: String,
+    ) -> Result<()> {
+        let _remote_context = self.set_remote_context(repo, remote);
+        let mut remote_handle = repo.find_remote(&remote.0)?;
+        let mut options = PushOptions::new();
+        options.remote_callbacks(self.remote_callbacks(Some(repo)));
+        let remote_url = remote_push_url(&remote_handle);
+        self.apply_push_proxy(&mut options, remote_url.as_deref())?;
+        let result = remote_handle.push(&[refspec.as_str()], Some(&mut options));
+        drop(remote_handle);
+        drop(options);
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) if err.code() == git2::ErrorCode::NotFastForward => {
+                Err(GitError::Message(NON_FAST_FORWARD_PUSH_MESSAGE.into()))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub fn create_branch(
         &self,
         repo: &mut Repository,
@@ -1379,6 +1504,134 @@ impl GitService {
         drop(tree);
         drop(parent_commits);
         self.snapshot_after_operation(repo)
+    }
+
+    /// 修补最后一次提交（`git commit --amend`）：以当前暂存区为树重写 HEAD。
+    ///
+    /// - `message` 为 `None` 或空白：保留 HEAD 原提交信息（只补文件不改信息的场景）；
+    /// - 父提交取 HEAD 的全部父提交（amend 合并提交时保留双亲）；
+    /// - 保留原提交的作者与时间戳，提交者为当前用户。
+    pub fn amend_commit(
+        &self,
+        repo: &mut Repository,
+        message: Option<&CommitMessage>,
+    ) -> Result<RepositorySnapshot> {
+        if merge::merge_in_progress(repo) {
+            return Err(GitError::Message(
+                "合并进行中，请先完成或中止合并，不能修补提交".into(),
+            ));
+        }
+        if rebase_in_progress(repo) {
+            return Err(GitError::Message(
+                "变基进行中，请通过变基状态条继续/跳过/中止，不能修补提交".into(),
+            ));
+        }
+        if repo.head_detached()? {
+            return Err(GitError::Message(
+                "当前处于 detached HEAD，不能修补提交，请先切回分支".into(),
+            ));
+        }
+
+        let head = repo.head()?;
+        if !head.is_branch() {
+            return Err(GitError::Message(
+                "当前 HEAD 未指向本地分支，不能修补提交".into(),
+            ));
+        }
+        let head_commit = head.peel_to_commit()?;
+
+        let new_message = match message {
+            Some(message) => message.0.trim(),
+            None => "",
+        };
+        let message = if new_message.is_empty() {
+            // 保留原提交信息。
+            String::from_utf8_lossy(head_commit.message_bytes()).into_owned()
+        } else {
+            new_message.to_string()
+        };
+
+        let mut index = repo.index()?;
+        if index.has_conflicts() {
+            return Err(GitError::Conflicts(self.conflicts(repo)?));
+        }
+        let tree_id = index.write_tree()?;
+        let tree = repo.find_tree(tree_id)?;
+
+        // 保留 HEAD 的全部父提交与原作者身份（含时间戳）。
+        let parent_commits = (0..head_commit.parent_count())
+            .map(|index| head_commit.parent(index))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let parent_refs = parent_commits.iter().collect::<Vec<_>>();
+        let author = preserved_signature(&head_commit).or_else(|_| signature(repo))?;
+        let committer = signature(repo)?;
+        let branch_name = head
+            .shorthand()
+            .map(str::to_string)
+            .unwrap_or_else(|_| "main".to_string());
+
+        self.progress
+            .emit(OperationEvent::Started("正在修补提交".into()));
+        // git_commit_create(update_ref) 要求新提交的首父必须是当前 tip，
+        // amend 语义恰恰要重写 tip：先不带引用创建提交，再手动前移当前分支。
+        let new_oid = repo.commit(None, &author, &committer, &message, &tree, &parent_refs)?;
+        repo.reference(
+            &format!("refs/heads/{branch_name}"),
+            new_oid,
+            true,
+            "amend: 修补最后一次提交",
+        )?;
+        repo.cleanup_state()?;
+        drop(tree);
+        drop(parent_commits);
+        drop(head_commit);
+        drop(head);
+        self.progress
+            .emit(OperationEvent::Finished("修补提交完成".into()));
+        self.snapshot_after_operation(repo)
+    }
+
+    /// HEAD 提交是否已推送到 upstream（upstream 包含 HEAD 即视为已推送）。
+    /// 无 upstream 时视为未推送（不可能与远端冲突）。
+    pub fn head_is_pushed(&self, repo: &Repository) -> bool {
+        let Ok(head) = repo.head() else {
+            return false;
+        };
+        let Some(head_oid) = head.target() else {
+            return false;
+        };
+        let Ok(branch_name) = head.shorthand() else {
+            return false;
+        };
+        let Ok(branch) = repo.find_branch(branch_name, BranchType::Local) else {
+            return false;
+        };
+        let Ok(upstream) = branch.upstream() else {
+            return false;
+        };
+        let Some(upstream_oid) = upstream.get().target() else {
+            return false;
+        };
+        // graph_descendant_of 对相同 oid 返回 false，补等值判断
+        //（HEAD 与 upstream 相同即已完全推送）。
+        upstream_oid == head_oid
+            || repo
+                .graph_descendant_of(upstream_oid, head_oid)
+                .unwrap_or(false)
+    }
+
+    /// 读取 HEAD 提交的完整提交信息（修补模式预填用）；
+    /// 未出生 HEAD（空仓库）返回 None。
+    pub fn head_commit_message(&self, repo: &Repository) -> Result<Option<String>> {
+        let Ok(head) = repo.head() else {
+            return Ok(None);
+        };
+        let Ok(commit) = head.peel_to_commit() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            String::from_utf8_lossy(commit.message_bytes()).into_owned(),
+        ))
     }
 
     pub fn commit_and_push(
@@ -1681,6 +1934,92 @@ impl GitService {
             self.handle_revert_apply_error(repo, err)?;
         }
         self.finish_revert_commit(repo, message, "撤销合并完成")
+    }
+
+    /// 拣选提交到当前分支（`git cherry-pick`）：把指定提交的改动作为新提交
+    /// 重放在 HEAD 之上，保留原作者与原提交信息，提交者为当前用户。
+    ///
+    /// 冲突时清状态文件并保留索引冲突，由现有冲突工作台处理；解决后通过
+    /// 普通提交完成拣选。与 revert 三段式平行实现（差异：作者/信息保留、
+    /// 空结果检查），不强行抽象。
+    pub fn cherry_pick_commit(
+        &self,
+        repo: &mut Repository,
+        commit_oid: &str,
+    ) -> Result<RepositorySnapshot> {
+        self.ensure_clean_before_revert(repo, "拣选提交前需要先提交、暂存或丢弃当前工作区修改")?;
+        let pick_commit = self.find_commit_by_oid(repo, commit_oid)?;
+        if pick_commit.parent_count() > 1 {
+            return Err(GitError::Git(git2::Error::from_str("暂不支持拣选合并提交")));
+        }
+        // 提前取出作者签名与完整提交信息：cherry-pick 借用检查要求 drop 提交对象。
+        let author = preserved_signature(&pick_commit).or_else(|_| signature(repo))?;
+        let message = String::from_utf8_lossy(pick_commit.message_bytes()).into_owned();
+        let short_oid = pick_commit.id().to_string()[..8].to_string();
+
+        self.progress
+            .emit(OperationEvent::Started("正在拣选提交".into()));
+        let mut options = CherrypickOptions::new();
+        let pick_result =
+            cherrypick_preserving_locked_directories(repo, &pick_commit, &mut options);
+        drop(pick_commit);
+        if let Err(err) = pick_result {
+            // 同 revert：冲突写入索引后清状态文件，保留索引冲突供冲突工作台处理。
+            let conflicts = self.conflicts(repo)?;
+            if !conflicts.is_empty() {
+                repo.cleanup_state()?;
+                return Err(GitError::Conflicts(conflicts));
+            }
+            return Err(err.into());
+        }
+        self.finish_cherry_pick_commit(repo, &message, &author, &short_oid)
+    }
+
+    /// cherry-pick 无冲突路径的落提交：空结果检查 + 原作者/原信息提交。
+    fn finish_cherry_pick_commit(
+        &self,
+        repo: &mut Repository,
+        message: &str,
+        author: &Signature<'static>,
+        short_oid: &str,
+    ) -> Result<RepositorySnapshot> {
+        let mut index = repo.index()?;
+        if index.has_conflicts() {
+            let conflicts = self.conflicts(repo)?;
+            repo.cleanup_state()?;
+            return Err(GitError::Conflicts(conflicts));
+        }
+
+        let tree_oid = index.write_tree()?;
+        // 空结果检查：改动已在当前分支中（如重复拣选）时 tree 与 HEAD 相同，
+        // 生成空提交只会制造噪音。
+        let head_commit = repo.head()?.peel_to_commit()?;
+        if tree_oid == head_commit.tree_id() {
+            repo.cleanup_state()?;
+            return Err(GitError::Message(format!(
+                "提交 {short_oid} 的改动已在当前分支中，拣选结果为空"
+            )));
+        }
+
+        let tree = repo.find_tree(tree_oid)?;
+        let committer = signature(repo)?;
+        repo.commit(
+            Some("HEAD"),
+            author,
+            &committer,
+            message,
+            &tree,
+            &[&head_commit],
+        )?;
+        repo.cleanup_state()?;
+        let mut checkout = CheckoutBuilder::new();
+        checkout.force();
+        checkout_head_preserving_locked_directories(repo, &mut checkout)?;
+        drop(tree);
+        drop(head_commit);
+        self.progress
+            .emit(OperationEvent::Finished("拣选提交完成".into()));
+        self.snapshot_after_operation(repo)
     }
 
     pub fn commit_graph(
@@ -2166,9 +2505,12 @@ impl GitService {
                 Err(git2::Error::from_str(NON_FAST_FORWARD_PUSH_MESSAGE))
             }
             Some(msg) => {
-                let branch = refname.strip_prefix("refs/heads/").unwrap_or(refname);
+                let name = refname
+                    .strip_prefix("refs/heads/")
+                    .or_else(|| refname.strip_prefix("refs/tags/"))
+                    .unwrap_or(refname);
                 Err(git2::Error::from_str(&format!(
-                    "远端拒绝推送 {branch}：{msg}"
+                    "远端拒绝推送 {name}：{msg}"
                 )))
             }
         });
@@ -2317,6 +2659,22 @@ fn validate_remote_name(name: &str) -> Result<()> {
         || !git2::Reference::is_valid_name(&refname)
     {
         return Err(GitError::Message(format!("远端名称无效：{name}")));
+    }
+    Ok(())
+}
+
+/// 标签名校验：拼成完整 refname 后用 libgit2 的引用名校验（覆盖 `~ ^ : \ ? [ *`、
+/// `..`、`@{`、以 `.` 开头/结尾等 Git 保留规则），另拒绝空白与 `-` 开头。
+fn validate_tag_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    let refname = format!("refs/tags/{trimmed}");
+    if trimmed.is_empty()
+        || trimmed.contains(char::is_whitespace)
+        || trimmed.contains('\\')
+        || trimmed.starts_with('-')
+        || !git2::Reference::is_valid_name(&refname)
+    {
+        return Err(GitError::Message(format!("标签名称无效：{name}")));
     }
     Ok(())
 }
@@ -2492,6 +2850,22 @@ pub(crate) fn signature(repo: &Repository) -> Result<Signature<'static>> {
     repo.signature()
         .or_else(|_| Signature::now("Khaslana", "khaslana@example.invalid"))
         .map_err(GitError::from)
+}
+
+/// 从既有提交提取作者签名（保留名字、邮箱与时间戳），供 amend / cherry-pick
+/// 重用原作者身份；字段缺失时报错，由调用方回退到当前用户签名。
+fn preserved_signature(
+    commit: &git2::Commit<'_>,
+) -> std::result::Result<Signature<'static>, git2::Error> {
+    let author = commit.author();
+    // git2 0.21 的 name()/email() 返回 Result（非 UTF-8 时 Err）。
+    let name = author
+        .name()
+        .map_err(|_| git2::Error::from_str("提交作者名字缺失"))?;
+    let email = author
+        .email()
+        .map_err(|_| git2::Error::from_str("提交作者邮箱缺失"))?;
+    git2::Signature::new(name, email, &author.when())
 }
 
 /// 检测是否有普通合并正在进行。

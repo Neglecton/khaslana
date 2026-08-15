@@ -9,7 +9,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 多仓库并存（仓库切换下拉）与会话恢复
 - 仓库打开、克隆、刷新
 - 本地/远端分支、标签、贮藏、远端管理
-- 暂存、取消暂存、丢弃变更、提交
+- 暂存、取消暂存、丢弃变更、提交、修补提交（amend）、拣选提交（cherry-pick）
 - fetch、pull、push、merge、checkout；普通合并采用 IDEA 风格闭环，冲突后可完成或中止
 - 提交历史、提交文件列表、历史 diff、提交图
 - commit reset / revert / 撤销合并提交
@@ -111,7 +111,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 标签：列表、checkout tag
 - 贮藏：列表、save、apply、pop、drop、文件列表和 diff 预览
 - 变更：stage、unstage、discard unstaged、discard all
-- 提交：commit、commit history、commit graph、commit files、commit file diff
+- 提交：commit、amend（保留原作者/父提交，经手动前移分支引用绕过 git_commit_create 的首父校验）、cherry-pick（保留原作者与提交信息，冲突进现有闭环，空结果拒绝）、commit history、commit graph、commit files、commit file diff
 - 历史操作：reset、revert
 - 变基：rebase_branch、rebase_continue、rebase_skip、rebase_abort、pull_branch_rebase
 - diff：工作区 diff、历史 diff、编码识别
@@ -231,7 +231,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - diff 编码可选
 - diff 区域支持左右滑动查看长行
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
-- 提交信息输入和 commit
+- 提交信息输入和 commit；「修补上次提交」开关（IDEA 式，位于输入框上方靠右）：开启后主按钮变「修补提交」、「提交并推送」变「修补提交并推送」（修补后推送，组合错误提示与提交并推送一致），输入框为空自动预填 HEAD 完整提交信息（优先用内存历史数据，未加载过历史时经后台任务读 HEAD 回填，不依赖进入过提交记录页；关闭开关时清除未被用户编辑的预填内容），输入框为空则修补保留原信息，以当前暂存区重写 HEAD；HEAD 已推送（branch_sync_status ahead==0 且有 upstream）时弹强推后果确认（按入口区分确认后动作）
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
 - 普通合并要求工作区干净；无冲突的非快进合并自动提交（双父提交），不保留 merge 会话。发生冲突时保留 Git Merge 状态，停留在工作区，通过合并状态条可直接调用 IDEA；冲突清零后状态条隐藏，右下角可编辑提交信息并「完成合并」，也可确认后「中止合并」恢复到合并前 HEAD
 - 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；设置中心「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
@@ -253,6 +253,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 分支右键「变基到当前分支」，将选中分支的提交变基到当前分支之上
 - 切换、创建、重命名、删除、拉取、推送等分支引用变动操作完成后自动完整刷新仓库状态
 - tag 列表和 checkout tag
+- 标签管理：创建（附注/轻量，目标默认 HEAD 或历史页右键指定提交）、删除本地标签、推送到指定远端、删除远端标签（确认弹窗）；标签区常驻显示，空标签时区头“+”仍可创建
 - stash 列表、创建、apply、pop、drop、文件列表和 diff 预览
 
 ### 5.4 历史
@@ -268,7 +269,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 查看提交文件列表
 - 查看指定提交文件 diff
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
-- 右键提交可复制 SHA、reset、revert、撤销合并提交等
+- 右键提交可复制 SHA、reset、revert、撤销合并提交、拣选提交到当前分支（合并提交暂禁用）、在此提交上创建标签等
 
 ### 5.5 分支浏览
 

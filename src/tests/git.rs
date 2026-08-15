@@ -3997,7 +3997,7 @@ fn diverged_dev_pair() -> (TempDir, TempDir, Repository, GitService) {
 
     // 开发者 B：克隆到与远端同步的基线，随后本地提交。
     let b_dir = TempDir::new().unwrap();
-    let mut b_repo = clone_to(&b_dir, "b");
+    let b_repo = clone_to(&b_dir, "b");
     git_support::write_file(b_repo.workdir().unwrap(), "b.txt", "from B\n");
     git_support::commit_all(&b_repo, "B 的提交");
 
@@ -4083,4 +4083,508 @@ fn commit_history_returns_full_message_and_signature_details() {
         commit.committer_email.as_deref(),
         Some("test@example.invalid")
     );
+}
+
+// ── amend（修补最后一次提交）──────────────────────────────────────
+
+fn commit_with_author(repo: &Repository, message: &str, author: &git2::Signature<'_>) -> Oid {
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let committer = repo.signature().unwrap();
+    // 容错未出生 HEAD（初始提交）。
+    let parent_commits = repo
+        .head()
+        .ok()
+        .and_then(|head| head.peel_to_commit().ok())
+        .map(|commit| vec![commit])
+        .unwrap_or_default();
+    let parents = parent_commits.iter().collect::<Vec<_>>();
+    repo.commit(Some("HEAD"), author, &committer, message, &tree, &parents)
+        .unwrap()
+}
+
+#[test]
+fn amend_updates_message_keeps_tree_parents_and_author() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "a.txt",
+        "v1
+",
+    );
+    let original_author = git2::Signature::new(
+        "原作者",
+        "author@example.invalid",
+        &git2::Time::new(1600000000, 480),
+    )
+    .unwrap();
+    commit_with_author(&repo, "原始提交信息", &original_author);
+    let before = repo.head().unwrap().peel_to_commit().unwrap();
+    let before_tree = before.tree_id();
+    let before_parent = before.parent_id(0);
+    drop(before);
+
+    service
+        .amend_commit(&mut repo, Some(&CommitMessage::new("改写后的提交信息")))
+        .unwrap();
+
+    let after = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(after.summary().unwrap(), Some("改写后的提交信息"));
+    assert_eq!(after.tree_id(), before_tree, "无新暂存内容时树不变");
+    assert_eq!(after.parent_id(0), before_parent);
+    assert_eq!(after.author().name().ok(), Some("原作者"));
+    assert_eq!(after.author().when().seconds(), 1600000000);
+    assert_eq!(after.committer().name().ok(), Some("Test User"));
+}
+
+#[test]
+fn amend_without_message_keeps_original_message() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "a.txt",
+        "v1
+",
+    );
+    git_support::commit_all(&repo, "只补文件不改信息");
+
+    git_support::write_file(
+        dir.path(),
+        "extra.txt",
+        "补充
+",
+    );
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("extra.txt")).unwrap();
+    index.write().unwrap();
+
+    service.amend_commit(&mut repo, None).unwrap();
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.summary().unwrap(), Some("只补文件不改信息"));
+    git_support::assert_file_text(
+        dir.path(),
+        "extra.txt",
+        "补充
+",
+    );
+}
+
+#[test]
+fn amend_preserves_merge_commit_parents() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "base.txt",
+        "base
+",
+    );
+    git_support::commit_all(&repo, "base");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(
+        dir.path(),
+        "feature.txt",
+        "feature
+",
+    );
+    git_support::commit_all(&repo, "feature");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(
+        dir.path(),
+        "main.txt",
+        "main
+",
+    );
+    git_support::commit_all(&repo, "main");
+    service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    let merged_parent_count = repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .parent_count();
+    assert_eq!(merged_parent_count, 2);
+
+    service
+        .amend_commit(&mut repo, Some(&CommitMessage::new("合并提交改写信息")))
+        .unwrap();
+
+    let amended = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(amended.parent_count(), 2, "修补合并提交应保留双亲");
+}
+
+#[test]
+fn head_commit_message_returns_full_message_or_none() {
+    let (dir, repo, service) = git_support::init_repo();
+    // 空仓库：未出生 HEAD 返回 None。
+    assert_eq!(service.head_commit_message(&repo).unwrap(), None);
+    git_support::write_file(dir.path(), "a.txt", "v1\n");
+    git_support::commit_all(&repo, "feat: 标题\n\n多行正文");
+    assert_eq!(
+        service.head_commit_message(&repo).unwrap(),
+        Some("feat: 标题\n\n多行正文".to_string())
+    );
+}
+
+#[test]
+fn amend_rejects_detached_head() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "a.txt",
+        "v1
+",
+    );
+    git_support::commit_all(&repo, "c1");
+    let head_oid = repo.head().unwrap().target().unwrap();
+    repo.set_head_detached(head_oid).unwrap();
+
+    let error = service
+        .amend_commit(&mut repo, Some(&CommitMessage::new("x")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("detached HEAD"), "实际错误：{error}");
+}
+
+#[test]
+fn head_is_pushed_reflects_upstream_state() {
+    let (remote_dir, service) = create_bare_remote_with_seed("README.md", "seed\n");
+    let clone_dir = TempDir::new().unwrap();
+    let clone_path = clone_dir.path().join("clone");
+    service
+        .clone_repo(
+            &git_support::path_url(remote_dir.path()),
+            &RepoPath::new(&clone_path),
+        )
+        .unwrap();
+    let mut repo = Repository::open(&clone_path).unwrap();
+    git_support::configure_user(&repo);
+
+    // 克隆完成即与远端同步：视为已推送。
+    assert!(service.head_is_pushed(&repo));
+
+    // 新本地提交后：未推送。
+    git_support::write_file(&clone_path, "b.txt", "b\n");
+    git_support::commit_all(&repo, "c2");
+    assert!(!service.head_is_pushed(&repo));
+
+    // 推送后恢复已推送状态。
+    service
+        .push_branch(
+            &mut repo,
+            &RemoteName::new("origin"),
+            &BranchName::new("main"),
+            true,
+        )
+        .unwrap();
+    assert!(service.head_is_pushed(&repo));
+}
+
+// ── cherry-pick（拣选提交）──────────────────────────────────────
+
+fn cherry_pick_setup() -> (TempDir, Repository, Oid, GitService) {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(repo.workdir().unwrap(), "base.txt", "base\n");
+    git_support::commit_all(&repo, "base");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    let pick_author = git2::Signature::new(
+        "拣选作者",
+        "picker@example.invalid",
+        &git2::Time::new(1700000000, 480),
+    )
+    .unwrap();
+    git_support::write_file(repo.workdir().unwrap(), "picked.txt", "被拣选的改动\n");
+    let picked_oid = commit_with_author(&repo, "feat: 被拣选提交", &pick_author);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(repo.workdir().unwrap(), "main-side.txt", "主线改动\n");
+    git_support::commit_all(&repo, "主线提交");
+    (dir, repo, picked_oid, service)
+}
+
+#[test]
+fn cherry_pick_creates_commit_with_original_author_and_message() {
+    let (dir, mut repo, picked_oid, service) = cherry_pick_setup();
+    let main_head = repo.head().unwrap().target().unwrap();
+
+    service
+        .cherry_pick_commit(&mut repo, &picked_oid.to_string())
+        .unwrap();
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.summary().unwrap(), Some("feat: 被拣选提交"));
+    // 保留原作者与时间戳，提交者为当前用户。
+    assert_eq!(head.author().name().ok(), Some("拣选作者"));
+    assert_eq!(head.author().when().seconds(), 1700000000);
+    assert_eq!(head.committer().name().ok(), Some("Test User"));
+    // 新提交以拣选前的 HEAD 为唯一父提交。
+    assert_eq!(head.parent_count(), 1);
+    assert_eq!(head.parent_id(0).ok(), Some(main_head));
+    // 双方改动都在工作区，且工作区干净。
+    git_support::assert_file_text(dir.path(), "picked.txt", "被拣选的改动\n");
+    git_support::assert_file_text(dir.path(), "main-side.txt", "主线改动\n");
+    assert!(service.status_full(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn cherry_pick_conflicts_report_and_resolve_via_commit() {
+    // 双方修改同一文件产生冲突：返回 Conflicts 错误，索引保留冲突，
+    // 解决并暂存后走普通提交完成拣选。
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "base");
+    service
+        .create_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "feature 版本\n");
+    let picked_oid = git_support::commit_all(&repo, "feature 修改");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+    git_support::write_file(dir.path(), "same.txt", "main 版本\n");
+    git_support::commit_all(&repo, "main 修改");
+
+    let error = service
+        .cherry_pick_commit(&mut repo, &picked_oid.to_string())
+        .unwrap_err();
+    match error {
+        GitError::Conflicts(paths) => assert_eq!(paths, vec!["same.txt".to_string()]),
+        other => panic!("期待冲突错误，实际：{other}"),
+    }
+
+    // 手动解决并暂存，普通提交完成拣选。
+    git_support::write_file(dir.path(), "same.txt", "解决后的版本\n");
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("same.txt")).unwrap();
+    index.write().unwrap();
+    service
+        .commit(&mut repo, &CommitMessage::new("feat: feature 修改"))
+        .unwrap();
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 1);
+    git_support::assert_file_text(dir.path(), "same.txt", "解决后的版本\n");
+    assert!(service.status_full(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn cherry_pick_rejects_dirty_worktree_and_merge_commit() {
+    let (dir, mut repo, picked_oid, service) = cherry_pick_setup();
+
+    // 脏工作区拒绝。
+    git_support::write_file(dir.path(), "scratch.txt", "脏文件\n");
+    let error = service
+        .cherry_pick_commit(&mut repo, &picked_oid.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("工作区修改"), "实际错误：{error}");
+    fs::remove_file(dir.path().join("scratch.txt")).unwrap();
+
+    // 合并提交拒绝。
+    service
+        .merge_branch(&mut repo, &BranchName::new("feature"))
+        .unwrap();
+    let merge_oid = repo.head().unwrap().target().unwrap();
+    let error = service
+        .cherry_pick_commit(&mut repo, &merge_oid.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("合并提交"), "实际错误：{error}");
+}
+
+#[test]
+fn cherry_pick_rejects_empty_result() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "a.txt", "v1\n");
+    let oid = git_support::commit_all(&repo, "已应用的提交");
+
+    // 拣选 HEAD 自身：改动已在当前分支，结果为空。
+    let error = service
+        .cherry_pick_commit(&mut repo, &oid.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("拣选结果为空"), "实际错误：{error}");
+}
+
+// ── 标签管理 ──────────────────────────────────────────────────
+
+#[test]
+fn create_tag_lightweight_and_annotated() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "a.txt", "v1\n");
+    git_support::commit_all(&repo, "c1");
+    let head_oid = repo.head().unwrap().target().unwrap();
+
+    // 轻量标签：直接指向 HEAD 提交。
+    service
+        .create_tag(&mut repo, &TagName::new("v-light"), None, None)
+        .unwrap();
+    let light_target_id = repo
+        .find_reference("refs/tags/v-light")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id();
+    assert_eq!(light_target_id, head_oid);
+
+    // 附注标签：标签对象带 tagger 与信息，peel 后指向同一提交。
+    service
+        .create_tag(
+            &mut repo,
+            &TagName::new("v-annotated"),
+            Some(&head_oid.to_string()),
+            Some("发布版本 1.0"),
+        )
+        .unwrap();
+    let tag = repo
+        .find_reference("refs/tags/v-annotated")
+        .unwrap()
+        .peel_to_tag()
+        .unwrap();
+    assert_eq!(tag.message().unwrap(), Some("发布版本 1.0"));
+    let tagger_name = tag
+        .tagger()
+        .and_then(|tagger| tagger.name().ok().map(str::to_string))
+        .unwrap_or_default();
+    assert_eq!(tagger_name, "Test User");
+    assert_eq!(tag.target_id(), head_oid);
+    drop(tag);
+
+    // 指定历史提交作为目标。
+    git_support::write_file(dir.path(), "a.txt", "v2\n");
+    let c2 = git_support::commit_all(&repo, "c2");
+    service
+        .create_tag(
+            &mut repo,
+            &TagName::new("v-c1"),
+            Some(&c2.to_string()),
+            None,
+        )
+        .unwrap();
+    assert!(repo.find_reference("refs/tags/v-c1").is_ok());
+}
+
+#[test]
+fn create_tag_rejects_duplicate_and_invalid_names() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "a.txt", "v1\n");
+    git_support::commit_all(&repo, "c1");
+    service
+        .create_tag(&mut repo, &TagName::new("v1"), None, None)
+        .unwrap();
+
+    let error = service
+        .create_tag(&mut repo, &TagName::new("v1"), None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("标签已存在"), "实际错误：{error}");
+
+    for invalid in ["", "带 空格", "-start", "a..b", "bad~name"] {
+        let error = service
+            .create_tag(&mut repo, &TagName::new(invalid), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("标签名称无效"),
+            "名称 {invalid:?} 实际错误：{error}"
+        );
+    }
+}
+
+#[test]
+fn delete_tag_removes_local_reference() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "a.txt", "v1\n");
+    git_support::commit_all(&repo, "c1");
+    service
+        .create_tag(&mut repo, &TagName::new("v1"), None, None)
+        .unwrap();
+
+    service.delete_tag(&mut repo, &TagName::new("v1")).unwrap();
+    assert!(repo.find_reference("refs/tags/v1").is_err());
+
+    let error = service
+        .delete_tag(&mut repo, &TagName::new("v1"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("标签不存在"), "实际错误：{error}");
+}
+
+#[test]
+fn push_tag_and_delete_remote_tag_sync_remote() {
+    let (remote_dir, service) = create_bare_remote_with_seed("README.md", "seed\n");
+    let clone_dir = TempDir::new().unwrap();
+    let clone_path = clone_dir.path().join("clone");
+    service
+        .clone_repo(
+            &git_support::path_url(remote_dir.path()),
+            &RepoPath::new(&clone_path),
+        )
+        .unwrap();
+    let mut repo = Repository::open(&clone_path).unwrap();
+    git_support::configure_user(&repo);
+    service
+        .create_tag(
+            &mut repo,
+            &TagName::new("v1.0.0"),
+            None,
+            Some("首个发布版本"),
+        )
+        .unwrap();
+
+    // 推送标签：bare 远端出现 refs/tags/v1.0.0。
+    service
+        .push_tag(
+            &mut repo,
+            &RemoteName::new("origin"),
+            &TagName::new("v1.0.0"),
+        )
+        .unwrap();
+    let bare = Repository::open_bare(remote_dir.path()).unwrap();
+    assert!(bare.find_reference("refs/tags/v1.0.0").is_ok());
+
+    // 删除远端标签：bare 远端引用消失，本地标签保留。
+    service
+        .delete_remote_tag(
+            &mut repo,
+            &RemoteName::new("origin"),
+            &TagName::new("v1.0.0"),
+        )
+        .unwrap();
+    assert!(bare.find_reference("refs/tags/v1.0.0").is_err());
+    assert!(repo.find_reference("refs/tags/v1.0.0").is_ok());
+
+    // 推送不存在的本地标签报中文错误。
+    let error = service
+        .push_tag(
+            &mut repo,
+            &RemoteName::new("origin"),
+            &TagName::new("v-nope"),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("本地标签不存在"), "实际错误：{error}");
 }

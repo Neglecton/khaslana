@@ -99,7 +99,7 @@ use workflow_view::{
     WorkflowInputFieldState, WorkflowLogEntry, WorkflowTemplateItem, workflow_templates_dir,
 };
 use yororen_ui::{
-    component::init as init_yororen_components,
+    component::{init as init_yororen_components, select, select_option},
     i18n::{I18n, Locale},
     theme::GlobalTheme,
 };
@@ -316,12 +316,12 @@ const FILE_PATH_MENU_HEIGHT: f32 = 68.0;
 const CREDENTIAL_MENU_WIDTH: f32 = 180.0;
 const CREDENTIAL_MENU_HEIGHT: f32 = 150.0;
 pub(crate) const TAG_MENU_WIDTH: f32 = 170.0;
-pub(crate) const TAG_MENU_HEIGHT: f32 = 80.0;
+pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
-const COMMIT_MENU_HEIGHT: f32 = 230.0;
-const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 265.0;
+const COMMIT_MENU_HEIGHT: f32 = 320.0;
+const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
 const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
 // 仓库切换下拉尺寸：宽 320 容纳完整路径，高 480 内部滚动。
@@ -343,6 +343,8 @@ enum FieldId {
     RemoteName,
     RemoteUrl,
     CommitMessage,
+    TagName,
+    TagMessage,
     CredentialUsername,
     CredentialSecret,
     CredentialKeyPath,
@@ -446,6 +448,25 @@ pub(crate) enum DialogState {
     ConfirmUncommitToStaged {
         oid: String,
         summary: String,
+    },
+    ConfirmAmendPushed {
+        /// 确认后执行“修补提交”还是“修补提交并推送”。
+        and_push: bool,
+    },
+    TagForm {
+        /// 创建目标提交；`None` 表示 HEAD。
+        target_oid: Option<String>,
+        target_summary: String,
+    },
+    TagPush {
+        tag: String,
+    },
+    ConfirmDeleteTag {
+        tag: String,
+    },
+    ConfirmDeleteRemoteTag {
+        remote: String,
+        tag: String,
     },
     ConfirmDiscardChange {
         scope: DiffScope,
@@ -1707,6 +1728,11 @@ pub(crate) enum UiEvent {
     BackgroundTaskPanicked {
         message: String,
     },
+    /// 修补开关的 HEAD 提交信息预填结果（历史未加载时由后台任务读取）。
+    AmendPrefillLoaded {
+        tab_id: RepoTabId,
+        message: Option<String>,
+    },
     // ── OAuth 快速登录（GitHub Device Flow / Gitee 授权码流）──
     OAuthLoginReady {
         request_id: u64,
@@ -2110,6 +2136,12 @@ fn started_message_for_label(label: &'static str) -> &'static str {
         "变基拉取完成" => "正在变基拉取",
         "切换分支完成" => "正在切换分支",
         "提交完成" => "正在提交",
+        "修补提交完成" => "正在修补提交",
+        "拣选提交完成" => "正在拣选提交",
+        "标签已创建" => "正在创建标签",
+        "标签已删除" => "正在删除标签",
+        "标签已推送" => "正在推送标签",
+        "远端标签已删除" => "正在删除远端标签",
         "分支已创建" => "正在创建分支",
         "分支已重命名" => "正在重命名分支",
         "分支已删除" => "正在删除分支",
@@ -2263,7 +2295,17 @@ pub(crate) struct RepositoryView {
     create_branch_checkout: bool,
     branch_rename: TextFieldState,
     commit_message: TextFieldState,
+    /// 修补提交模式：开启后主提交按钮变“修补提交”，以当前暂存区重写 HEAD。
+    amend_mode: bool,
+    /// 修补开关预填的提交信息：关闭开关时仅当输入框未被用户修改才清除。
+    amend_prefill: Option<String>,
     stash_message: TextFieldState,
+    tag_name: TextFieldState,
+    tag_message: TextFieldState,
+    /// 创建标签时是否带附注（附注标签记录 tagger 与信息，发布场景推荐）。
+    tag_annotated: bool,
+    /// 标签推送对话框选中的远端。
+    tag_push_remote: Option<String>,
     stash_include_untracked: bool,
     stash_keep_index: bool,
     credential_username: TextFieldState,
@@ -2440,7 +2482,13 @@ impl RepositoryView {
             create_branch_checkout: true,
             branch_rename: TextFieldState::new(cx, "重命名为"),
             commit_message: TextFieldState::new(cx, "提交信息"),
+            amend_mode: false,
+            amend_prefill: None,
             stash_message: TextFieldState::new(cx, "贮藏说明（可选）"),
+            tag_name: TextFieldState::new(cx, "标签名称，如 v1.0.0"),
+            tag_message: TextFieldState::new(cx, "标签附注信息（可选）"),
+            tag_annotated: true,
+            tag_push_remote: None,
             stash_include_untracked: false,
             stash_keep_index: false,
             credential_username: TextFieldState::new(cx, "用户名"),
@@ -4387,6 +4435,19 @@ impl RepositoryView {
                     cx,
                 );
             }
+            UiEvent::AmendPrefillLoaded { tab_id, message } => {
+                self.with_tab_context(tab_id, |this| {
+                    // 仅当仍处于修补模式且输入框仍为空时填入：期间用户可能
+                    // 已关闭开关或手动输入了内容。
+                    if this.amend_mode
+                        && this.commit_message.value.trim().is_empty()
+                        && let Some(message) = message.filter(|m| !m.trim().is_empty())
+                    {
+                        this.amend_prefill = Some(message.clone());
+                        this.commit_message.set_value(message);
+                    }
+                });
+            }
         }
         cx.notify();
     }
@@ -4782,6 +4843,10 @@ impl RepositoryView {
             if self.active_dialog == Some(DialogState::StashForm) {
                 self.save_stash();
             }
+        } else if matches!(field, FieldId::TagName) {
+            if matches!(self.active_dialog, Some(DialogState::TagForm { .. })) {
+                self.create_tag();
+            }
         } else if matches!(field, FieldId::RemoteName | FieldId::RemoteUrl) {
             if let Some(DialogState::RemoteForm { editing }) = self.active_dialog.clone() {
                 self.save_remote(editing);
@@ -5169,6 +5234,8 @@ impl RepositoryView {
             FieldId::RemoteUrl => &self.remote_url,
             FieldId::CommitMessage => &self.commit_message,
             FieldId::StashMessage => &self.stash_message,
+            FieldId::TagName => &self.tag_name,
+            FieldId::TagMessage => &self.tag_message,
             FieldId::CredentialUsername => &self.credential_username,
             FieldId::CredentialSecret => &self.credential_secret,
             FieldId::CredentialKeyPath => &self.credential_key_path,
@@ -5202,6 +5269,8 @@ impl RepositoryView {
             FieldId::RemoteUrl => &mut self.remote_url,
             FieldId::CommitMessage => &mut self.commit_message,
             FieldId::StashMessage => &mut self.stash_message,
+            FieldId::TagName => &mut self.tag_name,
+            FieldId::TagMessage => &mut self.tag_message,
             FieldId::CredentialUsername => &mut self.credential_username,
             FieldId::CredentialSecret => &mut self.credential_secret,
             FieldId::CredentialKeyPath => &mut self.credential_key_path,
@@ -7607,6 +7676,106 @@ impl RepositoryView {
         });
     }
 
+    // ── 标签管理 ──────────────────────────────────────────────
+
+    /// 打开创建标签对话框；`target_oid` 为 None 时目标为 HEAD。
+    pub(crate) fn open_tag_form_dialog(
+        &mut self,
+        target_oid: Option<String>,
+        target_summary: String,
+    ) {
+        self.close_popups();
+        self.tag_name.clear();
+        self.tag_message.clear();
+        self.tag_annotated = true;
+        self.active_dialog = Some(DialogState::TagForm {
+            target_oid,
+            target_summary,
+        });
+        self.last_error = None;
+    }
+
+    fn create_tag(&mut self) {
+        let target_oid = match self.active_dialog.clone() {
+            Some(DialogState::TagForm { target_oid, .. }) => target_oid,
+            _ => return,
+        };
+        let name = self.tag_name.value.trim().to_string();
+        if name.is_empty() {
+            self.last_error = Some("请填写标签名称".into());
+            return;
+        }
+        let message = if self.tag_annotated {
+            Some(self.tag_message.value.trim().to_string())
+        } else {
+            None
+        };
+        self.tag_name.clear();
+        self.tag_message.clear();
+        self.with_repo("标签已创建", move |service, repo| {
+            service.create_tag(
+                repo,
+                &TagName::new(name.clone()),
+                target_oid.as_deref(),
+                message.as_deref(),
+            )
+        });
+    }
+
+    pub(crate) fn open_tag_push_dialog(&mut self, tag: String) {
+        self.close_popups();
+        self.tag_push_remote = self.current_remote();
+        self.active_dialog = Some(DialogState::TagPush { tag });
+        self.last_error = None;
+    }
+
+    fn push_tag(&mut self, tag: String) {
+        let Some(remote) = self
+            .tag_push_remote
+            .clone()
+            .filter(|remote| !remote.trim().is_empty())
+            .or_else(|| self.current_remote())
+        else {
+            self.last_error = Some("当前仓库没有远端，无法推送标签".into());
+            return;
+        };
+        self.with_repo_blocking("标签已推送", move |service, repo| {
+            service.push_tag(
+                repo,
+                &RemoteName::new(remote.clone()),
+                &TagName::new(tag.clone()),
+            )
+        });
+    }
+
+    pub(crate) fn open_delete_tag_confirm(&mut self, tag: String) {
+        self.close_popups();
+        self.active_dialog = Some(DialogState::ConfirmDeleteTag { tag });
+        self.last_error = None;
+    }
+
+    fn delete_tag(&mut self, tag: String) {
+        self.with_repo("标签已删除", move |service, repo| {
+            service.delete_tag(repo, &TagName::new(tag.clone()))
+        });
+    }
+
+    pub(crate) fn open_delete_remote_tag_confirm(&mut self, remote: String, tag: String) {
+        self.close_popups();
+        self.active_dialog = Some(DialogState::ConfirmDeleteRemoteTag { remote, tag });
+        self.last_error = None;
+    }
+
+    fn delete_remote_tag(&mut self, remote: String, tag: String) {
+        self.with_repo_blocking("远端标签已删除", move |service, repo| {
+            service.delete_remote_tag(
+                repo,
+                &RemoteName::new(remote.clone()),
+                &TagName::new(tag.clone()),
+            )
+        });
+    }
+
     pub(crate) fn apply_stash(&mut self, index: usize) {
         if !self.ensure_no_merge_in_progress("应用贮藏") {
             return;
@@ -9370,6 +9539,171 @@ impl RepositoryView {
         });
     }
 
+    /// 修补最后一次提交：以当前暂存区为树重写 HEAD。
+    /// 输入框为空时保留原提交信息（只补文件不改信息的场景）。
+    fn amend(&mut self) {
+        if !self.ensure_no_merge_in_progress("修补提交") {
+            return;
+        }
+        if self.amend_needs_push_warning() {
+            self.open_amend_pushed_confirm_dialog(false);
+            return;
+        }
+        let message = self.commit_message.value.trim().to_string();
+        self.perform_amend(message);
+    }
+
+    /// 修补最后一次提交并推送当前分支。
+    fn amend_and_push(&mut self) {
+        if !self.ensure_no_merge_in_progress("修补提交并推送") {
+            return;
+        }
+        let Some(remote) = self.current_remote() else {
+            self.last_error = Some("当前仓库没有远端".into());
+            return;
+        };
+        if self.amend_needs_push_warning() {
+            self.open_amend_pushed_confirm_dialog(true);
+            return;
+        }
+        let message = self.commit_message.value.trim().to_string();
+        self.perform_amend_and_push(message, remote);
+    }
+
+    fn perform_amend(&mut self, message: String) {
+        let message = (!message.is_empty()).then(|| CommitMessage::new(message));
+        self.commit_message.clear();
+        self.amend_mode = false;
+        self.amend_prefill = None;
+        self.scroll_handle("commit-message-input-scroll")
+            .set_offset(point(px(0.0), px(0.0)));
+        self.with_repo_blocking("修补提交完成", move |service, repo| {
+            service.amend_commit(repo, message.as_ref())
+        });
+    }
+
+    /// 修补后推送：组合错误处理与 commit_and_push 一致——修补成功但推送
+    /// 失败时保留修补结果并给出组合提示。
+    fn perform_amend_and_push(&mut self, message: String, remote: String) {
+        let Some(tab_id) = self.active_tab_id() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let Some(path) = self.repo_path.clone() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let message = (!message.is_empty()).then(|| CommitMessage::new(message));
+        self.commit_message.clear();
+        self.amend_mode = false;
+        self.amend_prefill = None;
+        self.scroll_handle("commit-message-input-scroll")
+            .set_offset(point(px(0.0), px(0.0)));
+        let service = self.service_for_tab(tab_id);
+        self.spawn_operation_for_tab_with_blocker(
+            Some(tab_id),
+            "正在修补提交并推送",
+            OperationBlocker::Modal,
+            move || {
+                let mut repo = Repository::open(path)?;
+                let snapshot = service.amend_commit(&mut repo, message.as_ref())?;
+                match service.push(&mut repo, &RemoteName::new(remote)) {
+                    Ok(snapshot) => Ok(UiEvent::OperationFinished {
+                        tab_id: Some(tab_id),
+                        message: "修补提交并推送完成".to_string(),
+                        snapshot: Some(snapshot),
+                        diff: None,
+                    }),
+                    Err(err) => Ok(UiEvent::OperationFinished {
+                        tab_id: Some(tab_id),
+                        message: format!("修补已完成，但推送失败：{err}"),
+                        snapshot: Some(snapshot),
+                        diff: None,
+                    }),
+                }
+            },
+        );
+    }
+
+    /// 修补的 HEAD 是否已推送（据 branch_sync_status 判断，数据可能略陈旧：
+    /// 误判为已推送只会多一次确认，安全方向）。无 upstream 视为未推送。
+    /// 预填修补模式的 HEAD 提交信息：优先用内存中的历史数据（已加载过
+    /// 提交记录时即时命中）；否则后台读取 HEAD（不依赖进入过历史页），
+    /// 经 `AmendPrefillLoaded` 事件回填。
+    fn prefill_amend_message(&mut self) {
+        // 同步路径仅在历史数据确定新鲜时使用：刷新中（提交/推送等操作后
+        // 的后台重载还在飞行）旧列表里的 HEAD 徽章已过时，会预填旧提交的
+        // 信息，此时直接走后台读 HEAD 的兜底路径。
+        if !self.history_refreshing
+            && let Some(message) = self
+                .history_commits
+                .iter()
+                .find(|commit| {
+                    commit
+                        .refs
+                        .iter()
+                        .any(|reference| reference.kind == khaslana::CommitRefKind::Head)
+                })
+                .map(|commit| commit.message.clone())
+        {
+            self.amend_prefill = Some(message.clone());
+            self.commit_message.set_value(message);
+            return;
+        }
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(path) = self.repo_path.clone() else {
+            return;
+        };
+        let service = self.service_for_tab(tab_id);
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Short, move || {
+            let message = (|| -> khaslana::Result<Option<String>> {
+                let repo = Repository::open(path)?;
+                service.head_commit_message(&repo)
+            })()
+            // 仓库打开失败等视作无预填，不打断用户。
+            .unwrap_or(None);
+            send_ui_event(&tx, UiEvent::AmendPrefillLoaded { tab_id, message });
+        });
+    }
+
+    fn amend_needs_push_warning(&self) -> bool {
+        let Some(status) = self.branch_sync_status.as_ref() else {
+            return false;
+        };
+        let Some(head) = self.snapshot.as_ref().map(|snapshot| snapshot.head.clone()) else {
+            return false;
+        };
+        status.branch == head.unwrap_or_default() && status.upstream.is_some() && status.ahead == 0
+    }
+
+    fn open_amend_pushed_confirm_dialog(&mut self, and_push: bool) {
+        self.close_popups();
+        self.active_dialog = Some(DialogState::ConfirmAmendPushed { and_push });
+        self.last_error = None;
+    }
+
+    /// 拣选提交到当前分支（历史页右键菜单入口）。
+    fn cherry_pick_commit(&mut self, oid: String) {
+        if !self.ensure_no_merge_in_progress("拣选提交") {
+            return;
+        }
+        // 工作区脏时提前拦截，避免后台任务失败后才反馈。
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.changes.is_empty())
+        {
+            self.last_error = Some("工作区有未提交修改，请先提交、暂存或丢弃后再拣选".into());
+            return;
+        }
+        self.with_repo_blocking("拣选提交完成", move |service, repo| {
+            service.cherry_pick_commit(repo, &oid)
+        });
+    }
+
     fn commit_and_push(&mut self) {
         if !self.ensure_no_merge_in_progress("提交并推送") {
             return;
@@ -9699,7 +10033,10 @@ impl RepositoryView {
     }
 
     fn is_multiline_field(id: FieldId) -> bool {
-        matches!(id, FieldId::CommitMessage | FieldId::ConflictEditor)
+        matches!(
+            id,
+            FieldId::CommitMessage | FieldId::ConflictEditor | FieldId::TagMessage
+        )
     }
 
     fn single_line_input(
@@ -11000,6 +11337,10 @@ impl RepositoryView {
         let Some(menu) = self.tag_context_menu.clone() else {
             return div().into_any_element();
         };
+        let has_remotes = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.remotes.is_empty());
 
         glass_menu()
             .absolute()
@@ -11021,6 +11362,35 @@ impl RepositoryView {
                 {
                     let tag = menu.tag.clone();
                     move |this| this.open_browse_tag(tag.clone())
+                },
+                cx,
+            ))
+            .child(menu_separator())
+            .child(context_menu_item(
+                "推送到远端...",
+                !self.busy && has_remotes,
+                {
+                    let tag = menu.tag.clone();
+                    move |this| this.open_tag_push_dialog(tag.clone())
+                },
+                cx,
+            ))
+            .child(context_menu_item(
+                "删除标签",
+                !self.busy,
+                {
+                    let tag = menu.tag.clone();
+                    move |this| this.open_delete_tag_confirm(tag.clone())
+                },
+                cx,
+            ))
+            .child(context_menu_item(
+                "删除远端标签...",
+                !self.busy && has_remotes,
+                {
+                    let tag = menu.tag.clone();
+                    let remote = self.current_remote().unwrap_or_default();
+                    move |this| this.open_delete_remote_tag_confirm(remote.clone(), tag.clone())
                 },
                 cx,
             ))
@@ -11381,6 +11751,31 @@ impl RepositoryView {
                             this.open_revert_confirm_dialog(oid.clone(), summary.clone())
                         }
                     }
+                },
+                cx,
+            ))
+            // 拣选提交：合并提交暂不支持（需要 -m mainline 语义，后续迭代）。
+            .child(context_menu_item(
+                if is_merge_commit {
+                    "拣选提交（暂不支持合并提交）"
+                } else {
+                    "拣选提交到当前分支"
+                },
+                can_change_repository && !is_merge_commit,
+                {
+                    let oid = menu.oid.clone();
+                    move |this| this.cherry_pick_commit(oid.clone())
+                },
+                cx,
+            ))
+            .child(menu_separator())
+            .child(context_menu_item(
+                "在此提交上创建标签...",
+                can_change_repository,
+                {
+                    let oid = menu.oid.clone();
+                    let summary = menu.summary.clone();
+                    move |this| this.open_tag_form_dialog(Some(oid.clone()), summary.clone())
                 },
                 cx,
             ))
@@ -12475,6 +12870,32 @@ impl RepositoryView {
             .border_t_1()
             .border_color(rgb(ui_theme::BORDER))
             .bg(rgb(ui_theme::CARD))
+            // 修补上次提交开关：位于提交信息输入框上方、靠右；
+            // 合并进行中不提供（合并提交用“完成合并”路径）。
+            .when(!merge_in_progress && self.repo_path.is_some(), |this| {
+                this.child(div().flex().justify_end().child(self.toggle_row(
+                    "commit-amend-toggle",
+                    "修补上次提交",
+                    self.amend_mode,
+                    |this, _window, _cx| {
+                        this.amend_mode = !this.amend_mode;
+                        if this.amend_mode {
+                            // 开启时输入框为空则预填 HEAD 的完整提交信息，
+                            // 方便只改信息或补文件。
+                            if this.commit_message.value.trim().is_empty() {
+                                this.prefill_amend_message();
+                            }
+                        } else if let Some(prefill) = this.amend_prefill.take() {
+                            // 关闭时清除由开关预填且未被用户修改的内容；
+                            // 用户已编辑则保留，避免误删输入。
+                            if this.commit_message.value == prefill {
+                                this.commit_message.clear();
+                            }
+                        }
+                    },
+                    cx,
+                )))
+            })
             .child(self.input(FieldId::CommitMessage, false, window, cx))
             .child(
                 div()
@@ -12489,9 +12910,20 @@ impl RepositoryView {
                             .items_center()
                             .gap_1()
                             .child(self.primary_button(
-                                merge_view::merge_commit_button_label(merge_in_progress),
+                                // 修补模式下主按钮变为“修补提交”，以当前暂存区重写 HEAD。
+                                if !merge_in_progress && self.amend_mode {
+                                    "修补提交"
+                                } else {
+                                    merge_view::merge_commit_button_label(merge_in_progress)
+                                },
                                 can_primary_commit,
-                                |this, _, _| this.commit(),
+                                |this, _, _| {
+                                    if this.amend_mode && !this.merge_in_progress() {
+                                        this.amend();
+                                    } else {
+                                        this.commit();
+                                    }
+                                },
                                 cx,
                             ))
                             .when(merge_in_progress, |this| {
@@ -12504,9 +12936,20 @@ impl RepositoryView {
                             })
                             .when(!merge_in_progress, |this| {
                                 this.child(self.primary_button(
-                                    "提交并推送",
+                                    // 修补模式下变为“修补提交并推送”。
+                                    if self.amend_mode {
+                                        "修补提交并推送"
+                                    } else {
+                                        "提交并推送"
+                                    },
                                     can_commit_and_push,
-                                    |this, _, _| this.commit_and_push(),
+                                    |this, _, _| {
+                                        if this.amend_mode {
+                                            this.amend_and_push();
+                                        } else {
+                                            this.commit_and_push();
+                                        }
+                                    },
                                     cx,
                                 ))
                             }),
@@ -12775,6 +13218,24 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ConfirmUncommitToStaged { oid, summary } => self
                 .render_confirm_uncommit_to_staged_dialog(oid, summary, cx)
+                .into_any_element(),
+            DialogState::ConfirmAmendPushed { and_push } => self
+                .render_confirm_amend_pushed_dialog(and_push, cx)
+                .into_any_element(),
+            DialogState::TagForm {
+                target_oid,
+                target_summary,
+            } => self
+                .render_tag_form_dialog(target_oid, target_summary, window, cx)
+                .into_any_element(),
+            DialogState::TagPush { tag } => self
+                .render_tag_push_dialog(tag, window, cx)
+                .into_any_element(),
+            DialogState::ConfirmDeleteTag { tag } => self
+                .render_confirm_delete_tag_dialog(tag, cx)
+                .into_any_element(),
+            DialogState::ConfirmDeleteRemoteTag { remote, tag } => self
+                .render_confirm_delete_remote_tag_dialog(remote, tag, cx)
                 .into_any_element(),
             DialogState::ConfirmDiscardChange {
                 scope,
@@ -13187,6 +13648,230 @@ impl RepositoryView {
                         {
                             let oid = oid.clone();
                             move |this, _, _| this.uncommit_to_staged(oid.clone())
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_confirm_amend_pushed_dialog(
+        &self,
+        and_push: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("修补已推送的提交", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("当前最新提交已推送到远端。"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("修补会重写这条提交，之后必须用强制推送才能覆盖远端历史；当前版本暂不支持强推，其他协作者的本地历史会与远端分叉。"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("建议仅对尚未推送的提交使用修补。"),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.danger_button(
+                        if and_push { "仍要修补并推送" } else { "仍要修补" },
+                        !self.busy,
+                        move |this, _, _| {
+                            let message = this.commit_message.value.trim().to_string();
+                            if and_push {
+                                let Some(remote) = this.current_remote() else {
+                                    this.last_error = Some("当前仓库没有远端".into());
+                                    return;
+                                };
+                                this.perform_amend_and_push(message, remote);
+                            } else {
+                                this.perform_amend(message);
+                            }
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    /// 创建标签对话框：名称 + 附注开关 + 附注信息（多行）+ 目标提交展示。
+    fn render_tag_form_dialog(
+        &self,
+        target_oid: Option<String>,
+        target_summary: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let target_label = match (&target_oid, &target_summary) {
+            (Some(oid), summary) => {
+                format!("目标提交：{} {}", short_oid(oid), summary)
+            }
+            (None, _) => "目标提交：HEAD（当前分支最新提交）".to_string(),
+        };
+        self.dialog_panel("创建标签", cx)
+            .child(self.input(FieldId::TagName, false, window, cx))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(target_label),
+            )
+            .child(self.toggle_row(
+                "tag-annotated-toggle",
+                "创建附注标签（记录标签信息与创建者，发布推荐）",
+                self.tag_annotated,
+                |this, _, _| this.tag_annotated = !this.tag_annotated,
+                cx,
+            ))
+            .when(self.tag_annotated, |this| {
+                this.child(self.input(FieldId::TagMessage, false, window, cx))
+            })
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.primary_button(
+                        "创建",
+                        self.repo_path.is_some() && !self.busy,
+                        |this, _, _| this.create_tag(),
+                        cx,
+                    )),
+            )
+    }
+
+    /// 推送标签对话框：选择远端后推送。
+    fn render_tag_push_dialog(
+        &self,
+        tag: String,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let remotes = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.remotes.clone())
+            .unwrap_or_default();
+        let selected_remote = self
+            .tag_push_remote
+            .clone()
+            .or_else(|| remotes.first().map(|remote| remote.name.clone()));
+        let options = remotes
+            .iter()
+            .map(|remote| {
+                select_option()
+                    .value(remote.name.clone())
+                    .label(remote.name.clone())
+            })
+            .collect::<Vec<_>>();
+        let entity = cx.entity();
+        self.dialog_panel("推送标签", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(format!("标签：{tag}")),
+            )
+            .child(
+                div().w_full().text_size(px(12.0)).child(
+                    select("tag-push-remote-select")
+                        .w_full()
+                        .h(px(34.0))
+                        .options(options)
+                        .placeholder("选择远端")
+                        .value(selected_remote.unwrap_or_default())
+                        .disabled(remotes.is_empty() || self.busy)
+                        .menu_width(px(320.0))
+                        .on_change(move |value, _window, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.tag_push_remote = Some(value.to_string());
+                                cx.notify();
+                            });
+                        }),
+                ),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.primary_button(
+                        "推送",
+                        !remotes.is_empty() && !self.busy,
+                        {
+                            let tag = tag.clone();
+                            move |this, _, _| this.push_tag(tag.clone())
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_confirm_delete_tag_dialog(
+        &self,
+        tag: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("删除标签", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(format!("标签：{tag}")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("确认后删除本地标签，不影响远端标签。"),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.danger_button(
+                        "确认删除",
+                        !self.busy,
+                        {
+                            let tag = tag.clone();
+                            move |this, _, _| this.delete_tag(tag.clone())
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_confirm_delete_remote_tag_dialog(
+        &self,
+        remote: String,
+        tag: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("删除远端标签", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(format!("远端标签：{remote}/{tag}")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("确认后从远端删除该标签，已发布的版本引用将不可再用，删除后无法恢复。"),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.danger_button(
+                        "确认删除",
+                        !self.busy,
+                        {
+                            let remote = remote.clone();
+                            let tag = tag.clone();
+                            move |this, _, _| this.delete_remote_tag(remote.clone(), tag.clone())
                         },
                         cx,
                     )),
@@ -15183,6 +15868,8 @@ fn operation_requires_repository_refresh(message: &str) -> bool {
             | "变基拉取完成"
             | "分支拉取完成"
             | "推送完成"
+            | "标签已推送"
+            | "远端标签已删除"
             | "upstream 已设置"
     )
 }
@@ -15205,6 +15892,11 @@ fn operation_affects_commit_history(message: &str) -> bool {
             | "回滚提交完成"
             | "撤销合并完成"
             | "提交已还原到暂存区"
+            | "修补提交完成"
+            | "修补提交并推送完成"
+            | "拣选提交完成"
+            | "标签已创建"
+            | "标签已删除"
     )
 }
 

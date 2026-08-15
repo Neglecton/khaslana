@@ -54,6 +54,7 @@ fn strip_remote_prefix(upstream: &str) -> String {
 }
 
 const SIDEBAR_LOCAL_BRANCH_CREATE_ID: &str = "sidebar-local-branch-create";
+const SIDEBAR_TAG_CREATE_ID: &str = "sidebar-tag-create";
 
 fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
     // 图标按钮不显示文字，必须用分组专属 id，避免本地/远端搜索入口点击命中冲突。
@@ -191,21 +192,33 @@ impl RepositoryView {
                 .into_any_element()
         };
 
-        // 设计图：标签区域右侧计数 badge
+        // 标签区域右侧：创建入口（无标签时也保留）+ 计数 badge
         let tag_count = tag_rows.len();
-        let tag_action = if tag_count > 0 {
-            Some(
-                div()
-                    .flex_none()
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(tag_count.to_string())
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
+        let tag_action = Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(self.sidebar_header_icon_button(
+                    SIDEBAR_TAG_CREATE_ID,
+                    ToolbarIcon::Plus,
+                    false,
+                    self.repo_path.is_some() && !self.busy,
+                    |this, _, _| this.open_tag_form_dialog(None, String::new()),
+                    cx,
+                ))
+                .when(tag_count > 0, |this| {
+                    this.child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(tag_count.to_string()),
+                    )
+                })
+                .into_any_element(),
+        );
 
         // 设计图：贮藏区域右侧计数 badge
         let stash_count = stash_rows.len();
@@ -280,7 +293,8 @@ impl RepositoryView {
                 cx,
             ));
 
-        if !tag_rows.is_empty() {
+        // 标签区始终渲染：无标签时区头的“+”按钮是创建入口。
+        {
             sidebar = sidebar
                 .child(sidebar_divider())
                 .child(self.render_nav_section(

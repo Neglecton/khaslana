@@ -2,8 +2,8 @@
 use git2::Binding;
 use git2::build::CheckoutBuilder;
 use git2::{
-    AnnotatedCommit, MergeOptions, Repository, ResetType, RevertOptions, Signature,
-    StashApplyOptions, StashFlags,
+    AnnotatedCommit, CherrypickOptions, MergeOptions, Repository, ResetType, RevertOptions,
+    Signature, StashApplyOptions, StashFlags,
 };
 
 #[cfg(windows)]
@@ -171,6 +171,29 @@ pub(super) fn revert_preserving_locked_directories(
     #[cfg(not(windows))]
     {
         repo.revert(commit, Some(options))
+    }
+}
+
+/// cherry-pick 的 Windows 兼容包装：与 revert 版同构（libgit2 里两者的
+/// options 是同一结构），为 checkout 附加 SKIP_LOCKED_DIRECTORIES。
+pub(super) fn cherrypick_preserving_locked_directories(
+    repo: &Repository,
+    commit: &git2::Commit<'_>,
+    options: &mut CherrypickOptions<'_>,
+) -> std::result::Result<(), git2::Error> {
+    #[cfg(windows)]
+    {
+        let mut raw_options = options.raw();
+        raw_options.checkout_opts.checkout_strategy |=
+            libgit2_sys::GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES as u32;
+        raw_git_result(unsafe {
+            libgit2_sys::git_cherrypick(repo.raw(), commit.raw(), &raw_options)
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        repo.cherrypick(commit, Some(options))
     }
 }
 
