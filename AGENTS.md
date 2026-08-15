@@ -261,6 +261,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 提交引用标签，包括本地分支、远端分支、tag、HEAD
 - 切换分支、提交、合并、变基、拉取、推送等操作完成后自动后台刷新提交记录和引用标签（含 HEAD），无需人工刷新
 - 分页加载更多
+- 提交详情区（历史页左列上半部，四象限布局：详情上、文件列表下、差异右侧全高）：展示选中提交的摘要与引用徽章、完整提交信息（多行正文）、完整 SHA（可一键复制）、作者（含邮箱）、提交者（仅与作者不同时显示）、提交时间、父提交关系（双父标注合并提交）；默认与文件列表上下对半分（`history_details_height = None`，双方各占 flex_1），拖拽分割条后固化为绝对高度（`ResizeTarget::HistoryDetails`，对半分基准经 1px 标记 canvas 记录的左列顶部坐标推导），双击分割条复位回对半分；可折叠，内容区带自绘滚动条（`scrollable_frame_when`），无选中提交时不渲染。数据来自 `CommitInfo.message/author_email/committer/committer_email`（`collect_commit_infos` 一次性填充），无额外服务层调用
 - 查看提交文件列表
 - 查看指定提交文件 diff
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
@@ -504,16 +505,12 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 理由：当前提交行信息较紧凑，选中提交后主要看文件和 diff，缺少完整详情。
 
-建议范围：
+已完成基础范围（历史页左列上半部四象限布局，见 §5.4）：完整 SHA、父提交（双父标注合并提交）、作者（含邮箱）、提交者（与作者不同时）、时间、完整 message、SHA/提交信息一键复制、高度可拖拽与折叠。实现采用扩展 `CommitInfo`（`message`/`author_email`/`committer`/`committer_email`）而非新增 `CommitDetails`，`collect_commit_infos` 一次填充，无额外 IO。
 
-- 显示完整 SHA、父提交、作者、提交者、时间、完整 message。
-- 支持复制字段。
-- merge commit 显示父提交关系。
+建议后续范围：
 
-实现提示：
-
-- 可扩展 `CommitInfo` 或新增 `CommitDetails`。
-- UI 可在历史 diff 上方增加紧凑详情区，避免新开大弹窗。
+- 引用徽章点击跳转（如点击分支名定位到该分支）。
+- 父提交短 oid 点击后在历史列表中定位该提交。
 
 ### P2：远端分支管理增强
 

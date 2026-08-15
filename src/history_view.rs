@@ -9,7 +9,7 @@ use crate::{
     CHANGE_ROW_HEIGHT, DiffHeaderTarget, EncodingMenuTarget, RepositoryView, ResizeTarget,
     ScrollbarMode, author_avatar, change_state_badge, column_splitter_accepts_mouse_events,
     column_splitter_should_clear_resize, commit_time_label, history_scope_button, placeholder_row,
-    scrollable_uniform_frame, section_header, section_header_action,
+    scrollable_frame_when, scrollable_uniform_frame, section_header, section_header_action,
     ui::{
         components::{metric_badge, tooltip_text},
         theme as ui_theme,
@@ -34,6 +34,7 @@ pub(crate) struct CommitGraphRow {
 
 impl RepositoryView {
     pub(crate) fn render_history_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_selection = self.history_selected_commit.is_some();
         div()
             .flex()
             .flex_col()
@@ -49,7 +50,38 @@ impl RepositoryView {
                     .flex_1()
                     .min_w(px(0.0))
                     .min_h(px(0.0))
-                    .child(self.render_commit_files(cx))
+                    // 左列（与提交文件列表同宽）：上半为提交详情（默认与文件列表
+                    // 对半分，可拖拽改绝对高度），下半为文件列表；无选中提交时
+                    // 详情区整体不渲染，左列仅剩文件列表。
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .w(px(self.history_files_width))
+                            .min_w(px(self.history_files_width))
+                            .min_h(px(0.0))
+                            // 1px 透明标记：每帧记录左列顶部窗口坐标，供对半分
+                            // 模式下拖拽起始时推导详情区实际高度（见
+                            // start_resize_column）。
+                            .child({
+                                let top_hint = self.history_details_top_hint.clone();
+                                gpui::canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, _, _| {
+                                        top_hint.set(f32::from(bounds.origin.y));
+                                    },
+                                )
+                                .w_full()
+                                .h(px(1.0))
+                            })
+                            .when(has_selection, |this| {
+                                this.child(self.render_commit_details(cx)).child(
+                                    self.render_column_splitter(ResizeTarget::HistoryDetails, cx),
+                                )
+                            })
+                            .child(self.render_commit_files(cx)),
+                    )
                     .child(self.render_column_splitter(ResizeTarget::HistoryFiles, cx))
                     .child(self.render_history_diff(cx)),
             )
@@ -494,6 +526,182 @@ impl RepositoryView {
             )
     }
 
+    /// 提交详情区（历史页左列上半部）：展示选中提交的完整提交信息、
+    /// 作者/提交者、时间、完整 SHA 与父提交关系；可折叠，高度可拖拽。
+    fn render_commit_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(commit) = self
+            .history_selected_commit
+            .as_deref()
+            .and_then(|oid| self.history_commits.iter().find(|info| info.oid == oid))
+            .cloned()
+        else {
+            return section_header("提交详情").into_any_element();
+        };
+
+        let collapsed = self.history_details_collapsed;
+        let toggle_label: &'static str = if collapsed { "展开" } else { "收起" };
+        let header_title = if collapsed {
+            format!("提交详情 · {}", commit.summary)
+        } else {
+            "提交详情".to_string()
+        };
+        let header = section_header_action(
+            header_title,
+            Some(
+                history_scope_button(
+                    toggle_label,
+                    false,
+                    |this| {
+                        this.history_details_collapsed = !this.history_details_collapsed;
+                    },
+                    cx,
+                )
+                .into_any_element(),
+            ),
+        );
+
+        if collapsed {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .child(header)
+                .into_any_element();
+        }
+
+        // 完整提交信息（去首尾空白；与摘要相同则不重复展示）。
+        let message_body = commit.message.trim();
+        let body_text = (message_body != commit.summary).then(|| message_body.to_string());
+
+        let oid_for_copy = commit.oid.clone();
+        let message_for_copy = message_body.to_string();
+        let mut meta_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x_3()
+            .gap_y_1()
+            .text_size(px(11.0))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            .child(
+                div()
+                    .font_family("Consolas, monospace")
+                    .child(commit.oid.clone()),
+            )
+            .child(
+                div()
+                    .id("history-details-copy-sha")
+                    .flex_none()
+                    .px_2()
+                    .py(px(1.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .child("复制 SHA")
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.copy_commit_sha(oid_for_copy.clone(), cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("history-details-copy-message")
+                    .flex_none()
+                    .px_2()
+                    .py(px(1.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .child("复制信息")
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            message_for_copy.clone(),
+                        ));
+                        this.status = "已复制提交信息".into();
+                        this.last_error = None;
+                        this.notify_success(this.status.clone(), cx);
+                    })),
+            )
+            .child(div().child(format!("作者 {}", author_label(&commit))))
+            .child(div().child(format!("提交时间 {}", commit_time_label(commit.time))))
+            .child(div().child(parents_note(&commit.parents)));
+        if let Some(committer) = committer_note(&commit) {
+            meta_row = meta_row.child(div().child(format!("提交者 {committer}")));
+        }
+
+        let handle = self.scroll_handle("history-details-scroll");
+        let scroll_content = div()
+            .id("history-details-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .px_3()
+            .py_2()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child(commit.summary.clone()),
+                    )
+                    .children(commit_ref_labels(&commit.refs, &commit.short_oid)),
+            )
+            .children(body_text.map(|text| {
+                div()
+                    .min_w(px(0.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(text)
+            }))
+            .child(meta_row);
+
+        // 内容区套用统一的自绘滚动条容器（与其他滚动区域一致的视觉与拖拽交互）。
+        let content = scrollable_frame_when(
+            "history-details-scroll",
+            ScrollbarMode::Vertical,
+            scroll_content.into_any_element(),
+            handle,
+            true,
+            cx,
+        );
+
+        match self.history_details_height {
+            // 手动拖拽过的绝对高度。
+            Some(height) => div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(height))
+                .child(header)
+                .child(content)
+                .into_any_element(),
+            // 默认：与文件列表上下对半分（双方各占 flex_1）。
+            None => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(header)
+                .child(content)
+                .into_any_element(),
+        }
+    }
+
     fn render_commit_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let row_count = self.history_files.len().max(1);
         let content_present = !self.history_files.is_empty();
@@ -545,11 +753,10 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(self.history_files_width))
-            .min_w(px(self.history_files_width))
+            // 位于左列 flex_col 中（上方为提交详情区）：占余高；宽度由父容器约束。
+            .flex_1()
+            .min_w(px(0.0))
             .min_h(px(0.0))
-            .h_full()
             .child(section_header("提交文件"))
             .child(scrollable_uniform_frame(
                 "commit-file-list",
@@ -900,6 +1107,37 @@ fn paint_graph_circle(
     }
 }
 
+/// 作者展示文本：`名 <邮箱>`，无邮箱时仅名称。
+fn author_label(commit: &CommitInfo) -> String {
+    match &commit.author_email {
+        Some(email) => format!("{} <{}>", commit.author, email),
+        None => commit.author.clone(),
+    }
+}
+
+/// 提交者展示文本：仅当提交者与作者不同（rebase/cherry-pick 等）才有展示价值。
+fn committer_note(commit: &CommitInfo) -> Option<String> {
+    (commit.committer != commit.author).then(|| match &commit.committer_email {
+        Some(email) => format!("{} <{}>", commit.committer, email),
+        None => commit.committer.clone(),
+    })
+}
+
+/// 父提交展示文本：根提交、普通提交、合并提交（双父）、章鱼合并（>2 父）。
+fn parents_note(parents: &[String]) -> String {
+    let short = |oid: &str| oid.chars().take(8).collect::<String>();
+    match parents.len() {
+        0 => "根提交（无父提交）".to_string(),
+        1 => format!("父提交 {}", short(&parents[0])),
+        2 => format!(
+            "父提交 {} / {}（合并提交）",
+            short(&parents[0]),
+            short(&parents[1])
+        ),
+        count => format!("父提交 {count} 个（章鱼合并）"),
+    }
+}
+
 fn commit_ref_labels(refs: &[CommitRefInfo], row_short_oid: &str) -> Vec<gpui::AnyElement> {
     refs.iter()
         .take(MAX_COMMIT_REF_LABELS)
@@ -1028,7 +1266,11 @@ mod tests {
             oid: oid.to_string(),
             short_oid: oid.to_string(),
             summary: oid.to_string(),
+            message: oid.to_string(),
             author: "测试作者".to_string(),
+            author_email: Some("test@example.invalid".to_string()),
+            committer: "测试作者".to_string(),
+            committer_email: Some("test@example.invalid".to_string()),
             time: 0,
             parents: parents.iter().map(|parent| (*parent).to_string()).collect(),
             refs: Vec::new(),
@@ -1094,5 +1336,47 @@ mod tests {
         assert_eq!(graph_max_lane(64.0), 3);
         assert_eq!(graph_max_lane(96.0), 5);
         assert_eq!(graph_max_lane(480.0), 32);
+    }
+
+    // 提交者与作者相同时不产生展示文本（避免详情区噪音）。
+    #[test]
+    fn committer_note_only_when_differs_from_author() {
+        let mut commit = test_commit("abcd1234", &[]);
+        commit.committer = "测试作者".to_string();
+        assert_eq!(committer_note(&commit), None);
+
+        commit.committer = "变基机器人".to_string();
+        commit.committer_email = Some("bot@example.invalid".to_string());
+        assert_eq!(
+            committer_note(&commit),
+            Some("变基机器人 <bot@example.invalid>".to_string())
+        );
+    }
+
+    #[test]
+    fn parents_note_covers_root_merge_and_octopus() {
+        assert_eq!(parents_note(&[]), "根提交（无父提交）");
+        assert_eq!(
+            parents_note(&["aaaabbbbccccddddeeeeffff00001111".to_string()]),
+            "父提交 aaaabbbb"
+        );
+        assert_eq!(
+            parents_note(&[
+                "aaaabbbbccccddddeeeeffff00001111".to_string(),
+                "11112222333344445555666677778888".to_string()
+            ]),
+            "父提交 aaaabbbb / 11112222（合并提交）"
+        );
+        let octopus = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(parents_note(&octopus), "父提交 3 个（章鱼合并）");
+    }
+
+    #[test]
+    fn author_label_includes_email_when_present() {
+        let mut commit = test_commit("abcd1234", &[]);
+        assert_eq!(author_label(&commit), "测试作者 <test@example.invalid>");
+
+        commit.author_email = None;
+        assert_eq!(author_label(&commit), "测试作者");
     }
 }

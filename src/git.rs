@@ -1734,6 +1734,8 @@ impl GitService {
             let commit = repo.find_commit(oid)?;
             let author = commit.author();
             let author_name = author.name().unwrap_or("未知作者").to_string();
+            let committer = commit.committer();
+            let committer_name = committer.name().unwrap_or("未知提交者").to_string();
             let oid_string = oid.to_string();
             let parents = commit
                 .parent_ids()
@@ -1749,7 +1751,12 @@ impl GitService {
                     .flatten()
                     .unwrap_or("(无提交信息)")
                     .to_string(),
+                // message() 对非 UTF-8 编码返回 Err，统一走字节读取 + 有损转换。
+                message: String::from_utf8_lossy(commit.message_bytes()).into_owned(),
                 author: author_name,
+                author_email: author.email().ok().map(str::to_string),
+                committer: committer_name,
+                committer_email: committer.email().ok().map(str::to_string),
                 time: commit.time().seconds(),
                 parents,
                 refs: refs_by_oid.get(&oid).cloned().unwrap_or_default(),

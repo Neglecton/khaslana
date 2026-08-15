@@ -4058,3 +4058,29 @@ fn pull_clean_merge_auto_commits_and_push_succeeds() {
         .push(&mut b_repo, &RemoteName::new("origin"))
         .unwrap();
 }
+
+// commit_history 返回完整提交信息与作者/提交者签名（提交详情区数据来源）。
+#[test]
+fn commit_history_returns_full_message_and_signature_details() {
+    let (dir, repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "a.txt", "a\n");
+    git_support::commit_all(&repo, "feat: 示例标题\n\n多行正文第一行\n多行正文第二行");
+
+    let commits = service
+        .commit_history(&repo, HistoryScope::CurrentBranch, 0, 1)
+        .unwrap();
+
+    let commit = &commits[0];
+    assert_eq!(commit.summary, "feat: 示例标题");
+    assert_eq!(
+        commit.message,
+        "feat: 示例标题\n\n多行正文第一行\n多行正文第二行"
+    );
+    assert_eq!(commit.author, "Test User");
+    assert_eq!(commit.author_email.as_deref(), Some("test@example.invalid"));
+    assert_eq!(commit.committer, "Test User");
+    assert_eq!(
+        commit.committer_email.as_deref(),
+        Some("test@example.invalid")
+    );
+}

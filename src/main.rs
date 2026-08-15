@@ -29,7 +29,7 @@ mod ui;
 mod ui_helpers;
 mod workflow_view;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
@@ -281,7 +281,7 @@ pub(crate) fn find_shortcut_conflict(
         .copied()
 }
 
-const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 const DEFAULT_CHANGES_WIDTH: f32 = 330.0;
 const MIN_COLUMN_WIDTH: f32 = 240.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
@@ -289,6 +289,10 @@ const CHANGE_ROW_HEIGHT: f32 = 36.0;
 const DEFAULT_HISTORY_TOP_HEIGHT: f32 = 430.0;
 const MIN_HISTORY_TOP_HEIGHT: f32 = 180.0;
 const MAX_HISTORY_TOP_HEIGHT: f32 = 760.0;
+// 提交详情区高度（历史页左列上半部）：默认紧凑展示摘要+正文+元信息，可拖拽调整。
+const DEFAULT_HISTORY_DETAILS_HEIGHT: f32 = 260.0;
+const MIN_HISTORY_DETAILS_HEIGHT: f32 = 120.0;
+const MAX_HISTORY_DETAILS_HEIGHT: f32 = 720.0;
 const DEFAULT_HISTORY_FILES_WIDTH: f32 = 520.0;
 const MIN_HISTORY_FILES_WIDTH: f32 = 260.0;
 const MAX_HISTORY_FILES_WIDTH: f32 = 720.0;
@@ -1338,6 +1342,7 @@ pub(crate) enum ResizeTarget {
     WorkflowTemplates,
     HistoryFiles,
     HistoryTop,
+    HistoryDetails,
     HistoryGraph,
     BrowseFiles,
 }
@@ -2179,6 +2184,13 @@ pub(crate) struct RepositoryView {
     pub(crate) workflow_templates_width: f32,
     pub(crate) history_top_height: f32,
     pub(crate) history_files_width: f32,
+    /// 提交详情区高度与折叠状态（视图偏好，不持久化）：`None` 表示未手动
+    /// 调整过，详情区与文件列表按上下对半分弹性分配。
+    pub(crate) history_details_height: Option<f32>,
+    pub(crate) history_details_collapsed: bool,
+    /// 历史页左列顶部窗口坐标（1px 标记 canvas 每帧记录）：对半分模式下
+    /// 开始拖拽时，用分割条点击位置减去该坐标推导详情区实际高度并固化。
+    history_details_top_hint: Arc<Cell<f32>>,
     pub(crate) browse_tree_width: f32,
     pub(crate) history_graph_width: f32,
     resizing_sidebar_width: Option<ResizeState>,
@@ -2186,6 +2198,7 @@ pub(crate) struct RepositoryView {
     resizing_workflow_templates_width: Option<ResizeState>,
     resizing_history_files_width: Option<ResizeState>,
     resizing_history_top_height: Option<ResizeState>,
+    resizing_history_details_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
     resizing_history_graph_width: Option<ResizeState>,
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
@@ -2362,6 +2375,9 @@ impl RepositoryView {
             workflow_templates_width: DEFAULT_CHANGES_WIDTH,
             history_top_height: DEFAULT_HISTORY_TOP_HEIGHT,
             history_files_width: DEFAULT_HISTORY_FILES_WIDTH,
+            history_details_height: None,
+            history_details_collapsed: false,
+            history_details_top_hint: Arc::new(Cell::new(0.0)),
             browse_tree_width: DEFAULT_BROWSE_TREE_WIDTH,
             history_graph_width: DEFAULT_HISTORY_GRAPH_WIDTH,
             resizing_sidebar_width: None,
@@ -2369,6 +2385,7 @@ impl RepositoryView {
             resizing_workflow_templates_width: None,
             resizing_history_files_width: None,
             resizing_history_top_height: None,
+            resizing_history_details_height: None,
             resizing_browse_tree_width: None,
             resizing_history_graph_width: None,
             scroll_handles: RefCell::new(HashMap::new()),
@@ -8278,6 +8295,19 @@ impl RepositoryView {
         // 注意：不要在这里 close_popups——根层 capture_any_mouse_down 已对真正的
         // 菜单外部点击统一关闭弹层；菜单边缘容差区内的点击命中判定视为菜单内部
         //（菜单保持打开），此处若再关会把容差区内落在分割线上的点击重新误杀。
+        // 详情区对半分模式（height = None）：点击处即分割条顶部，用左列顶部
+        // 坐标推导当前实际高度并固化为绝对值，后续拖拽增量才有基准。
+        if target == ResizeTarget::HistoryDetails && self.history_details_height.is_none() {
+            let click_y: f32 = event.position.y.into();
+            let column_top = self.history_details_top_hint.get();
+            let derived = if column_top > 0.0 {
+                (click_y - column_top - 4.0)
+                    .clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT)
+            } else {
+                DEFAULT_HISTORY_DETAILS_HEIGHT
+            };
+            self.history_details_height = Some(derived);
+        }
         let state = ResizeState {
             start_x: event.position.x.into(),
             start_y: event.position.y.into(),
@@ -8290,6 +8320,7 @@ impl RepositoryView {
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width = Some(state),
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = Some(state),
             ResizeTarget::HistoryTop => self.resizing_history_top_height = Some(state),
+            ResizeTarget::HistoryDetails => self.resizing_history_details_height = Some(state),
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = Some(state),
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = Some(state),
         }
@@ -8307,6 +8338,13 @@ impl RepositoryView {
                 let delta = current_y - resize.start_y;
                 let height = (resize.start_height + delta)
                     .clamp(MIN_HISTORY_TOP_HEIGHT, MAX_HISTORY_TOP_HEIGHT);
+                self.set_row_height(target, height);
+            }
+            ResizeTarget::HistoryDetails => {
+                let current_y: f32 = event.position.y.into();
+                let delta = current_y - resize.start_y;
+                let height = (resize.start_height + delta)
+                    .clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT);
                 self.set_row_height(target, height);
             }
             ResizeTarget::HistoryFiles | ResizeTarget::WorkflowTemplates => {
@@ -8338,6 +8376,7 @@ impl RepositoryView {
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width = None,
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = None,
             ResizeTarget::HistoryTop => self.resizing_history_top_height = None,
+            ResizeTarget::HistoryDetails => self.resizing_history_details_height = None,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
         }
@@ -8353,6 +8392,8 @@ impl RepositoryView {
             }
             ResizeTarget::HistoryFiles => self.history_files_width = DEFAULT_HISTORY_FILES_WIDTH,
             ResizeTarget::HistoryTop => self.history_top_height = DEFAULT_HISTORY_TOP_HEIGHT,
+            // 双击复位：回到上下对半分的默认分配。
+            ResizeTarget::HistoryDetails => self.history_details_height = None,
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
             ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
         }
@@ -8364,7 +8405,7 @@ impl RepositoryView {
             ResizeTarget::Changes => self.changes_width,
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width,
             ResizeTarget::HistoryFiles => self.history_files_width,
-            ResizeTarget::HistoryTop => 0.0,
+            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails => 0.0,
             ResizeTarget::BrowseFiles => self.browse_tree_width,
             ResizeTarget::HistoryGraph => self.history_graph_width,
         }
@@ -8376,7 +8417,7 @@ impl RepositoryView {
             ResizeTarget::Changes => self.changes_width = width,
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width = width,
             ResizeTarget::HistoryFiles => self.history_files_width = width,
-            ResizeTarget::HistoryTop => {}
+            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails => {}
             ResizeTarget::BrowseFiles => self.browse_tree_width = width,
             ResizeTarget::HistoryGraph => self.history_graph_width = width,
         }
@@ -8385,6 +8426,9 @@ impl RepositoryView {
     fn row_height(&self, target: ResizeTarget) -> f32 {
         match target {
             ResizeTarget::HistoryTop => self.history_top_height,
+            ResizeTarget::HistoryDetails => self
+                .history_details_height
+                .unwrap_or(DEFAULT_HISTORY_DETAILS_HEIGHT),
             ResizeTarget::Sidebar
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
@@ -8397,6 +8441,7 @@ impl RepositoryView {
     fn set_row_height(&mut self, target: ResizeTarget, height: f32) {
         match target {
             ResizeTarget::HistoryTop => self.history_top_height = height,
+            ResizeTarget::HistoryDetails => self.history_details_height = Some(height),
             ResizeTarget::Sidebar
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
@@ -8413,6 +8458,7 @@ impl RepositoryView {
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width,
             ResizeTarget::HistoryFiles => self.resizing_history_files_width,
             ResizeTarget::HistoryTop => self.resizing_history_top_height,
+            ResizeTarget::HistoryDetails => self.resizing_history_details_height,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width,
         }
@@ -11845,7 +11891,10 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let entity = cx.entity();
         let active = self.resize_state(target).is_some();
-        let horizontal = target == ResizeTarget::HistoryTop;
+        let horizontal = matches!(
+            target,
+            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails
+        );
         // 弹窗或弹层菜单打开期间分割线不响应：不显示拖拽光标、不高亮、不响应鼠标，
         // 避免弹层边缘容差区内的悬停/点击被分割线抢走。
         let interactive = column_splitter_accepts_mouse_events(

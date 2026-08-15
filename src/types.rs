@@ -298,8 +298,15 @@ pub struct FileDiff {
 pub struct CommitInfo {
     pub oid: String,
     pub short_oid: String,
+    /// 仅首行摘要（列表行展示）。
     pub summary: String,
+    /// 完整提交信息（含多行 body，供提交详情区展示）。
+    pub message: String,
     pub author: String,
+    pub author_email: Option<String>,
+    /// 提交者（rebase/cherry-pick 后可能与作者不同，此时详情区单独展示）。
+    pub committer: String,
+    pub committer_email: Option<String>,
     pub time: i64,
     pub parents: Vec<String>,
     pub refs: Vec<CommitRefInfo>,
