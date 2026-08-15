@@ -161,6 +161,7 @@ UI 线程通过 `async-channel` 接收后台线程发回的 `UiEvent`。重型 G
 - 会创建/移动提交或 HEAD 的操作（提交、提交并推送、合并、变基、reset、revert、uncommit，见 `operation_affects_commit_history` 消息名单）完成后，经 `OperationFinished` 调用 `reload_history_after_change`：正在查看历史页或已有历史列表时无论当前视图都立即后台重载；历史列表为空且不在历史页时不预加载，等进入历史页再拉。
 - 引用类操作（切换分支、拉取、推送、分支增删改等，见 `operation_requires_repository_refresh`）走完整仓库重载，由 `RepositoryFastLoaded` 统一调用 `reload_history_after_change` 刷新历史。
 - `ensure_history_loaded` 在进入历史页时若历史被标记陈旧（`history_refreshing`）也会重新拉取，兜底失败重试与跨标签页陈旧；刷新期间旧列表保持可见（stale-while-revalidate）。
+- 刷新期间选中提交的文件列表与差异也保留展示（按 commit oid 不可变，与提交列表同一套 stale-while-revalidate 策略）：`refresh_history` 不清空 `history_files`/`history_selected_file`/`history_diff`；`HistoryCommitsLoaded` 全量替换时选中仍在新列表则保留三区展示（文件为空时经 `select_history_commit` 自愈重载，非空幂等跳过），选中被新列表丢弃才连同清空——避免出现"详情显示选中提交、文件/差异永远空占位"的不一致。
 - `RepoTabState.history_load_seq` 是提交列表请求序号，每次 `load_history_page` 递增并随 `HistoryCommitsLoaded` 事件回传：仅最新一代请求（seq 匹配）能应用数据和复位加载标志，旧一代晚到的结果被丢弃；`HistoryLoadFailed` 无论 load_id 是否匹配都复位加载标志，避免操作作废在飞请求后加载标志永久卡死、后续历史加载被静默吞掉。
 
 超大 diff 缓存保护：

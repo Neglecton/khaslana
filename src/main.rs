@@ -3684,7 +3684,10 @@ impl RepositoryView {
                                 this.history_commits = commits;
                                 let was_refreshing = this.history_refreshing;
                                 if was_refreshing {
-                                    // 刷新时保留选中提交（若仍存在于新列表）
+                                    // 刷新时保留选中提交（若仍存在于新列表）。
+                                    // 选中的文件列表与差异按 oid 不可变，一并保留，
+                                    // 避免出现“详情显示选中提交、文件/差异永远空占位”
+                                    // 的不一致（历史上这里的清空没有配套重载）。
                                     let still_exists =
                                         this.history_selected_commit.as_ref().is_some_and(|oid| {
                                             this.history_commits
@@ -3693,11 +3696,10 @@ impl RepositoryView {
                                         });
                                     if !still_exists {
                                         this.history_selected_commit = None;
+                                        this.history_files.clear();
+                                        this.history_selected_file = None;
+                                        this.history_diff = None;
                                     }
-                                    // 详情可能已过时，清空以重新加载
-                                    this.history_files.clear();
-                                    this.history_selected_file = None;
-                                    this.history_diff = None;
                                 } else {
                                     // 非刷新（scope 切换/初始加载）：全部重置
                                     this.history_selected_commit = None;
@@ -3718,6 +3720,12 @@ impl RepositoryView {
                                 }
                             } else {
                                 this.status = "提交记录已加载".to_string();
+                                // 自愈：选中保留但文件列表为空（旧状态冻结、或此前的
+                                // 文件加载被仓库重载作废）时重新拉取；非空时
+                                // select_history_commit 幂等跳过，不影响现有展示。
+                                if let Some(oid) = this.history_selected_commit.clone() {
+                                    this.select_history_commit(oid);
+                                }
                             }
                         }
                     }
@@ -8521,12 +8529,10 @@ impl RepositoryView {
 
     /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
     fn refresh_history(&mut self) {
-        // 保留：commits、graph_rows、has_more、refs_cache、selected_commit
-        // 清空详情（操作后可能已过时）
-        self.history_files.clear();
-        self.history_selected_file = None;
-        self.history_diff = None;
-        self.history_diff_headers_expanded = false;
+        // 保留：commits、graph_rows、has_more、refs_cache、selected_commit。
+        // 选中提交的文件列表与差异按 oid 不可变，同样保留展示（与提交列表
+        // 同一套 stale-while-revalidate 策略）；若新列表丢弃选中提交，
+        // 由 HistoryCommitsLoaded 统一清空文件与差异。
         self.history_refreshing = true;
         self.history_loading = HistoryLoading::default();
     }
@@ -9153,9 +9159,7 @@ impl RepositoryView {
         self.history_diff = None;
         self.history_diff_headers_expanded = false;
         self.reset_uniform_scroll("history-diff-scroll");
-        self.history_loading.files = true;
         self.history_loading.diff = false;
-        self.status = "正在加载提交文件".to_string();
 
         let Some(tab_id) = self.active_tab_id() else {
             return;
@@ -9163,6 +9167,10 @@ impl RepositoryView {
         let Some(repo_path) = self.repo_path.clone() else {
             return;
         };
+        // 加载标志与状态文字在守卫之后设置：守卫早退时不应挂起
+        // “提交文件加载中...”（文件区会永久显示加载占位）。
+        self.history_loading.files = true;
+        self.status = "正在加载提交文件".to_string();
         let service = self.service_for_tab(tab_id);
         let tx = self.tx.clone();
         let load_id = self.repository_load_id;
