@@ -82,7 +82,10 @@ use submodule_view::{
     submodule_request_matches,
 };
 use tasks::{TaskExecutor, TaskKind};
-use text_input::{MultiLineInputElement, SingleLineInputElement, TextFieldState};
+use text_input::{
+    MULTILINE_LINE_HEIGHT, MULTILINE_MIN_LINES, MultiLineInputElement, SingleLineInputElement,
+    TextFieldState,
+};
 use ui::theme::rgb;
 use ui::{
     components::{
@@ -929,7 +932,16 @@ fn dialog_parent_should_stop_mouse_event(event_name: &str) -> bool {
 }
 
 fn multiline_input_should_scroll(id: FieldId, value: &str) -> bool {
-    id == FieldId::ConflictEditor || visual_line_count(value) > 4
+    id == FieldId::ConflictEditor || visual_line_count(value) > MULTILINE_MIN_LINES
+}
+
+/// 多行输入字段的滚动容器句柄 id（提交信息框与冲突编辑器各一个）。
+pub(crate) fn multiline_scroll_handle_id(id: FieldId) -> &'static str {
+    if id == FieldId::ConflictEditor {
+        CONFLICT_RESULT_SCROLL_HANDLE_ID
+    } else {
+        "commit-message-input-scroll"
+    }
 }
 
 #[cfg(test)]
@@ -4445,6 +4457,7 @@ impl RepositoryView {
                     {
                         this.amend_prefill = Some(message.clone());
                         this.commit_message.set_value(message);
+                        this.commit_message.caret = 0;
                     }
                 });
             }
@@ -9648,6 +9661,8 @@ impl RepositoryView {
         {
             self.amend_prefill = Some(message.clone());
             self.commit_message.set_value(message);
+            // caret 归零：预填信息通常从首行（主题）开始编辑，避免滚动到底。
+            self.commit_message.caret = 0;
             return;
         }
         let Some(tab_id) = self.active_tab_id() else {
@@ -10152,7 +10167,9 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let field = self.field(id);
         let focused = field.focus.is_focused(window);
-        let multiline_overflows = multiline_input_should_scroll(id, &field.value);
+        // 溢出判定综合逻辑行数与上帧自动换行行数（长行换行后同样超高）。
+        let multiline_overflows = multiline_input_should_scroll(id, &field.value)
+            || field.last_wrapped_line_count > MULTILINE_MIN_LINES;
         input_frame(format!("field-{id:?}"), focused, InputFrameSize::Multiline)
             .track_focus(&field.focus)
             .key_context("TextInput")
@@ -10229,12 +10246,12 @@ impl RepositoryView {
             .py_2()
             .overflow_hidden()
             .child({
-                let (scroll_id, handle_id) = if id == FieldId::ConflictEditor {
-                    ("conflict-editor-scroll", CONFLICT_RESULT_SCROLL_HANDLE_ID)
+                let handle = self.scroll_handle(multiline_scroll_handle_id(id));
+                let scroll_id = if id == FieldId::ConflictEditor {
+                    "conflict-editor-scroll"
                 } else {
-                    ("commit-message-input-scroll", "commit-message-input-scroll")
+                    "commit-message-input-scroll"
                 };
-                let handle = self.scroll_handle(handle_id);
                 let content = div()
                     .id(scroll_id)
                     .flex()
@@ -10249,14 +10266,27 @@ impl RepositoryView {
                         entity: cx.entity(),
                     })
                     .into_any_element();
-                scrollable_frame_when(
+                let frame = scrollable_frame_when(
                     scroll_id,
                     ScrollbarMode::Vertical,
                     content,
                     handle,
                     multiline_overflows,
                     cx,
-                )
+                );
+                if id == FieldId::ConflictEditor {
+                    // 冲突编辑器随冲突面板高度伸缩。
+                    frame.into_any_element()
+                } else {
+                    // 提交信息框固定可视高度（约 MULTILINE_MIN_LINES 行），
+                    // 内容超出后滚动，不再随内容无限撑高。
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(px(MULTILINE_LINE_HEIGHT * MULTILINE_MIN_LINES as f32))
+                        .child(frame)
+                        .into_any_element()
+                }
             })
     }
 

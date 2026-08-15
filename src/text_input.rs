@@ -9,10 +9,13 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ui::theme as ui_theme;
 use crate::ui::theme::{rgb, rgba};
-use crate::{FieldId, RepositoryView};
+use crate::{FieldId, RepositoryView, multiline_scroll_handle_id};
 
-const MULTILINE_LINE_HEIGHT: f32 = 18.0;
-const MULTILINE_MIN_LINES: usize = 4;
+/// 多行输入单行高度（px）。
+pub(crate) const MULTILINE_LINE_HEIGHT: f32 = 18.0;
+/// 多行输入最小可视行数：同时是提交信息框的固定可视高度
+///（内容超过该行数后滚动而非继续撑高）。
+pub(crate) const MULTILINE_MIN_LINES: usize = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TextLineLayout {
@@ -815,6 +818,10 @@ impl Element for MultiLineInputElement {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
         style.size.height = px(MULTILINE_LINE_HEIGHT * line_count as f32).into();
+        // 固定高度的滚动容器内禁止收缩：布局引擎把 min-height:auto 解析为 0，
+        // 默认 flex_shrink=1 会把本元素压回容器高度，导致内容测量不溢出、
+        // 滚动与滚动条失效（行仍在绘制、只是被裁掉）。
+        style.flex_shrink = 0.0;
         (window.request_layout(style, [], cx), ())
     }
 
@@ -864,6 +871,8 @@ impl Element for MultiLineInputElement {
         let mut lines = Vec::new();
         let mut selections = Vec::new();
         let mut cursor = None;
+        // 光标所在视觉行（跟随滚动用）。
+        let mut caret_visual_line: Option<usize> = None;
         let wrap_width = bounds.size.width.max(px(1.0));
         // 用 shape_text 一次性把完整文本（含 \n）按 wrap_width 做自动换行，
         // 得到每个逻辑行对应的 WrappedLine（含换行边界）。
@@ -932,22 +941,26 @@ impl Element for MultiLineInputElement {
                     ));
                 }
 
-                if focused
-                    && field.selected_range().is_none()
+                if field.selected_range().is_none()
                     && field.caret >= seg_range.start
                     && field.caret <= seg_range.end
                 {
                     let local = field.caret.saturating_sub(seg_range.start);
-                    cursor = Some(fill(
-                        Bounds::new(
-                            point(
-                                line_bounds.left() + shaped.x_for_index(local),
-                                line_bounds.top(),
+                    // 光标跟随滚动不要求聚焦：AI 流式生成等场景下 caret 被推到
+                    // 末尾时，未聚焦的输入框也能自动滚到最新内容。
+                    caret_visual_line = Some(visual_line_index);
+                    if focused {
+                        cursor = Some(fill(
+                            Bounds::new(
+                                point(
+                                    line_bounds.left() + shaped.x_for_index(local),
+                                    line_bounds.top(),
+                                ),
+                                size(px(1.5), line_height),
                             ),
-                            size(px(1.5), line_height),
-                        ),
-                        rgb(ui_theme::INPUT_CARET),
-                    ));
+                            rgb(ui_theme::INPUT_CARET),
+                        ));
+                    }
                 }
 
                 lines.push(TextLineLayout {
@@ -957,6 +970,32 @@ impl Element for MultiLineInputElement {
                     bounds: line_bounds,
                 });
                 visual_line_index += 1;
+            }
+        }
+
+        // 光标跟随滚动：光标超出可视区域时把滚动容器调整到光标可见
+        //（仅越界时移动，不打断用户手动滚动；不要求聚焦，AI 流式回填也能跟随）。
+        if let Some(caret_line) = caret_visual_line {
+            let handle = self
+                .entity
+                .read(cx)
+                .scroll_handle(multiline_scroll_handle_id(self.field_id));
+            let container_height = f32::from(handle.bounds().size.height);
+            if container_height > 1.0 {
+                let offset = handle.offset();
+                let visible_top = -f32::from(offset.y);
+                let caret_top = MULTILINE_LINE_HEIGHT * caret_line as f32;
+                let caret_bottom = caret_top + MULTILINE_LINE_HEIGHT;
+                let new_top = if caret_bottom > visible_top + container_height {
+                    Some(caret_bottom - container_height)
+                } else if caret_top < visible_top {
+                    Some(caret_top)
+                } else {
+                    None
+                };
+                if let Some(new_top) = new_top {
+                    handle.set_offset(point(offset.x, px(-new_top)));
+                }
             }
         }
 
