@@ -28,6 +28,10 @@ pub enum ConflictBlockStatus {
     Unresolved,
     Resolved(ConflictBlockResolution),
     Ignored,
+    /// 已用自定义合并文本解决（AI 合并建议综合两侧生成的内容）。
+    /// 解决后的文本以当前草稿为准，不属于 `ConflictBlockResolution`
+    /// 的四种取法，因此独立成状态而非扩展取法枚举。
+    Merged,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +111,15 @@ impl ConflictFileView {
         self.blocks.iter().any(|block| block.has_manual_edits)
     }
 
+    /// 草稿是否已有本地处理痕迹（AI 合并建议覆盖前的确认判定）：
+    /// 草稿被编辑过、任一块已接受/忽略解决、或任一块有手工编辑。
+    pub fn has_local_edits(&self) -> bool {
+        self.draft_status != ConflictDraftStatus::Clean
+            || self.blocks.iter().any(|block| {
+                !matches!(block.status, ConflictBlockStatus::Unresolved) || block.has_manual_edits
+            })
+    }
+
     pub fn mark_applied(&mut self) {
         self.draft_status = ConflictDraftStatus::Applied;
     }
@@ -141,8 +154,32 @@ impl ConflictFileView {
         self.draft_status = ConflictDraftStatus::Dirty;
     }
 
+    /// 用整份新草稿覆盖（手动编辑路径）：被改动覆盖的块标记手工编辑
+    /// 并回到未处理状态，等待用户重新处理。
     pub fn set_draft(&mut self, new_draft: String) {
+        self.set_draft_inner(new_draft, false);
+    }
+
+    /// 用 AI 合并结果覆盖整份草稿：**所有**冲突块标记为「已合并」——
+    /// AI 对整份文件做出了完整合并决定，内容与当前侧一致的块（AI 选择
+    /// 保留当前侧）同样视为已处理，否则这些块会永远停留在未处理状态；
+    /// 不计入未处理，黄色警告横幅与「还有 N 个未处理」确认随之消失。
+    pub fn set_merged_draft(&mut self, new_draft: String) {
+        self.set_draft_inner(new_draft, true);
+    }
+
+    fn set_draft_inner(&mut self, new_draft: String, merged: bool) {
         if self.draft == new_draft {
+            if merged {
+                // AI 合并结果与当前草稿完全一致（例如 AI 决定整体保留当前
+                // 侧）：内容虽未变化，块状态也是 AI 的合并决定，同样标记
+                // 已合并，否则界面停留在「未处理」而状态栏却提示已填入。
+                for block in &mut self.blocks {
+                    block.status = ConflictBlockStatus::Merged;
+                    block.has_manual_edits = false;
+                }
+                self.draft_status = ConflictDraftStatus::Dirty;
+            }
             return;
         }
 
@@ -163,7 +200,10 @@ impl ConflictFileView {
                 continue;
             }
 
-            block.has_manual_edits = true;
+            if !merged {
+                block.has_manual_edits = true;
+                block.status = ConflictBlockStatus::Unresolved;
+            }
             if block.start > prefix {
                 block.start = prefix;
             }
@@ -172,7 +212,15 @@ impl ConflictFileView {
             // 吸附到最近的字符边界。
             block.end =
                 clamp_to_char_boundary(&new_draft, add_signed(block.end, delta).max(block.start));
-            block.status = ConflictBlockStatus::Unresolved;
+        }
+
+        if merged {
+            // AI 重新决定了整份文件：所有块（含未被改动区触及、内容与
+            // 当前侧一致的块）统一标记已合并。
+            for block in &mut self.blocks {
+                block.status = ConflictBlockStatus::Merged;
+                block.has_manual_edits = false;
+            }
         }
 
         self.draft = new_draft;
@@ -265,6 +313,154 @@ fn shared_suffix_len(left: &str, right: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clean_text_view() -> ConflictFileView {
+        ConflictFileView {
+            path: "f".into(),
+            kind: ConflictFileKind::Text,
+            draft: "ab".into(),
+            ours_text: "a".into(),
+            theirs_text: "b".into(),
+            blocks: vec![ConflictBlock {
+                base: None,
+                ours: "a".into(),
+                theirs: "b".into(),
+                start: 0,
+                end: 1,
+                ours_start: 0,
+                ours_end: 1,
+                theirs_start: 0,
+                theirs_end: 1,
+                status: ConflictBlockStatus::Unresolved,
+                has_manual_edits: false,
+            }],
+            draft_status: ConflictDraftStatus::Clean,
+            fallback_reason: None,
+        }
+    }
+
+    #[test]
+    fn has_local_edits_reflects_block_handling_and_manual_edits() {
+        // 初始状态：无任何本地处理痕迹。
+        let mut view = clean_text_view();
+        assert!(!view.has_local_edits());
+
+        // 块级接受解决后：有痕迹。
+        view.apply_block_resolution(0, ConflictBlockResolution::Ours);
+        assert!(view.has_local_edits());
+
+        // 忽略块：有痕迹。
+        let mut view = clean_text_view();
+        view.ignore_block(0);
+        assert!(view.has_local_edits());
+
+        // 整份草稿被手工改写（set_draft 置 Dirty）：有痕迹。
+        let mut view = clean_text_view();
+        view.set_draft("rewritten".into());
+        assert!(view.has_local_edits());
+
+        // 块带手工编辑标记（即使状态回到 Unresolved）：有痕迹。
+        let mut view = clean_text_view();
+        view.blocks[0].has_manual_edits = true;
+        assert!(view.has_local_edits());
+    }
+
+    #[test]
+    fn set_merged_draft_marks_touched_blocks_merged() {
+        // 双块视图：AI 合并改写第一块区域，第二块内容不动。
+        // draft = "AA\nmid\nBB\n"，block0 覆盖 "AA\n"、block1 覆盖 "BB\n"。
+        let mut view = ConflictFileView {
+            path: "f".into(),
+            kind: ConflictFileKind::Text,
+            draft: "AA\nmid\nBB\n".into(),
+            ours_text: "AA\nmid\nBB\n".into(),
+            theirs_text: "XX\nmid\nBB\n".into(),
+            blocks: vec![
+                ConflictBlock {
+                    base: None,
+                    ours: "AA\n".into(),
+                    theirs: "XX\n".into(),
+                    start: 0,
+                    end: 3,
+                    ours_start: 0,
+                    ours_end: 3,
+                    theirs_start: 0,
+                    theirs_end: 3,
+                    status: ConflictBlockStatus::Unresolved,
+                    has_manual_edits: false,
+                },
+                ConflictBlock {
+                    base: None,
+                    ours: "BB\n".into(),
+                    theirs: "BB\n".into(),
+                    start: 7,
+                    end: 10,
+                    ours_start: 7,
+                    ours_end: 10,
+                    theirs_start: 7,
+                    theirs_end: 10,
+                    status: ConflictBlockStatus::Unresolved,
+                    has_manual_edits: false,
+                },
+            ],
+            draft_status: ConflictDraftStatus::Clean,
+            fallback_reason: None,
+        };
+
+        view.set_merged_draft("merged\nmid\nBB\n".into());
+
+        assert_eq!(view.draft, "merged\nmid\nBB\n");
+        // 被覆盖的块标记「已合并」且不带手工编辑标记（不触发黄色横幅）。
+        assert_eq!(view.blocks[0].status, ConflictBlockStatus::Merged);
+        assert!(!view.blocks[0].has_manual_edits);
+        // 未被改动区触及的块（内容与当前侧一致，AI 选择保留）同样视为
+        // 已合并——AI 对整份文件做出了完整决定。
+        assert_eq!(view.blocks[1].status, ConflictBlockStatus::Merged);
+        assert_eq!(view.unresolved_block_count(), 0);
+        assert!(view.draft_status == ConflictDraftStatus::Dirty);
+        // 有本地处理痕迹：重复生成 AI 建议仍应弹覆盖确认。
+        assert!(view.has_local_edits());
+        // 已合并块不计入手工块统计。
+        assert!(!view.has_manual_blocks());
+    }
+
+    #[test]
+    fn set_merged_draft_marks_all_blocks_when_output_matches_current_draft() {
+        // AI 合并结果与当前草稿完全一致（AI 整体保留当前侧）：内容不变，
+        // 但块状态仍应标记已合并，否则界面停留在「未处理」。
+        let mut view = clean_text_view();
+        let identical = view.draft.clone();
+        view.set_merged_draft(identical);
+        assert_eq!(view.blocks[0].status, ConflictBlockStatus::Merged);
+        assert_eq!(view.unresolved_block_count(), 0);
+        assert!(!view.requires_resolution_confirmation());
+        assert!(view.has_local_edits());
+        // 手动编辑路径同样输入一致内容时不做任何标记（无可编辑差异）。
+        let mut manual = clean_text_view();
+        manual.set_draft(manual.draft.clone());
+        assert_eq!(manual.blocks[0].status, ConflictBlockStatus::Unresolved);
+        assert_eq!(manual.draft_status, ConflictDraftStatus::Clean);
+    }
+
+    #[test]
+    fn set_merged_draft_clears_confirmation_when_all_blocks_covered() {
+        let mut view = clean_text_view();
+        view.set_merged_draft("rewritten".into());
+        // 唯一块被覆盖：未处理数归零，「应用并标记已解决」不再弹确认。
+        assert_eq!(view.unresolved_block_count(), 0);
+        assert!(!view.requires_resolution_confirmation());
+        assert_eq!(view.blocks[0].status, ConflictBlockStatus::Merged);
+    }
+
+    #[test]
+    fn set_draft_manual_path_still_marks_unresolved_manual() {
+        // 手动编辑路径行为保持不变：被覆盖块回到未处理 + 手工编辑标记。
+        let mut view = clean_text_view();
+        view.set_draft("rewritten".into());
+        assert_eq!(view.blocks[0].status, ConflictBlockStatus::Unresolved);
+        assert!(view.blocks[0].has_manual_edits);
+        assert_eq!(view.unresolved_block_count(), 1);
+    }
 
     #[test]
     fn set_draft_clamps_block_end_to_char_boundary() {

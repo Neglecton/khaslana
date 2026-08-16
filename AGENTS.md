@@ -15,7 +15,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
 - 网络代理设置，支持禁用、Git 配置/环境变量代理和自定义代理
-- AI 辅助：大模型供应商配置（OpenAI Chat Completions 兼容）、commit message 生成、分支对比 AI code review。生成结果空正文（完全为空/纯空白/仅返回思考过程）按错误处理并经 `validate_generated_content` 给出区分文案；AI 请求失败在状态栏与右下角 toast 双通道展示；SSE 流解析失败行会计数并记 warn 日志，0 有效块与「有块但无内容」错误文案不同
+- AI 辅助：大模型供应商配置（OpenAI Chat Completions 兼容）、commit message 生成、分支对比 AI code review、冲突工作台 AI 合并建议（diff3 文本喂 LLM 生成合并草稿：整文件单请求优先，超限按冲突块边界分段逐段生成并携带滑动窗口对话历史，拼接整份文件一次性回填草稿区）。生成结果空正文（完全为空/纯空白/仅返回思考过程）按错误处理并经 `validate_generated_content` 给出区分文案；AI 请求失败在状态栏与右下角 toast 双通道展示；SSE 流解析失败行会计数并记 warn 日志，0 有效块与「有块但无内容」错误文案不同
 - diff 编码自动识别与手动选择，支持 UTF-8、GB18030/GBK、Big5
 
 产品形态更接近“轻量但完整的 Git 桌面客户端”，适合继续补齐高频 Git 操作、冲突处理、搜索过滤和差异查看能力。
@@ -62,6 +62,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - Gitee OAuth 令牌交换 broker：实现位于独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker)（`edge-functions/gitee.js`，部署到腾讯云 EdgeOne 边缘函数或任意 serverless 平台），持有 `GITEE_CLIENT_SECRET` 环境变量，替客户端用授权码向 Gitee 换 access_token。客户端只持 `GITEE_OAUTH_CLIENT_ID` + `GITEE_BROKER_URL`（`src/oauth.rs` 常量，二者均非空时 Gitee 登录按钮启用）。后续若新增其它 serverless 服务，也统一放进该仓库。
 - `assets/icons/github_lockup_{light,dark}.svg`、`assets/icons/gitee_lockup_{light,dark}.svg`：GitHub/Gitee 带文字品牌图标，按主题选浅/深变体，用于「添加凭据」的 OAuth 快速登录按钮（`OauthBrand`，`src/ui/icons.rs`）。品牌图标用固定 fill（Gitee 为红 + 黑/白多色），GPUI 的 `svg()` 只能做单色 alpha 蒙版会丢色，故按钮通过 `img()`（`render_single_frame`）渲染以保留原始配色，由 `ui_theme::active_variant()` 决定取哪个文件。
 - `src/proxy.rs`：网络代理设置类型、代理 URL 校验、远端协议到代理 URL 的选择，以及 `git2::ProxyOptions` 接入 helper。
+- `src/ai/merge.rs`：AI 冲突合并建议纯函数层：diff3 文本按「上下文行/完整冲突块」原子单元分段（绝不切开冲突块、拼接逐字节恒等、纯上下文段标记透传不送模型，`split_diff3_text`）、分段请求的滑动窗口对话组装（`build_segment_messages`，预算内从新到旧保留历史回合）、响应清洗（`strip_code_fence` 剥代码块围栏，保留尾部换行配合分段拼接）与冲突标记残留检测（`response_contains_conflict_markers`，`=======` 不单判避免误伤正文）。长度阈值常量（整文件 60K / 段 24K / 滑窗 150K 字符，按 ~200K token 上下文与 3-4 字符/token 保守估算）也在此定义。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
 - `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
@@ -239,6 +240,8 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
 - 普通合并要求工作区干净；无冲突的非快进合并自动提交（双父提交），不保留 merge 会话。发生冲突时保留 Git Merge 状态，停留在工作区，通过合并状态条可直接调用 IDEA；冲突清零后状态条隐藏，右下角可编辑提交信息并「完成合并」，也可确认后「中止合并」恢复到合并前 HEAD
 - 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；设置中心「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
+- 冲突工作台支持「AI 合并建议」（工具栏按钮，仅文本冲突且 AI 已配置启用）：后台读取该文件 diff3 原文（`GitService::conflict_diff3_text`），整文件 ≤60K 字符单请求，超限按块边界分段逐段生成（进度显示「第 i/N 段」）并携带滑动窗口对话历史；全部段成功后拼接整份文件经 `set_merged_draft` 一次性填入结果区（不做流式增量回填，内部与 `set_draft` 共享区间平移算法）。**所有**冲突块标记 `ConflictBlockStatus::Merged`——AI 对整份文件做出完整合并决定，内容与当前侧一致、未落入 diff 改动区的块（AI 选择保留当前侧）与「输出与草稿完全一致」的早退分支同样标记，否则这些块会永远停留在未处理（Merged 为绿色「已合并」徽标、结果区选中绿底，不计入未处理、不触发手工修改横幅与解决确认弹窗；`has_local_edits` 仍为 true，重复生成仍弹覆盖确认；手动编辑路径 `set_draft` 行为不变），沿用现有「应用到工作区/应用并标记已解决」闭环。任一段失败整体失败不写入草稿；响应经 `strip_code_fence` 清洗与冲突标记残留检测（残留即放弃）。草稿已有块处理/手工编辑（`has_local_edits`）时先弹覆盖确认弹窗；未配置 AI 时按钮显示「AI 合并建议（未配置）」禁用态（按钮 helper 不支持 tooltip）。AI 未配置或生成中不借用 busy，其它冲突操作保持可用
+- 冲突工作台三栏之间的 IDEA 式连线 overlay（`render_conflict_connectors`，`src/conflicts/mod.rs`）：三栏行容器 `relative` + 末位绝对定位 canvas（纯绘制不注册鼠标事件），从 ours 右缘/theirs 左缘向结果区左右缘画 S 形三次贝塞尔曲线，指示各冲突块采用后内容落点。坐标换算：每块行区间经 `conflict_document_byte_range` + `conflict_byte_range_to_lines` 构建时预计算，paint 时从各栏 `UniformListScrollHandle` 读视口 bounds、滚动 offset 与行高（`ItemSize.contents.height / 总行数`，兜底 18px），每帧重绘自动跟随滚动；非选中块 `MUTED_FOREGROUND` 实色（`BORDER` 与背景融为一体不可用）、选中块 `ACCENT` 加粗，块在任一端整段滚出视口即跳过该线（部分可见钳到可视段中点，纯函数 `conflict_block_y_range`/`conflict_connector_anchor_y` 可单测）。三栏视口顶部不对齐（ours/theirs 有操作按钮行），连线斜向是「落到哪里」的正确语义。**三栏同步滚动**也在该 canvas 的 prepaint 完成：与上帧 offset 记录（`RepositoryView.conflict_pane_scroll_sync`，Rc 共享给闭包，选中冲突文件时重置）比较，恰好一栏变化（用户滚轮/拖滚动条，`conflict_scroll_sync_source`）时把它作为源、其余两栏钳制到各自 `max_offset` 后设同一竖直 offset（横向不联动）；多栏同时变化（程序化三栏联动 scrollToItem）不同步。set_offset 只写值不触发重绘，故在 prepaint 期写入同帧生效并经 `App::refresh_windows` 补一帧（无变化即收敛），paint 期写入则本帧读不到且 refresh 是 no-op
 
 ### 5.3 分支、远端、标签、贮藏
 

@@ -104,6 +104,55 @@ pub fn review_prompts(
     (system, user)
 }
 
+/// 构造 AI 冲突合并建议的 system + user prompt。
+///
+/// - `path`：冲突文件路径（仓库相对路径）。
+/// - `diff3_text`：带 `<<<<<<< OURS / ||||||| BASE / ======= / >>>>>>> THEIRS`
+///   标记的完整 diff3 文本（整文件模式）或其中一段（分段模式）。
+/// - `segment`：分段模式下为 `Some((第几段, 总段数))`，要求只输出本段；
+///   整文件模式传 `None`。
+pub fn conflict_merge_prompts(
+    path: &str,
+    diff3_text: &str,
+    segment: Option<(usize, usize)>,
+) -> (ChatMessage, ChatMessage) {
+    let system = ChatMessage {
+        role: ChatRole::System,
+        content: "你是一名资深的 Git 合并专家，负责解决 diff3 格式的合并冲突。\n\
+                  输入文本中的冲突块格式为：\n\
+                  <<<<<<< OURS（当前分支的改动）\n\
+                  ||||||| BASE（共同祖先内容，供理解原始意图）\n\
+                  =======\n\
+                  >>>>>>> THEIRS（传入分支的改动）\n\
+                  要求：\n\
+                  1. 只输出解决冲突后的完整文本，不要任何解释、代码块围栏或多余前后缀。\n\
+                  2. 每个冲突块综合 OURS 与 THEIRS 两侧的改动意图智能合并，两侧的语义都应保留；BASE 仅用于理解演化过程，不是必须保留的内容。\n\
+                  3. 非冲突的上下文行必须逐字保留：不增删空行、不改格式、不“顺手优化”。\n\
+                  4. 输出中不得残留任何冲突标记（<<<<<<<、|||||||、=======、>>>>>>>）。\n\
+                  5. 无法确定取舍时，优先同时保留两侧内容（OURS 在前），并保证语法正确。"
+            .to_string(),
+    };
+
+    let mut user = String::new();
+    match segment {
+        Some((index, total)) => user.push_str(&format!(
+            "以下是文件 {path} 的第 {index}/{total} 段（文件过长已分段，各段首尾相接）。请只输出这一段解决冲突后的完整内容：\n\n"
+        )),
+        None => user.push_str(&format!(
+            "以下是文件 {path} 的完整内容，请输出解决全部冲突后的完整文件：\n\n"
+        )),
+    }
+    user.push_str("```diff3\n");
+    user.push_str(diff3_text);
+    user.push_str("\n```");
+
+    let user = ChatMessage {
+        role: ChatRole::User,
+        content: user,
+    };
+    (system, user)
+}
+
 /// 截断文本到指定字符数；超出时追加截断提示。
 pub(crate) fn truncate_text(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {

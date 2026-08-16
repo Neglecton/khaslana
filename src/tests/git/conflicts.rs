@@ -539,3 +539,34 @@ fn parse_diff3_supports_crlf_endings() {
     assert_eq!(blocks[0].theirs, "t\r\n");
     assert_eq!(draft, "a\r\no\r\nz\r\n");
 }
+
+#[test]
+fn conflict_diff3_text_returns_marker_text_for_text_conflict() {
+    let (_dir, repo, service) = create_multi_block_text_conflict();
+
+    let text = service
+        .conflict_diff3_text(&repo, Path::new("same.txt"))
+        .unwrap();
+
+    // diff3 四类标记齐全，且两侧改动内容都在。
+    assert!(text.contains("<<<<<<< OURS"));
+    assert!(text.contains("||||||| BASE"));
+    assert!(text.contains("======="));
+    assert!(text.contains(">>>>>>> THEIRS"));
+    assert!(text.contains("main-one"));
+    assert!(text.contains("feature-one"));
+}
+
+#[test]
+fn conflict_diff3_text_rejects_non_conflicted_path() {
+    let (dir, repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "same.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+
+    let error = service
+        .conflict_diff3_text(&repo, Path::new("same.txt"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("不存在冲突"));
+}

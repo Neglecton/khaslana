@@ -36,6 +36,7 @@ use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -596,6 +597,9 @@ pub(crate) enum DialogState {
         kind: RemoteBranchOperationKind,
     },
     ConfirmConflictResolve,
+    ConfirmAiConflictMerge {
+        path: String,
+    },
     ConfirmAbortMerge,
     ConfirmWindowClose,
     // ── 更新对话框 ──
@@ -1806,6 +1810,15 @@ pub(crate) enum UiEvent {
         content_delta: Option<String>,
         reasoning_delta: Option<String>,
     },
+    AiConflictMergeProgress {
+        path: String,
+        segment: usize,
+        total: usize,
+    },
+    AiConflictMergeGenerated {
+        path: String,
+        draft: String,
+    },
     AiRequestFailed {
         error: String,
     },
@@ -2461,6 +2474,13 @@ pub(crate) struct RepositoryView {
     /// review 流式生成时的实时思考链缓冲。
     pub(crate) ai_review_reasoning_buffer: String,
     pub(crate) ai_review_expanded: bool,
+    /// 冲突工作台三栏同步滚动的上帧 offset 记录（[ours, result, theirs]，
+    /// 跨帧供连线 canvas paint 判定滚动源；paint 闭包拿不到实体，经 Rc
+    /// 共享）。选中冲突文件时重置。
+    pub(crate) conflict_pane_scroll_sync: Rc<RefCell<Option<[f32; 3]>>>,
+    /// 冲突工作台「AI 合并建议」生成中标志（不借用 busy，生成期间其它
+    /// 冲突操作保持可用，与 commit message 生成同一模式）。
+    pub(crate) ai_conflict_loading: bool,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -2639,6 +2659,8 @@ impl RepositoryView {
             ai_review_buffer: String::new(),
             ai_review_reasoning_buffer: String::new(),
             ai_review_expanded: false,
+            conflict_pane_scroll_sync: Rc::new(RefCell::new(None)),
+            ai_conflict_loading: false,
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
@@ -4481,9 +4503,41 @@ impl RepositoryView {
                     self.ai_review_reasoning_buffer.push_str(&delta);
                 }
             }
+            UiEvent::AiConflictMergeProgress {
+                path,
+                segment,
+                total,
+            } => {
+                // 分段模式下的进度提示：仅当前选中的冲突文件更新状态栏，
+                // 避免生成期间切换文件后被旧任务的进度占据。整文件模式
+                // 只有一段，不发送该事件。
+                if self.conflict_workbench.selected_path.as_deref() == Some(path.as_str()) {
+                    self.status = format!("正在生成 AI 合并建议（第 {segment}/{total} 段）");
+                }
+            }
+            UiEvent::AiConflictMergeGenerated { path, draft } => {
+                self.ai_conflict_loading = false;
+                match self.conflict_workbench.files.get_mut(&path) {
+                    Some(view) if view.kind == ConflictFileKind::Text => {
+                        // Merged 写入：被覆盖块标记「已合并」（绿色），不再
+                        // 计入未处理，也不触发手工修改横幅。
+                        view.set_merged_draft(draft);
+                        self.sync_conflict_editor_from_state();
+                        self.status = "已填入 AI 合并建议，请检查后应用".into();
+                        self.last_error = None;
+                        self.notify_success("已填入 AI 合并建议，请检查后应用", cx);
+                    }
+                    // 生成期间冲突被解决、文件被移出列表或切换了标签页：
+                    // 结果无处安放，仅状态栏说明，不弹错误。
+                    _ => {
+                        self.status = "AI 合并建议已返回，但该文件已不在冲突列表".into();
+                    }
+                }
+            }
             UiEvent::AiRequestFailed { error } => {
                 self.ai_commit_loading = false;
                 self.ai_review_loading = false;
+                self.ai_conflict_loading = false;
                 self.ai_commit_buffer.clear();
                 self.ai_review_buffer.clear();
                 self.ai_review_reasoning_buffer.clear();
@@ -4783,6 +4837,8 @@ impl RepositoryView {
         self.conflict_workbench.selected_block = 0;
         self.conflict_workbench.show_base = false;
         self.conflict_workbench.clear_pending_resolve();
+        // 换文件后三栏 offset 全变，清掉同步滚动的上帧记录避免误判源栏。
+        self.conflict_pane_scroll_sync.borrow_mut().take();
         self.ensure_conflict_views_loaded();
         if self.conflict_workbench.files.contains_key(&path) {
             self.sync_conflict_editor_from_state();
@@ -13629,6 +13685,9 @@ impl RepositoryView {
             DialogState::ConfirmConflictResolve => self
                 .render_confirm_conflict_resolve_dialog(cx)
                 .into_any_element(),
+            DialogState::ConfirmAiConflictMerge { path } => self
+                .render_confirm_ai_conflict_merge_dialog(path, cx)
+                .into_any_element(),
             DialogState::ConfirmAbortMerge => self
                 .render_confirm_abort_merge_dialog(cx)
                 .into_any_element(),
@@ -14286,6 +14345,48 @@ impl RepositoryView {
                             move |this, _, _| {
                                 this.discard_change(paths.clone(), scope.clone(), target.clone())
                             }
+                        },
+                        cx,
+                    )),
+            )
+    }
+
+    /// AI 合并建议覆盖确认：草稿已有块处理或手工编辑时，确认后才生成并覆盖。
+    fn render_confirm_ai_conflict_merge_dialog(
+        &self,
+        path: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("覆盖现有冲突处理？", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(path.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("该文件的草稿已有块处理或手工修改，生成 AI 合并建议会覆盖这些内容。"),
+            )
+            .child(danger_callout(
+                "覆盖后已接受的块、忽略操作和手工编辑都会丢失，需要重新处理。",
+            ))
+            .child(
+                dialog_actions()
+                    .child(self.button(
+                        "返回保留现状",
+                        !self.busy,
+                        |this, _, _| this.close_dialog(),
+                        cx,
+                    ))
+                    .child(self.danger_button(
+                        "覆盖并生成",
+                        !self.busy,
+                        move |this, _, _| {
+                            this.close_dialog();
+                            this.start_ai_conflict_merge(path.clone());
                         },
                         cx,
                     )),

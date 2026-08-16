@@ -216,6 +216,183 @@ impl RepositoryView {
         });
     }
 
+    /// AI 冲突合并建议按钮是否可用。
+    pub(crate) fn ai_conflict_merge_button_enabled(&self) -> bool {
+        self.ai_settings.is_usable() && !self.ai_conflict_loading && !self.busy
+    }
+
+    /// 冲突工作台「AI 合并建议」入口：守卫后启动生成；
+    /// 草稿已有块处理或手工修改时先弹覆盖确认。
+    pub(crate) fn generate_ai_conflict_merge(&mut self) {
+        if self.ai_conflict_loading {
+            return;
+        }
+        if !self.ai_settings.is_usable() {
+            self.last_error = Some("请先在 AI 设置中配置并启用供应商".into());
+            return;
+        }
+        let Some(path) = self.conflict_workbench.selected_path.clone() else {
+            self.last_error = Some("请先选择一个冲突文件".into());
+            return;
+        };
+        let Some(view) = self.conflict_workbench.files.get(&path) else {
+            self.last_error = Some("请先选择一个冲突文件".into());
+            return;
+        };
+        if view.kind != khaslana::ConflictFileKind::Text {
+            self.last_error = Some("该冲突文件不是文本冲突，不支持 AI 合并建议".into());
+            return;
+        }
+        if view.has_local_edits() {
+            self.close_popups();
+            self.active_dialog = Some(crate::DialogState::ConfirmAiConflictMerge { path });
+            return;
+        }
+        self.start_ai_conflict_merge(path);
+    }
+
+    /// 启动 AI 合并建议生成（后台 Long 任务）：
+    /// 取 diff3 文本 → 整文件（≤ 上限）单请求，超限按块边界分段逐段请求
+    /// （携带滑动窗口对话历史）→ 拼接整份合并文件回填草稿。
+    /// 任一段失败整体失败，不部分写入草稿。
+    pub(crate) fn start_ai_conflict_merge(&mut self, path: String) {
+        if self.ai_conflict_loading {
+            return;
+        }
+        if !self.ai_settings.is_usable() {
+            self.last_error = Some("请先在 AI 设置中配置并启用供应商".into());
+            return;
+        }
+        let Some(tab_id) = self.active_tab_id() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let Some(repo_path) = self.repo_path.clone() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+
+        self.ai_conflict_loading = true;
+        self.status = "正在生成 AI 合并建议".into();
+        self.last_error = None;
+
+        let service = self.service_for_tab(tab_id);
+        let settings = self.ai_settings.clone();
+        let proxy_url = self
+            .proxy_settings
+            .proxy_url_for_target(&settings.normalized_base_url());
+        let tx = self.tx.clone();
+        self.tasks.spawn(crate::TaskKind::Long, move || {
+            let result = (|| -> khaslana::Result<String> {
+                let repo = git2::Repository::open(&repo_path)?;
+                let diff3_text =
+                    service.conflict_diff3_text(&repo, std::path::Path::new(&path))?;
+                let segments =
+                    if diff3_text.chars().count() <= khaslana::MERGE_WHOLE_FILE_LIMIT {
+                        // 整文件单请求。
+                        vec![khaslana::MergeSegment {
+                            text: diff3_text,
+                            has_conflicts: true,
+                        }]
+                    } else {
+                        khaslana::split_diff3_text(
+                            &diff3_text,
+                            khaslana::MERGE_SEGMENT_LIMIT,
+                            khaslana::MERGE_SINGLE_BLOCK_LIMIT,
+                        )?
+                    };
+                let request_segments = segments.iter().filter(|s| s.has_conflicts).count();
+                let total_segments = segments.len();
+                // 已完成段落的 (请求, 响应) 对话历史，供后续段请求提供连续性。
+                let mut history: Vec<(ChatMessage, ChatMessage)> = Vec::new();
+                let mut merged = String::new();
+                let mut request_done = 0usize;
+                for (index, segment) in segments.into_iter().enumerate() {
+                    if !segment.has_conflicts {
+                        // 纯上下文段不送模型，原样透传拼接。
+                        merged.push_str(&segment.text);
+                        continue;
+                    }
+                    request_done += 1;
+                    let (system, user) = khaslana::conflict_merge_prompts(
+                        &path,
+                        &segment.text,
+                        (request_segments > 1).then_some((request_done, request_segments)),
+                    );
+                    let messages = if history.is_empty() {
+                        vec![system, user.clone()]
+                    } else {
+                        khaslana::build_segment_messages(
+                            system,
+                            &history,
+                            user.clone(),
+                            khaslana::MERGE_CONTEXT_BUDGET_CHARS,
+                        )
+                    };
+                    // 默认 max_tokens（800）放不下整段输出：按段长放宽。
+                    let mut request_settings = settings.clone();
+                    request_settings.max_tokens =
+                        (segment.text.chars().count() / 3 + 1024).clamp(1024, 16_384) as u32;
+                    let client = ChatClient::new(request_settings, proxy_url.clone());
+                    let result = client.request_stream(&messages, &mut |_delta| {})?;
+                    let content = khaslana::validate_generated_content(
+                        &result,
+                        "AI 返回的合并结果为空，请重试或检查模型配置",
+                        "AI 未返回合并结果正文（仅返回了思考过程），请重试或更换模型",
+                    )?;
+                    let content = khaslana::strip_code_fence(&content);
+                    if khaslana::response_contains_conflict_markers(&content) {
+                        return Err(khaslana::GitError::Message(format!(
+                            "AI 返回的第 {request_done}/{request_segments} 段仍包含冲突标记，已放弃本次结果"
+                        )));
+                    }
+                    // 段按行切分，非末段的输出必须以换行收尾，否则拼接处
+                    // 会把两行挤成一行。
+                    let mut content = content;
+                    if index + 1 < total_segments && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    history.push((
+                        user,
+                        ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: content.clone(),
+                        },
+                    ));
+                    merged.push_str(&content);
+                    // 整文件模式只有一段，进度事件无信息量，不发。
+                    if request_segments > 1 {
+                        crate::send_ui_event(
+                            &tx,
+                            crate::UiEvent::AiConflictMergeProgress {
+                                path: path.clone(),
+                                segment: request_done,
+                                total: request_segments,
+                            },
+                        );
+                    }
+                }
+                Ok(merged)
+            })();
+            match result {
+                Ok(draft) => {
+                    crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiConflictMergeGenerated { path, draft },
+                    );
+                }
+                Err(err) => {
+                    crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiRequestFailed {
+                            error: err.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+    }
+
     /// 测试 AI 连接：发送一个最小请求。
     pub(crate) fn test_ai_connection(&mut self) {
         if self.busy || self.global_busy_tab.is_some() {

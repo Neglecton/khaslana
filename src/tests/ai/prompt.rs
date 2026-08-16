@@ -51,3 +51,27 @@ fn truncate_text_appends_notice_when_too_long() {
     assert!(result.starts_with("abc"));
     assert!(result.contains("已截断"));
 }
+
+#[test]
+fn conflict_merge_prompts_whole_file_mode() {
+    let (system, user) = conflict_merge_prompts("src/lib.rs", "<<<<<<< OURS\nx\n", None);
+    assert_eq!(system.role, ChatRole::System);
+    // 系统提示说明标记格式与输出约束（不得残留冲突标记、非冲突行逐字保留）。
+    assert!(system.content.contains("diff3"));
+    assert!(system.content.contains("冲突标记"));
+    assert!(system.content.contains("逐字保留"));
+    assert_eq!(user.role, ChatRole::User);
+    assert!(user.content.contains("src/lib.rs"));
+    assert!(user.content.contains("完整内容"));
+    // 整文件模式不出现分段说明。
+    assert!(!user.content.contains("第 "));
+    assert!(user.content.contains("<<<<<<< OURS\nx"));
+}
+
+#[test]
+fn conflict_merge_prompts_segment_mode_marks_position() {
+    let (_system, user) = conflict_merge_prompts("a.txt", "block body", Some((2, 5)));
+    assert!(user.content.contains("第 2/5 段"));
+    assert!(user.content.contains("只输出这一段"));
+    assert!(user.content.contains("block body"));
+}

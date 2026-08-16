@@ -15,16 +15,10 @@ use crate::{
 impl GitService {
     pub fn conflict_file_view(&self, repo: &Repository, path: &Path) -> Result<ConflictFileView> {
         ensure_worktree_relative_path(path, "不能读取冲突详情")?;
-        let index = repo.index()?;
-        let conflict = conflict_for_path(&index, path)?;
         let git_path = path_to_git(path);
 
-        let (Some(ancestor), Some(ours), Some(theirs)) = (
-            conflict.ancestor.as_ref(),
-            conflict.our.as_ref(),
-            conflict.their.as_ref(),
-        ) else {
-            return Ok(ConflictFileView {
+        match diff3_merge_text(repo, path)? {
+            ConflictMergeText::Unsupported => Ok(ConflictFileView {
                 path: git_path,
                 kind: ConflictFileKind::Unsupported,
                 draft: String::new(),
@@ -33,14 +27,8 @@ impl GitService {
                 blocks: Vec::new(),
                 draft_status: ConflictDraftStatus::Clean,
                 fallback_reason: Some("该冲突缺少三方文本内容，请使用快捷解决按钮".into()),
-            });
-        };
-
-        if [ancestor, ours, theirs]
-            .into_iter()
-            .any(|entry| entry.mode == 0 || blob_is_binary(repo, entry).unwrap_or(true))
-        {
-            return Ok(ConflictFileView {
+            }),
+            ConflictMergeText::Binary => Ok(ConflictFileView {
                 path: git_path,
                 kind: ConflictFileKind::Binary,
                 draft: String::new(),
@@ -49,31 +37,45 @@ impl GitService {
                 blocks: Vec::new(),
                 draft_status: ConflictDraftStatus::Clean,
                 fallback_reason: Some("该冲突文件不能使用文本合并编辑器".into()),
-            });
+            }),
+            ConflictMergeText::Text(merged_bytes) => {
+                let merged_text = str::from_utf8(&merged_bytes).map_err(|_| {
+                    GitError::Message("该冲突文件不是 UTF-8 文本，暂不能使用可视化编辑器".into())
+                })?;
+                let (draft, ours_text, theirs_text, blocks) =
+                    parse_diff3_conflict_text(merged_text)?;
+
+                Ok(ConflictFileView {
+                    path: git_path,
+                    kind: ConflictFileKind::Text,
+                    draft,
+                    ours_text,
+                    theirs_text,
+                    blocks,
+                    draft_status: ConflictDraftStatus::Clean,
+                    fallback_reason: None,
+                })
+            }
         }
+    }
 
-        let mut options = MergeFileOptions::new();
-        options
-            .style_diff3(true)
-            .ancestor_label("BASE")
-            .our_label("OURS")
-            .their_label("THEIRS");
-        let merged = repo.merge_file_from_index(ancestor, ours, theirs, Some(&mut options))?;
-        let merged_text = str::from_utf8(merged.content()).map_err(|_| {
-            GitError::Message("该冲突文件不是 UTF-8 文本，暂不能使用可视化编辑器".into())
-        })?;
-        let (draft, ours_text, theirs_text, blocks) = parse_diff3_conflict_text(merged_text)?;
-
-        Ok(ConflictFileView {
-            path: git_path,
-            kind: ConflictFileKind::Text,
-            draft,
-            ours_text,
-            theirs_text,
-            blocks,
-            draft_status: ConflictDraftStatus::Clean,
-            fallback_reason: None,
-        })
+    /// 读取冲突文件的 diff3 原始文本（带 OURS/BASE/THEIRS 标记），
+    /// 供 AI 合并建议构造 prompt 使用。
+    pub fn conflict_diff3_text(&self, repo: &Repository, path: &Path) -> Result<String> {
+        ensure_worktree_relative_path(path, "不能生成 AI 合并建议")?;
+        match diff3_merge_text(repo, path)? {
+            ConflictMergeText::Unsupported => Err(GitError::Message(
+                "该冲突缺少三方文本内容，不支持 AI 合并建议".into(),
+            )),
+            ConflictMergeText::Binary => Err(GitError::Message(
+                "二进制冲突文件不支持 AI 合并建议，请使用快捷解决按钮".into(),
+            )),
+            ConflictMergeText::Text(bytes) => {
+                str::from_utf8(&bytes).map(str::to_string).map_err(|_| {
+                    GitError::Message("该冲突文件不是 UTF-8 文本，暂不支持 AI 合并建议".into())
+                })
+            }
+        }
     }
 
     pub fn apply_conflict_draft(
@@ -255,6 +257,47 @@ fn conflict_for_path(index: &git2::Index, path: &Path) -> Result<git2::IndexConf
             GitError::Git(err)
         }
     })
+}
+
+/// `diff3_merge_text` 的加载结果：三方文本可用 / 缺三方条目 / 二进制。
+enum ConflictMergeText {
+    /// 带 OURS/BASE/THEIRS 标记的合并原始字节（UTF-8 判定留给调用方，
+    /// 便于按场景给出不同文案）。
+    Text(Vec<u8>),
+    Unsupported,
+    Binary,
+}
+
+/// 守卫并生成冲突文件的 diff3 合并文本：
+/// 三方 index 条目齐全且均为文本 blob 时，返回带
+/// `<<<<<<< OURS / ||||||| BASE / ======= / >>>>>>> THEIRS` 标记的合并文本。
+fn diff3_merge_text(repo: &Repository, path: &Path) -> Result<ConflictMergeText> {
+    let index = repo.index()?;
+    let conflict = conflict_for_path(&index, path)?;
+
+    let (Some(ancestor), Some(ours), Some(theirs)) = (
+        conflict.ancestor.as_ref(),
+        conflict.our.as_ref(),
+        conflict.their.as_ref(),
+    ) else {
+        return Ok(ConflictMergeText::Unsupported);
+    };
+
+    if [ancestor, ours, theirs]
+        .into_iter()
+        .any(|entry| entry.mode == 0 || blob_is_binary(repo, entry).unwrap_or(true))
+    {
+        return Ok(ConflictMergeText::Binary);
+    }
+
+    let mut options = MergeFileOptions::new();
+    options
+        .style_diff3(true)
+        .ancestor_label("BASE")
+        .our_label("OURS")
+        .their_label("THEIRS");
+    let merged = repo.merge_file_from_index(ancestor, ours, theirs, Some(&mut options))?;
+    Ok(ConflictMergeText::Text(merged.content().to_vec()))
 }
 
 fn write_conflict_draft(repo: &Repository, path: &Path, draft: &str) -> Result<()> {

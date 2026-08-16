@@ -1,9 +1,10 @@
-use std::{ops::Range, path::Path, sync::Arc};
+use std::{cell::RefCell, ops::Range, path::Path, rc::Rc, sync::Arc};
 
 use crate::ui::theme::rgb;
 use gpui::{
     Context, IntoElement, ListHorizontalSizingBehavior, ListSizingBehavior, MouseButton,
-    MouseDownEvent, Window, div, prelude::*, px, uniform_list,
+    MouseDownEvent, PathBuilder, UniformListScrollHandle, Window, canvas, div, point, prelude::*,
+    px, uniform_list,
 };
 use khaslana::{
     ConflictBlock, ConflictBlockResolution, ConflictBlockStatus, ConflictFileKind,
@@ -80,6 +81,255 @@ fn conflict_byte_range_to_lines(content: &str, start: usize, end: usize) -> std:
         end_line += 1;
     }
     start_line..end_line
+}
+
+// ── 三栏连线（IDEA 式采用指示）──────────────────────────────
+
+/// 冲突栏单行高度兜底值（行渲染 `.min_h(px(18.0))`）。
+const CONFLICT_CONNECTOR_FALLBACK_ROW_HEIGHT: f32 = 18.0;
+
+/// 单个冲突块在三栏中的行区间（构建时预计算，paint 闭包只做坐标换算）。
+#[derive(Clone)]
+struct ConflictConnectorAnchor {
+    ours_lines: Range<usize>,
+    result_lines: Range<usize>,
+    theirs_lines: Range<usize>,
+    selected: bool,
+}
+
+/// 连线 overlay 的 paint 数据：三栏滚动句柄、各栏总行数与块锚点。
+struct ConflictConnectorData {
+    ours_handle: UniformListScrollHandle,
+    result_handle: UniformListScrollHandle,
+    theirs_handle: UniformListScrollHandle,
+    ours_line_count: usize,
+    result_line_count: usize,
+    theirs_line_count: usize,
+    anchors: Vec<ConflictConnectorAnchor>,
+    /// 三栏 offset 的上帧记录（同步滚动源判定用），跨帧持久于
+    /// `RepositoryView.conflict_pane_scroll_sync`。
+    scroll_state: Rc<RefCell<Option<[f32; 3]>>>,
+}
+
+/// uniform_list 的总行数：与 `conflict_document_line_ranges` 的区间数一致
+///（空文本占 1 行、行尾换行产生尾空行），是行高换算的分母。
+fn uniform_list_line_count(content: &str) -> usize {
+    if content.is_empty() {
+        1
+    } else {
+        content.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+}
+
+/// 块区域在某栏内的内容坐标 y 段（窗口坐标，含滚动 offset；
+/// offset.y 向下滚动为负）。
+fn conflict_block_y_range(
+    viewport_top: f32,
+    offset_y: f32,
+    row_height: f32,
+    lines: &Range<usize>,
+) -> (f32, f32) {
+    let top = viewport_top + offset_y + row_height * lines.start as f32;
+    (top, top + row_height * (lines.end - lines.start) as f32)
+}
+
+/// 把块区域 y 段裁剪到视口可见范围并返回中点锚点 y；
+/// 整段滚出视口（不可见）返回 `None`。
+fn conflict_connector_anchor_y(
+    viewport_top: f32,
+    viewport_bottom: f32,
+    block_top: f32,
+    block_bottom: f32,
+) -> Option<f32> {
+    let visible_top = block_top.max(viewport_top);
+    let visible_bottom = block_bottom.min(viewport_bottom);
+    (visible_bottom > visible_top).then_some((visible_top + visible_bottom) / 2.0)
+}
+
+/// 某一栏的可视口几何（窗口坐标）、行高与滚动信息。
+struct ConflictPaneViewport {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    offset_x: f32,
+    offset_y: f32,
+    /// 可滚动的最大竖直偏移（正值；offset.y 取值范围 [-max, 0]）。
+    max_offset_y: f32,
+    row_height: f32,
+    handle: UniformListScrollHandle,
+}
+
+/// 从 uniform_list 滚动句柄读取视口 bounds、滚动 offset 与行高。
+/// 首帧尚未布局（bounds 高度非正）返回 `None`，该帧跳过连线绘制。
+fn conflict_pane_viewport(
+    handle: &UniformListScrollHandle,
+    line_count: usize,
+) -> Option<ConflictPaneViewport> {
+    let state = handle.0.borrow();
+    let bounds = state.base_handle.bounds();
+    let height = f32::from(bounds.size.height);
+    if !(height > 1.0) {
+        return None;
+    }
+    // ItemSize.contents = 行高 × 总行数（uniform_list prepaint 写入），
+    // 换算回单行高度；异常值兜底到行渲染的 min_h。
+    let row_height = state
+        .last_item_size
+        .map(|size| f32::from(size.contents.height) / line_count.max(1) as f32)
+        .filter(|height| (4.0..=100.0).contains(height))
+        .unwrap_or(CONFLICT_CONNECTOR_FALLBACK_ROW_HEIGHT);
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let offset = state.base_handle.offset();
+    Some(ConflictPaneViewport {
+        left,
+        right: left + f32::from(bounds.size.width),
+        top,
+        bottom: top + height,
+        offset_x: f32::from(offset.x),
+        offset_y: f32::from(offset.y),
+        max_offset_y: f32::from(state.base_handle.max_offset().height).max(0.0),
+        row_height,
+        handle: handle.clone(),
+    })
+}
+
+/// 同步滚动的源栏判定：与上帧比较，恰好一栏 offset 变化超过阈值时
+/// 返回该栏（用户滚轮/拖动滚动条只改一栏）；多栏同时变化（程序化
+/// 三栏联动 scrollToItem）或全部未变返回 `None`，不做同步。
+fn conflict_scroll_sync_source(current: [f32; 3], prev: [f32; 3]) -> Option<usize> {
+    let mut source = None;
+    for index in 0..3 {
+        if (current[index] - prev[index]).abs() > 0.5 {
+            if source.is_some() {
+                return None;
+            }
+            source = Some(index);
+        }
+    }
+    source
+}
+
+/// 一次性读取三栏视口；任一栏尚未布局返回 `None`。
+fn conflict_pane_viewports(data: &ConflictConnectorData) -> Option<[ConflictPaneViewport; 3]> {
+    Some([
+        conflict_pane_viewport(&data.ours_handle, data.ours_line_count)?,
+        conflict_pane_viewport(&data.result_handle, data.result_line_count)?,
+        conflict_pane_viewport(&data.theirs_handle, data.theirs_line_count)?,
+    ])
+}
+
+/// 三栏同步滚动：把源栏的竖直 offset 应用到其余两栏，各自钳制到自身
+/// 可滚动范围（短栏不越界，避免下一帧被布局钳回引发来回弹跳）。
+/// 横向偏移各自保留（行宽差异大，横向无对应关系）。
+/// 返回是否实际应用了同步（调用方据此请求补一帧）。
+fn sync_conflict_pane_scrolling(
+    panes: &mut [ConflictPaneViewport; 3],
+    prev: &mut Option<[f32; 3]>,
+) -> bool {
+    let current = [panes[0].offset_y, panes[1].offset_y, panes[2].offset_y];
+    let mut applied = false;
+    let next = match prev.as_ref() {
+        Some(prev_offsets) => match conflict_scroll_sync_source(current, *prev_offsets) {
+            Some(source) => {
+                let target = current[source];
+                let mut updated = current;
+                for other in 0..3 {
+                    if other == source {
+                        continue;
+                    }
+                    let clamped = target.max(-panes[other].max_offset_y).min(0.0);
+                    if (clamped - current[other]).abs() > 0.5 {
+                        panes[other]
+                            .handle
+                            .0
+                            .borrow()
+                            .base_handle
+                            .set_offset(point(px(panes[other].offset_x), px(clamped)));
+                        panes[other].offset_y = clamped;
+                        updated[other] = clamped;
+                        applied = true;
+                    }
+                }
+                updated
+            }
+            None => current,
+        },
+        None => current,
+    };
+    *prev = Some(next);
+    applied
+}
+
+/// 画一条 S 形三次贝塞尔连线：两端水平出发/到达（IDEA 合并工具风格）。
+fn paint_conflict_connector(
+    window: &mut Window,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    color: u32,
+    width: f32,
+) {
+    let mid_x = (x1 + x2) / 2.0;
+    let mut builder = PathBuilder::stroke(px(width));
+    builder.move_to(point(px(x1), px(y1)));
+    builder.cubic_bezier_to(
+        point(px(x2), px(y2)),
+        point(px(mid_x), px(y1)),
+        point(px(mid_x), px(y2)),
+    );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgb(color));
+    }
+}
+
+/// 绘制全部连线（滚动同步在 canvas prepaint 中先行完成）：ours 右缘 →
+/// 结果区左缘、theirs 左缘 → 结果区右缘。块区域在两侧栏或结果区整段
+/// 不可见时跳过该条（落点看不见的连线只会增加噪音）；部分可见裁剪到
+/// 可视段中点。三栏视口顶部不对齐（ours/theirs 有操作按钮行），
+/// 连线斜向是预期语义。
+fn paint_conflict_connectors(data: ConflictConnectorData, window: &mut Window) {
+    let Some(panes) = conflict_pane_viewports(&data) else {
+        return;
+    };
+    let (ours, result, theirs) = (&panes[0], &panes[1], &panes[2]);
+
+    let anchor_y = |pane: &ConflictPaneViewport, lines: &Range<usize>| {
+        let (top, bottom) = conflict_block_y_range(pane.top, pane.offset_y, pane.row_height, lines);
+        conflict_connector_anchor_y(pane.top, pane.bottom, top, bottom)
+    };
+
+    for anchor in &data.anchors {
+        // 非选中块用 MUTED_FOREGROUND 实色（BORDER 与背景融为一体），
+        // 选中块主题色加粗。
+        let (color, width) = if anchor.selected {
+            (ui_theme::ACCENT, 2.5)
+        } else {
+            (ui_theme::MUTED_FOREGROUND, 1.5)
+        };
+        if let (Some(from_y), Some(to_y)) = (
+            anchor_y(ours, &anchor.ours_lines),
+            anchor_y(result, &anchor.result_lines),
+        ) {
+            paint_conflict_connector(window, ours.right, from_y, result.left, to_y, color, width);
+        }
+        if let (Some(from_y), Some(to_y)) = (
+            anchor_y(theirs, &anchor.theirs_lines),
+            anchor_y(result, &anchor.result_lines),
+        ) {
+            paint_conflict_connector(
+                window,
+                theirs.left,
+                from_y,
+                result.right,
+                to_y,
+                color,
+                width,
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +432,24 @@ fn conflict_line_colors(
             ConflictDocumentPane::Result => {
                 if active {
                     (ui_theme::ACCENT, ui_theme::PRIMARY)
+                } else {
+                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                }
+            }
+        },
+        // AI 合并块：选中时结果区用绿色高亮（区别于未处理的黄色），
+        // 直观表达「这段已经合并完成」。
+        ConflictBlockStatus::Merged => match pane {
+            ConflictDocumentPane::Ours | ConflictDocumentPane::Theirs => {
+                if active {
+                    (ui_theme::COLOR_ERROR, ui_theme::COLOR_WARNING_FOREGROUND)
+                } else {
+                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                }
+            }
+            ConflictDocumentPane::Result => {
+                if active {
+                    (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
                 } else {
                     (ui_theme::CARD, ui_theme::FOREGROUND)
                 }
@@ -531,6 +799,21 @@ impl RepositoryView {
                         cx,
                     ))
                     .child(self.button(
+                        if self.ai_conflict_loading {
+                            "AI 生成中..."
+                        } else if !self.ai_settings.is_usable() {
+                            // 按钮不支持 tooltip（app_button 返回不透明元素），
+                            // 未配置时直接在文案中标注原因。
+                            "AI 合并建议（未配置）"
+                        } else {
+                            "AI 合并建议"
+                        },
+                        view.is_some_and(|view| view.kind == ConflictFileKind::Text)
+                            && self.ai_conflict_merge_button_enabled(),
+                        |this, _, _| this.generate_ai_conflict_merge(),
+                        cx,
+                    ))
+                    .child(self.button(
                         "应用到工作区",
                         view.is_some_and(|view| view.kind == ConflictFileKind::Text) && !self.busy,
                         |this, _, _| this.apply_selected_conflict_draft(false),
@@ -594,6 +877,7 @@ impl RepositoryView {
             })
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_w(px(0.0))
@@ -678,7 +962,10 @@ impl RepositoryView {
                             .into_any_element(),
                         ],
                         cx,
-                    )),
+                    ))
+                    // 连线 overlay 作为最后一个子元素绘制在三栏之上
+                    //（GPUI 子元素按声明顺序绘制）。
+                    .child(self.render_conflict_connectors(view, selected_block)),
             )
             .when(
                 self.conflict_workbench.show_base
@@ -791,6 +1078,69 @@ impl RepositoryView {
                     )),
             )
             .into_any_element()
+    }
+
+    /// 三栏连线 overlay：从「当前版本/传入版本」两侧的冲突块区域画
+    /// S 形曲线指向结果区对应块区域，指示采用后内容落点（IDEA 风格）。
+    /// 纯绘制 canvas，不注册鼠标事件、不拦截交互；作为三栏行容器的
+    /// 最后一个子元素绘制在最上层，每帧按各栏滚动 offset 重绘。
+    fn render_conflict_connectors(
+        &self,
+        view: &ConflictFileView,
+        selected_block: usize,
+    ) -> impl IntoElement {
+        let anchors = view
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| ConflictConnectorAnchor {
+                ours_lines: conflict_byte_range_to_lines(
+                    &view.ours_text,
+                    block.ours_start,
+                    block.ours_end,
+                ),
+                result_lines: conflict_byte_range_to_lines(&view.draft, block.start, block.end),
+                theirs_lines: conflict_byte_range_to_lines(
+                    &view.theirs_text,
+                    block.theirs_start,
+                    block.theirs_end,
+                ),
+                selected: index == selected_block,
+            })
+            .collect();
+        let data = ConflictConnectorData {
+            ours_handle: self.uniform_scroll_handle(crate::CONFLICT_OURS_SCROLL_HANDLE_ID),
+            result_handle: self.uniform_scroll_handle(crate::CONFLICT_RESULT_SCROLL_HANDLE_ID),
+            theirs_handle: self.uniform_scroll_handle(crate::CONFLICT_THEIRS_SCROLL_HANDLE_ID),
+            ours_line_count: uniform_list_line_count(&view.ours_text),
+            result_line_count: uniform_list_line_count(&view.draft),
+            theirs_line_count: uniform_list_line_count(&view.theirs_text),
+            anchors,
+            scroll_state: self.conflict_pane_scroll_sync.clone(),
+        };
+        canvas(
+            move |_, _, cx| {
+                // 同步滚动放在 prepaint：paint 期 set_offset 只写值且
+                // window.refresh() 在绘制期是 no-op，本帧 paint 读不到新
+                // 值；prepaint 期写入同帧生效。实际应用了同步时经
+                // refresh_windows 请求补一帧，滚动停止后其余两栏不差
+                // 最后一拍（下一帧无变化即收敛，不会循环刷新）。
+                if let Some(mut panes) = conflict_pane_viewports(&data) {
+                    let mut state = data.scroll_state.borrow_mut();
+                    if sync_conflict_pane_scrolling(&mut panes, &mut state) {
+                        drop(state);
+                        cx.refresh_windows();
+                    }
+                }
+                data
+            },
+            move |_, data, window, _| paint_conflict_connectors(data, window),
+        )
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
     }
 
     fn render_conflict_document_pane(
@@ -1024,6 +1374,11 @@ impl RepositoryView {
                 ("已忽略", ui_theme::ACCENT, ui_theme::MUTED_FOREGROUND)
             }
             ConflictBlockStatus::Resolved(_) => ("已处理", ui_theme::ACCENT, ui_theme::PRIMARY),
+            ConflictBlockStatus::Merged => (
+                "已合并",
+                ui_theme::COLOR_SUCCESS,
+                ui_theme::COLOR_SUCCESS_FOREGROUND,
+            ),
             ConflictBlockStatus::Unresolved if has_manual_edits => (
                 "手工修改",
                 ui_theme::COLOR_WARNING,
