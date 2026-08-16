@@ -575,6 +575,34 @@ pub(crate) fn history_scope_button(
         .child(label)
 }
 
+/// hunk 分隔行右侧的整块暂存/取消暂存按钮（紧凑版）。
+///
+/// 行高受 `DIFF_ROW_HEIGHT`（22px）硬约束：去掉边框、压缩内边距，
+/// 保证按钮整体高度不超过 hunk 分隔行本身，不撑高也不溢出行高。
+pub(crate) fn diff_hunk_action_button(
+    hunk_index: usize,
+    label: &'static str,
+    action: impl Fn(&mut RepositoryView) + 'static,
+    cx: &mut Context<RepositoryView>,
+) -> impl IntoElement {
+    div()
+        .id(format!("diff-hunk-stage-{hunk_index}"))
+        .flex_none()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(ui_theme::RADIUS_XS))
+        .bg(rgb(ui_theme::TILE))
+        .text_size(px(11.0))
+        .text_color(rgb(ui_theme::PRIMARY))
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            action(this);
+            cx.notify();
+        }))
+        .child(label)
+}
+
 pub(crate) fn nav_list(
     owner: &RepositoryView,
     id: &'static str,
@@ -1020,8 +1048,15 @@ pub(crate) fn diff_line(
         DiffLineKind::Header => (ui_theme::DIFF_HEADER_BG, ui_theme::DIFF_HEADER_TEXT),
         DiffLineKind::Context => (COLOR_PANEL_BG, COLOR_TEXT),
     };
+    let is_hunk_header = kind == DiffLineKind::Header && content.starts_with("@@");
     let old_lineno = old_lineno.map(|line| line.to_string()).unwrap_or_default();
     let new_lineno = new_lineno.map(|line| line.to_string()).unwrap_or_default();
+    // hunk 头的行号列与正文同底色，避免与行号列的 CARD 底色形成色带断裂。
+    let lineno_bg = if is_hunk_header {
+        ui_theme::DIFF_HUNK_BG
+    } else {
+        COLOR_HEADER_BG
+    };
 
     div()
         .flex()
@@ -1032,10 +1067,20 @@ pub(crate) fn diff_line(
         .line_height(px(DIFF_ROW_HEIGHT))
         .overflow_hidden()
         .items_center()
-        .bg(rgb(bg))
-        .text_color(rgb(fg))
-        .child(diff_lineno(old_lineno))
-        .child(diff_lineno(new_lineno))
+        .map(|this| {
+            if is_hunk_header {
+                // hunk 分隔行：更明显的底色 + 上下边框，与整体底色拉开层次。
+                this.border_t_1()
+                    .border_b_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::DIFF_HUNK_BG))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+            } else {
+                this.bg(rgb(bg)).text_color(rgb(fg))
+            }
+        })
+        .child(diff_lineno(old_lineno, lineno_bg))
+        .child(diff_lineno(new_lineno, lineno_bg))
         .child(
             div()
                 .flex_none()
@@ -1044,18 +1089,30 @@ pub(crate) fn diff_line(
                 .overflow_hidden()
                 .px_2()
                 .whitespace_nowrap()
+                .map(|this| {
+                    if is_hunk_header {
+                        // 行号范围渲染为圆角小胶囊，进一步与正文区分。
+                        this.px_2()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::TILE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_size(px(11.0))
+                    } else {
+                        this
+                    }
+                })
                 .child(content),
         )
 }
 
-fn diff_lineno(line: String) -> impl IntoElement {
+fn diff_lineno(line: String, bg: u32) -> impl IntoElement {
     div()
         .flex_none()
         .w(px(46.0))
         .px_1()
         .text_align(gpui::TextAlign::Right)
         .text_color(rgb(COLOR_TEXT_FAINT))
-        .bg(rgb(COLOR_HEADER_BG))
+        .bg(rgb(bg))
         .child(line)
 }
 

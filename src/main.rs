@@ -59,11 +59,11 @@ use khaslana::{
     CredentialScope, CredentialStore, CustomProxySettings, DiffEncodingChoice, DiffEncodingInfo,
     DiffEncodingPreferences, DiffLineKind, DiffScope, ExternalMergeSettings, FileDiff,
     GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
-    NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
+    LineSelection, NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
     RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
-    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SessionState, ShortcutBindings,
-    SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, ThemeMode, UpdatePreferences,
-    credential_display_target, credential_key_filename, credential_kind_label,
+    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SelectedDiffLine, SelectionSide,
+    SessionState, ShortcutBindings, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, ThemeMode,
+    UpdatePreferences, credential_display_target, credential_key_filename, credential_kind_label,
     credential_record_is_compatible_with_url, credential_record_label,
     credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
     test_credential_connection,
@@ -748,10 +748,13 @@ fn diff_render_model_for(diff: Option<&FileDiff>, headers_expanded: bool) -> Dif
             empty: true,
         };
     };
+    // 可折叠头部只统计纯文件头（diff --git / index / --- / +++）。
+    // 第一个 @@ hunk 头紧跟文件头且同为 Header kind，必须排除在外，
+    // 否则折叠头部时会连首个 hunk 头一起吞掉：hunk 少一个「暂存此块」入口，行号也跳变。
     let header_count = diff
         .lines
         .iter()
-        .take_while(|line| line.kind == DiffLineKind::Header)
+        .take_while(|line| line.kind == DiffLineKind::Header && !line.content.starts_with("@@"))
         .count();
     let mut row_count = diff.lines.len().saturating_sub(header_count);
     if header_count > 0 {
@@ -1174,6 +1177,10 @@ struct RepoTabState {
     pub(crate) change_indexes: ChangeListIndexes,
     pub(crate) diff: Option<Arc<FileDiff>>,
     pub(crate) diff_headers_expanded: bool,
+    /// 工作区差异的按行选择（diff 行索引；仅 Added/Removed 行参与部分暂存，
+    /// 范围选择中的上下文行在转换为行号选择时被忽略）。
+    pub(crate) diff_line_selection: BTreeSet<usize>,
+    diff_line_selection_anchor: Option<usize>,
     pub(crate) main_mode: MainMode,
     pub(crate) workflow_state: WorkflowState,
     pub(crate) history_commits: Vec<CommitInfo>,
@@ -1227,6 +1234,8 @@ impl RepoTabState {
             change_indexes: ChangeListIndexes::default(),
             diff: None,
             diff_headers_expanded: false,
+            diff_line_selection: BTreeSet::new(),
+            diff_line_selection_anchor: None,
             main_mode: MainMode::Worktree,
             workflow_state: WorkflowState::default(),
             history_commits: Vec::new(),
@@ -2150,6 +2159,8 @@ fn started_message_for_label(label: &'static str) -> &'static str {
         "提交完成" => "正在提交",
         "修补提交完成" => "正在修补提交",
         "拣选提交完成" => "正在拣选提交",
+        "已暂存选中改动" => "正在暂存选中改动",
+        "已取消暂存选中改动" => "正在取消暂存选中改动",
         "标签已创建" => "正在创建标签",
         "标签已删除" => "正在删除标签",
         "标签已推送" => "正在推送标签",
@@ -3545,11 +3556,31 @@ impl RepositoryView {
                         this.reset_uniform_scroll("diff-scroll");
                     }
                 });
-                if let Some((tab_id, path, load_id)) = full_status_request {
-                    self.load_full_status_for_tab(tab_id, path, load_id, "变更已补全".to_string());
+                // 暂存/取消暂存（整文件或按块/按行）后差异面板跟随刷新。
+                // 必须先于全量状态补全/分支同步请求执行：load_diff 会经
+                // spawn_operation 递增 repository_load_id（diff 缓存失效机制），
+                // 这些后台请求若沿用闭包内捕获的旧代际，结果到达时会因代际
+                // 守卫不匹配被丢弃，变更列表将停留在不含未跟踪文件的操作快照上。
+                if operation_refreshes_worktree_diff(&toast_message) {
+                    self.refresh_diff_after_stage_change();
                 }
-                if let Some((tab_id, path, remote, load_id, request_id)) = sync_request {
-                    self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
+                if let Some((tab_id, path, _)) = full_status_request {
+                    // 代际需在差异重载之后取最新值（见上），否则结果会被守卫丢弃。
+                    if let Some(load_id) = self.tab(tab_id).map(|tab| tab.repository_load_id) {
+                        self.load_full_status_for_tab(
+                            tab_id,
+                            path,
+                            load_id,
+                            "变更已补全".to_string(),
+                        );
+                    }
+                }
+                if let Some((tab_id, path, remote, _, request_id)) = sync_request {
+                    if let Some(load_id) = self.tab(tab_id).map(|tab| tab.repository_load_id) {
+                        self.load_branch_sync_status_for_tab(
+                            tab_id, path, remote, load_id, request_id,
+                        );
+                    }
                 }
                 if let Some((tab_id, path)) = repository_refresh_request {
                     // 分支引用变化后重新走完整仓库加载，避免只应用操作快照时遗漏引用或状态更新。
@@ -9774,6 +9805,9 @@ impl RepositoryView {
 
     pub(crate) fn load_diff(&mut self, path: String, scope: DiffScope) {
         self.reset_uniform_scroll("diff-scroll");
+        // 差异内容变化后行索引失效：清空按行选择。
+        self.diff_line_selection.clear();
+        self.diff_line_selection_anchor = None;
         let Some(tab_id) = self.active_tab_id() else {
             return;
         };
@@ -9826,6 +9860,149 @@ impl RepositoryView {
                 diff: Some(diff),
             })
         });
+    }
+
+    /// 暂存/取消暂存（整文件或按块/按行）完成后刷新差异面板：
+    /// - 当前差异的 (path, scope) 仍有改动 → 原位重载，反映最新暂存状态；
+    /// - 已失效（整文件被挪到对侧列表）→ 清空差异面板，避免残留旧内容
+    ///   与失效的「暂存此块/取消暂存此块」按钮。
+    /// 存在性按操作后的快照判定（见 `diff_scope_still_present`）。
+    fn refresh_diff_after_stage_change(&mut self) {
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        let path = diff.path.clone();
+        let scope = diff.scope.clone();
+        let still_present = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| diff_scope_still_present(&snapshot.changes, &path, &scope));
+        if still_present {
+            self.load_diff(path, scope);
+        } else {
+            self.diff = None;
+            self.diff_headers_expanded = false;
+            self.diff_line_selection.clear();
+            self.diff_line_selection_anchor = None;
+            self.reset_uniform_scroll("diff-scroll");
+        }
+    }
+
+    // ── 按行/按块部分暂存（工作区差异视图）─────────────────────────
+
+    /// 切换差异行的选中态。与变更列表同一套语义：普通点击单选（再点取消）、
+    /// Ctrl/Cmd 多选、Shift 从锚点范围选择（替换现有选择）。
+    fn toggle_diff_line_selection(&mut self, index: usize, multi: bool, shift: bool) {
+        // 两个字段经 Deref 落在 RepoTabState 上，需先取出同一可变引用。
+        let state = self.active_tab_state_mut();
+        toggle_index_selection(
+            &mut state.diff_line_selection,
+            &mut state.diff_line_selection_anchor,
+            index,
+            multi,
+            shift,
+        );
+    }
+
+    /// 把选中的 diff 行索引转换为服务层的行号选择
+    ///（Added 用 new_lineno、Removed 用 old_lineno；上下文行忽略）。
+    fn diff_line_indices_to_selection(
+        &self,
+        indices: impl Iterator<Item = usize>,
+    ) -> Option<LineSelection> {
+        let diff = self.diff.as_ref()?;
+        let mut selection = LineSelection::new();
+        for index in indices {
+            let Some(line) = diff.lines.get(index) else {
+                continue;
+            };
+            match line.kind {
+                DiffLineKind::Added => {
+                    if let Some(lineno) = line.new_lineno {
+                        selection.insert(SelectedDiffLine {
+                            side: SelectionSide::Added,
+                            lineno,
+                        });
+                    }
+                }
+                DiffLineKind::Removed => {
+                    if let Some(lineno) = line.old_lineno {
+                        selection.insert(SelectedDiffLine {
+                            side: SelectionSide::Removed,
+                            lineno,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        (!selection.is_empty()).then_some(selection)
+    }
+
+    /// 当前选中行对应的部分暂存选择。
+    fn selected_diff_lines_selection(&self) -> Option<LineSelection> {
+        let indices = self.diff_line_selection.iter().copied().collect::<Vec<_>>();
+        self.diff_line_indices_to_selection(indices.into_iter())
+    }
+
+    /// 指定 hunk 的全部 +/- 行对应的部分暂存选择。
+    fn diff_hunk_selection(&self, hunk_index: usize) -> Option<LineSelection> {
+        let diff = self.diff.as_ref()?;
+        let indices = diff
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.hunk_index == hunk_index)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        self.diff_line_indices_to_selection(indices.into_iter())
+    }
+
+    /// 执行部分暂存/取消暂存：按当前差异的 scope 决定方向
+    ///（未暂存 → 暂存选中改动；已暂存 → 取消暂存选中改动）。
+    fn apply_partial_stage(&mut self, selection: LineSelection) {
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        if diff.is_binary {
+            self.last_error = Some("二进制文件不支持部分暂存".into());
+            return;
+        }
+        let path = diff.path.clone();
+        let is_stage = diff.scope == DiffScope::Unstaged;
+        let label: &'static str = if is_stage {
+            "已暂存选中改动"
+        } else {
+            "已取消暂存选中改动"
+        };
+        // 选区随差异刷新清空（load_diff 开头统一处理，这里立即清掉按钮态）。
+        self.diff_line_selection.clear();
+        self.diff_line_selection_anchor = None;
+        self.with_repo(label, move |service, repo| {
+            if is_stage {
+                service.stage_lines(repo, Path::new(&path), &selection)
+            } else {
+                service.unstage_lines(repo, Path::new(&path), &selection)
+            }
+        });
+    }
+
+    /// 工具栏按钮：暂存/取消暂存当前选中的行。
+    fn apply_selected_partial_stage(&mut self) {
+        let Some(selection) = self.selected_diff_lines_selection() else {
+            self.last_error = Some("请先点击差异中的 +/- 行选择要暂存的改动".into());
+            return;
+        };
+        self.apply_partial_stage(selection);
+    }
+
+    /// hunk 头按钮：暂存/取消暂存整块。
+    fn apply_hunk_partial_stage(&mut self, hunk_index: usize) {
+        let Some(selection) = self.diff_hunk_selection(hunk_index) else {
+            self.last_error = Some("该块没有可暂存的改动".into());
+            return;
+        };
+        self.apply_partial_stage(selection);
     }
 
     fn use_credentials(&mut self) {
@@ -12748,6 +12925,8 @@ impl RepositoryView {
         empty_message: &str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // 仅工作区差异视图提供部分暂存交互（历史/贮藏/浏览只读）。
+        let partial_stage_enabled = header_target == DiffHeaderTarget::Worktree;
         match row {
             DiffRenderRow::HeaderToggle => {
                 let summary = if headers_expanded {
@@ -12763,17 +12942,97 @@ impl RepositoryView {
                         .into_any_element();
                 };
                 if line.kind == DiffLineKind::Header {
-                    diff_line(line.kind.clone(), None, None, line.content.clone())
-                        .into_any_element()
-                } else {
-                    diff_line(
-                        line.kind.clone(),
-                        line.old_lineno,
-                        line.new_lineno,
-                        line.content.clone(),
-                    )
-                    .into_any_element()
+                    let is_hunk_header = line.content.starts_with("@@");
+                    let row_element =
+                        diff_line(line.kind.clone(), None, None, line.content.clone());
+                    if partial_stage_enabled && is_hunk_header {
+                        // hunk 分隔行右侧提供整块暂存/取消暂存按钮。
+                        let is_stage = diff
+                            .map(|diff| diff.scope == DiffScope::Unstaged)
+                            .unwrap_or(true);
+                        let label: &'static str = if is_stage {
+                            "暂存此块"
+                        } else {
+                            "取消暂存此块"
+                        };
+                        let hunk_index = line.hunk_index;
+                        return div()
+                            .relative()
+                            .child(row_element)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_1()
+                                    .flex()
+                                    .items_center()
+                                    .child(diff_hunk_action_button(
+                                        hunk_index,
+                                        label,
+                                        move |this| {
+                                            this.apply_hunk_partial_stage(hunk_index);
+                                        },
+                                        cx,
+                                    )),
+                            )
+                            .into_any_element();
+                    }
+                    return row_element.into_any_element();
                 }
+                let row_element = diff_line(
+                    line.kind.clone(),
+                    line.old_lineno,
+                    line.new_lineno,
+                    line.content.clone(),
+                );
+                if !partial_stage_enabled {
+                    return row_element.into_any_element();
+                }
+                let selectable = matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed);
+                if !selectable {
+                    return row_element.into_any_element();
+                }
+                // +/- 行：点击选择（Ctrl/Cmd 多选、Shift 范围）。
+                // 高亮层必须放在 row_element 之后：GPUI 按子元素顺序绘制，
+                // 放在前面会被行自身的不透明背景完全盖住，视觉上不可见。
+                let selected = self.diff_line_selection.contains(&index);
+                div()
+                    .relative()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            let multi = event.modifiers.control || event.modifiers.platform;
+                            let shift = event.modifiers.shift;
+                            this.toggle_diff_line_selection(index, multi, shift);
+                            cx.notify();
+                        }),
+                    )
+                    .child(row_element)
+                    .when(selected, |this| {
+                        this.child(
+                            // 整行半透明主题色打底：复用输入选区 token（自带 alpha，跟随主题色），
+                            // 叠加在 +/- 行背景色之上仍能清晰辨认选中范围。
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .right_0()
+                                .bg(ui_theme::rgba(ui_theme::INPUT_SELECTION)),
+                        )
+                        .child(
+                            // 左缘 2px 主题色实线条作为第二重视觉信号。
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .w(px(2.0))
+                                .bg(rgb(ui_theme::PRIMARY)),
+                        )
+                    })
+                    .into_any_element()
             }
             DiffRenderRow::Empty => {
                 let message = diff
@@ -12831,7 +13090,45 @@ impl RepositoryView {
                     .when(!diff.is_some_and(|diff| diff.is_binary), |this| {
                         this.child(self.full_file_toggle_button(target, cx))
                             .child(self.encoding_button(diff, target, cx))
-                    }),
+                    })
+                    // 按行选择非空时的部分暂存入口（仅工作区差异视图）。
+                    .when(
+                        target == EncodingMenuTarget::Worktree
+                            && !self.diff_line_selection.is_empty(),
+                        |this| {
+                            let count = self.diff_line_selection.len();
+                            let is_stage = self
+                                .diff
+                                .as_ref()
+                                .map(|diff| diff.scope == DiffScope::Unstaged)
+                                .unwrap_or(true);
+                            let label = if is_stage {
+                                format!("暂存选中行({count})")
+                            } else {
+                                format!("取消暂存选中行({count})")
+                            };
+                            this.child(
+                                // 尺寸规格与「全文/编码」工具按钮一致（px 8 / py 2 /
+                                // RADIUS_XS / 11px），避免撑高差异区标题栏。
+                                div()
+                                    .id("stage-selected-diff-lines-button")
+                                    .flex_none()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .bg(rgb(ui_theme::ACCENT))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .cursor_pointer()
+                                    .hover(|hover| hover.bg(rgb(ui_theme::SECONDARY)))
+                                    .child(label)
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.apply_selected_partial_stage();
+                                        cx.notify();
+                                    })),
+                            )
+                        },
+                    ),
             )
     }
 
@@ -15902,6 +16199,86 @@ fn operation_requires_repository_refresh(message: &str) -> bool {
             | "远端标签已删除"
             | "upstream 已设置"
     )
+}
+
+/// 暂存/取消暂存类操作（整文件或按块/按行，含行内 +/- 按钮路径）：
+/// 完成后差异面板需跟随刷新（原位重载或清空），见
+/// `RepositoryView::refresh_diff_after_stage_change`。
+fn operation_refreshes_worktree_diff(message: &str) -> bool {
+    matches!(
+        message,
+        "暂存"
+            | "取消暂存"
+            | "已暂存选定文件"
+            | "已暂存所有文件"
+            | "已取消暂存选定文件"
+            | "已取消暂存所有文件"
+            | "已暂存选中改动"
+            | "已取消暂存选中改动"
+    )
+}
+
+/// (path, scope) 在变更列表中是否仍有可展示的改动。
+/// 操作快照来自 fast 状态（不含未跟踪文件）：scope 为未暂存且路径完全
+/// 缺失时视为仍存在——未跟踪文件只出现在未暂存侧，不能因快照缺失被清空。
+fn diff_scope_still_present(
+    changes: &[khaslana::WorktreeChange],
+    path: &str,
+    scope: &DiffScope,
+) -> bool {
+    let mut any_entry = false;
+    let mut side_present = false;
+    for change in changes {
+        if change.path != path {
+            continue;
+        }
+        any_entry = true;
+        side_present |= match scope {
+            DiffScope::Staged => change.staged.is_some(),
+            DiffScope::Unstaged => change.unstaged.is_some(),
+        };
+    }
+    side_present || (matches!(scope, DiffScope::Unstaged) && !any_entry)
+}
+
+/// 行索引选择的通用切换语义（差异行选择与变更列表一致）：
+/// 普通点击单选（再点同一行取消）、Ctrl/Cmd 切换多选、Shift 从锚点做
+/// 范围选择（替换现有选择；无锚点时等价普通选择并记录锚点）。
+/// 范围内的上下文行/块头索引不产生实际选择（转换时只取 +/- 行）。
+fn toggle_index_selection(
+    selection: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    index: usize,
+    multi: bool,
+    shift: bool,
+) {
+    if shift {
+        let Some(anchor) = *anchor else {
+            selection.insert(index);
+            *anchor = Some(index);
+            return;
+        };
+        let (lo, hi) = if anchor < index {
+            (anchor, index)
+        } else {
+            (index, anchor)
+        };
+        selection.clear();
+        selection.extend(lo..=hi);
+    } else if multi {
+        if selection.contains(&index) {
+            selection.remove(&index);
+        } else {
+            selection.insert(index);
+            *anchor = Some(index);
+        }
+    } else if selection.len() == 1 && selection.contains(&index) {
+        selection.clear();
+    } else {
+        selection.clear();
+        selection.insert(index);
+        *anchor = Some(index);
+    }
 }
 
 /// 这些操作会创建/移动提交或 HEAD，但不触发完整仓库重载；

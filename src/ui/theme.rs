@@ -132,6 +132,9 @@ theme_tokens! {
     // 主色族 token（48 INPUT_BORDER_FOCUSED、50 INPUT_SELECTION）见下方 accent 声明。
     49: INPUT_PLACEHOLDER => 0x61616799, 0xA8A8B099;
     51: INPUT_CARET => 0x2A2933, 0xE8E8EC;
+    // hunk 分隔行底色：需与 CARD（0xffffff/0x181A20）拉开明显层次
+    //（DIFF_HEADER_BG 与 ACCENT/TILE 同值太接近底色）。
+    92: DIFF_HUNK_BG => 0xE9E9EE, 0x2A2D36;
 
     // ── 弹窗和对话 ────────────────────────────────────────
     52: DIALOG_OVERLAY => 0x0f172a55, 0x00000088;

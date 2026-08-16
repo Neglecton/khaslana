@@ -31,6 +31,7 @@ use smallvec::SmallVec;
 mod browse;
 mod conflicts;
 mod merge;
+mod partial_stage;
 mod rebase;
 mod stash;
 mod submodule;
@@ -47,6 +48,7 @@ pub(crate) mod test_support;
 
 // 重新导出浏览模式引用种类，供二进制 crate 使用
 pub use browse::BrowseRefKind;
+pub use partial_stage::{LineSelection, SelectedDiffLine, SelectionSide};
 
 pub(crate) const DIFF_CONTEXT_LINES: u32 = 3;
 const BRANCH_SYNC_UNPUSHED_OID_LIMIT: usize = 256;
@@ -2285,6 +2287,7 @@ impl GitService {
             old_lineno: Option<u32>,
             new_lineno: Option<u32>,
             content: Vec<u8>,
+            hunk_index: usize,
         }
 
         let mut raw_lines = Vec::new();
@@ -2309,6 +2312,8 @@ impl GitService {
             }
         }
 
+        // hunk 分组序号：'H'（@@ hunk 头）出现时递增，文件头行为 0。
+        let mut hunk_counter = 0usize;
         diff.print(DiffFormat::Patch, |delta, _hunk, line| {
             // 二进制标记在补丁生成时才可靠：libgit2 只有加载内容后才在 delta 上
             // 回填 BINARY 标志（树→index diff 创建阶段不会读取 blob）。
@@ -2322,7 +2327,11 @@ impl GitService {
             let kind = match line.origin() {
                 '+' => DiffLineKind::Added,
                 '-' => DiffLineKind::Removed,
-                'F' | 'H' => DiffLineKind::Header,
+                'F' => DiffLineKind::Header,
+                'H' => {
+                    hunk_counter += 1;
+                    DiffLineKind::Header
+                }
                 _ => DiffLineKind::Context,
             };
             let content = line.content();
@@ -2335,6 +2344,7 @@ impl GitService {
                 old_lineno: line.old_lineno(),
                 new_lineno: line.new_lineno(),
                 content: content.to_vec(),
+                hunk_index: hunk_counter,
             });
             true
         })?;
@@ -2351,6 +2361,7 @@ impl GitService {
                     old_lineno: line.old_lineno,
                     new_lineno: line.new_lineno,
                     content,
+                    hunk_index: line.hunk_index,
                 }
             })
             .collect::<Vec<_>>();
@@ -2602,7 +2613,7 @@ impl GitService {
         repo.find_reference(name).map_err(GitError::from)
     }
 
-    fn conflicts(&self, repo: &Repository) -> Result<Vec<String>> {
+    pub(super) fn conflicts(&self, repo: &Repository) -> Result<Vec<String>> {
         let mut conflicts = Vec::new();
         let index = repo.index()?;
         if !index.has_conflicts() {
@@ -2628,11 +2639,20 @@ impl GitService {
     }
 
     fn ensure_path_not_conflicted(&self, repo: &Repository, path: &Path) -> Result<()> {
+        self.ensure_path_not_conflicted_with_action(repo, path, "回滚更改")
+    }
+
+    fn ensure_path_not_conflicted_with_action(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        action: &str,
+    ) -> Result<()> {
         let git_path = path_to_git(path);
         if self.conflicts(repo)?.iter().any(|path| path == &git_path) {
-            return Err(GitError::Message(
-                "该文件存在冲突，请先解决冲突后再回滚更改".into(),
-            ));
+            return Err(GitError::Message(format!(
+                "该文件存在冲突，请先解决冲突后再{action}"
+            )));
         }
         Ok(())
     }

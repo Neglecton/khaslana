@@ -279,6 +279,9 @@ pub struct DiffLine {
     pub old_lineno: Option<u32>,
     pub new_lineno: Option<u32>,
     pub content: String,
+    /// 所属 hunk 序号：文件头行为 0，首个 `@@` hunk 头之后为 1 并递增。
+    /// 供按块暂存等 hunk 级交互定位行分组。
+    pub hunk_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

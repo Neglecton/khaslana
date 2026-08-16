@@ -54,6 +54,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/submodule.rs`：子模块 Git 服务，包括状态读取、同步父仓库记录版本、快进到子模块远端最新以及递归子模块更新。
 - `src/git/rebase.rs`：变基 Git 服务，包括 `rebase_branch`、`rebase_continue`、`rebase_skip`、`rebase_abort` 和 `pull_branch_rebase`。
 - `src/git/worktree_compat.rs`：工作区写入兼容层。Windows 下为 checkout、merge/pull、hard reset、revert、rebase、stash 和子模块更新统一附加 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`，避免编辑器占用空目录导致 Git 操作失败；其他平台保持 git2 默认行为。
+- `src/git/partial_stage.rs`：按块/按行部分暂存服务（双向），含部分 patch 构造纯函数（未选中 +/- 行降级/丢弃、hunk 头重算、反向交换）与守卫、选择类型（`SelectedDiffLine`/`LineSelection`）。hunk 头重算指 post 侧 `new_start` 必须按「实际输出补丁的后镜像」坐标重算（= preimage 首行在目标初始内容中的行号 + 先前已输出块的累计净行数变化）：libgit2 的 apply 以 `new_start` 在被先前块逐步改写过的目标内容中精确定位且无偏移搜索，直接透传源 diff 原始 `new_start` 时，一旦丢弃或按行改写了前面的块（净行数变化），后续块会定位错位并报 `ApplyFail`（仅前序块无净行数变化时碰巧不错位）。
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
@@ -111,6 +112,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 标签：列表、checkout tag
 - 贮藏：列表、save、apply、pop、drop、文件列表和 diff 预览
 - 变更：stage、unstage、discard unstaged、discard all
+- 部分暂存：stage_lines / unstage_lines（`src/git/partial_stage.rs`，按块/按行双向）。以 `diff.print` 原始字节重建部分 patch，经 `Diff::from_buffer` + `repo.apply(ApplyLocation::Index)` 应用（等价 `git apply --cached`，不触工作区）；取消暂存走文本反转（git2 0.21 未暴露 reverse 标志）。选择以行号定位（Added=new_lineno / Removed=old_lineno），服务端重生成 diff 为权威。输出 hunk 头 post 侧 `new_start` 按输出补丁后镜像坐标重算（libgit2 apply 用其精确定位且无偏移搜索，丢弃/改写前序块后原始坐标会错位报 ApplyFail）。守卫：冲突/二进制/整文件增删改名拒绝部分操作；含无尾换行标记（EOFNL）的块拒绝按行部分选择（可整块）
 - 提交：commit、amend（保留原作者/父提交，经手动前移分支引用绕过 git_commit_create 的首父校验）、cherry-pick（保留原作者与提交信息，冲突进现有闭环，空结果拒绝）、commit history、commit graph、commit files、commit file diff
 - 历史操作：reset、revert
 - 变基：rebase_branch、rebase_continue、rebase_skip、rebase_abort、pull_branch_rebase
@@ -220,6 +222,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 已暂存和未暂存变更列表使用虚拟化渲染，上万文件时仅创建可见行
 - 单选、多选、范围选择变更
 - 暂存选中、暂存全部
+- 按块/按行部分暂存（双向，仅工作区差异视图）：点击 +/- 行选择（Ctrl/Cmd 多选、Shift 范围，选中行整行半透明主题色打底 + 左缘 2px 主题色条；高亮层渲染在行背景之后，否则会被行自身不透明背景遮盖），hunk 分隔行右侧「暂存此块/取消暂存此块」按钮（`diff_hunk_action_button`，紧凑无边框样式，总高不超过 22px 的 hunk 行高），选区非空时差异标题栏出现「暂存选中行(N)/取消暂存选中行(N)」按钮（与「全文/编码」按钮同规格，不撑高标题栏）；按当前差异 scope 决定方向（DiffLine.hunk_index 提供块分组）。暂存/取消暂存（整文件或按块/按行，消息名单 `operation_refreshes_worktree_diff`）完成后差异面板跟随刷新（`refresh_diff_after_stage_change`）：文件在当前 scope 仍有改动时原位重载，整文件挪到对侧列表时清空，避免残留失效的按块按钮；存在性判定 `diff_scope_still_present` 对「未暂存 scope 且路径在快照中完全缺失」视为仍存在（未跟踪文件不在操作快照的 fast 状态里）。该刷新在 `OperationFinished` 中必须先于全量状态补全/分支同步请求执行，且这些请求改按刷新后的最新 `repository_load_id` 发起——`load_diff` 会经 spawn_operation 递增代际（diff 缓存失效机制），沿用旧代际的结果会被代际守卫丢弃，变更列表将停留在不含未跟踪文件的操作快照上。可折叠 diff 头部只折叠纯文件头（diff --git / index / --- / +++），首个 `@@` hunk 头虽同为 Header kind 但始终留在正文渲染，折叠时不能吞掉（否则首个 hunk 缺「暂存此块」入口且行号跳变，回归测试 `diff_render_rows_keep_first_hunk_header_in_body`）
 - 取消暂存选中、取消暂存全部
 - 暂存区文件右键可复制绝对路径或打开文件所在目录
 - 丢弃单个、选中或全部变更
@@ -228,6 +231,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 大 diff 使用虚拟列表渲染
 - 选中二进制文件时差异区域显示居中信息占位卡片（`binary_diff_placeholder`，`src/ui_helpers.rs`）：说明无法以文本展示差异，并按新增/删除/修改给出文件大小（`FileDiff.old_size`/`new_size`，由 `file_diff_from_diff` 按 delta 状态填充，Added/Untracked 旧侧为 None、Deleted 新侧为 None；oid 侧读 blob 对象头，工作区侧用 stat 尺寸）；同时隐藏无意义的「全文切换」「编码」按钮。工作区、历史、贮藏和分支比较的差异区域共用同一渲染，行为一致。二进制判定有三路：`diff.print` 回调里的 `DiffFlags::BINARY`/`'B'` 行（补丁生成时才可靠）、未跟踪文件（`include_untracked` 不加载内容、无 BINARY 标志）的 8KB NUL 嗅探 `workdir_file_is_binary`、以及已知二进制扩展名兜底 `path_has_binary_extension`（内容检测对空文件无能为力，如右键新建即空的 .docx）
 - diff 头部可折叠
+- hunk 分隔行视觉增强：`@@ 行号范围 @@` 行使用独立底色 `DIFF_HUNK_BG` + 上下边框 + 圆角胶囊 + 行号列同底色（文件头行保持原浅色），深浅主题下均与底色明显区分
 - diff 编码可选
 - diff 区域支持左右滑动查看长行
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示

@@ -79,6 +79,7 @@ fn make_diff_line(kind: DiffLineKind, content: &str) -> khaslana::DiffLine {
         old_lineno: None,
         new_lineno: None,
         content: content.into(),
+        hunk_index: 0,
     }
 }
 
@@ -150,6 +151,46 @@ fn widest_diff_row_index_skips_collapsed_headers() {
     let model = diff_render_model_for(Some(&diff), false);
     // row0=HeaderToggle，row1=short，row2=longer content line here
     assert_eq!(widest_diff_row_index(Some(&diff), &model), Some(2));
+}
+
+#[test]
+fn diff_render_rows_keep_first_hunk_header_in_body() {
+    // 第一个 @@ hunk 头紧跟文件头且同为 Header kind，但不属于可折叠的文件头：
+    // 折叠时必须保留在正文中渲染，否则首个 hunk 的「暂存此块」入口被吞掉、行号跳变。
+    let diff = test_diff(
+        vec![
+            test_line(DiffLineKind::Header, "diff --git a/file.txt b/file.txt"),
+            test_line(DiffLineKind::Header, "index 0000000..1111111"),
+            test_line(DiffLineKind::Header, "@@ -1,2 +1,3 @@"),
+            test_line(DiffLineKind::Context, " ctx"),
+            test_line(DiffLineKind::Header, "@@ -9,2 +10,3 @@"),
+            test_line(DiffLineKind::Added, "+new"),
+        ],
+        false,
+    );
+
+    assert_eq!(
+        diff_render_rows_for(Some(&diff), false),
+        vec![
+            DiffRenderRow::HeaderToggle,
+            DiffRenderRow::DiffLine(2),
+            DiffRenderRow::DiffLine(3),
+            DiffRenderRow::DiffLine(4),
+            DiffRenderRow::DiffLine(5),
+        ]
+    );
+    assert_eq!(
+        diff_render_rows_for(Some(&diff), true),
+        vec![
+            DiffRenderRow::HeaderToggle,
+            DiffRenderRow::DiffLine(0),
+            DiffRenderRow::DiffLine(1),
+            DiffRenderRow::DiffLine(2),
+            DiffRenderRow::DiffLine(3),
+            DiffRenderRow::DiffLine(4),
+            DiffRenderRow::DiffLine(5),
+        ]
+    );
 }
 
 #[test]
@@ -961,6 +1002,7 @@ fn test_line(kind: DiffLineKind, content: &str) -> khaslana::DiffLine {
         old_lineno: None,
         new_lineno: None,
         content: content.to_string(),
+        hunk_index: 0,
     }
 }
 
@@ -1186,4 +1228,147 @@ fn repo_switcher_highlight_wraps_and_handles_empty_list() {
     assert_eq!(next_repo_switcher_highlight(3, Some(0), -1), Some(2));
     assert_eq!(next_repo_switcher_highlight(3, Some(2), 1), Some(0));
     assert_eq!(next_repo_switcher_highlight(3, Some(1), 1), Some(2));
+}
+
+#[test]
+fn stage_operations_refresh_worktree_diff() {
+    // 整文件（含行内 +/- 按钮路径）与按块/按行部分暂存的消息都触发差异面板跟随刷新
+    for message in [
+        "暂存",
+        "取消暂存",
+        "已暂存选定文件",
+        "已暂存所有文件",
+        "已取消暂存选定文件",
+        "已取消暂存所有文件",
+        "已暂存选中改动",
+        "已取消暂存选中改动",
+    ] {
+        assert!(operation_refreshes_worktree_diff(message), "{message}");
+    }
+    // 其它操作不触发（差异加载/刷新/提交各有自己的路径）
+    for message in ["差异已加载", "已刷新", "提交完成", "拉取完成"] {
+        assert!(!operation_refreshes_worktree_diff(message), "{message}");
+    }
+}
+
+fn change_entry(
+    path: &str,
+    staged: Option<ChangeState>,
+    unstaged: Option<ChangeState>,
+) -> khaslana::WorktreeChange {
+    khaslana::WorktreeChange {
+        path: path.to_string(),
+        staged,
+        unstaged,
+    }
+}
+
+#[test]
+fn diff_scope_presence_detects_side_moves_and_untracked() {
+    // 部分暂存后未暂存侧仍有改动：两侧都保留，原位重载
+    let partially_staged = vec![change_entry(
+        "a.rs",
+        Some(ChangeState::Modified),
+        Some(ChangeState::Modified),
+    )];
+    assert!(diff_scope_still_present(
+        &partially_staged,
+        "a.rs",
+        &DiffScope::Unstaged
+    ));
+    assert!(diff_scope_still_present(
+        &partially_staged,
+        "a.rs",
+        &DiffScope::Staged
+    ));
+
+    // 整文件暂存后：未暂存侧失效（清空差异面板），已暂存侧仍在
+    let fully_staged = vec![change_entry("a.rs", Some(ChangeState::Modified), None)];
+    assert!(!diff_scope_still_present(
+        &fully_staged,
+        "a.rs",
+        &DiffScope::Unstaged
+    ));
+    assert!(diff_scope_still_present(
+        &fully_staged,
+        "a.rs",
+        &DiffScope::Staged
+    ));
+
+    // 未跟踪文件不在 fast 快照中：未暂存侧视为仍存在，已暂存侧视为失效
+    assert!(diff_scope_still_present(
+        &[],
+        "new.txt",
+        &DiffScope::Unstaged
+    ));
+    assert!(!diff_scope_still_present(
+        &[],
+        "new.txt",
+        &DiffScope::Staged
+    ));
+
+    // 路径仅存在于未暂存侧（其它文件不影响判定）：已暂存侧失效
+    let others = vec![change_entry("b.rs", None, Some(ChangeState::Modified))];
+    assert!(diff_scope_still_present(
+        &others,
+        "b.rs",
+        &DiffScope::Unstaged
+    ));
+    assert!(!diff_scope_still_present(
+        &others,
+        "b.rs",
+        &DiffScope::Staged
+    ));
+}
+
+#[test]
+fn diff_line_selection_plain_click_replaces_and_toggles_off() {
+    let mut selection = BTreeSet::new();
+    let mut anchor = None;
+    toggle_index_selection(&mut selection, &mut anchor, 3, false, false);
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [3]);
+    assert_eq!(anchor, Some(3));
+    // 普通点击另一行：替换选择
+    toggle_index_selection(&mut selection, &mut anchor, 7, false, false);
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [7]);
+    // 再点同一行：取消选择
+    toggle_index_selection(&mut selection, &mut anchor, 7, false, false);
+    assert!(selection.is_empty());
+}
+
+#[test]
+fn diff_line_selection_ctrl_click_toggles_multiple_lines() {
+    let mut selection = BTreeSet::new();
+    let mut anchor = None;
+    toggle_index_selection(&mut selection, &mut anchor, 3, false, false);
+    toggle_index_selection(&mut selection, &mut anchor, 8, true, false);
+    toggle_index_selection(&mut selection, &mut anchor, 12, true, false);
+    // Ctrl/Cmd 多选可同时选中多行，一次「暂存选中行(N)」全部生效
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [3, 8, 12]);
+    // Ctrl 再点已选行：仅移除该行
+    toggle_index_selection(&mut selection, &mut anchor, 8, true, false);
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [3, 12]);
+}
+
+#[test]
+fn diff_line_selection_shift_click_selects_range() {
+    let mut selection = BTreeSet::new();
+    let mut anchor = None;
+    toggle_index_selection(&mut selection, &mut anchor, 10, false, false);
+    // Shift 向下范围选择：替换现有选择；范围内的上下文行索引保留，
+    // 转换为部分暂存选择时只取 +/- 行
+    toggle_index_selection(&mut selection, &mut anchor, 14, false, true);
+    assert_eq!(
+        selection.iter().copied().collect::<Vec<_>>(),
+        [10, 11, 12, 13, 14]
+    );
+    // Shift 向上范围选择同样成立（锚点不变）
+    toggle_index_selection(&mut selection, &mut anchor, 8, false, true);
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [8, 9, 10]);
+    // 无锚点时 Shift 等价普通选择并记录锚点（不清空已有选择）
+    let mut selection = BTreeSet::from([2]);
+    let mut anchor = None;
+    toggle_index_selection(&mut selection, &mut anchor, 5, false, true);
+    assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [2, 5]);
+    assert_eq!(anchor, Some(5));
 }
