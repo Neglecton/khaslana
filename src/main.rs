@@ -2,6 +2,7 @@
 
 mod ai_view;
 mod assets;
+mod blame_view;
 mod browse_compare_view;
 mod browse_view;
 mod conflicts;
@@ -53,7 +54,7 @@ use gpui::{
     px, size, uniform_list,
 };
 use khaslana::{
-    AiProviderSettings, AiReviewResult, BranchKind, BranchName, BranchSyncStatus,
+    AiProviderSettings, AiReviewResult, BlameView, BranchKind, BranchName, BranchSyncStatus,
     BrowseCompareFile, BrowseEntry, BrowseFileContent, BrowseListMode, BrowseRefKind, BrowseTarget,
     ChangeState, CommitFileChange, CommitInfo, CommitMessage, ConflictBlockResolution,
     ConflictFileKind, ConflictFileView, CredentialProvider, CredentialRecord, CredentialRequest,
@@ -313,10 +314,13 @@ pub(crate) const BRANCH_MENU_HEIGHT: f32 = 404.0;
 pub(crate) const REMOTE_MENU_WIDTH: f32 = 170.0;
 pub(crate) const REMOTE_MENU_HEIGHT: f32 = 80.0;
 const CHANGE_MENU_WIDTH: f32 = 210.0;
-const CHANGE_MENU_HEIGHT: f32 = 255.0;
-const STAGED_CHANGE_MENU_HEIGHT: f32 = 325.0;
+// 两个菜单分支均新增「查看文件历史」「追溯此文件」两项（约 +34px/项），
+// 未暂存分支还多一条分隔线。
+const CHANGE_MENU_HEIGHT: f32 = 330.0;
+const STAGED_CHANGE_MENU_HEIGHT: f32 = 395.0;
 const FILE_PATH_MENU_WIDTH: f32 = 180.0;
-const FILE_PATH_MENU_HEIGHT: f32 = 68.0;
+// 提交文件右键菜单新增「查看文件历史」「追溯此文件」两项。
+const FILE_PATH_MENU_HEIGHT: f32 = 140.0;
 const CREDENTIAL_MENU_WIDTH: f32 = 180.0;
 const CREDENTIAL_MENU_HEIGHT: f32 = 150.0;
 pub(crate) const TAG_MENU_WIDTH: f32 = 170.0;
@@ -781,6 +785,7 @@ pub(crate) enum EncodingMenuTarget {
     History,
     Stash,
     Browse,
+    Blame,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1165,6 +1170,39 @@ pub(crate) enum BrowseViewMode {
     Diff,
 }
 
+/// 文件追溯视图的 per-repository 状态。
+///
+/// 进入追溯视图时记录目标路径并后台加载 `BlameView`；
+/// 切换到其他主模式再切回时状态保留。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BlameState {
+    /// 当前追溯的文件（git 风格相对路径）。
+    pub path: Option<String>,
+    pub loading: bool,
+    /// 追溯数据，后台加载完成后填充。
+    pub view: Option<Arc<BlameView>>,
+    /// 内容视图最宽行扫描缓存：((Arc 地址, 行数), 最宽行索引)。
+    /// 与 BrowseState::widest_line_cache 同一套模式，内容未变时每帧免扫描。
+    pub widest_line_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
+}
+
+impl BlameState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 释放超大缓存，避免切仓库后内存占用过高。
+    fn release_large_caches(&mut self) {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.lines.len() > LARGE_DIFF_CACHE_LINE_LIMIT)
+        {
+            self.view = None;
+        }
+    }
+}
+
 /// 分支浏览模式的 per-repository 状态。
 ///
 /// 维护已加载的文件树（按目录懒加载）、展开/选中状态，以及当前文件的只读内容或差异。
@@ -1287,6 +1325,10 @@ struct RepoTabState {
     /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
     pub(crate) history_refreshing: bool,
     pub(crate) history_scope: HistoryScope,
+    /// 历史页的文件路径过滤：只显示改动过该文件的提交。
+    /// 用户意图，`clear_history` 不清除（切 scope/切分支/刷新均保留），
+    /// 仅显式点 chip 的 × 清除；随 tab 销毁自然释放。
+    pub(crate) history_file_filter: Option<String>,
     pub(crate) history_refs_cache: Option<HistoryRefsCache>,
     /// 提交列表请求序号：每次发起加载递增，用于丢弃旧一代请求晚到的结果
     pub(crate) history_load_seq: u64,
@@ -1302,6 +1344,8 @@ struct RepoTabState {
     pub(crate) full_file_view: bool,
     // 分支浏览模式状态
     pub(crate) browse: BrowseState,
+    // 文件追溯视图状态
+    pub(crate) blame: BlameState,
     pub(crate) busy: bool,
     pub(crate) operation_blocker: OperationBlocker,
     /// 操作遮罩层开始时间；用于延迟显示遮罩层，避免快速完成时一闪而过。
@@ -1341,6 +1385,7 @@ impl RepoTabState {
             history_loading: HistoryLoading::default(),
             history_refreshing: false,
             history_scope: HistoryScope::default(),
+            history_file_filter: None,
             history_refs_cache: None,
             history_load_seq: 0,
             history_graph_rows: Vec::new(),
@@ -1353,6 +1398,7 @@ impl RepoTabState {
             sidebar_sections: SidebarSectionState::default(),
             full_file_view: false,
             browse: BrowseState::default(),
+            blame: BlameState::default(),
             busy: false,
             operation_blocker: OperationBlocker::None,
             operation_blocker_started: None,
@@ -1398,7 +1444,48 @@ impl RepoTabState {
             self.history_diff_headers_expanded = false;
         }
         self.browse.release_large_caches();
+        self.blame.release_large_caches();
     }
+
+    /// 历史提交事件的应用守卫：load_id、scope 与路径过滤均与当前状态一致才落地。
+    /// 抽成独立方法便于单测（过滤切换后旧请求晚到的结果不覆盖新数据）。
+    fn history_commits_event_matches(
+        &self,
+        load_id: u64,
+        scope: HistoryScope,
+        path_filter: Option<&str>,
+    ) -> bool {
+        load_id == self.repository_load_id
+            && scope == self.history_scope
+            && path_filter == self.history_file_filter.as_deref()
+    }
+
+    /// 清空历史页的列表与选中状态。
+    ///
+    /// 注意：不清 `history_file_filter`——过滤器是用户意图，
+    /// 切 scope/切分支/刷新均保留，仅显式点 chip 的 × 清除。
+    fn clear_history(&mut self) {
+        self.history_commits.clear();
+        self.history_has_more = false;
+        self.history_selected_commit = None;
+        self.history_files.clear();
+        self.history_selected_file = None;
+        self.history_diff = None;
+        self.history_diff_headers_expanded = false;
+        self.history_loading = HistoryLoading::default();
+        self.history_refs_cache = None;
+        self.history_graph_rows.clear();
+        self.history_refreshing = false;
+    }
+}
+
+/// HistoryFilesLoaded 自动选中的文件：默认取首个；过滤模式下若列表
+/// 包含被过滤的路径则优先选它（提交差异立即可见）。
+fn preferred_history_file(filter: Option<&str>, files: &[CommitFileChange]) -> Option<String> {
+    filter
+        .filter(|filter| files.iter().any(|file| file.path.as_str() == *filter))
+        .map(str::to_string)
+        .or_else(|| files.first().map(|file| file.path.clone()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1490,6 +1577,7 @@ pub(crate) enum MainMode {
     Workflow,
     Stash,
     Browse,
+    Blame,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1644,6 +1732,9 @@ pub(crate) enum UiEvent {
         append: bool,
         has_more: bool,
         scope: HistoryScope,
+        /// 发起请求时生效的文件路径过滤；与当前过滤器比对，
+        /// 防止切换过滤后旧请求的结果覆盖新数据。
+        path_filter: Option<String>,
         load_id: u64,
         seq: u64,
     },
@@ -1713,6 +1804,20 @@ pub(crate) enum UiEvent {
         error: String,
         load_id: u64,
         request_id: u64,
+    },
+    // 文件追溯视图：后台加载完成
+    BlameLoaded {
+        tab_id: RepoTabId,
+        path: String,
+        view: khaslana::BlameView,
+        load_id: u64,
+    },
+    // 文件追溯视图：后台加载失败
+    BlameLoadFailed {
+        tab_id: RepoTabId,
+        path: String,
+        error: String,
+        load_id: u64,
     },
     // 分支浏览模式：目标引用解析完成
     BrowseTargetResolved {
@@ -3158,6 +3263,9 @@ impl RepositoryView {
         if self.main_mode == MainMode::Browse {
             self.reload_browse_on_encoding_change();
         }
+        if self.main_mode == MainMode::Blame {
+            self.reload_blame_on_encoding_change();
+        }
     }
 
     fn save_session(&self) {
@@ -3867,6 +3975,7 @@ impl RepositoryView {
                 append,
                 has_more,
                 scope,
+                path_filter,
                 load_id,
                 seq,
             } => {
@@ -3877,7 +3986,11 @@ impl RepositoryView {
                     // 否则 history_loading.commits 永久为 true 会吞掉后续所有历史加载。
                     if seq == this.history_load_seq {
                         this.history_loading.commits = false;
-                        if load_id == this.repository_load_id && scope == this.history_scope {
+                        if this.history_commits_event_matches(
+                            load_id,
+                            scope,
+                            path_filter.as_deref(),
+                        ) {
                             this.history_refs_cache = Some(refs_cache);
                             this.history_has_more = has_more;
                             if append {
@@ -3911,8 +4024,13 @@ impl RepositoryView {
                                 }
                                 this.history_refreshing = false;
                             }
-                            this.history_graph_rows =
-                                history_view::commit_graph_rows(&this.history_commits);
+                            // 过滤模式下隐藏提交图形列：过滤后中间提交缺失，
+                            // 泳道线会断裂，跳过泳道计算并让行渲染不画图形。
+                            this.history_graph_rows = if this.history_file_filter.is_none() {
+                                history_view::commit_graph_rows(&this.history_commits)
+                            } else {
+                                Vec::new()
+                            };
 
                             if this.history_selected_commit.is_none() {
                                 if let Some(commit) = this.history_commits.first() {
@@ -3949,8 +4067,11 @@ impl RepositoryView {
                         this.history_diff = None;
                         this.history_diff_headers_expanded = false;
 
-                        if let Some(file) = this.history_files.first() {
-                            this.select_history_file(file.path.clone());
+                        if let Some(preferred) = preferred_history_file(
+                            this.history_file_filter.as_deref(),
+                            &this.history_files,
+                        ) {
+                            this.select_history_file(preferred);
                         } else {
                             this.status = "该提交没有文件变更".to_string();
                         }
@@ -4208,6 +4329,42 @@ impl RepositoryView {
                         tracing::warn!("submodule remote status skipped: {error}");
                     }
                 });
+            }
+            UiEvent::BlameLoaded {
+                tab_id,
+                path,
+                view,
+                load_id,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    // load_id 与路径双校验：仓库重载或切换追溯文件后，
+                    // 旧请求的结果不落地。
+                    if load_id == this.repository_load_id
+                        && this.blame.path.as_deref() == Some(path.as_str())
+                    {
+                        this.blame.loading = false;
+                        this.blame.view = Some(Arc::new(view));
+                        this.status = "文件追溯已加载".to_string();
+                    }
+                });
+            }
+            UiEvent::BlameLoadFailed {
+                tab_id,
+                path,
+                error,
+                load_id,
+            } => {
+                let toast_message = error.clone();
+                self.with_tab_context(tab_id, |this| {
+                    if load_id == this.repository_load_id
+                        && this.blame.path.as_deref() == Some(path.as_str())
+                    {
+                        this.blame.loading = false;
+                        this.status = "文件追溯加载失败".to_string();
+                        this.last_error = Some(error);
+                    }
+                });
+                self.notify_error(toast_message, cx);
             }
             UiEvent::BrowseTargetResolved {
                 tab_id,
@@ -8808,20 +8965,6 @@ impl RepositoryView {
         }
     }
 
-    fn clear_history(&mut self) {
-        self.history_commits.clear();
-        self.history_has_more = false;
-        self.history_selected_commit = None;
-        self.history_files.clear();
-        self.history_selected_file = None;
-        self.history_diff = None;
-        self.history_diff_headers_expanded = false;
-        self.history_loading = HistoryLoading::default();
-        self.history_refs_cache = None;
-        self.history_graph_rows.clear();
-        self.history_refreshing = false;
-    }
-
     /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
     fn refresh_history(&mut self) {
         // 保留：commits、graph_rows、has_more、refs_cache、selected_commit。
@@ -9221,6 +9364,88 @@ impl RepositoryView {
         if self.main_mode == MainMode::Browse && self.browse.list_mode == BrowseListMode::Compare {
             self.close_browse();
         }
+        // 追溯视图同样基于 HEAD：检出后内容失效，一并关闭。
+        if self.main_mode == MainMode::Blame {
+            self.close_blame();
+        }
+    }
+
+    // ===== 文件追溯（blame）视图 =====
+
+    /// 打开某文件的追溯视图：置状态、切主模式并后台加载。
+    ///
+    /// 历史页提交文件右键入口对 HEAD 版本追溯（v1 不支持对任意提交 blame，
+    /// `BlameOptions::newest_commit` 留作后续）；工作区入口同时纳入未提交
+    /// 改动（服务端经 blame_buffer 处理）。
+    pub(crate) fn open_blame_file(&mut self, path: String) {
+        self.close_popups();
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(repo_path) = self.repo_path.clone() else {
+            return;
+        };
+        let encoding = self.diff_encoding_choice_for_path(&repo_path);
+        let load_id = self.repository_load_id;
+        self.blame.reset();
+        self.blame.path = Some(path.clone());
+        self.blame.loading = true;
+        self.main_mode = MainMode::Blame;
+        self.status = format!("正在加载文件追溯：{path}");
+        let service = self.service_for_tab(tab_id);
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Short, move || {
+            let result = (|| -> khaslana::Result<UiEvent> {
+                let repo = Repository::open(&repo_path)?;
+                let view = service.blame_file(&repo, Path::new(&path), encoding)?;
+                Ok(UiEvent::BlameLoaded {
+                    tab_id,
+                    path: path.clone(),
+                    view,
+                    load_id,
+                })
+            })();
+            match result {
+                Ok(event) => send_ui_event(&tx, event),
+                Err(err) => send_ui_event(
+                    &tx,
+                    UiEvent::BlameLoadFailed {
+                        tab_id,
+                        path,
+                        error: err.to_string(),
+                        load_id,
+                    },
+                ),
+            }
+        });
+    }
+
+    /// 关闭追溯视图，回到工作区（仿浏览模式）。
+    pub(crate) fn close_blame(&mut self) {
+        self.blame.reset();
+        self.main_mode = MainMode::Worktree;
+        self.status = "已退出文件追溯".to_string();
+    }
+
+    /// 编码切换时重新加载当前追溯文件。
+    pub(crate) fn reload_blame_on_encoding_change(&mut self) {
+        if self.main_mode != MainMode::Blame {
+            return;
+        }
+        if let Some(path) = self.blame.path.clone() {
+            self.open_blame_file(path);
+        }
+    }
+
+    /// 右键菜单「查看文件历史」入口：设置历史页路径过滤并切换过去；
+    /// 已在历史页时仅设置过滤器。
+    pub(crate) fn view_file_history(&mut self, path: String) {
+        self.close_popups();
+        let in_history = self.main_mode == MainMode::History;
+        self.set_history_file_filter(Some(path));
+        if !in_history {
+            self.set_main_mode(MainMode::History);
+        }
     }
 
     /// 将鼠标 Y 坐标映射到内容行索引（基于 uniform_list 滚动偏移与行高）。
@@ -9305,8 +9530,28 @@ impl RepositoryView {
             return;
         }
         self.history_scope = scope;
+        // 过滤器是用户意图：切 scope 保留，仅显式清除（chip 的 ×）。
         self.clear_history();
         self.status = format!("提交记录范围已切换为{}", scope.label());
+        self.load_history_page(false);
+    }
+
+    /// 设置/清除历史页的文件路径过滤（None 为清除）。
+    ///
+    /// 仿 `set_history_scope`：设字段 -> 清列表（`clear_history` 不清过滤器）
+    /// -> 全量重载。切换分支、刷新等操作同样保留过滤器，per-tab 生命周期
+    /// 随 tab 自然销毁。
+    pub(crate) fn set_history_file_filter(&mut self, path: Option<String>) {
+        if self.history_file_filter == path {
+            return;
+        }
+        let label = path
+            .as_deref()
+            .map(|path| format!("提交记录已按文件 {path} 过滤"))
+            .unwrap_or_else(|| "已清除文件过滤".to_string());
+        self.history_file_filter = path;
+        self.clear_history();
+        self.status = label;
         self.load_history_page(false);
     }
 
@@ -9355,6 +9600,8 @@ impl RepositoryView {
         let service = self.service_for_tab(tab_id);
         let tx = self.tx.clone();
         let scope = self.history_scope;
+        // 文件路径过滤：非空时分派到 file_history（只返回改动过该文件的提交）
+        let path_filter = self.history_file_filter.clone();
         // 仅分页（append）复用 refs 缓存；全量刷新传 None 重建，
         // 保证切换分支、提交等操作后 HEAD/分支/标签徽章与最新仓库状态一致。
         let refs_cache = if append {
@@ -9382,26 +9629,37 @@ impl RepositoryView {
             let started = Instant::now();
             let result = (|| -> khaslana::Result<UiEvent> {
                 let repo = Repository::open(repo_path)?;
-                let (mut commits, refs_cache) = service.commit_history_with_refs(
-                    &repo,
-                    scope,
-                    offset,
-                    HISTORY_PAGE_SIZE + 1,
-                    refs_cache.as_ref(),
-                )?;
+                let (mut commits, refs_cache) = match path_filter.as_deref() {
+                    Some(path) => service.file_history(
+                        &repo,
+                        scope,
+                        path,
+                        offset,
+                        HISTORY_PAGE_SIZE + 1,
+                        refs_cache.as_ref(),
+                    )?,
+                    None => service.commit_history_with_refs(
+                        &repo,
+                        scope,
+                        offset,
+                        HISTORY_PAGE_SIZE + 1,
+                        refs_cache.as_ref(),
+                    )?,
+                };
                 let has_more = commits.len() > HISTORY_PAGE_SIZE;
                 commits.truncate(HISTORY_PAGE_SIZE);
                 perf_log(
                     "history.commits",
                     started,
                     format!(
-                        "tab={} scope={} append={} offset={} commits={} has_more={}",
+                        "tab={} scope={} append={} offset={} commits={} has_more={} path_filter={:?}",
                         tab_id.0,
                         scope.label(),
                         append,
                         offset,
                         commits.len(),
-                        has_more
+                        has_more,
+                        path_filter
                     ),
                 );
                 Ok(UiEvent::HistoryCommitsLoaded {
@@ -9411,6 +9669,7 @@ impl RepositoryView {
                     append,
                     has_more,
                     scope,
+                    path_filter,
                     load_id,
                     seq,
                 })
@@ -11749,6 +12008,24 @@ impl RepositoryView {
                     },
                     cx,
                 ))
+                .child(context_menu_item(
+                    "查看文件历史",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this| this.view_file_history(path.clone())
+                    },
+                    cx,
+                ))
+                .child(context_menu_item(
+                    "追溯此文件",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this| this.open_blame_file(path.clone())
+                    },
+                    cx,
+                ))
                 .child(menu_separator())
                 .child(context_menu_item(
                     "取消暂存选定文件",
@@ -11812,6 +12089,25 @@ impl RepositoryView {
                     cx,
                 )),
             DiffScope::Unstaged => menu_el
+                .child(context_menu_item(
+                    "查看文件历史",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this| this.view_file_history(path.clone())
+                    },
+                    cx,
+                ))
+                .child(context_menu_item(
+                    "追溯此文件",
+                    true,
+                    {
+                        let path = menu.path.clone();
+                        move |this| this.open_blame_file(path.clone())
+                    },
+                    cx,
+                ))
+                .child(menu_separator())
                 .child(context_menu_item(
                     "暂存选定文件",
                     selected_count > 0 && !self.busy,
@@ -11909,6 +12205,25 @@ impl RepositoryView {
                 {
                     let path = menu.path.clone();
                     move |this, cx| this.open_file_parent_directory(path.clone(), cx)
+                },
+                cx,
+            ))
+            // 「追溯此文件」对 HEAD 版本追溯（v1 不支持对任意提交 blame）
+            .child(context_menu_item(
+                "查看文件历史",
+                true,
+                {
+                    let path = menu.path.clone();
+                    move |this| this.view_file_history(path.clone())
+                },
+                cx,
+            ))
+            .child(context_menu_item(
+                "追溯此文件",
+                true,
+                {
+                    let path = menu.path.clone();
+                    move |this| this.open_blame_file(path.clone())
                 },
                 cx,
             ))
@@ -12184,6 +12499,7 @@ impl RepositoryView {
             EncodingMenuTarget::History => "提交差异编码",
             EncodingMenuTarget::Stash => "贮藏差异编码",
             EncodingMenuTarget::Browse => "浏览编码",
+            EncodingMenuTarget::Blame => "追溯编码",
         };
 
         glass_menu()
@@ -13142,6 +13458,8 @@ impl RepositoryView {
             EncodingMenuTarget::History => self.history_diff.as_deref(),
             EncodingMenuTarget::Stash => self.stash_preview.diff.as_deref(),
             EncodingMenuTarget::Browse => self.browse.diff.as_deref(),
+            // 追溯视图没有 FileDiff；该 target 不经此头部渲染
+            EncodingMenuTarget::Blame => None,
         };
         div()
             .flex_none()
@@ -13210,6 +13528,37 @@ impl RepositoryView {
                                     })),
                             )
                         },
+                    )
+                    // 工作区差异的「追溯」入口：打开该文件的追溯视图
+                    //（规格严格复用「全文/编码」工具按钮；二进制文件不提供）。
+                    .when(
+                        target == EncodingMenuTarget::Worktree
+                            && self.diff.as_ref().is_some_and(|diff| !diff.is_binary),
+                        |this| {
+                            let path = self
+                                .diff
+                                .as_ref()
+                                .map(|diff| diff.path.clone())
+                                .unwrap_or_default();
+                            this.child(
+                                div()
+                                    .id("worktree-diff-blame-button")
+                                    .flex_none()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .bg(rgb(ui_theme::ACCENT))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .cursor_pointer()
+                                    .hover(|hover| hover.bg(rgb(ui_theme::SECONDARY)))
+                                    .child("追溯")
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.open_blame_file(path.clone());
+                                        cx.notify();
+                                    })),
+                            )
+                        },
                     ),
             )
     }
@@ -13230,6 +13579,7 @@ impl RepositoryView {
                 EncodingMenuTarget::History => "history-diff-encoding",
                 EncodingMenuTarget::Stash => "stash-diff-encoding",
                 EncodingMenuTarget::Browse => "browse-encoding",
+                EncodingMenuTarget::Blame => "blame-encoding",
             })
             .relative()
             .flex_none()
@@ -15986,6 +16336,7 @@ impl Render for RepositoryView {
                         }
                         MainMode::Stash => self.render_stash_preview_view(cx).into_any_element(),
                         MainMode::Browse => self.render_browse_view(cx).into_any_element(),
+                        MainMode::Blame => self.render_blame_view(cx).into_any_element(),
                     }),
             )
             .child(self.render_status())

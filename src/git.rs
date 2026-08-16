@@ -28,6 +28,7 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
+mod blame;
 mod browse;
 mod conflicts;
 mod merge;

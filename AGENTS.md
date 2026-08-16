@@ -12,6 +12,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 暂存、取消暂存、丢弃变更、提交、修补提交（amend）、拣选提交（cherry-pick）
 - fetch、pull、push、merge、checkout；普通合并采用 IDEA 风格闭环，冲突后可完成或中止
 - 提交历史、提交文件列表、历史 diff、提交图
+- 文件历史（历史页按路径过滤，只显示改动过该文件的提交）与文件追溯（blame，UI 术语统一为「追溯」：逐行归属标注的独立视图，支持工作区未提交行标注与编码切换）
 - commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
 - 网络代理设置，支持禁用、Git 配置/环境变量代理和自定义代理
@@ -50,12 +51,14 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/assets.rs`：应用自有静态资源入口，将 `assets/icons/` 与 Yororen 内置资源合并注册给 GPUI。
 - `src/types.rs`：领域类型和错误类型的汇总入口；较独立的领域类型放到 `src/types/` 子目录，例如冲突解决类型在 `src/types/conflicts.rs`。
 - `src/types/browse.rs`：分支浏览和分支比较模式领域类型，包括 `BrowseTarget`、`BrowseListMode`、`BrowseEntry`、`BrowseEntryKind`、`BrowseCompareFile` 和 `BrowseFileContent`。
+- `src/types/blame.rs`：文件追溯领域类型，包括 `BlameCommitInfo`（hunk 归属提交的 owned 展示信息）、`BlameHunkInfo`（连续同源行段，`commit: None` 表示工作区未提交行）、`BlameView`（路径 + 解码行 + hunk + `line_hunk` 行索引映射 + 实际使用的编码）。
 - `src/git.rs`：核心 Git 服务层的汇总入口；大型或独立 Git 能力放到 `src/git/` 子目录，例如冲突解决服务在 `src/git/conflicts.rs`，贮藏服务在 `src/git/stash.rs`，变基服务在 `src/git/rebase.rs`。
 - `src/git/submodule.rs`：子模块 Git 服务，包括状态读取、同步父仓库记录版本、快进到子模块远端最新以及递归子模块更新。
 - `src/git/rebase.rs`：变基 Git 服务，包括 `rebase_branch`、`rebase_continue`、`rebase_skip`、`rebase_abort` 和 `pull_branch_rebase`。
 - `src/git/worktree_compat.rs`：工作区写入兼容层。Windows 下为 checkout、merge/pull、hard reset、revert、rebase、stash 和子模块更新统一附加 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`，避免编辑器占用空目录导致 Git 操作失败；其他平台保持 git2 默认行为。
 - `src/git/partial_stage.rs`：按块/按行部分暂存服务（双向），含部分 patch 构造纯函数（未选中 +/- 行降级/丢弃、hunk 头重算、反向交换）与守卫、选择类型（`SelectedDiffLine`/`LineSelection`）。hunk 头重算指 post 侧 `new_start` 必须按「实际输出补丁的后镜像」坐标重算（= preimage 首行在目标初始内容中的行号 + 先前已输出块的累计净行数变化）：libgit2 的 apply 以 `new_start` 在被先前块逐步改写过的目标内容中精确定位且无偏移搜索，直接透传源 diff 原始 `new_start` 时，一旦丢弃或按行改写了前面的块（净行数变化），后续块会定位错位并报 `ApplyFail`（仅前序块无净行数变化时碰巧不错位）。
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
+- `src/git/blame.rs`：文件历史与文件追溯 Git 服务。`file_history` 按路径过滤提交（libgit2 revwalk 不支持 pathspec，全量迭代 + 逐提交 first-parent tree-diff 单 pathspec 判断，分页作用于过滤后 OID 流；单 pathspec tree-diff 有剪枝，超大仓库后续再下沉缓存）；`blame_file` 基于 HEAD 计算 blame（守卫：HEAD 无该路径报中文错误、blob 超 `FULL_FILE_MAX_BYTES` 报过大、8KB NUL 嗅探报二进制），工作区文件存在且非二进制时经 `blame_buffer` 纳入未提交改动（差异行零 OID → `commit: None`），hunk 的作者/时间/摘要直接取 libgit2 填充的 final 签名与 summary，不逐提交查库。v1 不追踪 rename/copy，也不支持对任意提交版本 blame（`BlameOptions::newest_commit` 留作后续）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
 - `src/oauth.rs`：OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。GitHub 走设备流（设备码请求、令牌轮询含 `authorization_pending`/`slow_down`/取消/过期、用令牌换取登录名；轮询 Agent 关闭 `http_status_as_error`，因 GitHub 待定/过期返回 400 且详情在响应体里）；Gitee 走授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调服务器用 `std::net` 手写、循环读齐请求头、校验 Host 为本机回调地址、state 用 OS CSPRNG 128 位随机 → 收 code → POST 给 broker 换 token → 取登录名，登录名请求的 token 走 `Authorization` 头而非 URL query）。纯同步 `ureq 3`，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。客户端不含 Gitee `client_secret`（公开分发会泄露），token 交换由部署在边缘平台的 broker 代办（见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`）。
@@ -80,6 +83,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
 - `src/browse_compare_view.rs`：分支比较模式左侧差异文件树 UI，包括把扁平差异文件构造为目录嵌套文件树的 `flatten_compare_files`、默认全展开的 `all_compare_dirs`、文件名级重命名展示、差异文件状态徽标和列表空状态；虚拟化列表行数取展平可见行数 `compare_visible_row_count`（目录节点 + 文件叶子），不能用差异文件数，否则深层目录与文件叶子会因超出行数而不渲染。
+- `src/blame_view.rs`：文件追溯视图 UI 模块（独立 `MainMode::Blame`，头部「关闭」返回工作区，无顶栏药丸）：三列布局（注释栏 | 行号 | 内容，列间细分割线，行号列 48px 右对齐 + 右缘分割线 + 内边距与内容拉开距离）；注释栏为 IDE 风格分组（hunk 首行「短 oid + 作者 + 月-日 + 摘要」、连续同块行留空、块边界细分割线）；未提交行整行 `COLOR_WARNING` 打底 + 内容文字 `COLOR_WARNING_FOREGROUND` + 「未提交」徽标，与已提交行明显区分。`uniform_list` 虚拟渲染（行高 18px、横向 Unconstrained + 最宽行测量缓存，模式与 `BrowseState::widest_line_cache` 一致），支持双向滚动条与编码切换重载。
 - `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像（`author_avatar`）、仓库头像（`repo_avatar`/`repo_initials`，圆角方形首字母缩写色块）等辅助渲染。
 - `src/tests/`：测试代码目录，存放所有从源文件通过 `#[path]` 属性外移的单元测试模块。目录结构映射源文件结构，例如 `src/tests/git/browse.rs` 对应 `src/git/browse.rs` 的测试、`src/tests/ai/client.rs` 对应 `src/ai/client.rs` 的测试。外移的测试模块通过 `use super::*` 仍可访问源文件的私有项。
 - `src/git/test_support.rs`：Git 测试共享辅助模块，提供 `service()`、`init_repo()`、`configure_user()`、`write_file()`、`write_bytes()`、`assert_file_text()`、`commit_all()`、`path_url()` 等公共 fixture 函数，供 `git`、`workflow` 等模块的测试复用，消除各 `mod tests` 中的重复定义。
@@ -277,6 +281,8 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 查看指定提交文件 diff
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
 - 右键提交可复制 SHA、reset、revert、撤销合并提交、拣选提交到当前分支（合并提交暂禁用）、在此提交上创建标签等
+- 文件历史（路径过滤）：工作区变更（已暂存/未暂存两分支）与历史页提交文件右键「查看文件历史」，只显示改动过该文件的提交；过滤状态 `RepoTabState.history_file_filter`，`clear_history` 不清过滤器（用户意图，切 scope/切分支/刷新均保留，仅显式点标题栏过滤 chip 的 × 清除，per-tab 生命周期随 tab 销毁）；`HistoryCommitsLoaded` 携带 `path_filter`，应用守卫扩为 scope + path_filter 双比较（`RepoTabState::history_commits_event_matches`），防切换过滤后旧请求覆盖新数据；过滤模式下隐藏提交图形列与列宽分割条（过滤后中间提交缺失，泳道线会断裂）、标题栏显示「文件：<basename>」chip（hover 完整路径）；`HistoryFilesLoaded` 自动选中首个文件时若 filter 激活且列表含该路径则优先选它（diff 立即可见）
+- 文件追溯（blame，UI 术语统一为「追溯」）：工作区变更两分支右键、历史页提交文件右键「追溯此文件」与工作区 diff 标题栏「追溯」按钮（规格复用「全文/编码」工具按钮，仅工作区且非二进制显示）进入独立 `MainMode::Blame` 视图；基于 HEAD + 工作区未提交改动（历史页入口对 HEAD 版本追溯），三列布局（注释栏/行号/内容，列间分割线），IDE 风格分组注释栏，未提交行整行警告色打底 + 「未提交」徽标与已提交行区分，支持双向滚动与编码切换重载；检出分支/标签时因 HEAD 变化自动关闭回工作区
 
 ### 5.5 分支浏览
 
@@ -376,6 +382,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - `src/tests/credentials.rs`：凭据匹配、Keyring/内存存储逻辑、URL 规范化、记录排序、兼容性判断等。
 - `src/tests/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
 - `src/tests/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
+- `src/tests/git/blame.rs`：文件历史路径过滤（只返回触及该文件的提交、分页基于过滤后流、CurrentBranch/AllRefs 两 scope、未触及路径空结果）与文件追溯（行号内容对齐、多 hunk 分组、工作区改动行 `commit: None`、HEAD 无路径与二进制守卫）的仓库级单测。
 - 普通合并测试覆盖快进、无冲突结果暂存、显式完成后的双父提交、冲突状态恢复、冲突后完成、确认中止、脏工作区拒绝和重新打开仓库后继续合并。
 - `src/tests/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
 
@@ -386,7 +393,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 ## 8. 编码和设计约定
 
 - 代码修改要有中文注释，完成后应当检查`AGENTS.md`内容是否需要调整。
-- 用户可见文案保持中文。
+- 用户可见文案保持中文；blame 功能的 UI 术语统一用「追溯」，不直接暴露英文 blame。
 - Git 业务能力优先放在 `GitService`。
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。
@@ -480,22 +487,22 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - UI 可先在 `RepoTabState.snapshot.conflicts` 基础上做最小闭环。
 - 测试重点放在 merge/revert 产生冲突、标记解决后的状态变化。
 
-### P1：文件历史和 blame
+### P1：文件历史和 blame（已完成）
 
 理由：当前历史页已经有 commit graph、commit files 和 commit file diff，继续扩展到“选中文件的历史”非常顺手，而且是 Git 客户端高频需求。
 
-建议范围：
+已完成范围（2026-08）：
 
-- 在工作区变更文件和历史文件右键菜单增加“查看文件历史”。
-- 历史页增加文件路径过滤模式。
-- 显示某文件相关提交列表和该文件在每次提交中的 diff。
-- 后续再加 blame 视图。
+- 工作区变更文件（已暂存/未暂存）和历史文件右键菜单「查看文件历史」。
+- 历史页文件路径过滤模式（`RepoTabState.history_file_filter`，`clear_history` 不清过滤器；过滤模式隐藏提交图形列；标题栏过滤 chip 可清除，hover 显示完整路径）。
+- 显示某文件相关提交列表和该文件在每次提交中的 diff（复用现有文件列表 + 差异视图；`HistoryFilesLoaded` 自动优先选中被过滤路径）。
+- blame 视图（UI 术语「追溯」）：独立 `MainMode::Blame`，基于 HEAD + 工作区未提交行（`blame_buffer`），IDE 风格分组注释栏 + 虚拟列表 + 编码切换；入口为工作区右键、历史页提交文件右键与工作区 diff 标题栏「追溯」按钮。
 
-实现提示：
+实现说明：
 
-- 在 `GitService` 增加按 path 过滤的 revwalk/diff 查询。
-- UI 可复用 `HistoryScope` 思路扩展为 `HistoryFilter`。
-- 注意 rename 跟踪可以后续迭代，第一版先做当前路径历史。
+- `GitService::file_history`（`src/git/blame.rs`）按路径过滤：revwalk 不支持 pathspec，全量迭代 + 逐提交 first-parent tree-diff 单 pathspec 判断，分页作用于过滤后 OID 流。
+- `GitService::blame_file`：HEAD blob 守卫（未提交报错/过大/二进制）+ `blame_buffer` 纳入未提交改动；hunk 作者/时间/摘要直接取 libgit2 填充的 final 签名与 summary。
+- rename/copy 追踪（`--follow` / -M -C）与对任意提交版本 blame（`BlameOptions::newest_commit`）留作后续迭代。
 
 ### P2：提交历史搜索和过滤
 

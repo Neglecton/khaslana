@@ -1388,3 +1388,100 @@ fn dedicated_fields_registry_has_no_duplicates_and_covers_tag_inputs() {
     assert!(ids.contains(&FieldId::TagName), "TagName 未注册");
     assert!(ids.contains(&FieldId::TagMessage), "TagMessage 未注册");
 }
+
+// ===== 文件历史过滤（history_file_filter）=====
+
+fn filter_test_commit(oid: &str) -> CommitInfo {
+    CommitInfo {
+        oid: oid.to_string(),
+        short_oid: oid.to_string(),
+        summary: oid.to_string(),
+        message: oid.to_string(),
+        author: "测试作者".to_string(),
+        author_email: None,
+        committer: "测试作者".to_string(),
+        committer_email: None,
+        time: 0,
+        parents: Vec::new(),
+        refs: Vec::new(),
+    }
+}
+
+#[test]
+fn history_file_filter_survives_clear_history() {
+    // 过滤器是用户意图：clear_history（切 scope/刷新共用路径）清列表但保留过滤
+    let mut tab = RepoTabState::new(RepoTabId(1), None);
+    tab.history_file_filter = Some("src/lib.rs".into());
+    tab.history_commits = vec![filter_test_commit("a"), filter_test_commit("b")];
+    tab.history_has_more = true;
+    tab.history_selected_commit = Some("a".into());
+
+    tab.clear_history();
+
+    assert_eq!(tab.history_file_filter.as_deref(), Some("src/lib.rs"));
+    assert!(tab.history_commits.is_empty());
+    assert!(!tab.history_has_more);
+    assert!(tab.history_selected_commit.is_none());
+}
+
+#[test]
+fn history_commits_event_guard_requires_matching_path_filter() {
+    // scope + path_filter 双比较：切换过滤后，旧一代请求晚到的结果被丢弃
+    let mut tab = RepoTabState::new(RepoTabId(1), None);
+    tab.repository_load_id = 3;
+    tab.history_scope = HistoryScope::CurrentBranch;
+    tab.history_file_filter = Some("src/lib.rs".into());
+
+    // 全部匹配
+    assert!(tab.history_commits_event_matches(3, HistoryScope::CurrentBranch, Some("src/lib.rs")));
+
+    // 过滤已被清除但旧请求仍带过滤器
+    tab.history_file_filter = None;
+    assert!(!tab.history_commits_event_matches(3, HistoryScope::CurrentBranch, Some("src/lib.rs")));
+
+    // 新过滤器与旧请求路径不同
+    tab.history_file_filter = Some("other.rs".into());
+    assert!(!tab.history_commits_event_matches(3, HistoryScope::CurrentBranch, Some("src/lib.rs")));
+
+    // load_id 或 scope 变化同样丢弃
+    assert!(!tab.history_commits_event_matches(4, HistoryScope::CurrentBranch, Some("other.rs")));
+    assert!(!tab.history_commits_event_matches(3, HistoryScope::AllRefs, Some("other.rs")));
+
+    // 无过滤的普通请求在无过滤状态下正常落地
+    tab.history_file_filter = None;
+    assert!(tab.history_commits_event_matches(3, HistoryScope::CurrentBranch, None));
+}
+
+#[test]
+fn preferred_history_file_favors_filter_path_when_present() {
+    let files = vec![
+        CommitFileChange {
+            path: "src/other.rs".to_string(),
+            old_path: None,
+            status: ChangeState::Modified,
+        },
+        CommitFileChange {
+            path: "src/lib.rs".to_string(),
+            old_path: None,
+            status: ChangeState::Modified,
+        },
+    ];
+
+    // 过滤路径在列表中：优先选中，提交差异立即可见
+    assert_eq!(
+        preferred_history_file(Some("src/lib.rs"), &files),
+        Some("src/lib.rs".to_string())
+    );
+    // 过滤路径不在列表中：回退到首个文件
+    assert_eq!(
+        preferred_history_file(Some("missing.rs"), &files),
+        Some("src/other.rs".to_string())
+    );
+    // 无过滤：首个文件
+    assert_eq!(
+        preferred_history_file(None, &files),
+        Some("src/other.rs".to_string())
+    );
+    // 空列表：None（调用方显示“该提交没有文件变更”）
+    assert_eq!(preferred_history_file(Some("src/lib.rs"), &[]), None);
+}

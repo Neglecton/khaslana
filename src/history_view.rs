@@ -100,10 +100,10 @@ impl RepositoryView {
         let handle = self.uniform_scroll_handle("commit-history-list");
         let list_handle = handle.clone();
         // 拖拽提交图列宽时挂载窗口级鼠标事件承载层；无命中区，不拦截列表点击。
-        let graph_resize_overlay = self
-            .resize_state(ResizeTarget::HistoryGraph)
-            .is_some()
-            .then(|| self.history_graph_resize_overlay(cx).into_any_element());
+        // 过滤模式下图形列隐藏，无需承载层。
+        let graph_resize_overlay = (self.resize_state(ResizeTarget::HistoryGraph).is_some()
+            && self.history_file_filter.is_none())
+        .then(|| self.history_graph_resize_overlay(cx).into_any_element());
         let content = div()
             .id("commit-history-list")
             .relative()
@@ -204,6 +204,12 @@ impl RepositoryView {
                             |this| this.set_history_scope(khaslana::HistoryScope::AllRefs),
                             cx,
                         ))
+                        // 文件路径过滤 chip：点击清除过滤，悬浮提示完整路径
+                        .children(
+                            self.history_file_filter
+                                .as_deref()
+                                .map(|path| history_file_filter_chip(path, cx)),
+                        )
                         .into_any_element(),
                 ),
             ))
@@ -429,8 +435,12 @@ impl RepositoryView {
                     cx.notify();
                 }),
             )
-            .child(render_commit_graph_cell(graph, self.history_graph_width))
-            .child(self.render_history_graph_splitter(cx))
+            // 过滤模式下隐藏提交图形列（含列宽分割条）：过滤后中间提交缺失，
+            // 泳道线会断裂，隐藏最干净。
+            .when(self.history_file_filter.is_none(), |this| {
+                this.child(render_commit_graph_cell(graph, self.history_graph_width))
+                    .child(self.render_history_graph_splitter(cx))
+            })
             .child(
                 div()
                     .flex_none()
@@ -1104,6 +1114,48 @@ fn paint_graph_circle(
     builder.close();
     if let Ok(path) = builder.build() {
         window.paint_path(path, rgb(color));
+    }
+}
+
+/// 历史页文件路径过滤 chip：显示「文件：<basename>」+ ×，点击清除过滤；
+/// 样式复用 history_scope_button（选中态配色），悬浮提示完整路径。
+fn history_file_filter_chip(path: &str, cx: &mut Context<RepositoryView>) -> impl IntoElement {
+    let label = format!("文件：{}", file_filter_label(path));
+    let tooltip = path.to_string();
+    div()
+        .id("history-file-filter-chip")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w(px(220.0))
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(ui_theme::ACCENT))
+        .bg(rgb(ui_theme::ACCENT))
+        .text_size(px(11.0))
+        .text_color(rgb(ui_theme::PRIMARY))
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.set_history_file_filter(None);
+            cx.notify();
+        }))
+        .tooltip(move |_window, cx| tooltip_text(tooltip.clone(), cx))
+        .child(div().min_w(px(0.0)).truncate().child(label))
+        .child(div().flex_none().child("×"))
+}
+
+/// 过滤 chip 的短标签：优先 basename，过长时截断加省略号。
+fn file_filter_label(path: &str) -> String {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if basename.chars().count() > 20 {
+        let truncated: String = basename.chars().take(18).collect();
+        format!("{truncated}…")
+    } else {
+        basename.to_string()
     }
 }
 

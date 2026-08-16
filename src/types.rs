@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod blame;
 mod browse;
 mod conflicts;
+
+pub use blame::{BlameCommitInfo, BlameHunkInfo, BlameView};
 
 pub use conflicts::{
     ConflictBlock, ConflictBlockResolution, ConflictBlockStatus, ConflictDraftStatus,

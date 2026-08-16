@@ -29,6 +29,8 @@ impl RepositoryView {
                 EncodingMenuTarget::History => "history-full-file-toggle",
                 EncodingMenuTarget::Stash => "stash-full-file-toggle",
                 EncodingMenuTarget::Browse => "browse-full-file-toggle",
+                // 追溯视图不经 diff_section_header 渲染该按钮（视图本身即整份文件）
+                EncodingMenuTarget::Blame => "blame-full-file-toggle",
             })
             .flex_none()
             .px(px(8.0))
