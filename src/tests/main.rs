@@ -1372,3 +1372,19 @@ fn diff_line_selection_shift_click_selects_range() {
     assert_eq!(selection.iter().copied().collect::<Vec<_>>(), [2, 5]);
     assert_eq!(anchor, Some(5));
 }
+
+#[test]
+fn dedicated_fields_registry_has_no_duplicates_and_covers_tag_inputs() {
+    let ids: Vec<FieldId> = DEDICATED_FIELDS.iter().map(|(id, _)| *id).collect();
+    // 无重复注册：find 永远命中第一条，重复会让后注册的字段收不到输入
+    for (index, id) in ids.iter().enumerate() {
+        assert!(
+            !ids[..index].contains(id),
+            "DEDICATED_FIELDS 存在重复注册：{id:?}"
+        );
+    }
+    // 回归：创建标签弹窗的名称与附注输入框必须注册到聚焦字段清单，
+    // 漏注册时字段可渲染但 EntityInputHandler 静默丢弃全部输入
+    assert!(ids.contains(&FieldId::TagName), "TagName 未注册");
+    assert!(ids.contains(&FieldId::TagMessage), "TagMessage 未注册");
+}

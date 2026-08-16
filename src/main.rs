@@ -371,6 +371,95 @@ enum FieldId {
     WorkflowInput(usize),
 }
 
+/// 专用（非 WorkflowInput 动态索引）文本字段的注册表：FieldId → 状态访问器。
+/// `field()` 与 `focused_field()` 共用同一份清单，避免两份手写列表漂移：
+/// 漏注册的字段能正常渲染，但 `focused_field` 找不到聚焦字段会让
+/// `EntityInputHandler` 静默丢弃全部键盘/粘贴/IME 输入（创建标签弹窗的
+/// 标签名称与附注输入框曾因此完全无法输入）。新增 FieldId 时除补
+/// `field_mut()` 的穷举 match 外，必须同步注册到这里。
+type DedicatedFieldAccessor = fn(&RepositoryView) -> &TextFieldState;
+
+const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
+    (FieldId::CloneUrl, |view: &RepositoryView| &view.clone_url),
+    (FieldId::ClonePath, |view: &RepositoryView| &view.clone_path),
+    (FieldId::BranchName, |view: &RepositoryView| {
+        &view.branch_name
+    }),
+    (FieldId::BranchRename, |view: &RepositoryView| {
+        &view.branch_rename
+    }),
+    (FieldId::RemoteName, |view: &RepositoryView| {
+        &view.remote_name
+    }),
+    (FieldId::RemoteUrl, |view: &RepositoryView| &view.remote_url),
+    (FieldId::CommitMessage, |view: &RepositoryView| {
+        &view.commit_message
+    }),
+    (FieldId::StashMessage, |view: &RepositoryView| {
+        &view.stash_message
+    }),
+    (FieldId::TagName, |view: &RepositoryView| &view.tag_name),
+    (FieldId::TagMessage, |view: &RepositoryView| {
+        &view.tag_message
+    }),
+    (FieldId::CredentialUsername, |view: &RepositoryView| {
+        &view.credential_username
+    }),
+    (FieldId::CredentialSecret, |view: &RepositoryView| {
+        &view.credential_secret
+    }),
+    (FieldId::CredentialKeyPath, |view: &RepositoryView| {
+        &view.credential_key_path
+    }),
+    (FieldId::CredentialPassphrase, |view: &RepositoryView| {
+        &view.credential_passphrase
+    }),
+    (FieldId::CredentialRemoteUrl, |view: &RepositoryView| {
+        &view.credential_remote_url
+    }),
+    (FieldId::CredentialDisplayName, |view: &RepositoryView| {
+        &view.credential_display_name
+    }),
+    (FieldId::ConflictEditor, |view: &RepositoryView| {
+        &view.conflict_editor
+    }),
+    (FieldId::RemoteBranchName, |view: &RepositoryView| {
+        &view.remote_branch_name
+    }),
+    (FieldId::RemoteBranchSearch, |view: &RepositoryView| {
+        &view.remote_branch_search
+    }),
+    (FieldId::RepoSwitcherSearch, |view: &RepositoryView| {
+        &view.repo_switcher_search
+    }),
+    (
+        FieldId::SidebarLocalBranchSearch,
+        |view: &RepositoryView| &view.sidebar_local_branch_search,
+    ),
+    (
+        FieldId::SidebarRemoteBranchSearch,
+        |view: &RepositoryView| &view.sidebar_remote_branch_search,
+    ),
+    (FieldId::ProxyHttpUrl, |view: &RepositoryView| {
+        &view.proxy_http_url
+    }),
+    (FieldId::ProxyHttpsUrl, |view: &RepositoryView| {
+        &view.proxy_https_url
+    }),
+    (FieldId::ProxySocks5Url, |view: &RepositoryView| {
+        &view.proxy_socks5_url
+    }),
+    (FieldId::AiBaseUrl, |view: &RepositoryView| {
+        &view.ai_base_url
+    }),
+    (FieldId::AiApiKey, |view: &RepositoryView| &view.ai_api_key),
+    (FieldId::AiModel, |view: &RepositoryView| &view.ai_model),
+    (
+        FieldId::ExternalMergeIntellijPath,
+        |view: &RepositoryView| &view.external_merge_intellij_path,
+    ),
+];
+
 #[derive(Clone, Debug)]
 struct PendingCredential {
     tab_id: Option<RepoTabId>,
@@ -5222,84 +5311,21 @@ impl RepositoryView {
     }
 
     fn focused_field(&self, window: &Window, _cx: &App) -> Option<FieldId> {
-        [
-            (FieldId::CloneUrl, &self.clone_url),
-            (FieldId::ClonePath, &self.clone_path),
-            (FieldId::BranchName, &self.branch_name),
-            (FieldId::BranchRename, &self.branch_rename),
-            (FieldId::RemoteName, &self.remote_name),
-            (FieldId::RemoteUrl, &self.remote_url),
-            (FieldId::CommitMessage, &self.commit_message),
-            (FieldId::StashMessage, &self.stash_message),
-            (FieldId::CredentialUsername, &self.credential_username),
-            (FieldId::CredentialSecret, &self.credential_secret),
-            (FieldId::CredentialKeyPath, &self.credential_key_path),
-            (FieldId::CredentialPassphrase, &self.credential_passphrase),
-            (FieldId::CredentialRemoteUrl, &self.credential_remote_url),
-            (
-                FieldId::CredentialDisplayName,
-                &self.credential_display_name,
-            ),
-            (FieldId::ConflictEditor, &self.conflict_editor),
-            (FieldId::RemoteBranchName, &self.remote_branch_name),
-            (FieldId::RemoteBranchSearch, &self.remote_branch_search),
-            (FieldId::RepoSwitcherSearch, &self.repo_switcher_search),
-            (
-                FieldId::SidebarLocalBranchSearch,
-                &self.sidebar_local_branch_search,
-            ),
-            (
-                FieldId::SidebarRemoteBranchSearch,
-                &self.sidebar_remote_branch_search,
-            ),
-            (FieldId::ProxyHttpUrl, &self.proxy_http_url),
-            (FieldId::ProxyHttpsUrl, &self.proxy_https_url),
-            (FieldId::ProxySocks5Url, &self.proxy_socks5_url),
-            (FieldId::AiBaseUrl, &self.ai_base_url),
-            (FieldId::AiApiKey, &self.ai_api_key),
-            (FieldId::AiModel, &self.ai_model),
-            (
-                FieldId::ExternalMergeIntellijPath,
-                &self.external_merge_intellij_path,
-            ),
-        ]
-        .into_iter()
-        .find_map(|(id, field)| field.focus.is_focused(window).then_some(id))
-        .or_else(|| self.focused_workflow_input(window))
+        DEDICATED_FIELDS
+            .iter()
+            .find_map(|(id, access)| access(self).focus.is_focused(window).then_some(*id))
+            .or_else(|| self.focused_workflow_input(window))
     }
 
     fn field(&self, id: FieldId) -> &TextFieldState {
         match id {
-            FieldId::CloneUrl => &self.clone_url,
-            FieldId::ClonePath => &self.clone_path,
-            FieldId::BranchName => &self.branch_name,
-            FieldId::BranchRename => &self.branch_rename,
-            FieldId::RemoteName => &self.remote_name,
-            FieldId::RemoteUrl => &self.remote_url,
-            FieldId::CommitMessage => &self.commit_message,
-            FieldId::StashMessage => &self.stash_message,
-            FieldId::TagName => &self.tag_name,
-            FieldId::TagMessage => &self.tag_message,
-            FieldId::CredentialUsername => &self.credential_username,
-            FieldId::CredentialSecret => &self.credential_secret,
-            FieldId::CredentialKeyPath => &self.credential_key_path,
-            FieldId::CredentialPassphrase => &self.credential_passphrase,
-            FieldId::CredentialRemoteUrl => &self.credential_remote_url,
-            FieldId::CredentialDisplayName => &self.credential_display_name,
-            FieldId::ConflictEditor => &self.conflict_editor,
-            FieldId::RemoteBranchName => &self.remote_branch_name,
-            FieldId::RemoteBranchSearch => &self.remote_branch_search,
-            FieldId::RepoSwitcherSearch => &self.repo_switcher_search,
-            FieldId::SidebarLocalBranchSearch => &self.sidebar_local_branch_search,
-            FieldId::SidebarRemoteBranchSearch => &self.sidebar_remote_branch_search,
-            FieldId::ProxyHttpUrl => &self.proxy_http_url,
-            FieldId::ProxyHttpsUrl => &self.proxy_https_url,
-            FieldId::ProxySocks5Url => &self.proxy_socks5_url,
-            FieldId::AiBaseUrl => &self.ai_base_url,
-            FieldId::AiApiKey => &self.ai_api_key,
-            FieldId::AiModel => &self.ai_model,
-            FieldId::ExternalMergeIntellijPath => &self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field(index),
+            // 经 DEDICATED_FIELDS 单一注册表查找：与 focused_field 共用一份
+            // 清单，漏注册会在此处 panic（首次渲染即暴露）而非静默丢输入。
+            _ => DEDICATED_FIELDS
+                .iter()
+                .find_map(|(field_id, access)| (*field_id == id).then(|| access(self)))
+                .expect("FieldId 未注册到 DEDICATED_FIELDS"),
         }
     }
 
