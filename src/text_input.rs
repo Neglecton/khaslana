@@ -15,7 +15,40 @@ use crate::{FieldId, RepositoryView, multiline_scroll_handle_id};
 pub(crate) const MULTILINE_LINE_HEIGHT: f32 = 18.0;
 /// 多行输入最小可视行数：同时是提交信息框的固定可视高度
 ///（内容超过该行数后滚动而非继续撑高）。
-pub(crate) const MULTILINE_MIN_LINES: usize = 4;
+pub(crate) const MULTILINE_MIN_LINES: usize = 5;
+
+/// 多行输入光标跟随滚动的决策（纯函数，便于单测）。
+///
+/// - 跟随键（光标字节, 内容长度）与上次相同 → 视为用户手动滚动，不回弹
+///   也不刷新键（键变化才代表光标移动或内容改变）；
+/// - 键变化但光标行仍在可视区域内 → 不滚动；
+/// - 键变化且光标行越出可视区域 → 滚动到恰好可见（向下滚动底对齐光标行、
+///   向上滚动顶对齐）。
+///
+/// 返回 (新滚动顶部的内容坐标 px（None 表示本次不滚动）, 新跟随键)。
+/// 调用方无论是否滚动都应写入新跟随键：光标在可视区内移动后用户再手动
+/// 滚走，残留旧键会让下一次 prepaint 误判为光标移动而回弹。
+pub(crate) fn multiline_caret_follow_decision(
+    last_key: Option<(usize, usize)>,
+    key: (usize, usize),
+    caret_line: usize,
+    container_height: f32,
+    visible_top: f32,
+) -> (Option<f32>, Option<(usize, usize)>) {
+    if last_key == Some(key) {
+        return (None, last_key);
+    }
+    let caret_top = MULTILINE_LINE_HEIGHT * caret_line as f32;
+    let caret_bottom = caret_top + MULTILINE_LINE_HEIGHT;
+    let scroll_top = if caret_bottom > visible_top + container_height {
+        Some(caret_bottom - container_height)
+    } else if caret_top < visible_top {
+        Some(caret_top)
+    } else {
+        None
+    };
+    (scroll_top, Some(key))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct TextLineLayout {
@@ -38,6 +71,10 @@ pub(crate) struct TextEditState {
     pub(crate) is_selecting: bool,
     /// 上一次 prepaint 计算出的视觉行数（含自动换行），供下次 request_layout 复用。
     pub(crate) last_wrapped_line_count: usize,
+    /// 上一次光标跟随滚动对应的（光标字节，内容长度）。
+    /// 仅当键变化（光标移动或内容改变）时才重新跟随滚动；
+    /// 键不变说明是用户手动滚动，不把视口拉回光标处。
+    pub(crate) last_caret_follow: Option<(usize, usize)>,
 }
 
 impl TextEditState {
@@ -53,6 +90,7 @@ impl TextEditState {
             last_multiline_layout: Vec::new(),
             is_selecting: false,
             last_wrapped_line_count: MULTILINE_MIN_LINES,
+            last_caret_follow: None,
         }
     }
 
@@ -69,6 +107,7 @@ impl TextEditState {
             last_multiline_layout: Vec::new(),
             is_selecting: false,
             last_wrapped_line_count: MULTILINE_MIN_LINES,
+            last_caret_follow: None,
         }
     }
 
@@ -973,8 +1012,9 @@ impl Element for MultiLineInputElement {
             }
         }
 
-        // 光标跟随滚动：光标超出可视区域时把滚动容器调整到光标可见
-        //（仅越界时移动，不打断用户手动滚动；不要求聚焦，AI 流式回填也能跟随）。
+        // 光标跟随滚动：仅当光标移动或内容改变（跟随键变化）且光标越出
+        // 可视区域时才滚动到光标可见；键不变视为用户手动滚动，不回弹
+        // （不要求聚焦，AI 流式回填把 caret 推到末尾时同样跟随）。
         if let Some(caret_line) = caret_visual_line {
             let handle = self
                 .entity
@@ -982,19 +1022,22 @@ impl Element for MultiLineInputElement {
                 .scroll_handle(multiline_scroll_handle_id(self.field_id));
             let container_height = f32::from(handle.bounds().size.height);
             if container_height > 1.0 {
-                let offset = handle.offset();
-                let visible_top = -f32::from(offset.y);
-                let caret_top = MULTILINE_LINE_HEIGHT * caret_line as f32;
-                let caret_bottom = caret_top + MULTILINE_LINE_HEIGHT;
-                let new_top = if caret_bottom > visible_top + container_height {
-                    Some(caret_bottom - container_height)
-                } else if caret_top < visible_top {
-                    Some(caret_top)
-                } else {
-                    None
-                };
-                if let Some(new_top) = new_top {
-                    handle.set_offset(point(offset.x, px(-new_top)));
+                let follow_key = (field.caret, value.len());
+                let (scroll_top, new_key) = multiline_caret_follow_decision(
+                    field.last_caret_follow,
+                    follow_key,
+                    caret_line,
+                    container_height,
+                    -f32::from(handle.offset().y),
+                );
+                if let Some(top) = scroll_top {
+                    let offset = handle.offset();
+                    handle.set_offset(point(offset.x, px(-top)));
+                }
+                if new_key != field.last_caret_follow {
+                    self.entity.update(cx, |view, _| {
+                        view.field_mut(self.field_id).last_caret_follow = new_key;
+                    });
                 }
             }
         }

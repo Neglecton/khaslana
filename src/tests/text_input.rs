@@ -1,4 +1,4 @@
-use super::TextEditState;
+use super::{MULTILINE_LINE_HEIGHT, TextEditState, multiline_caret_follow_decision};
 
 #[test]
 fn text_field_edits_at_utf8_char_boundaries() {
@@ -138,4 +138,44 @@ fn text_field_secret_utf16_text_is_masked() {
     let field = TextEditState::for_test("密码12", true);
 
     assert_eq!(field.text_for_utf16_range(&(0..4)), "****");
+}
+
+#[test]
+fn multiline_caret_follow_scrolls_only_when_caret_moves_or_content_changes() {
+    // 可视高度按 5 行（MULTILINE_MIN_LINES）计算，共 6 行内容。
+    let container = MULTILINE_LINE_HEIGHT * 5.0;
+    // 光标在第 6 行（索引 5），视口显示 1..6 行：光标可见，不滚动但刷新键
+    let visible_top = MULTILINE_LINE_HEIGHT;
+    let key = (10, 20);
+    let (scroll, new_key) =
+        multiline_caret_follow_decision(Some((9, 20)), key, 5, container, visible_top);
+    assert_eq!(scroll, None);
+    assert_eq!(new_key, Some(key));
+
+    // 同一帧后用户手动上滚到 0..5 行，光标（第 6 行）出界：键未变 → 不回弹
+    let (scroll, new_key) = multiline_caret_follow_decision(Some(key), key, 5, container, 0.0);
+    assert_eq!(scroll, None);
+    assert_eq!(new_key, Some(key));
+
+    // 光标随后移动（键变化）：向下滚动到恰好看见光标行（底对齐）
+    let next_key = (12, 21);
+    let (scroll, new_key) = multiline_caret_follow_decision(Some(key), next_key, 5, container, 0.0);
+    let expect = MULTILINE_LINE_HEIGHT * 6.0 - container;
+    assert_eq!(scroll, Some(expect));
+    assert_eq!(new_key, Some(next_key));
+
+    // 光标移回首行、视口仍在底部：向上滚动顶对齐光标行
+    let (scroll, _) = multiline_caret_follow_decision(
+        Some(next_key),
+        (0, 21),
+        0,
+        container,
+        MULTILINE_LINE_HEIGHT,
+    );
+    assert_eq!(scroll, Some(0.0));
+
+    // 首次渲染（无历史键）同样跟随
+    let (scroll, new_key) = multiline_caret_follow_decision(None, key, 5, container, 0.0);
+    assert_eq!(scroll, Some(MULTILINE_LINE_HEIGHT * 6.0 - container));
+    assert_eq!(new_key, Some(key));
 }
