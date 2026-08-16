@@ -68,6 +68,7 @@ use khaslana::{
     UpdatePreferences, credential_display_target, credential_key_filename, credential_kind_label,
     credential_record_is_compatible_with_url, credential_record_label,
     credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
+    syntax::SyntaxSpans as SharedSyntaxSpans,
     test_credential_connection,
     update::{self, UpdateCheckResult, UpdateManifest, UpdatePlatformAsset},
 };
@@ -1064,6 +1065,55 @@ struct PendingConflictResolve {
     unresolved_count: usize,
 }
 
+/// 语法高亮的槽位：标识一份「已落地的内容」来自哪个视图，
+/// 调度与回填都按槽位路由（冲突视图单独走 `ConflictSyntaxPane`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyntaxSlot {
+    WorktreeDiff,
+    HistoryDiff,
+    StashDiff,
+    BrowseDiff,
+    Blame,
+    BrowseContent,
+}
+
+/// 语法高亮的后台任务源内容：把 Arc 带进闭包免克隆行数据，
+/// anchor = (Arc 地址, 行数) 作为回填守卫（与 widest_line_cache 同一先例，
+/// 行数参与比较可排除 Arc 地址复用误命中）。
+enum SyntaxSource {
+    Diff(Arc<FileDiff>),
+    Blame(Arc<BlameView>),
+    Content(Arc<BrowseFileContent>),
+}
+
+impl SyntaxSource {
+    fn anchor(&self) -> (usize, usize) {
+        match self {
+            Self::Diff(diff) => (Arc::as_ptr(diff) as usize, diff.lines.len()),
+            Self::Blame(view) => (Arc::as_ptr(view) as usize, view.lines.len()),
+            Self::Content(content) => (Arc::as_ptr(content) as usize, content.lines.len()),
+        }
+    }
+}
+
+/// 冲突工作台的语法高亮分栏（ours/theirs 为只读，draft 随草稿重算）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConflictSyntaxPane {
+    Ours,
+    Theirs,
+    Draft,
+}
+
+/// 单个冲突文件三栏的语法高亮缓存（key = 冲突文件路径）。
+#[derive(Clone, Debug, Default)]
+struct ConflictFileSyntax {
+    ours: Option<Arc<SharedSyntaxSpans>>,
+    theirs: Option<Arc<SharedSyntaxSpans>>,
+    draft: Option<Arc<SharedSyntaxSpans>>,
+    /// 草稿重算请求序号：按块接受/AI 生成连发时丢弃晚到的旧结果。
+    draft_seq: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ConflictWorkbenchState {
     selected_path: Option<String>,
@@ -1072,6 +1122,8 @@ struct ConflictWorkbenchState {
     pending_resolve: Option<PendingConflictResolve>,
     files: BTreeMap<String, ConflictFileView>,
     external_merge_auto_opened: BTreeSet<String>,
+    /// 每个冲突文件的三栏语法高亮（选中文件才计算，见调度器）。
+    syntax: BTreeMap<String, ConflictFileSyntax>,
 }
 
 impl ConflictWorkbenchState {
@@ -1181,6 +1233,8 @@ pub(crate) struct BlameState {
     pub loading: bool,
     /// 追溯数据，后台加载完成后填充。
     pub view: Option<Arc<BlameView>>,
+    /// 内容列的语法高亮（索引与 view.lines 对齐；未提交行渲染时不使用）。
+    pub syntax: Option<Arc<SharedSyntaxSpans>>,
     /// 内容视图最宽行扫描缓存：((Arc 地址, 行数), 最宽行索引)。
     /// 与 BrowseState::widest_line_cache 同一套模式，内容未变时每帧免扫描。
     pub widest_line_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
@@ -1228,8 +1282,12 @@ pub(crate) struct BrowseState {
     pub selected_compare_file: Option<BrowseCompareFile>,
     /// 只读内容视图的数据。
     pub content: Option<Arc<BrowseFileContent>>,
+    /// 内容视图的语法高亮（索引与 content.lines 对齐）。
+    pub content_syntax: Option<Arc<SharedSyntaxSpans>>,
     /// 与 HEAD 的差异。
     pub diff: Option<Arc<FileDiff>>,
+    /// 差异视图的语法高亮（仅全文模式计算；索引与 diff.lines 对齐）。
+    pub diff_syntax: Option<Arc<SharedSyntaxSpans>>,
     /// 当前视图模式。
     pub view_mode: BrowseViewMode,
     /// 差异头部是否展开。
@@ -1307,6 +1365,8 @@ struct RepoTabState {
     pub(crate) change_selection: ChangeSelection,
     pub(crate) change_indexes: ChangeListIndexes,
     pub(crate) diff: Option<Arc<FileDiff>>,
+    /// 工作区差异的语法高亮（仅全文模式计算；索引与 diff.lines 对齐）。
+    pub(crate) diff_syntax: Option<Arc<SharedSyntaxSpans>>,
     pub(crate) diff_headers_expanded: bool,
     /// 工作区差异的按行选择（diff 行索引；仅 Added/Removed 行参与部分暂存，
     /// 范围选择中的上下文行在转换为行号选择时被忽略）。
@@ -1320,6 +1380,8 @@ struct RepoTabState {
     pub(crate) history_files: Vec<CommitFileChange>,
     pub(crate) history_selected_file: Option<String>,
     pub(crate) history_diff: Option<Arc<FileDiff>>,
+    /// 历史差异的语法高亮（仅全文模式计算；索引与 history_diff.lines 对齐）。
+    pub(crate) history_diff_syntax: Option<Arc<SharedSyntaxSpans>>,
     pub(crate) history_diff_headers_expanded: bool,
     pub(crate) history_loading: HistoryLoading,
     /// 刷新历史时保留旧列表可见，等新数据就绪后直接替换
@@ -1370,6 +1432,7 @@ impl RepoTabState {
             change_selection: ChangeSelection::default(),
             change_indexes: ChangeListIndexes::default(),
             diff: None,
+            diff_syntax: None,
             diff_headers_expanded: false,
             diff_line_selection: BTreeSet::new(),
             diff_line_selection_anchor: None,
@@ -1381,6 +1444,7 @@ impl RepoTabState {
             history_files: Vec::new(),
             history_selected_file: None,
             history_diff: None,
+            history_diff_syntax: None,
             history_diff_headers_expanded: false,
             history_loading: HistoryLoading::default(),
             history_refreshing: false,
@@ -1818,6 +1882,22 @@ pub(crate) enum UiEvent {
         path: String,
         error: String,
         load_id: u64,
+    },
+    // 语法高亮：后台补算完成（Arc 槽位，anchor = 源内容 Arc 地址 + 行数防复用误命中）
+    SyntaxHighlighted {
+        tab_id: RepoTabId,
+        slot: SyntaxSlot,
+        anchor: usize,
+        anchor_len: usize,
+        spans: Option<Arc<SharedSyntaxSpans>>,
+    },
+    // 语法高亮：冲突工作台分栏补算完成（draft 带 seq 防乱序）
+    ConflictSyntaxHighlighted {
+        tab_id: RepoTabId,
+        path: String,
+        pane: ConflictSyntaxPane,
+        seq: u64,
+        spans: Option<Arc<SharedSyntaxSpans>>,
     },
     // 分支浏览模式：目标引用解析完成
     BrowseTargetResolved {
@@ -3772,6 +3852,8 @@ impl RepositoryView {
                         }
                         this.diff = Some(diff);
                         this.diff_headers_expanded = false;
+                        this.diff_syntax = None;
+                        this.schedule_syntax_highlight(SyntaxSlot::WorktreeDiff);
                         this.reset_uniform_scroll("diff-scroll");
                     }
                 });
@@ -4101,6 +4183,8 @@ impl RepositoryView {
                         }
                         this.history_diff = Some(diff);
                         this.history_diff_headers_expanded = false;
+                        this.history_diff_syntax = None;
+                        this.schedule_syntax_highlight(SyntaxSlot::HistoryDiff);
                         this.reset_uniform_scroll("history-diff-scroll");
                         this.status = "提交差异已加载".to_string();
                     }
@@ -4161,6 +4245,8 @@ impl RepositoryView {
                         }
                         this.stash_preview.diff = Some(diff);
                         this.stash_preview.diff_headers_expanded = false;
+                        this.stash_preview.diff_syntax = None;
+                        this.schedule_syntax_highlight(SyntaxSlot::StashDiff);
                         this.reset_uniform_scroll("stash-diff-scroll");
                         this.status = "贮藏差异已加载".to_string();
                     }
@@ -4343,8 +4429,10 @@ impl RepositoryView {
                         && this.blame.path.as_deref() == Some(path.as_str())
                     {
                         this.blame.loading = false;
+                        this.blame.syntax = None;
                         this.blame.view = Some(Arc::new(view));
                         this.status = "文件追溯已加载".to_string();
+                        this.schedule_syntax_highlight(SyntaxSlot::Blame);
                     }
                 });
             }
@@ -4365,6 +4453,85 @@ impl RepositoryView {
                     }
                 });
                 self.notify_error(toast_message, cx);
+            }
+            UiEvent::SyntaxHighlighted {
+                tab_id,
+                slot,
+                anchor,
+                anchor_len,
+                spans,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    // Arc 身份守卫：内容已被替换（或 Arc 地址被复用但行数不同）
+                    // 时丢弃，避免旧高亮错配新内容。
+                    let current = match slot {
+                        SyntaxSlot::WorktreeDiff => this
+                            .diff
+                            .as_ref()
+                            .map(|diff| (Arc::as_ptr(diff) as usize, diff.lines.len())),
+                        SyntaxSlot::HistoryDiff => this
+                            .history_diff
+                            .as_ref()
+                            .map(|diff| (Arc::as_ptr(diff) as usize, diff.lines.len())),
+                        SyntaxSlot::StashDiff => this
+                            .stash_preview
+                            .diff
+                            .as_ref()
+                            .map(|diff| (Arc::as_ptr(diff) as usize, diff.lines.len())),
+                        SyntaxSlot::BrowseDiff => this
+                            .browse
+                            .diff
+                            .as_ref()
+                            .map(|diff| (Arc::as_ptr(diff) as usize, diff.lines.len())),
+                        SyntaxSlot::Blame => this
+                            .blame
+                            .view
+                            .as_ref()
+                            .map(|view| (Arc::as_ptr(view) as usize, view.lines.len())),
+                        SyntaxSlot::BrowseContent => this
+                            .browse
+                            .content
+                            .as_ref()
+                            .map(|content| (Arc::as_ptr(content) as usize, content.lines.len())),
+                    };
+                    if current != Some((anchor, anchor_len)) {
+                        return;
+                    }
+                    match slot {
+                        SyntaxSlot::WorktreeDiff => this.diff_syntax = spans,
+                        SyntaxSlot::HistoryDiff => this.history_diff_syntax = spans,
+                        SyntaxSlot::StashDiff => this.stash_preview.diff_syntax = spans,
+                        SyntaxSlot::BrowseDiff => this.browse.diff_syntax = spans,
+                        SyntaxSlot::Blame => this.blame.syntax = spans,
+                        SyntaxSlot::BrowseContent => this.browse.content_syntax = spans,
+                    }
+                });
+            }
+            UiEvent::ConflictSyntaxHighlighted {
+                tab_id,
+                path,
+                pane,
+                seq,
+                spans,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    if !this.conflict_workbench.files.contains_key(&path) {
+                        return;
+                    }
+                    let Some(entry) = this.conflict_workbench.syntax.get_mut(&path) else {
+                        return;
+                    };
+                    match pane {
+                        ConflictSyntaxPane::Ours => entry.ours = spans,
+                        ConflictSyntaxPane::Theirs => entry.theirs = spans,
+                        // 草稿已再次变更（更新的调度在飞）时丢弃旧结果
+                        ConflictSyntaxPane::Draft => {
+                            if entry.draft_seq == seq {
+                                entry.draft = spans;
+                            }
+                        }
+                    }
+                });
             }
             UiEvent::BrowseTargetResolved {
                 tab_id,
@@ -4445,8 +4612,10 @@ impl RepositoryView {
                         && this.browse.view_mode == BrowseViewMode::Content
                     {
                         this.browse.loading_content = false;
+                        this.browse.content_syntax = None;
                         this.browse.content = Some(Arc::new(content));
                         this.status = "文件内容已加载".to_string();
+                        this.schedule_syntax_highlight(SyntaxSlot::BrowseContent);
                     }
                 });
             }
@@ -4462,9 +4631,11 @@ impl RepositoryView {
                         && this.browse.view_mode == BrowseViewMode::Diff
                     {
                         this.browse.loading_diff = false;
+                        this.browse.diff_syntax = None;
                         this.browse.diff = Some(Arc::new(diff));
                         this.browse.diff_headers_expanded = false;
                         this.status = "文件差异已加载".to_string();
+                        this.schedule_syntax_highlight(SyntaxSlot::BrowseDiff);
                     }
                 });
             }
@@ -4680,6 +4851,8 @@ impl RepositoryView {
                         // 计入未处理，也不触发手工修改横幅。
                         view.set_merged_draft(draft);
                         self.sync_conflict_editor_from_state();
+                        // 草稿整体替换后重算结果区语法高亮
+                        self.schedule_conflict_syntax_for_selected(&[ConflictSyntaxPane::Draft]);
                         self.status = "已填入 AI 合并建议，请检查后应用".into();
                         self.last_error = None;
                         self.notify_success("已填入 AI 合并建议，请检查后应用", cx);
@@ -5000,6 +5173,13 @@ impl RepositoryView {
         if self.conflict_workbench.files.contains_key(&path) {
             self.sync_conflict_editor_from_state();
             self.maybe_auto_open_external_merge_for_selected_conflict();
+            // 切换冲突文件后为新的选中文件补算三栏语法高亮
+            let panes = [
+                ConflictSyntaxPane::Ours,
+                ConflictSyntaxPane::Theirs,
+                ConflictSyntaxPane::Draft,
+            ];
+            self.schedule_conflict_syntax_for_selected(&panes);
         }
     }
 
@@ -5045,6 +5225,8 @@ impl RepositoryView {
             view.apply_block_resolution(selected_block, resolution);
         }
         self.sync_conflict_editor_from_state();
+        // 草稿文本已变，重算结果区语法高亮（seq 守卫丢弃乱序旧结果）
+        self.schedule_conflict_syntax_for_selected(&[ConflictSyntaxPane::Draft]);
     }
 
     fn ignore_selected_conflict_block(&mut self) {
@@ -8956,6 +9138,13 @@ impl RepositoryView {
         if self.main_mode == MainMode::Conflict {
             self.ensure_conflict_views_loaded();
             self.sync_conflict_editor_from_state();
+            // 进入冲突工作台即为选中文件补算三栏语法高亮
+            let panes = [
+                ConflictSyntaxPane::Ours,
+                ConflictSyntaxPane::Theirs,
+                ConflictSyntaxPane::Draft,
+            ];
+            self.schedule_conflict_syntax_for_selected(&panes);
         }
         if self.main_mode == MainMode::Workflow {
             self.refresh_workflow_templates();
@@ -9448,6 +9637,162 @@ impl RepositoryView {
         }
     }
 
+    // ===== 语法高亮调度（统一后台补算 + Arc 身份守卫） =====
+
+    /// 为当前活动 tab 的某个槽位调度后台语法高亮。
+    ///
+    /// 调度只发生在「内容落位」之后（各加载事件处理分支 / 缓存命中路径），
+    /// 计算是纯 CPU 任务（不碰 git），结果经 `SyntaxHighlighted` 回填；
+    /// diff 槽位仅在全文模式且非二进制时调度（紧凑差异块不高亮）。
+    pub(crate) fn schedule_syntax_highlight(&mut self, slot: SyntaxSlot) {
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let source = match slot {
+            SyntaxSlot::WorktreeDiff => self.diff.clone().map(SyntaxSource::Diff),
+            SyntaxSlot::HistoryDiff => self.history_diff.clone().map(SyntaxSource::Diff),
+            SyntaxSlot::StashDiff => self.stash_preview.diff.clone().map(SyntaxSource::Diff),
+            SyntaxSlot::BrowseDiff => self.browse.diff.clone().map(SyntaxSource::Diff),
+            SyntaxSlot::Blame => self.blame.view.clone().map(SyntaxSource::Blame),
+            SyntaxSlot::BrowseContent => self.browse.content.clone().map(SyntaxSource::Content),
+        };
+        let Some(source) = source else {
+            return;
+        };
+        if let SyntaxSource::Diff(diff) = &source
+            && (!self.full_file_view || diff.is_binary)
+        {
+            return;
+        }
+        if let SyntaxSource::Content(content) = &source
+            && content.is_binary
+        {
+            return;
+        }
+        let (anchor, anchor_len) = source.anchor();
+        let dark = ui::theme::active_variant().is_dark();
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Short, move || {
+            let spans = match &source {
+                SyntaxSource::Diff(diff) => khaslana::syntax::highlight_diff_lines(diff, dark),
+                SyntaxSource::Blame(view) => {
+                    khaslana::syntax::highlight(&view.path, &view.lines, dark)
+                }
+                SyntaxSource::Content(content) => {
+                    khaslana::syntax::highlight(&content.path, &content.lines, dark)
+                }
+            };
+            send_ui_event(
+                &tx,
+                UiEvent::SyntaxHighlighted {
+                    tab_id,
+                    slot,
+                    anchor,
+                    anchor_len,
+                    spans: spans.map(Arc::new),
+                },
+            );
+        });
+    }
+
+    /// 为当前选中的冲突文件调度指定分栏的语法高亮。
+    ///
+    /// 只计算选中文件（渲染也只看选中文件）；draft 每次调度递增 seq，
+    /// 晚到的旧结果在回填时被丢弃。二进制冲突文件无文本栏，直接跳过。
+    fn schedule_conflict_syntax_for_selected(&mut self, panes: &[ConflictSyntaxPane]) {
+        let panes: Vec<ConflictSyntaxPane> = panes.to_vec();
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(path) = self.conflict_workbench.selected_path.clone() else {
+            return;
+        };
+        let (ours, theirs, draft) = match self.conflict_workbench.files.get(&path) {
+            Some(view) if view.kind == ConflictFileKind::Text => (
+                view.ours_text.clone(),
+                view.theirs_text.clone(),
+                view.draft.clone(),
+            ),
+            _ => return,
+        };
+        let dark = ui::theme::active_variant().is_dark();
+        for pane in panes {
+            let (text, seq) = match pane {
+                ConflictSyntaxPane::Ours => (ours.clone(), 0),
+                ConflictSyntaxPane::Theirs => (theirs.clone(), 0),
+                ConflictSyntaxPane::Draft => {
+                    let entry = self
+                        .conflict_workbench
+                        .syntax
+                        .entry(path.clone())
+                        .or_default();
+                    entry.draft_seq += 1;
+                    (draft.clone(), entry.draft_seq)
+                }
+            };
+            let task_path = path.clone();
+            let tx = self.tx.clone();
+            self.tasks.spawn(TaskKind::Short, move || {
+                let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+                let spans = khaslana::syntax::highlight(&task_path, &lines, dark);
+                send_ui_event(
+                    &tx,
+                    UiEvent::ConflictSyntaxHighlighted {
+                        tab_id,
+                        path: task_path,
+                        pane,
+                        seq,
+                        spans: spans.map(Arc::new),
+                    },
+                );
+            });
+        }
+    }
+
+    /// 主题深浅切换后：清空全部语法高亮并按新变体重新调度。
+    ///
+    /// 只是从各槽位现存的 Arc/文本补算，不做任何 git 重载；
+    /// 含非活动 tab（调度是读 Arc 的轻量任务）。
+    fn invalidate_and_refresh_syntax_highlights(&mut self) {
+        let slots_by_tab: Vec<(RepoTabId, Vec<SyntaxSlot>)> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                (
+                    tab.id,
+                    vec![
+                        SyntaxSlot::WorktreeDiff,
+                        SyntaxSlot::HistoryDiff,
+                        SyntaxSlot::StashDiff,
+                        SyntaxSlot::BrowseDiff,
+                        SyntaxSlot::Blame,
+                        SyntaxSlot::BrowseContent,
+                    ],
+                )
+            })
+            .collect();
+        for (tab_id, slots) in slots_by_tab {
+            self.with_tab_context(tab_id, |this| {
+                this.diff_syntax = None;
+                this.history_diff_syntax = None;
+                this.stash_preview.diff_syntax = None;
+                this.browse.diff_syntax = None;
+                this.browse.content_syntax = None;
+                this.blame.syntax = None;
+                this.conflict_workbench.syntax.clear();
+                for slot in slots {
+                    this.schedule_syntax_highlight(slot);
+                }
+                let panes = [
+                    ConflictSyntaxPane::Ours,
+                    ConflictSyntaxPane::Theirs,
+                    ConflictSyntaxPane::Draft,
+                ];
+                this.schedule_conflict_syntax_for_selected(&panes);
+            });
+        }
+    }
+
     /// 将鼠标 Y 坐标映射到内容行索引（基于 uniform_list 滚动偏移与行高）。
     fn browse_row_for_mouse_y(&self, y: Pixels, line_count: usize) -> usize {
         let scroll = self.uniform_scroll_handle("browse-content-scroll");
@@ -9804,9 +10149,12 @@ impl RepositoryView {
         );
         if !force_reload && let Some(diff) = self.cached_diff(&cache_key) {
             self.history_loading.diff = false;
+            self.history_diff_syntax = None;
             self.history_diff = Some(diff);
             self.history_diff_headers_expanded = false;
             self.status = "提交差异已加载".to_string();
+            // 缓存命中不走事件落位，语法高亮在此手动调度
+            self.schedule_syntax_highlight(SyntaxSlot::HistoryDiff);
             return;
         }
         let service = self.service_for_tab(tab_id);
@@ -10167,7 +10515,10 @@ impl RepositoryView {
         if let Some(diff) = self.cached_diff(&cache_key) {
             self.diff = Some(diff);
             self.diff_headers_expanded = false;
+            self.diff_syntax = None;
             self.status = "差异已加载".to_string();
+            // 缓存命中不走事件落位，语法高亮在此手动调度
+            self.schedule_syntax_highlight(SyntaxSlot::WorktreeDiff);
             return;
         }
         let is_conflicted_path = self
@@ -13314,6 +13665,19 @@ impl RepositoryView {
         .into_any_element()
     }
 
+    /// 按差异视图上下文取对应槽位的语法高亮结果（带主题变体守卫）。
+    fn syntax_spans_for_diff(&self, target: DiffHeaderTarget) -> Option<&SharedSyntaxSpans> {
+        let spans = match target {
+            DiffHeaderTarget::Worktree => &self.diff_syntax,
+            DiffHeaderTarget::History => &self.history_diff_syntax,
+            DiffHeaderTarget::Stash => &self.stash_preview.diff_syntax,
+            DiffHeaderTarget::Browse => &self.browse.diff_syntax,
+        };
+        spans
+            .as_deref()
+            .filter(|spans| spans.dark == ui::theme::active_variant().is_dark())
+    }
+
     fn render_diff_row(
         &self,
         diff: Option<&FileDiff>,
@@ -13336,13 +13700,17 @@ impl RepositoryView {
             }
             DiffRenderRow::DiffLine(index) => {
                 let Some(line) = diff.and_then(|diff| diff.lines.get(index)) else {
-                    return diff_line(DiffLineKind::Context, None, None, String::new())
+                    return diff_line(DiffLineKind::Context, None, None, String::new(), None)
                         .into_any_element();
                 };
+                // 按差异上下文取对应槽位的语法高亮（仅全文模式计算过）。
+                let syntax_spans = self
+                    .syntax_spans_for_diff(header_target)
+                    .and_then(|spans| spans.lines.get(index).map(Vec::as_slice));
                 if line.kind == DiffLineKind::Header {
                     let is_hunk_header = line.content.starts_with("@@");
                     let row_element =
-                        diff_line(line.kind.clone(), None, None, line.content.clone());
+                        diff_line(line.kind.clone(), None, None, line.content.clone(), None);
                     if partial_stage_enabled && is_hunk_header {
                         // hunk 分隔行右侧提供整块暂存/取消暂存按钮。
                         let is_stage = diff
@@ -13383,6 +13751,7 @@ impl RepositoryView {
                     line.old_lineno,
                     line.new_lineno,
                     line.content.clone(),
+                    syntax_spans,
                 );
                 if !partial_stage_enabled {
                     return row_element.into_any_element();
@@ -13442,7 +13811,8 @@ impl RepositoryView {
                         }
                     })
                     .unwrap_or(empty_message);
-                diff_line(DiffLineKind::Context, None, None, message.to_string()).into_any_element()
+                diff_line(DiffLineKind::Context, None, None, message.to_string(), None)
+                    .into_any_element()
             }
         }
     }

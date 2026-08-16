@@ -21,6 +21,11 @@ impl ThemeVariant {
             Self::Dark => WindowAppearance::Dark,
         }
     }
+
+    /// 是否深色变体；语法高亮等按深浅二选一的能力用它分流。
+    pub(crate) const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
 }
 
 static ACTIVE_THEME_VARIANT: AtomicU8 = AtomicU8::new(ThemeVariant::Light as u8);

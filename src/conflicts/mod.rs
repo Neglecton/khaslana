@@ -1213,6 +1213,24 @@ impl RepositoryView {
             ))
     }
 
+    /// 取某冲突文件某分栏的语法高亮（带主题变体守卫；未计算/已失效返回 None，
+    /// 回退整行块状态前景色）。
+    fn conflict_syntax_spans(
+        &self,
+        pane: ConflictDocumentPane,
+        view: &ConflictFileView,
+    ) -> Option<Arc<khaslana::syntax::SyntaxSpans>> {
+        let entry = self.conflict_workbench.syntax.get(&view.path)?;
+        let spans = match pane {
+            ConflictDocumentPane::Ours => entry.ours.as_ref(),
+            ConflictDocumentPane::Result => entry.draft.as_ref(),
+            ConflictDocumentPane::Theirs => entry.theirs.as_ref(),
+        };
+        spans
+            .filter(|spans| spans.dark == ui_theme::active_variant().is_dark())
+            .cloned()
+    }
+
     fn render_conflict_document_text(
         &self,
         scroll_id: &'static str,
@@ -1229,6 +1247,8 @@ impl RepositoryView {
         let row_count = model.line_count();
         let model_for_list = model.clone();
         let blocks = Arc::<[ConflictBlock]>::from(view.blocks.clone());
+        // 该分栏的语法高亮（带变体守卫；结果区随草稿重算）
+        let syntax = self.conflict_syntax_spans(pane, view);
         let content = div()
             .id(scroll_id)
             .flex()
@@ -1255,6 +1275,13 @@ impl RepositoryView {
                                     .map(|block| conflict_line_colors(pane, block, active))
                                     .unwrap_or((ui_theme::CARD, ui_theme::FOREGROUND));
                                 let line = model_for_list.line_text(line_index);
+                                // 块状态背景保留，语法色做前景
+                                let spans = syntax
+                                    .as_ref()
+                                    .and_then(|spans| {
+                                        spans.lines.get(line_index).map(Vec::as_slice)
+                                    })
+                                    .filter(|spans| !spans.is_empty());
                                 div()
                                     .min_h(px(18.0))
                                     .px_1()
@@ -1262,9 +1289,9 @@ impl RepositoryView {
                                     .bg(rgb(bg))
                                     .text_color(rgb(fg))
                                     .child(if line.is_empty() {
-                                        " ".to_string()
+                                        div().child(" ").into_any_element()
                                     } else {
-                                        line.to_string()
+                                        crate::ui_helpers::syntax_styled_text(line, spans)
                                     })
                                     .into_any_element()
                             })

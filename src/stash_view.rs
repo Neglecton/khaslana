@@ -22,6 +22,8 @@ pub(crate) struct StashPreviewState {
     pub(crate) files: Vec<StashFileChange>,
     pub(crate) selected_file: Option<String>,
     pub(crate) diff: Option<Arc<FileDiff>>,
+    /// 差异的语法高亮（仅全文模式计算；索引与 diff.lines 对齐）。
+    pub(crate) diff_syntax: Option<Arc<khaslana::syntax::SyntaxSpans>>,
     pub(crate) loading_files: bool,
     pub(crate) loading_diff: bool,
     pub(crate) diff_headers_expanded: bool,
@@ -218,9 +220,12 @@ impl RepositoryView {
         );
         if !force_reload && let Some(diff) = self.cached_diff(&cache_key) {
             self.stash_preview.loading_diff = false;
+            self.stash_preview.diff_syntax = None;
             self.stash_preview.diff = Some(diff);
             self.stash_preview.diff_headers_expanded = false;
             self.status = "贮藏差异已加载".to_string();
+            // 缓存命中不走事件落位，语法高亮在此手动调度
+            self.schedule_syntax_highlight(crate::SyntaxSlot::StashDiff);
             return;
         }
         let service = self.service_for_tab(tab_id);

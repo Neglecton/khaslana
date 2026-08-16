@@ -859,6 +859,7 @@ fn conflict_state_returns_to_worktree_when_last_conflict_disappears() {
         }),
         files: BTreeMap::from([(String::from("a.txt"), sample_conflict_view("a.txt"))]),
         external_merge_auto_opened: BTreeSet::new(),
+        syntax: BTreeMap::new(),
     };
 
     sync_conflict_state_from_paths(&mut mode, &mut state, &[], true);
@@ -885,6 +886,7 @@ fn conflict_state_prunes_removed_files_and_keeps_existing_drafts() {
             (String::from("b.txt"), sample_conflict_view("b.txt")),
         ]),
         external_merge_auto_opened: BTreeSet::new(),
+        syntax: BTreeMap::new(),
     };
 
     sync_conflict_state_from_paths(&mut mode, &mut state, &["b.txt".into()], true);

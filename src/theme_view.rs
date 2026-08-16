@@ -26,12 +26,18 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) {
         let variant = ui_theme::variant_for_mode(self.theme_mode, appearance);
+        let variant_changed = ui_theme::active_variant() != variant;
         ui_theme::set_active_variant(variant);
         ui_theme::set_active_accent(self.theme_accent);
         cx.set_global(yororen_global_theme(
             variant.window_appearance(),
             ui_theme::active_accent(),
         ));
+        if variant_changed {
+            // 语法高亮颜色绑定深浅主题（syntect 内置主题二选一）：
+            // 清空全部槽位并按新变体从现存内容补算，不做 git 重载。
+            self.invalidate_and_refresh_syntax_highlights();
+        }
         cx.notify();
     }
 

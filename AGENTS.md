@@ -31,6 +31,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 序列化：`serde`、`serde_json`
 - 错误：`thiserror`
 - 编码检测：`chardetng`、`encoding_rs`
+- 语法高亮：`syntect 5`（`default-fancy` feature，纯 Rust fancy-regex 免 oniguruma C 依赖），内置语法/主题 dump，追溯、浏览内容、冲突工作台与差异全文视图共用
 - 系统目录：`directories`
 - 文件对话框：`rfd`
 - 日志：`tracing`、`tracing-subscriber`
@@ -58,6 +59,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/git/worktree_compat.rs`：工作区写入兼容层。Windows 下为 checkout、merge/pull、hard reset、revert、rebase、stash 和子模块更新统一附加 `GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES`，避免编辑器占用空目录导致 Git 操作失败；其他平台保持 git2 默认行为。
 - `src/git/partial_stage.rs`：按块/按行部分暂存服务（双向），含部分 patch 构造纯函数（未选中 +/- 行降级/丢弃、hunk 头重算、反向交换）与守卫、选择类型（`SelectedDiffLine`/`LineSelection`）。hunk 头重算指 post 侧 `new_start` 必须按「实际输出补丁的后镜像」坐标重算（= preimage 首行在目标初始内容中的行号 + 先前已输出块的累计净行数变化）：libgit2 的 apply 以 `new_start` 在被先前块逐步改写过的目标内容中精确定位且无偏移搜索，直接透传源 diff 原始 `new_start` 时，一旦丢弃或按行改写了前面的块（净行数变化），后续块会定位错位并报 `ApplyFail`（仅前序块无净行数变化时碰巧不错位）。
 - `src/git/browse.rs`：分支浏览/比较 Git 服务，包括引用解析（`resolve_browse_target`）、文件树遍历（`browse_tree_entries`）、差异文件列表（`browse_compare_files`，三点比较 `merge_base..target`，仅列目标分支领先当前分支的提交所改动的文件）、文件内容读取（`browse_file_content`）和与 HEAD 差异（`browse_file_diff`）。
+- `src/syntax.rs`：语法高亮纯函数层（lib crate）。`highlight(path, lines, dark)` 把已解码文本行映射为「行内 utf8 字节区间 + RGB」span 序列（`SyntaxSpans`，与源行严格索引对齐、相邻同色合并）；`highlight_diff_lines` 为 FileDiff 全文行做同样映射（文件头/hunk 头/EOFNL 行产空 vec）。语言检测按扩展名 → 文件名 token 兜底；守卫 >1MB 或 >20K 行返回 None（渲染侧回退纯文本）；深浅主题二选一内置主题（浅 InspiredGitHub / 深 base16-ocean.dark），`SyntaxSet`/`Theme` 经 OnceLock 全局一次初始化（首次约百毫秒，全部调用点在后台线程）。UI 侧接入模式：各视图内容落位后经 `schedule_syntax_highlight`（`SyntaxSlot` 槽位枚举）后台补算，`SyntaxHighlighted` 事件按 (Arc 地址, 行数) 身份守卫回填；冲突工作台走 `ConflictSyntaxHighlighted`（ours/theirs 只读一次、draft 随按块接受/AI 生成重算，seq 防乱序）；主题深浅切换经 `invalidate_and_refresh_syntax_highlights` 清空并从现存 Arc 补算（不做 git 重载）。渲染用 gpui `StyledText::with_highlights`（`syntax_styled_text` helper），宽度测量与既有 String 子元素同路径，横向滚动机制零改动。
 - `src/git/blame.rs`：文件历史与文件追溯 Git 服务。`file_history` 按路径过滤提交（libgit2 revwalk 不支持 pathspec，全量迭代 + 逐提交 first-parent tree-diff 单 pathspec 判断，分页作用于过滤后 OID 流；单 pathspec tree-diff 有剪枝，超大仓库后续再下沉缓存）；`blame_file` 基于 HEAD 计算 blame（守卫：HEAD 无该路径报中文错误、blob 超 `FULL_FILE_MAX_BYTES` 报过大、8KB NUL 嗅探报二进制），工作区文件存在且非二进制时经 `blame_buffer` 纳入未提交改动（差异行零 OID → `commit: None`），hunk 的作者/时间/摘要直接取 libgit2 填充的 final 签名与 summary，不逐提交查库。v1 不追踪 rename/copy，也不支持对任意提交版本 blame（`BlameOptions::newest_commit` 留作后续）。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
@@ -83,7 +85,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
 - `src/browse_compare_view.rs`：分支比较模式左侧差异文件树 UI，包括把扁平差异文件构造为目录嵌套文件树的 `flatten_compare_files`、默认全展开的 `all_compare_dirs`、文件名级重命名展示、差异文件状态徽标和列表空状态；虚拟化列表行数取展平可见行数 `compare_visible_row_count`（目录节点 + 文件叶子），不能用差异文件数，否则深层目录与文件叶子会因超出行数而不渲染。
-- `src/blame_view.rs`：文件追溯视图 UI 模块（独立 `MainMode::Blame`，头部「关闭」返回工作区，无顶栏药丸）：三列布局（注释栏 | 行号 | 内容，列间细分割线，行号列 48px 右对齐 + 右缘分割线 + 内边距与内容拉开距离）；注释栏为 IDE 风格分组（hunk 首行「短 oid + 作者 + 月-日 + 摘要」、连续同块行留空、块边界细分割线）；未提交行整行 `COLOR_WARNING` 打底 + 内容文字 `COLOR_WARNING_FOREGROUND` + 「未提交」徽标，与已提交行明显区分。`uniform_list` 虚拟渲染（行高 18px、横向 Unconstrained + 最宽行测量缓存，模式与 `BrowseState::widest_line_cache` 一致），支持双向滚动条与编码切换重载。
+- `src/blame_view.rs`：文件追溯视图 UI 模块（独立 `MainMode::Blame`，头部「关闭」返回工作区，无顶栏药丸）：三列布局（注释栏 | 行号 | 内容），**不用任何分割线**——注释栏整列铺 `DIFF_HEADER_BG` 微灰底形成「注释侧栏 | 代码区」IDE 分区，分组由「仅块首行有注释」传达；注释栏内部按固定宽度分列对齐（哈希 56px 主色等宽 / 作者 72px truncate / 日期 36px / 摘要 flex truncate），栏宽 280px；行号 48px 右对齐 + 两侧内边距；未提交行整行 `COLOR_WARNING` 打底 + `COLOR_WARNING_FOREGROUND` 文字 + 「未提交」徽标且不做语法高亮，已提交行内容列带语法高亮。`uniform_list` 虚拟渲染（行高 18px、横向 Unconstrained + 最宽行测量缓存），支持双向滚动条与编码切换重载。
 - `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像（`author_avatar`）、仓库头像（`repo_avatar`/`repo_initials`，圆角方形首字母缩写色块）等辅助渲染。
 - `src/tests/`：测试代码目录，存放所有从源文件通过 `#[path]` 属性外移的单元测试模块。目录结构映射源文件结构，例如 `src/tests/git/browse.rs` 对应 `src/git/browse.rs` 的测试、`src/tests/ai/client.rs` 对应 `src/ai/client.rs` 的测试。外移的测试模块通过 `use super::*` 仍可访问源文件的私有项。
 - `src/git/test_support.rs`：Git 测试共享辅助模块，提供 `service()`、`init_repo()`、`configure_user()`、`write_file()`、`write_bytes()`、`assert_file_text()`、`commit_all()`、`path_url()` 等公共 fixture 函数，供 `git`、`workflow` 等模块的测试复用，消除各 `mod tests` 中的重复定义。
@@ -232,7 +234,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 暂存区文件右键可复制绝对路径或打开文件所在目录
 - 丢弃单个、选中或全部变更
 - 查看工作区 diff
-- 差异区域支持全文/紧凑切换：切换按钮位于标题栏编码按钮旁，开启后展示整份文件并保留增删行高亮
+- 差异区域支持全文/紧凑切换：切换按钮位于标题栏编码按钮旁，开启后展示整份文件并保留增删行高亮；全文模式（工作区/历史/贮藏/浏览四个差异视图共用）带语法高亮——文本色来自 syntect span、行背景仍按增删/上下文 kind 表达（GitHub 式），紧凑差异块不高亮；语言未识别或 >1MB/20K 行回退纯文本；块状态/部分暂存选中层等交互不受影响
 - 大 diff 使用虚拟列表渲染
 - 选中二进制文件时差异区域显示居中信息占位卡片（`binary_diff_placeholder`，`src/ui_helpers.rs`）：说明无法以文本展示差异，并按新增/删除/修改给出文件大小（`FileDiff.old_size`/`new_size`，由 `file_diff_from_diff` 按 delta 状态填充，Added/Untracked 旧侧为 None、Deleted 新侧为 None；oid 侧读 blob 对象头，工作区侧用 stat 尺寸）；同时隐藏无意义的「全文切换」「编码」按钮。工作区、历史、贮藏和分支比较的差异区域共用同一渲染，行为一致。二进制判定有三路：`diff.print` 回调里的 `DiffFlags::BINARY`/`'B'` 行（补丁生成时才可靠）、未跟踪文件（`include_untracked` 不加载内容、无 BINARY 标志）的 8KB NUL 嗅探 `workdir_file_is_binary`、以及已知二进制扩展名兜底 `path_has_binary_extension`（内容检测对空文件无能为力，如右键新建即空的 .docx）
 - diff 头部可折叠
@@ -244,6 +246,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 变基进行中时在工作区顶部显示变基状态条，提供「继续变基 / 跳过此提交 / 中止」操作；冲突解决后自动复用现有冲突工作台
 - 普通合并要求工作区干净；无冲突的非快进合并自动提交（双父提交），不保留 merge 会话。发生冲突时保留 Git Merge 状态，停留在工作区，通过合并状态条可直接调用 IDEA；冲突清零后状态条隐藏，右下角可编辑提交信息并「完成合并」，也可确认后「中止合并」恢复到合并前 HEAD
 - 冲突工作台支持「用 IntelliJ IDEA 解决」，自动检测 `idea64` / `idea` 命令或 `KHASLANA_IDEA_PATH`，通过外部 Merge Dialog 生成结果后写回并标记解决；设置中心「合并工具」可持久化 IDEA 路径，并可选择在选中冲突文件时自动打开 IDEA
+- 冲突工作台三栏（当前版本/结果区/传入版本）带语法高亮：块状态背景保留为行背景、语法色做前景，结果区随按块接受/AI 生成重算（后台补算 + seq 防乱序）；底部 base 折叠面板 v1 不高亮
 - 冲突工作台支持「AI 合并建议」（工具栏按钮，仅文本冲突且 AI 已配置启用）：后台读取该文件 diff3 原文（`GitService::conflict_diff3_text`），整文件 ≤60K 字符单请求，超限按块边界分段逐段生成（进度显示「第 i/N 段」）并携带滑动窗口对话历史；全部段成功后拼接整份文件经 `set_merged_draft` 一次性填入结果区（不做流式增量回填，内部与 `set_draft` 共享区间平移算法）。**所有**冲突块标记 `ConflictBlockStatus::Merged`——AI 对整份文件做出完整合并决定，内容与当前侧一致、未落入 diff 改动区的块（AI 选择保留当前侧）与「输出与草稿完全一致」的早退分支同样标记，否则这些块会永远停留在未处理（Merged 为绿色「已合并」徽标、结果区选中绿底，不计入未处理、不触发手工修改横幅与解决确认弹窗；`has_local_edits` 仍为 true，重复生成仍弹覆盖确认；手动编辑路径 `set_draft` 行为不变），沿用现有「应用到工作区/应用并标记已解决」闭环。任一段失败整体失败不写入草稿；响应经 `strip_code_fence` 清洗与冲突标记残留检测（残留即放弃）。草稿已有块处理/手工编辑（`has_local_edits`）时先弹覆盖确认弹窗；未配置 AI 时按钮显示「AI 合并建议（未配置）」禁用态（按钮 helper 不支持 tooltip）。AI 未配置或生成中不借用 busy，其它冲突操作保持可用
 - 冲突工作台三栏之间的 IDEA 式连线 overlay（`render_conflict_connectors`，`src/conflicts/mod.rs`）：三栏行容器 `relative` + 末位绝对定位 canvas（纯绘制不注册鼠标事件），从 ours 右缘/theirs 左缘向结果区左右缘画 S 形三次贝塞尔曲线，指示各冲突块采用后内容落点。坐标换算：每块行区间经 `conflict_document_byte_range` + `conflict_byte_range_to_lines` 构建时预计算，paint 时从各栏 `UniformListScrollHandle` 读视口 bounds、滚动 offset 与行高（`ItemSize.contents.height / 总行数`，兜底 18px），每帧重绘自动跟随滚动；非选中块 `MUTED_FOREGROUND` 实色（`BORDER` 与背景融为一体不可用）、选中块 `ACCENT` 加粗，块在任一端整段滚出视口即跳过该线（部分可见钳到可视段中点，纯函数 `conflict_block_y_range`/`conflict_connector_anchor_y` 可单测）。三栏视口顶部不对齐（ours/theirs 有操作按钮行），连线斜向是「落到哪里」的正确语义。**三栏同步滚动**也在该 canvas 的 prepaint 完成：与上帧 offset 记录（`RepositoryView.conflict_pane_scroll_sync`，Rc 共享给闭包，选中冲突文件时重置）比较，恰好一栏变化（用户滚轮/拖滚动条，`conflict_scroll_sync_source`）时把它作为源、其余两栏钳制到各自 `max_offset` 后设同一竖直 offset（横向不联动）；多栏同时变化（程序化三栏联动 scrollToItem）不同步。set_offset 只写值不触发重绘，故在 prepaint 期写入同帧生效并经 `App::refresh_windows` 补一帧（无变化即收敛），paint 期写入则本帧读不到且 refresh 是 no-op
 
@@ -282,7 +285,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
 - 右键提交可复制 SHA、reset、revert、撤销合并提交、拣选提交到当前分支（合并提交暂禁用）、在此提交上创建标签等
 - 文件历史（路径过滤）：工作区变更（已暂存/未暂存两分支）与历史页提交文件右键「查看文件历史」，只显示改动过该文件的提交；过滤状态 `RepoTabState.history_file_filter`，`clear_history` 不清过滤器（用户意图，切 scope/切分支/刷新均保留，仅显式点标题栏过滤 chip 的 × 清除，per-tab 生命周期随 tab 销毁）；`HistoryCommitsLoaded` 携带 `path_filter`，应用守卫扩为 scope + path_filter 双比较（`RepoTabState::history_commits_event_matches`），防切换过滤后旧请求覆盖新数据；过滤模式下隐藏提交图形列与列宽分割条（过滤后中间提交缺失，泳道线会断裂）、标题栏显示「文件：<basename>」chip（hover 完整路径）；`HistoryFilesLoaded` 自动选中首个文件时若 filter 激活且列表含该路径则优先选它（diff 立即可见）
-- 文件追溯（blame，UI 术语统一为「追溯」）：工作区变更两分支右键、历史页提交文件右键「追溯此文件」与工作区 diff 标题栏「追溯」按钮（规格复用「全文/编码」工具按钮，仅工作区且非二进制显示）进入独立 `MainMode::Blame` 视图；基于 HEAD + 工作区未提交改动（历史页入口对 HEAD 版本追溯），三列布局（注释栏/行号/内容，列间分割线），IDE 风格分组注释栏，未提交行整行警告色打底 + 「未提交」徽标与已提交行区分，支持双向滚动与编码切换重载；检出分支/标签时因 HEAD 变化自动关闭回工作区
+- 文件追溯（blame，UI 术语统一为「追溯」）：工作区变更两分支右键、历史页提交文件右键「追溯此文件」与工作区 diff 标题栏「追溯」按钮（规格复用「全文/编码」工具按钮，仅工作区且非二进制显示）进入独立 `MainMode::Blame` 视图；基于 HEAD + 工作区未提交改动（历史页入口对 HEAD 版本追溯），三列布局（注释栏/行号/内容，无分割线、注释栏微灰底侧栏 + 块首行固定宽度分列对齐），未提交行整行警告色打底 + 「未提交」徽标与已提交行区分，已提交行内容列带语法高亮（未提交行保持警告前景色纯色），支持双向滚动与编码切换重载；检出分支/标签时因 HEAD 变化自动关闭回工作区
 
 ### 5.5 分支浏览
 
@@ -290,7 +293,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 从侧边栏本地分支、远端分支和标签的右键菜单进入「浏览此分支 / 浏览此标签」
 - 从侧边栏本地分支和远端分支右键进入「与当前分支比较」，不切换分支列出目标分支领先当前分支的提交所改动的文件（三点比较，当前分支独有改动不显示）
 - 左侧文件树浏览器：可展开/折叠的目录树，按目录懒加载
-- 右侧默认显示目标分支上文件的只读原始内容（含行号和编码识别）
+- 右侧默认显示目标分支上文件的只读原始内容（含行号、编码识别与语法高亮；与 HEAD 差异视图在全文模式下同样高亮）
 - 顶部可一键切换到「与当前 HEAD 的差异」视图
 - 分支比较模式左侧以目录嵌套文件树展示差异文件（默认全部展开，可折叠），右侧同样支持目标分支全文内容和与当前 HEAD 的差异视图
 - 支持切换 diff 编码
@@ -383,6 +386,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - `src/tests/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
 - `src/tests/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
 - `src/tests/git/blame.rs`：文件历史路径过滤（只返回触及该文件的提交、分页基于过滤后流、CurrentBranch/AllRefs 两 scope、未触及路径空结果）与文件追溯（行号内容对齐、多 hunk 分组、工作区改动行 `commit: None`、HEAD 无路径与二进制守卫）的仓库级单测。
+- `src/tests/syntax.rs`：语法高亮纯函数单测——span 拼接与原行字节恒等（含中文）、相邻同色合并且无零长度、扩展名/文件名检测（.rs/.py/.md 命中、未知扩展与 Makefile/GNUmakefile 兜底）、深浅主题产出不同颜色、体积/行数守卫返回 None、空文件与空行安全、diff 全文行索引对齐且文件头/hunk 头/EOFNL 行产空 vec。
 - 普通合并测试覆盖快进、无冲突结果暂存、显式完成后的双父提交、冲突状态恢复、冲突后完成、确认中止、脏工作区拒绝和重新打开仓库后继续合并。
 - `src/tests/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
 
@@ -394,6 +398,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 - 代码修改要有中文注释，完成后应当检查`AGENTS.md`内容是否需要调整。
 - 用户可见文案保持中文；blame 功能的 UI 术语统一用「追溯」，不直接暴露英文 blame。
+- 语法高亮统一经 `src/syntax.rs`（syntect）计算、`syntax_styled_text` 渲染；颜色来自 syntect 内置主题按深浅二选一，不自建 scope 映射，也不把 span 颜色混入 `ui/theme.rs` 语义 token 体系。新视图接入按「内容落位 → `schedule_syntax_highlight` → `SyntaxHighlighted` 回填（Arc 身份守卫）」模式。
 - Git 业务能力优先放在 `GitService`。
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。

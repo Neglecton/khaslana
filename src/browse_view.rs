@@ -658,7 +658,7 @@ impl RepositoryView {
         )
     }
 
-    /// 渲染一行只读文件内容（带行号）。
+    /// 渲染一行只读文件内容（带行号 + 语法高亮）。
     fn browse_content_line(&self, index: usize, text: String) -> impl IntoElement {
         let selected = self.browse.is_row_selected(index);
         div()
@@ -687,7 +687,13 @@ impl RepositoryView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(rgb(ui_theme::FOREGROUND))
-                    .child(text),
+                    .child(crate::ui_helpers::syntax_styled_text(
+                        &text,
+                        crate::ui_helpers::syntax_spans_for_line(
+                            &self.browse.content_syntax,
+                            index,
+                        ),
+                    )),
             )
     }
 

@@ -2,10 +2,11 @@
 #![allow(dead_code)]
 
 use gpui::{
-    Bounds, Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollHandle, SharedString, UniformListScrollHandle, Window, canvas, div, fill,
-    point, prelude::*, px,
+    Bounds, Context, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, StyledText, UniformListScrollHandle,
+    Window, canvas, div, fill, point, prelude::*, px,
 };
+use khaslana::syntax::SyntaxSpan;
 use khaslana::{ChangeState, DiffLineKind, DiffScope, FileDiff};
 
 use crate::ui::theme::{rgb, rgba};
@@ -990,6 +991,45 @@ pub(crate) fn menu_separator() -> impl IntoElement {
     div().h(px(1.0)).mx_1().my_1().bg(rgb(ui_theme::BORDER))
 }
 
+/// 语法高亮文本：有 span 时整行一个 StyledText 元素、按 utf8 字节区间上色；
+/// 未覆盖区间沿用父容器的 text_color（调用方已设的 kind 色/前景色即兜底）。
+/// 无 span（语言未识别、超出守卫或该行无高亮）时退回普通 String 子元素，
+/// 与既有渲染路径完全一致。
+///
+/// 宽度测量：StyledText 与 String 子元素走同一 TextLayout 路径，
+/// uniform_list 的 with_width_from_item 最宽行测量与 Unconstrained
+/// 横向滚动不受影响。span 颜色是 syntect 字面色（非主题 token），
+/// 直接经 gpui::rgb 解析，不过 theme::rgb 的 token 解析。
+pub(crate) fn syntax_styled_text(line: &str, spans: Option<&[SyntaxSpan]>) -> gpui::AnyElement {
+    let Some(spans) = spans.filter(|spans| !spans.is_empty()) else {
+        return div().child(line.to_string()).into_any_element();
+    };
+    StyledText::new(line.to_string())
+        .with_highlights(spans.iter().map(|span| {
+            (
+                span.start..span.end,
+                HighlightStyle {
+                    color: Some(gpui::rgb(span.color).into()),
+                    ..Default::default()
+                },
+            )
+        }))
+        .into_any_element()
+}
+
+/// 取当前主题变体下某行的语法高亮 span；变体不符（主题已切换待重算）或
+/// 该行无高亮时返回 None（回退整行默认前景色）。
+pub(crate) fn syntax_spans_for_line(
+    spans: &Option<std::sync::Arc<khaslana::syntax::SyntaxSpans>>,
+    line_index: usize,
+) -> Option<&[SyntaxSpan]> {
+    spans
+        .as_ref()
+        .filter(|spans| spans.dark == ui_theme::active_variant().is_dark())
+        .and_then(|spans| spans.lines.get(line_index).map(Vec::as_slice))
+        .filter(|spans| !spans.is_empty())
+}
+
 pub(crate) fn diff_header_toggle(
     label: &'static str,
     target: DiffHeaderTarget,
@@ -1041,6 +1081,7 @@ pub(crate) fn diff_line(
     old_lineno: Option<u32>,
     new_lineno: Option<u32>,
     content: String,
+    syntax: Option<&[SyntaxSpan]>,
 ) -> impl IntoElement {
     let (bg, fg) = match kind {
         DiffLineKind::Added => (ui_theme::DIFF_ADDED_BG, ui_theme::DIFF_ADDED_TEXT),
@@ -1057,6 +1098,9 @@ pub(crate) fn diff_line(
     } else {
         COLOR_HEADER_BG
     };
+    // 语法高亮只作用于正文行：文本色来自语法 span，行背景仍按 kind 表达
+    // 增删语义（GitHub 式）；hunk 头/文件头不受影响。
+    let syntax = if is_hunk_header { None } else { syntax };
 
     div()
         .flex()
@@ -1101,7 +1145,7 @@ pub(crate) fn diff_line(
                         this
                     }
                 })
-                .child(content),
+                .child(syntax_styled_text(&content, syntax)),
         )
 }
 

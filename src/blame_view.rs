@@ -19,9 +19,15 @@ use crate::{
 
 /// 追溯视图每行高度（px），与 browse_content_line 的 18px 一致。
 pub(crate) const BLAME_ROW_HEIGHT: f32 = 18.0;
-/// 注释栏宽度：短 oid + 作者 + 日期 + 摘要。
-const BLAME_GUTTER_WIDTH: f32 = 240.0;
-/// 行号列宽度（右对齐 + 右缘分割线 + 内边距，容纳 5 位行号）。
+/// 注释栏宽度：哈希 + 作者 + 日期 + 摘要四个固定/弹性分列。
+const BLAME_GUTTER_WIDTH: f32 = 280.0;
+/// 注释栏内哈希列宽（8 位短 oid，等宽字体）。
+const BLAME_GUTTER_HASH_WIDTH: f32 = 56.0;
+/// 注释栏内作者列宽（truncate）。
+const BLAME_GUTTER_AUTHOR_WIDTH: f32 = 72.0;
+/// 注释栏内日期列宽（月-日）。
+const BLAME_GUTTER_DATE_WIDTH: f32 = 36.0;
+/// 行号列宽度（右对齐 + 两侧内边距，容纳 5 位行号）。
 const BLAME_LINENO_WIDTH: f32 = 48.0;
 
 /// 按内容身份缓存的最宽行扫描（与 BrowseState::widest_line_cache 同一套模式）：
@@ -226,10 +232,10 @@ impl RepositoryView {
 
     /// 渲染追溯视图的一行。
     ///
-    /// 三列布局：注释栏 | 行号 | 内容，列间以细分割线隔开（行号与内容
-    /// 之间留出内边距）。注释栏采用 IDE 风格分组：hunk 首行显示
-    /// 「短 oid + 作者 + 日期 + 摘要」，连续同块行留空，块边界画上缘
-    /// 细分割线。未提交行以警告色打底整行区分，内容文字用警告前景色。
+    /// 三列布局：注释栏 | 行号 | 内容。不用分割线（避免整页呈表格感），
+    /// 注释栏以微灰底色形成「注释侧栏 | 代码区」的 IDE 分区；分组信息由
+    /// 「仅块首行有注释」天然传达。未提交行以警告色打底整行区分，
+    /// 内容文字用警告前景色且不做语法高亮（与已提交行的彩色代码区分）。
     fn blame_line(&self, view: &BlameView, index: usize, text: String) -> impl IntoElement {
         let hunk = view
             .line_hunk
@@ -237,6 +243,11 @@ impl RepositoryView {
             .and_then(|hunk_index| view.hunks.get(*hunk_index));
         let is_hunk_first = hunk.is_some_and(|hunk| hunk.start_line == index + 1);
         let is_uncommitted = hunk.is_some_and(|hunk| hunk.commit.is_none());
+        let syntax_spans = if is_uncommitted {
+            None
+        } else {
+            crate::ui_helpers::syntax_spans_for_line(&self.blame.syntax, index)
+        };
 
         div()
             .flex()
@@ -247,13 +258,9 @@ impl RepositoryView {
             .h(px(BLAME_ROW_HEIGHT))
             // 未提交行整行以警告色打底，与已提交行明显区分
             .when(is_uncommitted, |this| this.bg(rgb(ui_theme::COLOR_WARNING)))
-            // hunk 边界的细分割线（首行除外）
-            .when(is_hunk_first && index > 0, |this| {
-                this.border_t_1().border_color(rgb(ui_theme::BORDER))
-            })
-            // 列 1：注释栏（右缘分割线）
+            // 列 1：注释栏（微灰底侧栏）
             .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted))
-            // 列 2：行号（右缘分割线 + 内边距，与内容拉开距离）
+            // 列 2：行号（右对齐 + 内边距，与内容拉开距离）
             .child(
                 div()
                     .flex_none()
@@ -263,13 +270,11 @@ impl RepositoryView {
                     .w(px(BLAME_LINENO_WIDTH))
                     .h(px(BLAME_ROW_HEIGHT))
                     .pr(px(8.0))
-                    .border_r_1()
-                    .border_color(rgb(ui_theme::BORDER))
                     .text_size(px(11.0))
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child((index + 1).to_string()),
             )
-            // 列 3：内容（左内边距与行号列分割线隔开）
+            // 列 3：内容（左内边距与行号隔开；已提交行带语法高亮）
             .child(
                 div()
                     .flex_none()
@@ -283,27 +288,21 @@ impl RepositoryView {
                     } else {
                         ui_theme::FOREGROUND
                     }))
-                    .child(text),
+                    .child(crate::ui_helpers::syntax_styled_text(&text, syntax_spans)),
             )
     }
 
-    /// 注释栏：块首行展示归属提交信息或「未提交」徽标，其余行留空。
+    /// 注释栏：微灰底侧栏，块首行按「哈希 | 作者 | 日期 | 摘要」固定宽度
+    /// 分列对齐（跨行纵向整齐），连续同块行留空；未提交块首行显示
+    /// 「未提交」徽标。哈希用主色等宽字体点缀，其余弱化文字。
     fn blame_gutter(
         &self,
         hunk: Option<&khaslana::BlameHunkInfo>,
         is_hunk_first: bool,
         is_uncommitted: bool,
     ) -> impl IntoElement {
-        let annotation: Option<String> = if is_hunk_first {
-            hunk.and_then(|hunk| hunk.commit.as_ref()).map(|commit| {
-                format!(
-                    "{} {} {} {}",
-                    commit.short_oid,
-                    commit.author,
-                    blame_date_label(commit.time),
-                    commit.summary
-                )
-            })
+        let commit = if is_hunk_first && !is_uncommitted {
+            hunk.and_then(|hunk| hunk.commit.as_ref())
         } else {
             None
         };
@@ -312,20 +311,54 @@ impl RepositoryView {
             .flex()
             .flex_none()
             .items_center()
+            .gap_1()
             .w(px(BLAME_GUTTER_WIDTH))
             .h(px(BLAME_ROW_HEIGHT))
             .pr(px(8.0))
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER))
             .overflow_hidden()
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(annotation.unwrap_or_default()),
-            )
+            // 已提交行的注释栏铺微灰底，与代码区分区；未提交行保持整行
+            // 警告底（此处不再铺灰底，避免盖掉行背景）。
+            .when(!is_uncommitted, |this| {
+                this.bg(rgb(ui_theme::DIFF_HEADER_BG))
+            })
+            .when_some(commit, |this, commit| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .w(px(BLAME_GUTTER_HASH_WIDTH))
+                        .font_family("Consolas, monospace")
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .truncate()
+                        .child(commit.short_oid.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(BLAME_GUTTER_AUTHOR_WIDTH))
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .truncate()
+                        .child(commit.author.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(BLAME_GUTTER_DATE_WIDTH))
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child(blame_date_label(commit.time)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .truncate()
+                        .child(commit.summary.clone()),
+                )
+            })
             .when(is_hunk_first && is_uncommitted, |this| {
                 this.child(
                     div()
