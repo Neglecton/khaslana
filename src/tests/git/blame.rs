@@ -197,3 +197,84 @@ fn blame_file_rejects_binary() {
         .unwrap_err();
     assert!(err.to_string().contains("二进制文件不支持追溯"));
 }
+
+// ===== 换行风格回归（Windows core.autocrlf 场景）=====
+
+/// 构建换行风格测试仓库：core.autocrlf=true（工作区 CRLF、blob LF）。
+fn build_crlf_repo() -> (tempfile::TempDir, git2::Oid) {
+    let (dir, repo, _svc) = git_support::init_repo();
+    // 模拟 Windows 常见配置：提交时 CRLF 归一化为 LF，工作区保持 CRLF
+    repo.config()
+        .unwrap()
+        .set_str("core.autocrlf", "true")
+        .unwrap();
+    git_support::write_file(dir.path(), "a.txt", "a\r\nb\r\nc\r\n");
+    let commit = git_support::commit_all(&repo, "crlf commit");
+    drop(repo);
+    (dir, commit)
+}
+
+// 工作区与 HEAD 内容一致（仅换行风格不同）时，不应把整文件判成未提交。
+#[test]
+fn blame_file_crlf_clean_workdir_all_attributed() {
+    let (dir, commit) = build_crlf_repo();
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let svc = git_support::service();
+
+    let view = svc
+        .blame_file(&repo, Path::new("a.txt"), DiffEncodingChoice::Auto)
+        .unwrap();
+
+    // 三行全部归属提交，没有任何「未提交」行
+    assert_eq!(view.lines, vec!["a", "b", "c"]);
+    for hunk in &view.hunks {
+        assert!(
+            hunk.commit.is_some(),
+            "干净工作区（CRLF/LF 差异）不应出现未提交行"
+        );
+        assert_eq!(hunk.commit.as_ref().unwrap().oid, commit.to_string());
+    }
+}
+
+// CRLF 工作区 + 真实改动：改动行「未提交」，未改行仍归属提交。
+#[test]
+fn blame_file_crlf_partial_edit_attributed() {
+    let (dir, commit) = build_crlf_repo();
+    // 工作区改第 2 行（未暂存，保持 CRLF）
+    git_support::write_file(dir.path(), "a.txt", "a\r\nB\r\nc\r\n");
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let svc = git_support::service();
+
+    let view = svc
+        .blame_file(&repo, Path::new("a.txt"), DiffEncodingChoice::Auto)
+        .unwrap();
+
+    assert_eq!(view.lines, vec!["a", "B", "c"]);
+    let edited = &view.hunks[view.line_hunk[1]];
+    assert!(edited.commit.is_none(), "改动行应为未提交");
+    for index in [0usize, 2] {
+        let hunk = &view.hunks[view.line_hunk[index]];
+        assert_eq!(
+            hunk.commit.as_ref().unwrap().oid,
+            commit.to_string(),
+            "未改行应归属提交（不被换行差异吞掉）"
+        );
+    }
+}
+
+// blob 本身是 CRLF（未开 autocrlf）且工作区被清空：空内容、无块，不报错
+//（git_blame_buffer 断言 buffer 非空，需绕过）。
+#[test]
+fn blame_file_emptied_workdir_returns_empty_view() {
+    let (dir, commit) = build_crlf_repo();
+    git_support::write_file(dir.path(), "a.txt", "");
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let svc = git_support::service();
+    let _ = commit;
+
+    let view = svc
+        .blame_file(&repo, Path::new("a.txt"), DiffEncodingChoice::Auto)
+        .unwrap();
+    assert!(view.lines.is_empty());
+    assert!(view.hunks.is_empty());
+}

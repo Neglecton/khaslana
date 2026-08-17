@@ -20,13 +20,13 @@ use crate::{
 /// 追溯视图每行高度（px），与 browse_content_line 的 18px 一致。
 pub(crate) const BLAME_ROW_HEIGHT: f32 = 18.0;
 /// 注释栏宽度：哈希 + 作者 + 日期 + 摘要四个固定/弹性分列。
-const BLAME_GUTTER_WIDTH: f32 = 280.0;
+const BLAME_GUTTER_WIDTH: f32 = 300.0;
 /// 注释栏内哈希列宽（8 位短 oid，等宽字体）。
 const BLAME_GUTTER_HASH_WIDTH: f32 = 56.0;
 /// 注释栏内作者列宽（truncate）。
 const BLAME_GUTTER_AUTHOR_WIDTH: f32 = 72.0;
-/// 注释栏内日期列宽（月-日）。
-const BLAME_GUTTER_DATE_WIDTH: f32 = 36.0;
+/// 注释栏内日期列宽（含年份的 yyyy-mm-dd）。
+const BLAME_GUTTER_DATE_WIDTH: f32 = 64.0;
 /// 行号列宽度（右对齐 + 两侧内边距，容纳 5 位行号）。
 const BLAME_LINENO_WIDTH: f32 = 48.0;
 
@@ -189,7 +189,7 @@ impl RepositoryView {
                 uniform_list(
                     "blame-list",
                     row_count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                         let view = this.blame.view.clone();
                         range
                             .map(|index| {
@@ -202,7 +202,7 @@ impl RepositoryView {
                                     .into_any_element();
                                 };
                                 let line = view.lines.get(index).cloned().unwrap_or_default();
-                                this.blame_line(view, index, line).into_any_element()
+                                this.blame_line(view, index, line, cx).into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -236,7 +236,13 @@ impl RepositoryView {
     /// 注释栏以微灰底色形成「注释侧栏 | 代码区」的 IDE 分区；分组信息由
     /// 「仅块首行有注释」天然传达。未提交行以警告色打底整行区分，
     /// 内容文字用警告前景色且不做语法高亮（与已提交行的彩色代码区分）。
-    fn blame_line(&self, view: &BlameView, index: usize, text: String) -> impl IntoElement {
+    fn blame_line(
+        &self,
+        view: &BlameView,
+        index: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let hunk = view
             .line_hunk
             .get(index)
@@ -259,7 +265,7 @@ impl RepositoryView {
             // 未提交行整行以警告色打底，与已提交行明显区分
             .when(is_uncommitted, |this| this.bg(rgb(ui_theme::COLOR_WARNING)))
             // 列 1：注释栏（微灰底侧栏）
-            .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted))
+            .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted, index, cx))
             // 列 2：行号（右对齐 + 内边距，与内容拉开距离）
             .child(
                 div()
@@ -295,17 +301,30 @@ impl RepositoryView {
     /// 注释栏：微灰底侧栏，块首行按「哈希 | 作者 | 日期 | 摘要」固定宽度
     /// 分列对齐（跨行纵向整齐），连续同块行留空；未提交块首行显示
     /// 「未提交」徽标。哈希用主色等宽字体点缀，其余弱化文字。
+    /// 悬浮注释栏显示完整提交信息（作者/摘要可能被列宽截断）。
     fn blame_gutter(
         &self,
         hunk: Option<&khaslana::BlameHunkInfo>,
         is_hunk_first: bool,
         is_uncommitted: bool,
+        index: usize,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let commit = if is_hunk_first && !is_uncommitted {
             hunk.and_then(|hunk| hunk.commit.as_ref())
         } else {
             None
         };
+        // 完整信息（含精确到秒的时间与未截断的作者/摘要）
+        let commit_tooltip = commit.map(|commit| {
+            format!(
+                "{} {} {} {}",
+                commit.short_oid,
+                commit.author,
+                crate::ui_helpers::commit_time_label(commit.time),
+                commit.summary
+            )
+        });
 
         div()
             .flex()
@@ -320,6 +339,11 @@ impl RepositoryView {
             // 警告底（此处不再铺灰底，避免盖掉行背景）。
             .when(!is_uncommitted, |this| {
                 this.bg(rgb(ui_theme::DIFF_HEADER_BG))
+            })
+            .id(format!("blame-gutter-{index}"))
+            // 悬浮显示完整提交信息（作者/摘要被截断时的兜底查看入口）
+            .when_some(commit_tooltip, |this, tooltip| {
+                this.tooltip(move |_window, cx| tooltip_text(tooltip.clone(), cx))
             })
             .when_some(commit, |this, commit| {
                 this.child(
@@ -376,13 +400,13 @@ impl RepositoryView {
     }
 }
 
-/// 追溯注释栏的紧凑日期（月-日，本地时区）。
+/// 追溯注释栏的紧凑日期（含年份的 yyyy-mm-dd，本地时区）。
 fn blame_date_label(seconds: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
         .map(|time| {
             time.with_timezone(&chrono::Local)
-                .format("%m-%d")
+                .format("%Y-%m-%d")
                 .to_string()
         })
-        .unwrap_or_else(|| "--".to_string())
+        .unwrap_or_else(|| "----".to_string())
 }
