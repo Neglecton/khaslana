@@ -189,7 +189,7 @@ impl RepositoryView {
                 uniform_list(
                     "blame-list",
                     row_count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
                         let view = this.blame.view.clone();
                         range
                             .map(|index| {
@@ -202,7 +202,7 @@ impl RepositoryView {
                                     .into_any_element();
                                 };
                                 let line = view.lines.get(index).cloned().unwrap_or_default();
-                                this.blame_line(view, index, line, cx).into_any_element()
+                                this.blame_line(view, index, line).into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -236,13 +236,7 @@ impl RepositoryView {
     /// 注释栏以微灰底色形成「注释侧栏 | 代码区」的 IDE 分区；分组信息由
     /// 「仅块首行有注释」天然传达。未提交行以警告色打底整行区分，
     /// 内容文字用警告前景色且不做语法高亮（与已提交行的彩色代码区分）。
-    fn blame_line(
-        &self,
-        view: &BlameView,
-        index: usize,
-        text: String,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn blame_line(&self, view: &BlameView, index: usize, text: String) -> impl IntoElement {
         let hunk = view
             .line_hunk
             .get(index)
@@ -265,7 +259,7 @@ impl RepositoryView {
             // 未提交行整行以警告色打底，与已提交行明显区分
             .when(is_uncommitted, |this| this.bg(rgb(ui_theme::COLOR_WARNING)))
             // 列 1：注释栏（微灰底侧栏）
-            .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted, index, cx))
+            .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted, index))
             // 列 2：行号（右对齐 + 内边距，与内容拉开距离）
             .child(
                 div()
@@ -308,7 +302,6 @@ impl RepositoryView {
         is_hunk_first: bool,
         is_uncommitted: bool,
         index: usize,
-        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let commit = if is_hunk_first && !is_uncommitted {
             hunk.and_then(|hunk| hunk.commit.as_ref())

@@ -377,6 +377,8 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 每次实现完计划后必须执行 `cargo build --release`，并修复所有出现的错误和警告（无论相关代码是不是本次写的）。只有 release 构建零错误零警告才算实现完成。
 
+正式发布使用 `release-perf` profile（fat LTO + codegen-units=1，见 Cargo.toml；产物在 `target/release-perf/`），GitHub 发布工作流 `.github/workflows/release.yml` 按 tag 触发并用该 profile 构建打包。发版流程：改 `Cargo.toml` version 与 `src/tests/update.rs` 的版本断言 -> 提交 -> 打 `v*` tag 推送。
+
 ## 7. 测试现状
 
 项目已有较多单元测试，重点覆盖：

@@ -23,7 +23,9 @@ jobs:
         run: cargo test
 
       - name: Build
-        run: cargo build --release --bin khaslana --bin khaslana_updater
+        # release-perf：fat LTO + codegen-units=1（见 Cargo.toml [profile.release-perf]），
+        # 发布产物走极致优化；自定义 profile 的产物目录是 target/release-perf/。
+        run: cargo build --profile release-perf --bin khaslana --bin khaslana_updater
 
       - name: Package
         shell: bash
@@ -33,8 +35,8 @@ jobs:
           VERSION="${VERSION_TAG#v}"
           ZIP="khaslana-v${VERSION}-windows-x86_64"
           mkdir -p dist/package
-          cp target/release/khaslana.exe dist/package/
-          cp target/release/khaslana_updater.exe dist/package/
+          cp target/release-perf/khaslana.exe dist/package/
+          cp target/release-perf/khaslana_updater.exe dist/package/
           cp LICENSE dist/package/ || true
           cp README.md dist/package/ || true
           cd dist/package

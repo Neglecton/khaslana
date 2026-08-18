@@ -86,6 +86,14 @@ Windows 下项目会通过 `.cargo/config.toml` 为 `x86_64-pc-windows-msvc` 启
 target/release/khaslana.exe
 ```
 
+如需极致优化的发布级构建（fat LTO + 单编译单元，编译显著变慢）：
+
+```powershell
+cargo build --profile release-perf
+```
+
+产物位于 `target/release-perf/khaslana.exe`，官方发布流程（`.github/workflows/release.yml`）即使用该 profile。
+
 ## 数据持久化
 
 Khaslana 使用 `directories::ProjectDirs::from("", "", "Khaslana")` 获取系统配置目录，并将应用数据保存到 SQLite 数据库：
