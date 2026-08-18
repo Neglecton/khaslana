@@ -88,6 +88,7 @@ fn make_sample_diff(lines: Vec<khaslana::DiffLine>) -> FileDiff {
         path: "a.txt".into(),
         scope: DiffScope::Unstaged,
         is_binary: false,
+        untracked: false,
         old_size: None,
         new_size: None,
         encoding: khaslana::DiffEncodingInfo {
@@ -987,6 +988,7 @@ fn test_diff(lines: Vec<khaslana::DiffLine>, is_binary: bool) -> FileDiff {
         path: "file.txt".to_string(),
         scope: DiffScope::Unstaged,
         is_binary,
+        untracked: false,
         old_size: None,
         new_size: None,
         encoding: khaslana::DiffEncodingInfo {
@@ -1486,4 +1488,31 @@ fn preferred_history_file_favors_filter_path_when_present() {
     );
     // 空列表：None（调用方显示“该提交没有文件变更”）
     assert_eq!(preferred_history_file(Some("src/lib.rs"), &[]), None);
+}
+
+// 未跟踪文件差异的展示行类型：Added 映射为 Context 配色（白底），
+// 其余 kind 与普通 diff 一致；显示映射不影响服务层原始 kind。
+#[test]
+fn display_diff_line_kind_maps_untracked_added_to_context() {
+    assert_eq!(
+        display_diff_line_kind(DiffLineKind::Added, true),
+        DiffLineKind::Context
+    );
+    assert_eq!(
+        display_diff_line_kind(DiffLineKind::Added, false),
+        DiffLineKind::Added
+    );
+    // 未跟踪文件没有 Removed 行；Context/Header 原样保留
+    assert_eq!(
+        display_diff_line_kind(DiffLineKind::Removed, true),
+        DiffLineKind::Removed
+    );
+    assert_eq!(
+        display_diff_line_kind(DiffLineKind::Context, true),
+        DiffLineKind::Context
+    );
+    assert_eq!(
+        display_diff_line_kind(DiffLineKind::Header, true),
+        DiffLineKind::Header
+    );
 }

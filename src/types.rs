@@ -292,6 +292,9 @@ pub struct FileDiff {
     pub path: String,
     pub scope: DiffScope,
     pub is_binary: bool,
+    /// 未跟踪文件（git 状态 ？）：内容整体展示但不按「新增」绿色高亮，
+    /// 渲染侧白底显示（SourceTree 式），行 kind 仍为 Added。
+    pub untracked: bool,
     /// 旧侧文件大小（字节）；新增文件（Added delta）为 None。
     pub old_size: Option<u64>,
     /// 新侧文件大小（字节）；删除文件（Deleted delta）为 None。

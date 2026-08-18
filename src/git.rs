@@ -1665,6 +1665,9 @@ impl GitService {
         options
             .pathspec(path)
             .include_untracked(true)
+            // 未跟踪文件输出完整内容（默认只出文件头无正文），
+            // 行为对齐 SourceTree：差异区展示整份文件。
+            .show_untracked_content(true)
             .context_lines(diff_context_lines(full_context));
 
         let diff = match scope {
@@ -2296,10 +2299,13 @@ impl GitService {
         let mut is_binary = false;
         let mut old_size = None;
         let mut new_size = None;
+        let mut untracked = false;
         for delta in diff.deltas() {
             let status = delta.status();
-            // 未跟踪文件不加载内容，需手动嗅探是否二进制。
             if status == git2::Delta::Untracked {
+                untracked = true;
+                // 未跟踪文件需手动嗅探是否二进制（内容加载与否不影响 delta 的
+                // BINARY 标志时序，保留兜底）。
                 if let Some(path) = delta.new_file().path() {
                     is_binary = is_binary || workdir_file_is_binary(repo, path);
                 }
@@ -2386,6 +2392,7 @@ impl GitService {
             path,
             scope,
             is_binary,
+            untracked,
             old_size,
             new_size,
             encoding: DiffEncodingInfo {

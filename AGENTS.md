@@ -98,7 +98,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 
 - `RepositorySnapshot` 是 UI 的主要仓库状态输入，包含路径、HEAD、分支、变更、远端、标签、贮藏、冲突、普通合并状态（`merge_in_progress` / `merge_message`）和变基进行中标记（`rebase_in_progress`）。
 - `WorktreeChange` 使用 `staged` 与 `unstaged` 两个字段表达同一路径在暂存区和工作区中的不同状态。
-- `FileDiff` 包含路径、范围、二进制标记、编码信息和逐行 diff。
+- `FileDiff` 包含路径、范围、二进制标记、未跟踪标记、编码信息和逐行 diff。
 - `CommitInfo` 表示提交历史中的一行，包含 oid、短 oid、摘要、作者、时间、父提交和 ref 标签。
 - `GitError` 是统一错误出口，用户可见文案大多为中文。
 - `RebaseOutcome` 表示变基操作结果，区分 `Completed(快照)` 和 `Conflicts { 快照, 当前提交序号, 总数 }`，便于 UI 层无缝接入现有冲突工作台。
@@ -233,10 +233,10 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 取消暂存选中、取消暂存全部
 - 暂存区文件右键可复制绝对路径或打开文件所在目录
 - 丢弃单个、选中或全部变更
-- 查看工作区 diff
+- 查看工作区 diff；选中未跟踪文件（？）时差异区展示整份文件内容（`show_untracked_content`），但白底显示不标绿（SourceTree 式：`FileDiff.untracked` 标记 + 纯函数 `display_diff_line_kind` 把 Added 行映射为 Context 配色，仅影响显示，服务层行 kind 保持 Added、部分暂存守卫不受影响）
 - 差异区域支持全文/紧凑切换：切换按钮位于标题栏编码按钮旁，开启后展示整份文件并保留增删行高亮；全文模式（工作区/历史/贮藏/浏览四个差异视图共用）带语法高亮——文本色来自 syntect span、行背景仍按增删/上下文 kind 表达（GitHub 式），紧凑差异块不高亮；语言未识别或 >1MB/20K 行回退纯文本；块状态/部分暂存选中层等交互不受影响
 - 大 diff 使用虚拟列表渲染
-- 选中二进制文件时差异区域显示居中信息占位卡片（`binary_diff_placeholder`，`src/ui_helpers.rs`）：说明无法以文本展示差异，并按新增/删除/修改给出文件大小（`FileDiff.old_size`/`new_size`，由 `file_diff_from_diff` 按 delta 状态填充，Added/Untracked 旧侧为 None、Deleted 新侧为 None；oid 侧读 blob 对象头，工作区侧用 stat 尺寸）；同时隐藏无意义的「全文切换」「编码」按钮。工作区、历史、贮藏和分支比较的差异区域共用同一渲染，行为一致。二进制判定有三路：`diff.print` 回调里的 `DiffFlags::BINARY`/`'B'` 行（补丁生成时才可靠）、未跟踪文件（`include_untracked` 不加载内容、无 BINARY 标志）的 8KB NUL 嗅探 `workdir_file_is_binary`、以及已知二进制扩展名兜底 `path_has_binary_extension`（内容检测对空文件无能为力，如右键新建即空的 .docx）
+- 选中二进制文件时差异区域显示居中信息占位卡片（`binary_diff_placeholder`，`src/ui_helpers.rs`）：说明无法以文本展示差异，并按新增/删除/修改给出文件大小（`FileDiff.old_size`/`new_size`，由 `file_diff_from_diff` 按 delta 状态填充，Added/Untracked 旧侧为 None、Deleted 新侧为 None；oid 侧读 blob 对象头，工作区侧用 stat 尺寸）；同时隐藏无意义的「全文切换」「编码」按钮。工作区、历史、贮藏和分支比较的差异区域共用同一渲染，行为一致。二进制判定有三路：`diff.print` 回调里的 `DiffFlags::BINARY`/`'B'` 行（补丁生成时才可靠）、未跟踪文件的 8KB NUL 嗅探 `workdir_file_is_binary`（`show_untracked_content` 已加载内容，嗅探保留兜底）、以及已知二进制扩展名兜底 `path_has_binary_extension`（内容检测对空文件无能为力，如右键新建即空的 .docx）
 - diff 头部可折叠
 - hunk 分隔行视觉增强：`@@ 行号范围 @@` 行使用独立底色 `DIFF_HUNK_BG` + 上下边框 + 圆角胶囊 + 行号列同底色（文件头行保持原浅色），深浅主题下均与底色明显区分
 - diff 编码可选

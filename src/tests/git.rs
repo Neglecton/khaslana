@@ -4588,3 +4588,51 @@ fn push_tag_and_delete_remote_tag_sync_remote() {
         .to_string();
     assert!(error.contains("本地标签不存在"), "实际错误：{error}");
 }
+
+// 未跟踪文件：diff 输出整份文件内容（SourceTree 式），标记 untracked，
+// 行 kind 仍为 Added（渲染侧按白底显示）。
+#[test]
+fn diff_for_untracked_file_shows_full_content() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_file(dir.path(), "new.txt", "hello\nworld\n");
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("new.txt"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(!diff.is_binary);
+    assert!(diff.untracked);
+    assert_eq!(diff.old_size, None);
+    assert_eq!(diff.new_size, Some("hello\nworld\n".len() as u64));
+    // 整份文件作为正文行输出（含行号），不再是只有文件头的空差异
+    let body: Vec<&DiffLine> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .collect();
+    let contents: Vec<&str> = body.iter().map(|line| line.content.as_str()).collect();
+    assert_eq!(contents, vec!["hello", "world"]);
+    assert_eq!(body[0].new_lineno, Some(1));
+    assert_eq!(body[1].new_lineno, Some(2));
+
+    // 对照：普通修改文件的 diff 不标记 untracked
+    git_support::write_file(dir.path(), "tracked.txt", "base\nmore\n");
+    let tracked_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("tracked.txt"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(!tracked_diff.untracked);
+}

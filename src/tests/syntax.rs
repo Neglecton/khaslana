@@ -114,6 +114,7 @@ fn diff_highlight_index_aligned_and_headers_skipped() {
         path: "a.rs".to_string(),
         scope: DiffScope::Unstaged,
         is_binary: false,
+        untracked: false,
         old_size: None,
         new_size: None,
         encoding: DiffEncodingInfo {

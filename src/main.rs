@@ -1552,6 +1552,17 @@ fn preferred_history_file(filter: Option<&str>, files: &[CommitFileChange]) -> O
         .or_else(|| files.first().map(|file| file.path.clone()))
 }
 
+/// 未跟踪文件差异的展示行类型：整份文件以「新增」行输出，但渲染时
+/// 白底显示（SourceTree 式，不标绿）——映射为 Context 的配色。
+/// 仅影响显示，部分暂存等服务侧行为仍按原始 Added kind 判断。
+fn display_diff_line_kind(kind: DiffLineKind, untracked: bool) -> DiffLineKind {
+    if untracked && kind == DiffLineKind::Added {
+        DiffLineKind::Context
+    } else {
+        kind
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ResizeState {
     start_x: f32,
@@ -13747,7 +13758,7 @@ impl RepositoryView {
                     return row_element.into_any_element();
                 }
                 let row_element = diff_line(
-                    line.kind.clone(),
+                    display_diff_line_kind(line.kind.clone(), diff.is_some_and(|d| d.untracked)),
                     line.old_lineno,
                     line.new_lineno,
                     line.content.clone(),
