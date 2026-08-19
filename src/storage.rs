@@ -376,6 +376,12 @@ pub fn default_database_path() -> Option<PathBuf> {
     pick_active_path(legacy, portable, legacy_dir)
 }
 
+/// 应用当前应使用的数据目录（数据库所在目录），与 DB 同一套便携/旧目录
+/// 激活规则；AI 评审记录等非 DB 数据落在这里（`ai-reviews/` 子目录）。
+pub fn active_data_dir() -> Option<PathBuf> {
+    default_database_path().and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
 /// 待执行便携迁移的启动期结果，用于决定是否向用户反馈。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOutcome {

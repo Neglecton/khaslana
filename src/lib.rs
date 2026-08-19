@@ -38,11 +38,13 @@ pub use workflow::{
 };
 
 pub use ai::{
-    AiApiType, AiProviderSettings, AiReviewResult, ChatClient, ChatMessage, ChatResult, ChatRole,
+    AgentChatMessage, AgentEvent, AgentToolCall, AgentTurn, AiApiType, AiProviderSettings,
+    AiReviewRecord, AiReviewResult, AiReviewStep, ChatClient, ChatMessage, ChatResult, ChatRole,
     MERGE_CONTEXT_BUDGET_CHARS, MERGE_SEGMENT_LIMIT, MERGE_SINGLE_BLOCK_LIMIT,
-    MERGE_WHOLE_FILE_LIMIT, MergeSegment, StreamDelta, build_segment_messages,
-    conflict_merge_prompts, response_contains_conflict_markers, split_diff3_text, strip_code_fence,
-    validate_generated_content,
+    MERGE_WHOLE_FILE_LIMIT, MergeSegment, ReviewAgentInput, StreamDelta, ToolSchema,
+    build_segment_messages, conflict_merge_prompts, file_diff_to_patch_text, list_review_records,
+    response_contains_conflict_markers, run_review_agent, save_review_record, split_diff3_text,
+    split_reasoning, strip_code_fence, validate_generated_content,
 };
 
 // 浏览模式领域类型已在 types::* 中重新导出（BrowseTarget / BrowseEntry / BrowseEntryKind / BrowseFileContent）。

@@ -1,12 +1,10 @@
-// AI prompt 构造纯函数：commit message 生成、code review。
+// AI prompt 构造纯函数：commit message 生成、冲突合并。
 //
 // 所有函数都是纯函数，不依赖网络/Git/GPUI，方便单元测试。
 
 /// commit message 生成时用户 prompt 中允许的 diff 文本最大字符数，
 /// 避免超出常见模型上下文窗口。
 pub(crate) const COMMIT_DIFF_TEXT_LIMIT: usize = 6000;
-/// code review 时单文件 diff 文本最大字符数。
-pub(crate) const REVIEW_DIFF_TEXT_LIMIT: usize = 8000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -59,43 +57,6 @@ pub fn commit_message_prompts(diff_text: &str, hint: Option<&str>) -> (ChatMessa
             user.push_str(hint);
         }
     }
-
-    let user = ChatMessage {
-        role: ChatRole::User,
-        content: user,
-    };
-    (system, user)
-}
-
-/// 构造 AI code review 的 system + user prompt。
-///
-/// - `file_path`：被 review 的文件路径（仓库相对路径）。
-/// - `diff_text`：该文件的 diff 文本。
-/// - `branch_name`：目标分支名（用于上下文）。
-pub fn review_prompts(
-    file_path: &str,
-    diff_text: &str,
-    branch_name: &str,
-) -> (ChatMessage, ChatMessage) {
-    let system = ChatMessage {
-        role: ChatRole::System,
-        content: "你是一名资深代码评审专家（code reviewer）。请对给定的代码差异进行评审。\n\
-                  要求：\n\
-                  1. 用中文输出，结构清晰：按“严重问题 / 建议 / 风险点 / 优点”分组，没有的组可省略。\n\
-                  2. 只针对 diff 中的实际改动评论，不要凭空假设未展示的代码。\n\
-                  3. 指出潜在 bug、安全问题、性能问题、可读性问题，并给出简短改进建议。\n\
-                  4. 不要直接重写整段代码；如需示例，只给关键片段。\n\
-                  5. 保持简洁，聚焦最重要的 3-5 个点。"
-            .to_string(),
-    };
-
-    let mut user = String::new();
-    user.push_str("请评审以下文件的差异：\n\n");
-    user.push_str(&format!("文件：{file_path}\n"));
-    user.push_str(&format!("目标分支：{branch_name}\n\n"));
-    user.push_str("```diff\n");
-    user.push_str(&truncate_text(diff_text, REVIEW_DIFF_TEXT_LIMIT));
-    user.push_str("\n```");
 
     let user = ChatMessage {
         role: ChatRole::User,

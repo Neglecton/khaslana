@@ -10,6 +10,7 @@ use crate::UiEvent;
 pub(crate) struct TaskExecutor {
     short_pool: Arc<ThreadPool>,
     long_pool: Arc<ThreadPool>,
+    ai_pool: Arc<ThreadPool>,
     event_tx: async_channel::Sender<UiEvent>,
 }
 
@@ -20,9 +21,15 @@ impl TaskExecutor {
             .unwrap_or(4)
             .clamp(2, 4);
         let long_threads = 2;
+        // AI 评审 agent 走独立线程池：单任务可达分钟级（120 轮流式 + 重试），
+        // 且允许并发。若复用 long 池（2 线程），两个评审就会把
+        // fetch/push/clone 等网络 Git 操作饿死在队列里。池大小直接引用
+        // 并发上限常量，避免两处硬编码脱钩（只改其一会让任务在队列里排队）。
+        let ai_threads = crate::MAX_CONCURRENT_AI_REVIEWS;
         Self {
             short_pool: Arc::new(build_pool("khaslana-short", short_threads)),
             long_pool: Arc::new(build_pool("khaslana-long", long_threads)),
+            ai_pool: Arc::new(build_pool("khaslana-ai", ai_threads)),
             event_tx,
         }
     }
@@ -46,12 +53,14 @@ impl TaskExecutor {
         match kind {
             TaskKind::Short => self.short_pool.spawn(wrapped),
             TaskKind::Long => self.long_pool.spawn(wrapped),
+            TaskKind::Ai => self.ai_pool.spawn(wrapped),
         }
     }
 }
 
 /// 从 catch_unwind 的 payload 提取可读的 panic 信息。
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
+/// `pub(crate)`：ai_view 的评审任务第二层兜底复用同一提取逻辑。
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -65,6 +74,8 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 pub(crate) enum TaskKind {
     Short,
     Long,
+    /// 分钟级 AI agent 任务（评审循环），独占 ai 池，不与网络 Git 操作抢线程。
+    Ai,
 }
 
 fn build_pool(name: &'static str, threads: usize) -> ThreadPool {

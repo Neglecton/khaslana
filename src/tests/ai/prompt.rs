@@ -30,17 +30,6 @@ fn commit_message_prompts_truncates_long_diff() {
 }
 
 #[test]
-fn review_prompts_contains_file_and_branch() {
-    let (system, user) = review_prompts("src/main.rs", "some diff", "feature/x");
-    assert_eq!(system.role, ChatRole::System);
-    assert!(system.content.contains("代码评审"));
-    assert_eq!(user.role, ChatRole::User);
-    assert!(user.content.contains("src/main.rs"));
-    assert!(user.content.contains("feature/x"));
-    assert!(user.content.contains("some diff"));
-}
-
-#[test]
 fn truncate_text_keeps_short_text_intact() {
     assert_eq!(truncate_text("hello", 10), "hello");
 }

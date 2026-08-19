@@ -358,6 +358,9 @@ impl RepositoryView {
     /// 渲染右侧内容区域（内容/差异切换 + 视图）。
     fn render_browse_content_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let show_ai_review = self.browse.list_mode == BrowseListMode::Compare;
+        // AI 评审展开时占满右侧区域（替换内容/差异视图），收起时回底部
+        // 单行条；生成中也可收起（进度显示在底部条）。
+        let ai_review_full = show_ai_review && self.ai_review_expanded;
         div()
             .flex()
             .flex_col()
@@ -366,12 +369,22 @@ impl RepositoryView {
             .min_w(px(0.0))
             .h_full()
             .child(self.render_browse_content_header(cx))
-            .child(match self.browse.view_mode {
-                BrowseViewMode::Content => self.render_browse_content_view(cx).into_any_element(),
-                BrowseViewMode::Diff => self.render_browse_diff_view(cx).into_any_element(),
+            .child(if ai_review_full {
+                self.render_ai_review_panel(cx).into_any_element()
+            } else {
+                match self.browse.view_mode {
+                    BrowseViewMode::Content => {
+                        self.render_browse_content_view(cx).into_any_element()
+                    }
+                    BrowseViewMode::Diff => self.render_browse_diff_view(cx).into_any_element(),
+                }
             })
-            .when(show_ai_review, |this| {
+            .when(show_ai_review && !ai_review_full, |this| {
                 this.child(self.render_ai_review_panel(cx))
+            })
+            // 评审历史弹窗（覆盖层）
+            .when(self.ai_review_history.is_some(), |this| {
+                this.child(self.render_ai_review_history(cx))
             })
             // 编码选择下拉菜单
             .child(self.render_encoding_dropdown(EncodingMenuTarget::Browse, cx))

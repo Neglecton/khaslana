@@ -9,6 +9,7 @@ mod conflicts;
 mod diff_view;
 mod external_merge_view;
 mod history_view;
+mod markdown_view;
 mod merge_view;
 mod oauth;
 mod operation_blocker_view;
@@ -54,19 +55,19 @@ use gpui::{
     px, size, uniform_list,
 };
 use khaslana::{
-    AiProviderSettings, AiReviewResult, BlameView, BranchKind, BranchName, BranchSyncStatus,
-    BrowseCompareFile, BrowseEntry, BrowseFileContent, BrowseListMode, BrowseRefKind, BrowseTarget,
-    ChangeState, CommitFileChange, CommitInfo, CommitMessage, ConflictBlockResolution,
-    ConflictFileKind, ConflictFileView, CredentialProvider, CredentialRecord, CredentialRequest,
-    CredentialScope, CredentialStore, CustomProxySettings, DiffEncodingChoice, DiffEncodingInfo,
-    DiffEncodingPreferences, DiffLineKind, DiffScope, ExternalMergeSettings, FileDiff,
-    GitCredential, GitService, HistoryRefsCache, HistoryScope, KeyringCredentialStore,
-    LineSelection, NetworkProxyMode, NetworkProxySettings, OperationEvent, ProgressEmitter,
-    RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy, RemoteInfo,
-    RemoteName, RepoPath, RepositorySnapshot, ResetMode, SelectedDiffLine, SelectionSide,
-    SessionState, ShortcutBindings, SubmoduleInfo, SubmoduleRemoteSyncStatus, TagName, ThemeMode,
-    UpdatePreferences, credential_display_target, credential_key_filename, credential_kind_label,
-    credential_record_is_compatible_with_url, credential_record_label,
+    AiProviderSettings, AiReviewRecord, AiReviewResult, AiReviewStep, BlameView, BranchKind,
+    BranchName, BranchSyncStatus, BrowseCompareFile, BrowseEntry, BrowseFileContent,
+    BrowseListMode, BrowseRefKind, BrowseTarget, ChangeState, CommitFileChange, CommitInfo,
+    CommitMessage, ConflictBlockResolution, ConflictFileKind, ConflictFileView, CredentialProvider,
+    CredentialRecord, CredentialRequest, CredentialScope, CredentialStore, CustomProxySettings,
+    DiffEncodingChoice, DiffEncodingInfo, DiffEncodingPreferences, DiffLineKind, DiffScope,
+    ExternalMergeSettings, FileDiff, GitCredential, GitService, HistoryRefsCache, HistoryScope,
+    KeyringCredentialStore, LineSelection, NetworkProxyMode, NetworkProxySettings, OperationEvent,
+    ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy,
+    RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode, SelectedDiffLine,
+    SelectionSide, SessionState, ShortcutBindings, SubmoduleInfo, SubmoduleRemoteSyncStatus,
+    TagName, ThemeMode, UpdatePreferences, credential_display_target, credential_key_filename,
+    credential_kind_label, credential_record_is_compatible_with_url, credential_record_label,
     credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
     syntax::SyntaxSpans as SharedSyntaxSpans,
     test_credential_connection,
@@ -337,6 +338,11 @@ const MENU_VIEWPORT_MARGIN: f32 = 8.0;
 const REPO_SWITCHER_MENU_WIDTH: f32 = 320.0;
 const REPO_SWITCHER_MENU_HEIGHT: f32 = 480.0;
 const MAX_CONCURRENT_REPO_LOADS: usize = 2;
+/// 同时进行的 AI 评审任务上限（含切目标后仍在后台跑的分离任务）；
+/// 超出时阻止新开，提示等待完成或取消。
+const MAX_CONCURRENT_AI_REVIEWS: usize = 3;
+/// 评审历史弹窗一次加载的记录条数。
+const AI_REVIEW_HISTORY_LIMIT: usize = 20;
 const LARGE_DIFF_CACHE_LINE_LIMIT: usize = 20_000;
 const DIFF_CACHE_CAPACITY: usize = 16;
 const CONFLICT_OURS_SCROLL_HANDLE_ID: &str = "conflict-ours-scroll-handle";
@@ -1257,6 +1263,14 @@ impl BlameState {
     }
 }
 
+/// AI 评审历史弹窗状态（None = 关闭）。
+pub(crate) struct AiReviewHistoryState {
+    /// 后台加载记录中。
+    pub loading: bool,
+    pub records: Vec<AiReviewRecord>,
+    pub error: Option<String>,
+}
+
 /// 分支浏览模式的 per-repository 状态。
 ///
 /// 维护已加载的文件树（按目录懒加载）、展开/选中状态，以及当前文件的只读内容或差异。
@@ -2000,11 +2014,45 @@ pub(crate) enum UiEvent {
         delta: String,
     },
     AiReviewGenerated {
+        /// 任务代际：与 `ai_review_active_generation` 匹配才应用到面板，
+        /// 不匹配说明 UI 已分离（切目标/取消），仅做后台完成提示。
+        generation: u64,
         review: AiReviewResult,
+        /// 记录是否成功落盘到评审记录目录。
+        saved: bool,
     },
+    /// agent 评审过程新增一个步骤（思维链或工具调用完成）。
+    AiReviewStepAdded {
+        generation: u64,
+        step: AiReviewStep,
+    },
+    /// agent 评审的进度文案更新（如「第 2 轮 · 已执行工具 5 次」）。
+    AiReviewProgress {
+        generation: u64,
+        message: String,
+    },
+    /// agent 评审当前轮的流式增量（正文/思考链），驱动时间线 live 区。
     AiReviewDelta {
+        generation: u64,
         content_delta: Option<String>,
         reasoning_delta: Option<String>,
+    },
+    /// agent 评审失败（从共用的 AiRequestFailed 拆出：携带代际，旧任务的
+    /// 失败不会误复位新任务的状态）。
+    AiReviewFailed {
+        generation: u64,
+        error: String,
+    },
+    /// agent 评审被取消后在轮次边界退出（UI 已在取消时复位，这里只做
+    /// 在途任务计数归位；无需携带代际，取消只影响计数）。
+    AiReviewCancelled,
+    /// 评审历史记录加载完成（历史弹窗）。
+    AiReviewHistoryLoaded {
+        records: Vec<AiReviewRecord>,
+    },
+    /// 评审历史记录加载失败。
+    AiReviewHistoryLoadFailed {
+        error: String,
     },
     AiConflictMergeProgress {
         path: String,
@@ -2665,11 +2713,31 @@ pub(crate) struct RepositoryView {
     pub(crate) ai_commit_buffer: String,
     pub(crate) ai_review: Option<Arc<AiReviewResult>>,
     pub(crate) ai_review_loading: bool,
-    /// review 流式生成时的实时正文缓冲。
-    pub(crate) ai_review_buffer: String,
-    /// review 流式生成时的实时思考链缓冲。
-    pub(crate) ai_review_reasoning_buffer: String,
+    /// agent 评审实时累积的执行轨迹（思维链 + 工具调用），生成期间与
+    /// 完成后共用（完成后与 review.steps 同源）。
+    pub(crate) ai_review_steps: Vec<AiReviewStep>,
+    /// agent 评审的进度文案（生成中展示在标题栏）。
+    pub(crate) ai_review_progress: Option<String>,
+    /// 时间线上展开详情的步骤下标集合（其余行只显示一行摘要）。
+    pub(crate) ai_review_step_expanded: BTreeSet<usize>,
+    /// 当前轮流式思维链的实时累积（「思考中…」live 区，轮次落定后清空）。
+    pub(crate) ai_review_live_reasoning: String,
+    /// 最终正文的流式实时累积（边生成边按 Markdown 渲染，完成定格）。
+    pub(crate) ai_review_live_content: String,
     pub(crate) ai_review_expanded: bool,
+    /// 评审代际计数器：每次 generate 递增，事件携带代际做守卫。
+    ai_review_next_generation: u64,
+    /// 当前展示附着的任务代际；None = 无附着（后台任务可能仍在跑，
+    /// 其事件只用于完成提示，不进面板）。
+    ai_review_active_generation: Option<u64>,
+    /// 在途评审任务数（含切目标后分离的），上限 MAX_CONCURRENT_AI_REVIEWS。
+    ai_review_running_tasks: usize,
+    /// 附着任务的取消标志（置位后任务在轮次边界退出，不落盘不提示失败）。
+    ai_review_cancel: Option<Arc<AtomicBool>>,
+    /// 面板当前展示的是历史记录时的标签（如「历史 · 08-18 14:30 · feature/x」）。
+    pub(crate) ai_review_loaded_label: Option<String>,
+    /// 评审历史弹窗状态（None = 关闭）。
+    pub(crate) ai_review_history: Option<AiReviewHistoryState>,
     /// 冲突工作台三栏同步滚动的上帧 offset 记录（[ours, result, theirs]，
     /// 跨帧供连线 canvas paint 判定滚动源；paint 闭包拿不到实体，经 Rc
     /// 共享）。选中冲突文件时重置。
@@ -2852,9 +2920,18 @@ impl RepositoryView {
             ai_commit_buffer: String::new(),
             ai_review: None,
             ai_review_loading: false,
-            ai_review_buffer: String::new(),
-            ai_review_reasoning_buffer: String::new(),
+            ai_review_steps: Vec::new(),
+            ai_review_progress: None,
+            ai_review_step_expanded: BTreeSet::new(),
+            ai_review_live_reasoning: String::new(),
+            ai_review_live_content: String::new(),
             ai_review_expanded: false,
+            ai_review_next_generation: 1,
+            ai_review_active_generation: None,
+            ai_review_running_tasks: 0,
+            ai_review_cancel: None,
+            ai_review_loaded_label: None,
+            ai_review_history: None,
             conflict_pane_scroll_sync: Rc::new(RefCell::new(None)),
             ai_conflict_loading: false,
             // ── 更新状态 ──
@@ -4823,23 +4900,110 @@ impl RepositoryView {
                 self.commit_message.value.push_str(&delta);
                 self.commit_message.caret = self.commit_message.value.len();
             }
-            UiEvent::AiReviewGenerated { review } => {
-                self.ai_review_loading = false;
-                self.ai_review_buffer.clear();
-                self.ai_review_reasoning_buffer.clear();
-                self.ai_review = Some(Arc::new(review));
-                self.status = "AI 评审已生成".into();
-                self.last_error = None;
+            UiEvent::AiReviewGenerated {
+                generation,
+                review,
+                saved,
+            } => {
+                self.ai_review_running_tasks = self.ai_review_running_tasks.saturating_sub(1);
+                if self.ai_review_active_generation == Some(generation) {
+                    self.ai_review_loading = false;
+                    self.ai_review_cancel = None;
+                    self.ai_review_progress = None;
+                    // live 缓冲定格为正式结果（同一数据源），清空避免重复展示。
+                    self.ai_review_live_reasoning.clear();
+                    self.ai_review_live_content.clear();
+                    self.ai_review_loaded_label = None;
+                    self.ai_review = Some(Arc::new(review));
+                    self.status = if saved {
+                        "AI 评审已生成并保存到评审记录".into()
+                    } else {
+                        "AI 评审已生成（保存记录失败）".into()
+                    };
+                    self.last_error = None;
+                } else {
+                    // 后台分离任务完成：落盘已在任务线程做完，提示可去历史查看。
+                    let message = if saved {
+                        "后台 AI 评审完成，已保存到评审记录".to_string()
+                    } else {
+                        "后台 AI 评审完成（保存记录失败，历史弹窗中将看不到本次记录）".to_string()
+                    };
+                    self.status = message.clone();
+                    self.notify_completion(&message, cx);
+                }
+            }
+            UiEvent::AiReviewStepAdded { generation, step } => {
+                // 代际守卫：UI 已分离（切目标/取消）的旧任务事件不进面板。
+                if self.ai_review_active_generation == Some(generation) {
+                    // 保留已完成评审的轨迹直到新评审开始覆盖（generate 时清空）。
+                    // 思维链/中间正文步骤落定后，对应 live 区让位于正式时间线行。
+                    match &step {
+                        AiReviewStep::Reasoning { .. } => self.ai_review_live_reasoning.clear(),
+                        AiReviewStep::Message { .. } => self.ai_review_live_content.clear(),
+                        AiReviewStep::ToolCall { .. } => {}
+                    }
+                    self.ai_review_steps.push(step);
+                }
+            }
+            UiEvent::AiReviewProgress {
+                generation,
+                message,
+            } => {
+                if self.ai_review_active_generation == Some(generation) {
+                    // 新一轮开始：清上一轮的 live 思维链（正文 live 只属于末轮，
+                    // 也在换轮时清空避免中轮正文残留）。
+                    self.ai_review_live_reasoning.clear();
+                    self.ai_review_live_content.clear();
+                    // 进度同时落状态栏，与其它 AI 任务一致。
+                    self.status = message.clone();
+                    self.ai_review_progress = Some(message);
+                }
             }
             UiEvent::AiReviewDelta {
+                generation,
                 content_delta,
                 reasoning_delta,
             } => {
-                if let Some(delta) = content_delta {
-                    self.ai_review_buffer.push_str(&delta);
+                if self.ai_review_active_generation == Some(generation) {
+                    if let Some(delta) = content_delta {
+                        self.ai_review_live_content.push_str(&delta);
+                    }
+                    if let Some(delta) = reasoning_delta {
+                        self.ai_review_live_reasoning.push_str(&delta);
+                    }
                 }
-                if let Some(delta) = reasoning_delta {
-                    self.ai_review_reasoning_buffer.push_str(&delta);
+            }
+            UiEvent::AiReviewFailed { generation, error } => {
+                self.ai_review_running_tasks = self.ai_review_running_tasks.saturating_sub(1);
+                if self.ai_review_active_generation == Some(generation) {
+                    self.ai_review_loading = false;
+                    self.ai_review_cancel = None;
+                    self.ai_review_progress = None;
+                    self.ai_review_live_reasoning.clear();
+                    self.ai_review_live_content.clear();
+                    // 失败保留已产生的轨迹（可检查模型做了什么）。
+                    self.status = "AI 请求失败".into();
+                    self.last_error = Some(error.clone());
+                    self.notify_error(format!("AI 请求失败：{error}"), cx);
+                } else {
+                    // 后台分离任务失败：不打断用户，仅状态栏可见。
+                    self.status = format!("后台 AI 评审失败：{error}");
+                }
+            }
+            UiEvent::AiReviewCancelled => {
+                // 取消时 UI 已即时复位，这里只做在途计数归位。
+                self.ai_review_running_tasks = self.ai_review_running_tasks.saturating_sub(1);
+            }
+            UiEvent::AiReviewHistoryLoaded { records } => {
+                if let Some(state) = self.ai_review_history.as_mut() {
+                    state.loading = false;
+                    state.records = records;
+                }
+            }
+            UiEvent::AiReviewHistoryLoadFailed { error } => {
+                if let Some(state) = self.ai_review_history.as_mut() {
+                    state.loading = false;
+                    state.error = Some(error);
                 }
             }
             UiEvent::AiConflictMergeProgress {
@@ -4877,11 +5041,10 @@ impl RepositoryView {
             }
             UiEvent::AiRequestFailed { error } => {
                 self.ai_commit_loading = false;
-                self.ai_review_loading = false;
                 self.ai_conflict_loading = false;
                 self.ai_commit_buffer.clear();
-                self.ai_review_buffer.clear();
-                self.ai_review_reasoning_buffer.clear();
+                // 评审失败走带代际的 AiReviewFailed（旧任务的失败不能
+                // 误复位当前附着任务的状态）。
                 // 测试连接失败时也要解锁借用的 busy，否则按钮永久禁用。
                 self.end_global_test_busy();
                 // 失败提示走右下角 toast + 状态栏双通道，仅靠状态栏小字极易被错过。
@@ -5821,6 +5984,7 @@ impl RepositoryView {
 
     pub(crate) fn close_popups(&mut self) {
         self.active_dialog = None;
+        self.ai_review_history = None;
         self.remote_branch_operation.branch_dropdown_open = false;
         self.remote_branch_search.clear();
         self.branch_context_menu = None;
@@ -9231,6 +9395,8 @@ impl RepositoryView {
         self.browse.reset();
         self.browse.list_mode = BrowseListMode::Compare;
         self.browse.view_mode = BrowseViewMode::Diff;
+        // 切换比较目标时作废旧评审。
+        self.reset_ai_review_state();
         self.main_mode = MainMode::Browse;
         self.status = format!("正在准备分支比较 {branch}");
         self.open_browse_resolve(repo_path, tab_id, branch, ref_kind);
@@ -9555,7 +9721,105 @@ impl RepositoryView {
     /// 关闭浏览模式，回到工作区。
     pub(crate) fn close_browse(&mut self) {
         self.main_mode = MainMode::Worktree;
+        // 评审针对具体比较目标，退出浏览时整体作废，避免下次进入比较模式
+        // 时残留旧评审直接占满右侧区域。
+        self.reset_ai_review_state();
         self.status = "已退出分支浏览".to_string();
+    }
+
+    /// 分离当前评审展示（**不终止在途任务**）：切目标/退出浏览时调用。
+    /// 后台任务继续执行，完成后落盘并 toast 提示；其后续事件因代际
+    /// 不匹配被丢弃，不会污染新目标的展示状态。
+    fn reset_ai_review_state(&mut self) {
+        self.ai_review = None;
+        self.ai_review_steps.clear();
+        self.ai_review_step_expanded.clear();
+        self.ai_review_progress = None;
+        self.ai_review_live_reasoning.clear();
+        self.ai_review_live_content.clear();
+        self.ai_review_expanded = false;
+        self.ai_review_loaded_label = None;
+        self.ai_review_active_generation = None;
+        self.ai_review_loading = false;
+        // 取消标志不动：任务继续后台执行直到结束落盘。
+    }
+
+    /// 取消当前附着的评审任务：置位取消标志并分离展示；任务在轮次
+    /// 边界自行退出（不落盘、不提示失败、不占并发名额的时间超过必要）。
+    pub(crate) fn cancel_ai_review(&mut self) {
+        if let Some(flag) = self.ai_review_cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.reset_ai_review_state();
+        self.status = "已取消 AI 评审".into();
+    }
+
+    /// 打开评审历史弹窗并后台加载当前仓库的最近记录。
+    pub(crate) fn open_ai_review_history(&mut self) {
+        if self.ai_review_history.is_some() {
+            return;
+        }
+        let Some(repo_path) = self.repo_path.clone() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let Some(data_dir) = khaslana::storage::active_data_dir() else {
+            self.last_error = Some("无法定位数据目录".into());
+            return;
+        };
+        self.ai_review_history = Some(AiReviewHistoryState {
+            loading: true,
+            records: Vec::new(),
+            error: None,
+        });
+        self.status = "正在加载评审记录".into();
+        let tx = self.tx.clone();
+        self.tasks.spawn(crate::TaskKind::Short, move || {
+            let repo_path_string = repo_path.display().to_string();
+            let result = khaslana::ai::list_review_records(
+                &data_dir,
+                &repo_path_string,
+                AI_REVIEW_HISTORY_LIMIT,
+            );
+            match result {
+                Ok(records) => {
+                    crate::send_ui_event(&tx, crate::UiEvent::AiReviewHistoryLoaded { records })
+                }
+                Err(err) => crate::send_ui_event(
+                    &tx,
+                    crate::UiEvent::AiReviewHistoryLoadFailed {
+                        error: err.to_string(),
+                    },
+                ),
+            }
+        });
+    }
+
+    /// 关闭评审历史弹窗。
+    pub(crate) fn close_ai_review_history(&mut self) {
+        self.ai_review_history = None;
+    }
+
+    /// 把一条历史记录载入评审面板（若有生成中的附着任务先分离，其继续
+    /// 后台执行并落盘）。
+    pub(crate) fn open_ai_review_record(&mut self, record: AiReviewRecord) {
+        self.close_ai_review_history();
+        self.reset_ai_review_state();
+        let date =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(record.created_at_millis as i64)
+                .map(|time| {
+                    time.with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "时间未知".to_string());
+        self.ai_review_loaded_label =
+            Some(format!("历史 · {date} · {}", record.target_display_name));
+        self.ai_review = Some(Arc::new(record.result.clone()));
+        self.ai_review_steps = record.result.steps;
+        self.ai_review_expanded = true;
+        self.status = "已打开历史评审记录".into();
+        self.last_error = None;
     }
 
     /// 对比视图依赖具体分支的差异；切换分支/检出后旧差异会失效，

@@ -34,6 +34,7 @@ mod conflicts;
 mod merge;
 mod partial_stage;
 mod rebase;
+mod search;
 mod stash;
 mod submodule;
 mod worktree_compat;
@@ -50,6 +51,7 @@ pub(crate) mod test_support;
 // 重新导出浏览模式引用种类，供二进制 crate 使用
 pub use browse::BrowseRefKind;
 pub use partial_stage::{LineSelection, SelectedDiffLine, SelectionSide};
+pub use search::CodeSearchMatch;
 
 pub(crate) const DIFF_CONTEXT_LINES: u32 = 3;
 const BRANCH_SYNC_UNPUSHED_OID_LIMIT: usize = 256;

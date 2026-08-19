@@ -19,6 +19,8 @@ keyring-core = "1"
 bstr = "1"
 getrandom = "0.3"
 lru = "0.18"
+# Markdown 解析（AI 评审结果等富文本展示）；只需 parser，关掉默认的 html 渲染器。
+pulldown-cmark = { version = "0.13", default-features = false }
 rayon = "1"
 regex = "1"
 semver = "1"

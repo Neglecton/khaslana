@@ -6,15 +6,15 @@
 use std::sync::Arc;
 
 use gpui::{Context, IntoElement, Window, div, point, prelude::*, px};
-use khaslana::{
-    AiApiType, AiReviewResult, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffLineKind,
-    DiffScope,
-};
+use khaslana::{AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope};
 
 use crate::ui::theme::rgb;
 use crate::{
     FieldId, RepositoryView,
-    ui::{components::dialog_actions, theme as ui_theme},
+    ui::{
+        components::{dialog_actions, dialog_overlay},
+        theme as ui_theme,
+    },
     ui_helpers::{ScrollbarMode, scrollable_frame_when},
 };
 
@@ -178,7 +178,7 @@ impl RepositoryView {
                         continue;
                     }
                     diff_text.push_str(&format!("--- a/{}\n", path));
-                    diff_text.push_str(&file_diff_to_patch_text(&file_diff));
+                    diff_text.push_str(&khaslana::ai::file_diff_to_patch_text(&file_diff));
                 }
                 let (system, user) = khaslana::ai::commit_message_prompts(&diff_text, None);
                 let client = ChatClient::new(settings, proxy_url);
@@ -445,11 +445,14 @@ impl RepositoryView {
         self.ai_settings.is_usable()
             && !self.ai_review_loading
             && !self.busy
-            && self.browse.diff.is_some()
+            && self.browse.target.is_some()
+            && !self.browse.compare_files.is_empty()
     }
 
-    /// 触发 AI code review 当前选中文件。
-    pub(crate) fn generate_ai_review(&mut self) {
+    /// 触发 Agentic AI 评审：覆盖分支比较的全部差异文件（diff-first，
+    /// 模型按需调用工具深入代码），过程轨迹实时回传时间线；完成后由
+    /// 任务线程落盘到评审记录，即使中途切换目标也继续后台执行。
+    pub(crate) fn generate_ai_review(&mut self, cx: &mut Context<Self>) {
         if self.ai_review_loading {
             return;
         }
@@ -457,85 +460,223 @@ impl RepositoryView {
             self.last_error = Some("请先在 AI 设置中配置并启用供应商".into());
             return;
         }
-        let Some(diff) = self.browse.diff.clone() else {
-            self.last_error = Some("请先选择要评审的差异文件".into());
+        // 并发上限：在途任务（含后台分离的）达到上限时阻止新开。
+        if self.ai_review_running_tasks >= crate::MAX_CONCURRENT_AI_REVIEWS {
+            let message = format!(
+                "已有 {} 个 AI 评审任务在进行中，请等待完成或取消后再试",
+                crate::MAX_CONCURRENT_AI_REVIEWS
+            );
+            self.last_error = Some(message.clone());
+            self.notify_error(message, cx);
+            return;
+        }
+        let Some(target) = self.browse.target.clone() else {
+            self.last_error = Some("请先进入分支比较模式".into());
             return;
         };
-        let file_path = diff.path.clone();
-        let branch_name = self
-            .browse
-            .target
-            .as_ref()
-            .map(|target| target.display_name.clone())
-            .unwrap_or_else(|| "目标分支".to_string());
-        let diff_text = if diff.is_binary {
-            format!("（{file_path} 是二进制文件，无法评审）")
-        } else {
-            file_diff_to_patch_text(&diff)
+        if self.browse.compare_files.is_empty() {
+            self.last_error = Some("当前分支比较没有差异文件".into());
+            return;
+        }
+        let Some(tab_id) = self.active_tab_id() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
         };
+        let Some(repo_path) = self.repo_path.clone() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let service = self.service_for_tab(tab_id);
+
+        // 代际登记：事件携带代际，切目标/取消后旧任务事件不再进面板。
+        let generation = self.ai_review_next_generation;
+        self.ai_review_next_generation += 1;
+        self.ai_review_active_generation = Some(generation);
+        self.ai_review_running_tasks += 1;
+        let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.ai_review_cancel = Some(cancel_flag.clone());
 
         self.ai_review_loading = true;
         self.ai_review = None;
-        self.ai_review_buffer.clear();
-        self.ai_review_reasoning_buffer.clear();
+        self.ai_review_steps.clear();
+        self.ai_review_step_expanded.clear();
+        self.ai_review_live_reasoning.clear();
+        self.ai_review_live_content.clear();
+        self.ai_review_loaded_label = None;
+        self.ai_review_progress = Some("正在准备评审上下文…".into());
+        // 生成期间自动占满右侧区域，实时展示思维链与工具轨迹。
+        self.ai_review_expanded = true;
         self.scroll_handle("ai-review-scroll")
             .set_offset(point(px(0.0), px(0.0)));
         self.status = "正在生成 AI 评审".into();
         self.last_error = None;
 
         let settings = self.ai_settings.clone();
+        let model = settings.model.clone();
         let proxy_url = self
             .proxy_settings
             .proxy_url_for_target(&settings.normalized_base_url());
+        let repo_path_string = repo_path.display().to_string();
+        let file_count = self.browse.compare_files.len();
+        let data_dir = khaslana::storage::active_data_dir();
+        let input = khaslana::ai::ReviewAgentInput {
+            repo_path,
+            target_display_name: target.display_name,
+            target_commit_oid: target.commit_oid,
+            compare_files: self.browse.compare_files.clone(),
+        };
         let tx = self.tx.clone();
-        self.tasks.spawn(crate::TaskKind::Long, move || {
-            let (system, user) = khaslana::ai::review_prompts(&file_path, &diff_text, &branch_name);
-            let client = ChatClient::new(settings, proxy_url);
-            // 流式请求：content 和 reasoning 增量分别推回 UI，实时渲染评审内容。
-            let tx = tx.clone();
-            let result = client.request_stream(&[system, user], &mut |delta| {
-                let (content_delta, reasoning_delta) = match delta {
-                    khaslana::StreamDelta::Content(text) => (Some(text), None),
-                    khaslana::StreamDelta::Reasoning(text) => (None, Some(text)),
+        let started_at = std::time::Instant::now();
+        // 评审 agent 是分钟级任务（多轮流式 + 重试）且允许 3 个并发，
+        // 走独立 ai 池避免占满 long 池饿死 fetch/push 等网络操作。
+        self.tasks.spawn(crate::TaskKind::Ai, move || {
+            // panic 兜底（第二层）：TaskExecutor 的 catch_unwind 只发
+            // BackgroundTaskPanicked，无法区分任务种类、不会归位评审并发
+            // 计数与加载标志——任务体一旦 panic，并发名额会永久泄漏
+            // （3 次后评审入口锁死）。这里对任务体再包一层，panic 时补发
+            // 该代际的 AiReviewFailed 走常规失败通道精确复位。
+            let panic_tx = tx.clone();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let client = ChatClient::new(settings, proxy_url);
+                let tx = tx.clone();
+                // 完成事件由返回值统一发送（Generated/Failed/Cancelled）；
+                // lib 侧的 Done 事件忽略，避免双发。
+                let mut on_event = |event: khaslana::ai::AgentEvent| match event {
+                    khaslana::ai::AgentEvent::Step(step) => crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiReviewStepAdded {
+                            generation: generation,
+                            step,
+                        },
+                    ),
+                    khaslana::ai::AgentEvent::Progress(message) => crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiReviewProgress {
+                            generation: generation,
+                            message,
+                        },
+                    ),
+                    khaslana::ai::AgentEvent::Delta { content, reasoning } => crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiReviewDelta {
+                            generation: generation,
+                            content_delta: content,
+                            reasoning_delta: reasoning,
+                        },
+                    ),
+                    khaslana::ai::AgentEvent::Done(_) => {}
                 };
+                match khaslana::ai::run_review_agent(
+                    &input,
+                    &service,
+                    &client,
+                    &cancel_flag,
+                    &mut on_event,
+                ) {
+                    Ok(Some(review)) => {
+                        // 落盘在任务线程完成：即使 UI 已分离（切目标/退出浏览）
+                        // 也能保存，历史弹窗随时可查。
+                        let saved = match &data_dir {
+                            Some(dir) => {
+                                let created_at_millis = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|elapsed| elapsed.as_millis() as u64)
+                                    .unwrap_or(0);
+                                khaslana::ai::save_review_record(
+                                    dir,
+                                    khaslana::AiReviewRecord {
+                                        id: String::new(),
+                                        repo_path: repo_path_string.clone(),
+                                        target_display_name: input.target_display_name.clone(),
+                                        target_commit_oid: input.target_commit_oid.clone(),
+                                        model: model.clone(),
+                                        created_at_millis,
+                                        duration_secs: started_at.elapsed().as_secs(),
+                                        file_count,
+                                        result: review.clone(),
+                                    },
+                                )
+                                .is_ok()
+                            }
+                            None => {
+                                tracing::warn!(
+                                    target: "khaslana::ai",
+                                    "无法定位数据目录，评审记录未保存"
+                                );
+                                false
+                            }
+                        };
+                        crate::send_ui_event(
+                            &tx,
+                            crate::UiEvent::AiReviewGenerated {
+                                generation: generation,
+                                review,
+                                saved,
+                            },
+                        );
+                    }
+                    Ok(None) => {
+                        // 用户取消：任务在轮次边界退出，UI 已复位，仅归位计数。
+                        crate::send_ui_event(&tx, crate::UiEvent::AiReviewCancelled);
+                    }
+                    Err(err) => {
+                        crate::send_ui_event(
+                            &tx,
+                            crate::UiEvent::AiReviewFailed {
+                                generation,
+                                error: err.to_string(),
+                            },
+                        );
+                    }
+                }
+            }));
+            if let Err(payload) = outcome {
+                let message = crate::tasks::panic_message(payload);
+                tracing::error!(target: "khaslana::ai", "AI 评审任务 panic：{message}");
                 crate::send_ui_event(
-                    &tx,
-                    crate::UiEvent::AiReviewDelta {
-                        content_delta,
-                        reasoning_delta,
+                    &panic_tx,
+                    crate::UiEvent::AiReviewFailed {
+                        generation,
+                        error: format!("AI 评审任务异常终止：{message}"),
                     },
                 );
-            });
-            match result.and_then(|result| {
-                // 空正文按失败处理：避免空评审面板 +「AI 评审已生成」假成功。
-                khaslana::ai::validate_generated_content(
-                    &result,
-                    "AI 返回的评审内容为空，请重试或检查模型配置",
-                    "AI 未返回评审正文（仅返回了思考过程），请重试或更换模型",
-                )
-                .map(|content| (content, result.reasoning))
-            }) {
-                Ok((content, reasoning)) => {
-                    let review = AiReviewResult { content, reasoning };
-                    crate::send_ui_event(&tx, crate::UiEvent::AiReviewGenerated { review });
-                }
-                Err(err) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiRequestFailed {
-                            error: err.to_string(),
-                        },
-                    );
-                }
             }
         });
     }
 
-    /// 渲染 AI 评审面板（可折叠），放在对比模式 diff 视图下方。
+    /// 渲染 AI 评审面板：展开为全区域模式（替换 diff 视图占满右侧），
+    /// 收起为底部单行条。生成中也可收起（进度显示在底部条 + 可取消）。
     pub(crate) fn render_ai_review_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.ai_review_expanded {
+            self.render_ai_review_full_area(cx).into_any_element()
+        } else {
+            self.render_ai_review_collapsed_bar(cx).into_any_element()
+        }
+    }
+
+    /// 全区域模式：标题栏（进度 + 收起/重新生成）+ 滚动正文
+    ///（步骤时间线 + Markdown 评审结果）。
+    fn render_ai_review_full_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let loading = self.ai_review_loading;
         let review = self.ai_review.clone();
-        let expanded = self.ai_review_expanded;
+        let has_steps = !self.ai_review_steps.is_empty();
+        let has_live =
+            !self.ai_review_live_reasoning.is_empty() || !self.ai_review_live_content.is_empty();
+        let has_content = has_steps || review.is_some() || has_live;
+        let handle = self.scroll_handle("ai-review-scroll");
+
+        let status_text = if let Some(label) = &self.ai_review_loaded_label {
+            // 历史记录展示态：标签优先于进度/完成文案。
+            label.clone()
+        } else if loading {
+            self.ai_review_progress
+                .clone()
+                .unwrap_or_else(|| "生成中…".to_string())
+        } else if let Some(review) = &review {
+            format!("完成 · 共 {} 个步骤", review.steps.len())
+        } else {
+            String::new()
+        };
 
         let header = div()
             .flex()
@@ -552,6 +693,7 @@ impl RepositoryView {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .min_w(px(0.0))
                     .child(
                         div()
                             .text_size(px(12.0))
@@ -559,12 +701,13 @@ impl RepositoryView {
                             .text_color(rgb(ui_theme::PRIMARY))
                             .child("AI 评审"),
                     )
-                    .when(loading, |this| {
+                    .when(!status_text.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                .child("生成中..."),
+                                .truncate()
+                                .child(status_text),
                         )
                     }),
             )
@@ -573,180 +716,692 @@ impl RepositoryView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when_some(review.clone(), |this, _review| {
+                    .flex_none()
+                    .when(review.is_some(), |this| {
                         this.child(self.button(
-                            if expanded { "收起" } else { "展开" },
-                            !loading,
-                            |this, _, _| this.ai_review_expanded = !this.ai_review_expanded,
-                            cx,
-                        ))
-                        .child(self.button(
-                            "重新生成",
-                            self.ai_review_button_enabled(),
-                            |this, _, _| this.generate_ai_review(),
+                            "复制结论",
+                            true,
+                            |this, _, cx| {
+                                let Some(review) = this.ai_review.clone() else {
+                                    return;
+                                };
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    review.content.clone(),
+                                ));
+                                this.status = "已复制评审结论".into();
+                                this.last_error = None;
+                                this.notify_success(this.status.clone(), cx);
+                            },
                             cx,
                         ))
                     })
                     .child(self.button(
-                        "AI Review",
-                        self.ai_review_button_enabled(),
-                        |this, _, _| this.generate_ai_review(),
+                        "历史",
+                        true,
+                        |this, _, _| {
+                            this.close_popups();
+                            this.open_ai_review_history();
+                        },
                         cx,
-                    )),
+                    ))
+                    .when(loading, |this| {
+                        this.child(self.button(
+                            "取消",
+                            true,
+                            |this, _, _| {
+                                this.cancel_ai_review();
+                            },
+                            cx,
+                        ))
+                    })
+                    .child(self.button(
+                        "收起",
+                        true,
+                        |this, _, _| {
+                            this.ai_review_expanded = false;
+                        },
+                        cx,
+                    ))
+                    .when(!loading, |this| {
+                        this.child(self.button(
+                            if has_content {
+                                "重新生成"
+                            } else {
+                                "AI Review"
+                            },
+                            self.ai_review_button_enabled(),
+                            |this, _, cx| this.generate_ai_review(cx),
+                            cx,
+                        ))
+                    }),
             );
 
-        let body = if loading {
-            // 流式生成时实时显示缓冲内容（正文 + 可选思考链）。
-            let content = self.ai_review_buffer.clone();
-            let reasoning = (!self.ai_review_reasoning_buffer.is_empty())
-                .then(|| self.ai_review_reasoning_buffer.clone());
-            let has_output = !content.is_empty() || reasoning.is_some();
-            let content_view = div()
-                .px_3()
-                .py_2()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(rgb(if has_output {
-                    ui_theme::FOREGROUND
-                } else {
-                    ui_theme::MUTED_FOREGROUND
-                }))
-                .child(if has_output {
-                    String::new()
-                } else {
-                    "正在等待 AI 返回评审结果...".to_string()
-                })
-                .when(has_output, |this| {
-                    this.child(div().child(content.clone())).when_some(
-                        reasoning,
-                        |this, reasoning| {
-                            this.child(
-                                div()
-                                    .mt_2()
-                                    .pt_2()
-                                    .border_t_1()
-                                    .border_color(rgb(ui_theme::BORDER))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                    .child(
-                                        div().font_weight(gpui::FontWeight::BOLD).child("思考链："),
-                                    )
-                                    .child(div().child(reasoning)),
-                            )
-                        },
-                    )
-                });
-            let handle = self.scroll_handle("ai-review-scroll");
-            Some(
-                scrollable_frame_when(
-                    "ai-review-scroll",
-                    ScrollbarMode::Vertical,
-                    content_view.into_any_element(),
-                    handle,
-                    has_output,
-                    cx,
-                )
-                .into_any_element(),
-            )
-        } else if let Some(review) = review {
-            if expanded {
-                let handle = self.scroll_handle("ai-review-scroll");
-                Some(
-                    scrollable_frame_when(
-                        "ai-review-scroll",
-                        ScrollbarMode::Vertical,
-                        render_review_content(&review),
-                        handle,
-                        true,
-                        cx,
-                    )
-                    .into_any_element(),
-                )
-            } else {
-                Some(
+        let live_reasoning = self.ai_review_live_reasoning.clone();
+        let live_content = self.ai_review_live_content.clone();
+        let has_live = !live_reasoning.is_empty() || !live_content.is_empty();
+
+        // 滚动结构与仓库切换下拉同构：外层有界（flex_1 + min_h 0）+
+        // scrollable_frame_when 直接子元素 + 内容 div 只挂 id/overflow/
+        // track_scroll。不要给内容 div 再叠 flex_1/min_h 中间层——约束
+        // 不会沿多层 flex 收缩链传递确定高度，多一层就滚不动。
+        let content = div()
+            .id("ai-review-scroll")
+            .flex()
+            .flex_col()
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .px_3()
+            .py_2()
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .text_color(rgb(ui_theme::FOREGROUND))
+            .child(self.render_review_timeline(cx))
+            .when_some(review, |this, review| {
+                this.child(
                     div()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .truncate()
-                        .child(review.content.chars().take(80).collect::<String>())
-                        .into_any_element(),
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER))
+                        .child(crate::markdown_view::render_markdown(&review.content)),
                 )
-            }
-        } else {
-            None
-        };
+            })
+            // 末轮流式正文：边生成边按 Markdown 渲染（半截文档由解析器
+            // 在 EOF 收尾），完成态由 review.content 定格（同一数据源）。
+            .when(loading && !live_content.is_empty(), |this| {
+                this.child(
+                    div()
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER))
+                        .child(crate::markdown_view::render_markdown(&live_content)),
+                )
+            })
+            // live 区为空时的兜底提示（工具执行间隙/初始准备）。
+            .when(loading && !has_live, |this| {
+                this.child(
+                    div()
+                        .mt_2()
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child(if has_steps {
+                            "工具执行中…"
+                        } else {
+                            "正在准备评审上下文…"
+                        }),
+                )
+            });
 
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .max_h(px(360.0))
+            .flex_1()
             .min_h(px(0.0))
+            .bg(rgb(ui_theme::CARD))
+            .child(header)
+            .child(scrollable_frame_when(
+                "ai-review-scroll",
+                ScrollbarMode::Vertical,
+                content.into_any_element(),
+                handle,
+                has_content,
+                cx,
+            ))
+    }
+
+    /// 收起态：底部单行条（进度或 80 字符正文预览 + 展开/重新生成）。
+    fn render_ai_review_collapsed_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let review = self.ai_review.clone();
+        let has_content = review.is_some() || !self.ai_review_steps.is_empty();
+        let preview = if let Some(label) = &self.ai_review_loaded_label {
+            label.clone()
+        } else if self.ai_review_loading {
+            self.ai_review_progress
+                .clone()
+                .unwrap_or_else(|| "正在生成 AI 评审…".to_string())
+        } else if let Some(review) = &review {
+            review
+                .content
+                .replace('\n', " ")
+                .chars()
+                .take(80)
+                .collect::<String>()
+        } else if !self.ai_review_steps.is_empty() {
+            "评审未完成，可展开检查执行轨迹".to_string()
+        } else {
+            "未生成".to_string()
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .h(px(32.0))
+            .flex_none()
             .border_t_1()
             .border_color(rgb(ui_theme::BORDER))
             .bg(rgb(ui_theme::CARD))
-            .child(header)
-            .when_some(body, |this, body| {
-                this.child(div().flex_1().min_h(px(0.0)).child(body))
-            })
-    }
-}
-
-/// 把 FileDiff 转成 patch 风格文本，供 AI prompt 使用。
-fn file_diff_to_patch_text(diff: &khaslana::FileDiff) -> String {
-    if diff.is_binary {
-        return format!("（{} 是二进制文件）\n", diff.path);
-    }
-    let mut text = String::new();
-    for line in &diff.lines {
-        match line.kind {
-            DiffLineKind::Header => {
-                text.push_str(&line.content);
-                text.push('\n');
-            }
-            DiffLineKind::Context => {
-                text.push(' ');
-                text.push_str(&line.content);
-                text.push('\n');
-            }
-            DiffLineKind::Added => {
-                text.push('+');
-                text.push_str(&line.content);
-                text.push('\n');
-            }
-            DiffLineKind::Removed => {
-                text.push('-');
-                text.push_str(&line.content);
-                text.push('\n');
-            }
-        }
-    }
-    text
-}
-
-/// 渲染评审正文 + 可选思考链。
-fn render_review_content(review: &Arc<AiReviewResult>) -> gpui::AnyElement {
-    div()
-        .px_3()
-        .py_2()
-        .text_size(px(12.0))
-        .line_height(px(18.0))
-        .text_color(rgb(ui_theme::FOREGROUND))
-        .child(div().child(review.content.clone()))
-        .when_some(review.reasoning.clone(), |this, reasoning| {
-            this.child(
+            .child(
                 div()
-                    .mt_2()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::PRIMARY))
+                    .flex_none()
+                    .child("AI 评审"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .text_size(px(11.0))
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(div().font_weight(gpui::FontWeight::BOLD).child("思考链："))
-                    .child(div().child(reasoning)),
+                    .truncate()
+                    .child(preview),
             )
-        })
-        .into_any_element()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_none()
+                    .when(self.ai_review_loading, |this| {
+                        // 生成中收起到底部条：可展开回去看进度，也可取消。
+                        this.child(self.button(
+                            "展开",
+                            true,
+                            |this, _, _| {
+                                this.ai_review_expanded = true;
+                            },
+                            cx,
+                        ))
+                        .child(self.button(
+                            "取消",
+                            true,
+                            |this, _, _| {
+                                this.cancel_ai_review();
+                            },
+                            cx,
+                        ))
+                    })
+                    .when(!self.ai_review_loading, |this| {
+                        this.child(self.button(
+                            "历史",
+                            true,
+                            |this, _, _| {
+                                this.close_popups();
+                                this.open_ai_review_history();
+                            },
+                            cx,
+                        ))
+                        .when(has_content, |this| {
+                            this.child(self.button(
+                                "展开",
+                                true,
+                                |this, _, _| {
+                                    this.ai_review_expanded = true;
+                                },
+                                cx,
+                            ))
+                        })
+                        .child(self.button(
+                            if review.is_some() {
+                                "重新生成"
+                            } else {
+                                "AI Review"
+                            },
+                            self.ai_review_button_enabled(),
+                            |this, _, cx| this.generate_ai_review(cx),
+                            cx,
+                        ))
+                    }),
+            )
+    }
+
+    /// 评审历史弹窗：最近记录列表，点击「打开」载入面板；背景点击关闭。
+    pub(crate) fn render_ai_review_history(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(state) = &self.ai_review_history else {
+            return div().into_any_element();
+        };
+        let handle = self.scroll_handle("ai-review-history-scroll");
+
+        let body = if state.loading {
+            div()
+                .py_6()
+                .text_size(px(12.0))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child("正在加载评审记录…")
+                .into_any_element()
+        } else if let Some(error) = &state.error {
+            div()
+                .py_6()
+                .text_size(px(12.0))
+                .text_color(rgb(ui_theme::DESTRUCTIVE))
+                .child(format!("加载失败：{error}"))
+                .into_any_element()
+        } else if state.records.is_empty() {
+            div()
+                .py_6()
+                .text_size(px(12.0))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child("暂无评审记录")
+                .into_any_element()
+        } else {
+            // 滚动结构照仓库切换下拉同构：外层有界 + scrollable_frame_when
+            // 直接子元素 + 内容 div 只挂 id/overflow/track_scroll。
+            let rows = state
+                .records
+                .clone()
+                .into_iter()
+                .map(|record| self.render_ai_review_history_row(record, cx))
+                .collect::<Vec<_>>();
+            let content = div()
+                .id("ai-review-history-scroll")
+                .flex()
+                .flex_col()
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(&handle)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child(div().w(px(92.0)).flex_none().child("完成时间"))
+                        .child(div().flex_1().min_w(px(0.0)).child("目标分支"))
+                        .child(div().w(px(110.0)).flex_none().child("模型"))
+                        .child(div().w(px(64.0)).flex_none().text_right().child("步骤")),
+                )
+                .children(rows);
+            scrollable_frame_when(
+                "ai-review-history-scroll",
+                ScrollbarMode::Vertical,
+                content.into_any_element(),
+                handle,
+                true,
+                cx,
+            )
+            .into_any_element()
+        };
+
+        dialog_overlay()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.close_ai_review_history();
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .id("ai-review-history-panel")
+                    .w(px(600.0))
+                    .max_h(px(480.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(gpui::MouseButton::Right, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(ui_theme::BORDER))
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("评审历史"),
+                            )
+                            .child(
+                                div()
+                                    .id("ai-review-history-close")
+                                    .flex_none()
+                                    .size(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_ai_review_history();
+                                        cx.notify();
+                                    }))
+                                    .child("✕"),
+                            ),
+                    )
+                    // 列表主体：有界（flex_1 + min_h 0）承接滚动。
+                    .child(div().flex_1().min_h(px(0.0)).p_2().child(body)),
+            )
+            .into_any_element()
+    }
+
+    /// 历史列表单行。
+    fn render_ai_review_history_row(
+        &self,
+        record: khaslana::AiReviewRecord,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let date =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(record.created_at_millis as i64)
+                .map(|time| {
+                    time.with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "时间未知".to_string());
+        let target_display_name = record.target_display_name.clone();
+        let model = record.model.clone();
+        let step_count = record.result.steps.len();
+        div()
+            .id(format!("ai-review-history-{}", record.id))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_2()
+            .py(px(5.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .cursor_pointer()
+            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.open_ai_review_record(record.clone());
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(92.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(date),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .truncate()
+                    .child(target_display_name),
+            )
+            .child(
+                div()
+                    .w(px(110.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .truncate()
+                    .child(model),
+            )
+            .child(
+                div()
+                    .w(px(64.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_right()
+                    .child(format!("{step_count} 步")),
+            )
+            .into_any_element()
+    }
+
+    /// 步骤时间线（Codex/ZCode 式）：左侧竖轨 + 节点圆点，行默认折叠只显
+    /// 一行摘要，点击展开 TILE 底等宽详情块；思维链与工具调用错开颜色，
+    /// 错误步骤用警告色。
+    fn render_review_timeline(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let has_steps = !self.ai_review_steps.is_empty();
+        let live_reasoning = self.ai_review_live_reasoning.clone();
+        let show_live = self.ai_review_loading && !live_reasoning.is_empty();
+        if !has_steps && !show_live {
+            return div().into_any_element();
+        }
+        let rows = self
+            .ai_review_steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| self.render_review_step_row(index, step, cx))
+            .collect::<Vec<_>>();
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            // 竖轨：绝对定位细线，先声明先绘制，节点圆点覆盖其上。
+            .child(
+                div()
+                    .absolute()
+                    .left(px(3.0))
+                    .top(px(4.0))
+                    .bottom(px(4.0))
+                    .w(px(1.0))
+                    .bg(rgb(ui_theme::BORDER)),
+            )
+            .children(rows)
+            // live 思考行：流式期间的瞬时「思考中…」，思维链全文灰色
+            // 小字实时变长；轮次落定（Step(Reasoning) 到达）后由正式
+            // 时间线行（「思考：{首行摘要}」）取而代之。
+            .when(show_live, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(7.0))
+                                .h(px(7.0))
+                                .rounded_full()
+                                .mt(px(6.0))
+                                .bg(rgb(ui_theme::PRIMARY)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(10.0))
+                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .child("✻"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .child("思考中…"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .child(live_reasoning),
+                                ),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 时间线单行：节点圆点 + 摘要（可点击展开详情）；Message 步骤整段
+    /// 直出不折叠（模型明确说的话，不该被下一个工具消息覆盖）。
+    fn render_review_step_row(
+        &self,
+        index: usize,
+        step: &khaslana::AiReviewStep,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // 中间轮 assistant 正文：非折叠整段直出，无展开交互。
+        if let khaslana::AiReviewStep::Message { text } = step {
+            return div()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .rounded_full()
+                        .mt(px(6.0))
+                        .bg(rgb(ui_theme::PRIMARY)),
+                )
+                .child(
+                    div().flex_1().min_w(px(0.0)).flex().flex_col().child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child("❝"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(11.0))
+                                    .line_height(px(17.0))
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child(text.clone()),
+                            ),
+                    ),
+                )
+                .into_any_element();
+        }
+
+        let expanded = self.ai_review_step_expanded.contains(&index);
+        let is_error = step.is_error();
+        let is_reasoning = matches!(step, khaslana::AiReviewStep::Reasoning { .. });
+        let summary = step.summary();
+        let detail = step.detail().to_string();
+        let summary_color = if is_error {
+            ui_theme::DESTRUCTIVE
+        } else if is_reasoning {
+            ui_theme::MUTED_FOREGROUND
+        } else {
+            ui_theme::FOREGROUND
+        };
+        let marker = if is_reasoning {
+            "✻"
+        } else if expanded {
+            "▾"
+        } else {
+            "▸"
+        };
+
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded_full()
+                    .mt(px(6.0))
+                    .bg(rgb(if is_error {
+                        ui_theme::DESTRUCTIVE
+                    } else if is_reasoning {
+                        ui_theme::MUTED_FOREGROUND
+                    } else {
+                        ui_theme::PRIMARY
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    // 摘要行可点击展开/收起详情。
+                    .child(
+                        div()
+                            .id(format!("ai-review-step-{index}"))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                if this.ai_review_step_expanded.contains(&index) {
+                                    this.ai_review_step_expanded.remove(&index);
+                                } else {
+                                    this.ai_review_step_expanded.insert(index);
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child(marker),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(summary_color))
+                                    .truncate()
+                                    .child(summary),
+                            ),
+                    )
+                    .when(expanded, |this| {
+                        this.child(
+                            div()
+                                .mt_1()
+                                .mb_2()
+                                .p_2()
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .bg(rgb(ui_theme::TILE))
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .font_family("Consolas, monospace")
+                                .text_color(rgb(if is_error {
+                                    ui_theme::DESTRUCTIVE
+                                } else {
+                                    ui_theme::MUTED_FOREGROUND
+                                }))
+                                .child(detail),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
 }
