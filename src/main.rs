@@ -628,6 +628,8 @@ pub(crate) enum DialogState {
     },
     // ── 便携数据目录迁移提示 ──
     PortableMigrationPrompt,
+    // ── 程序位置风险搬迁提示（exe 位于临时/聊天软件接收/下载目录） ──
+    ExeRelocationPrompt,
 }
 
 #[derive(Clone, Debug)]
@@ -2971,6 +2973,8 @@ impl RepositoryView {
         }
         // 老用户首次进入便携版本时，提示把数据从 C 盘迁移到程序同级目录。
         view.maybe_prompt_portable_migration();
+        // exe 位于临时/聊天软件接收/下载目录时，提示移动程序到安全目录。
+        view.maybe_prompt_exe_relocation();
         view
     }
 
@@ -3035,6 +3039,57 @@ impl RepositoryView {
         let exe_str = exe.to_string_lossy().to_string();
         let _ = std::process::Command::new(&exe_str).spawn();
         std::process::exit(0);
+    }
+
+    // ── 程序位置风险搬迁（exe 位于临时/聊天软件接收/下载目录） ──
+
+    /// 当前是否应提供「移动程序到安全目录」入口。
+    /// dismiss 标记只抑制启动弹窗，不影响设置中心手动入口。
+    fn exe_relocation_available(&self) -> bool {
+        if khaslana::current_exe_location_risk() == khaslana::ExeLocationRisk::Safe {
+            return false;
+        }
+        // 已排队待搬迁 → 不重复提示。
+        if khaslana::exe_relocation_pending_marker().is_some_and(|marker| marker.exists()) {
+            return false;
+        }
+        true
+    }
+
+    /// 检测是否应提示用户把程序（连同数据）移出风险目录。
+    fn maybe_prompt_exe_relocation(&mut self) {
+        if !self.exe_relocation_available() {
+            return;
+        }
+        if self.storage.exe_relocation_dismissed() {
+            return;
+        }
+        // 便携迁移提示优先；两者都满足时本轮只弹一个，位置风险下一轮再提示。
+        if self.active_dialog.is_some() {
+            return;
+        }
+        self.active_dialog = Some(DialogState::ExeRelocationPrompt);
+    }
+
+    /// 用户确认搬迁：写入待搬迁标记（固定目录下）后重启，
+    /// 下次启动最早期把程序与数据搬到安全目录并从新位置运行。
+    fn confirm_exe_relocation(&mut self) {
+        self.active_dialog = None;
+        let Some(target) = khaslana::exe_relocation_target_dir() else {
+            self.last_error = Some("无法定位搬迁目标目录".to_string());
+            return;
+        };
+        if let Err(err) = khaslana::request_exe_relocation(&target) {
+            self.last_error = Some(err.to_string());
+            return;
+        }
+        Self::relaunch_app();
+    }
+
+    /// 用户保持现状：永久忽略程序位置风险提示（数据本身已受解析规则保护）。
+    fn dismiss_exe_relocation(&mut self) {
+        let _ = self.storage.mark_exe_relocation_dismissed();
+        self.active_dialog = None;
     }
 
     pub(crate) fn scroll_handle(&self, id: &'static str) -> ScrollHandle {
@@ -14707,6 +14762,9 @@ impl RepositoryView {
             DialogState::PortableMigrationPrompt => {
                 self.render_portable_migration_dialog(cx).into_any_element()
             }
+            DialogState::ExeRelocationPrompt => {
+                self.render_exe_relocation_dialog(cx).into_any_element()
+            }
         };
 
         dialog_overlay()
@@ -14842,6 +14900,61 @@ impl RepositoryView {
                         "迁移并重启",
                         true,
                         |this, _, _| this.confirm_portable_migration(),
+                        cx,
+                    )),
+            )
+    }
+
+    /// 程序位置风险搬迁弹窗：exe 位于临时/聊天软件接收/下载目录时建议
+    /// 把程序与数据一起移到安全目录。文案区分风险级别，并说明数据当前
+    /// 是否已在安全位置（新用户经解析规则直接落固定目录）。
+    fn render_exe_relocation_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let risk = khaslana::current_exe_location_risk();
+        let risk_text = match risk {
+            khaslana::ExeLocationRisk::Volatile => {
+                "检测到程序当前位于可能被自动清理的目录（临时目录或聊天软件的接收文件目录）。\
+                 这类目录会被系统或聊天软件的清理功能定期清空，届时程序与其中的数据都会丢失。"
+            }
+            _ => {
+                "检测到程序当前位于下载文件夹。下载文件夹可能被系统「存储感知」\
+                或清理工具定期清空，届时程序与其中的数据都会丢失。"
+            }
+        };
+        let data_at_risk = khaslana::portable_database_path().is_some_and(|path| path.exists());
+        let data_note = if data_at_risk {
+            "数据目前也存放在该目录中，强烈建议立即移动。"
+        } else {
+            "你的数据已保存在安全位置，仅程序本体存在丢失风险。"
+        };
+        let target_label = khaslana::exe_relocation_target_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| "未知".to_string());
+        self.dialog_panel("移动到安全目录", cx)
+            .w(px(540.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(risk_text),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!("{data_note}点击「移动并重启」后应用将关闭，程序与数据会被搬到 {target_label} 并从新位置重新启动。若选择「保持现状」，之后可在「设置」-「更新设置」中手动执行移动。")),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button(
+                        "保持现状",
+                        true,
+                        |this, _, _| this.dismiss_exe_relocation(),
+                        cx,
+                    ))
+                    .child(self.primary_button(
+                        "移动并重启",
+                        true,
+                        |this, _, _| this.confirm_exe_relocation(),
                         cx,
                     )),
             )
@@ -15453,6 +15566,19 @@ impl RepositoryView {
             },
             cx,
         );
+        // 程序位于临时/聊天软件接收/下载目录时，常驻「移动到安全目录」入口；
+        // dismiss 标记只抑制启动时的自动弹窗，不影响此处手动入口。
+        let relocation_available = self.exe_relocation_available();
+        // 第一个 when 闭包会 move current_db_label，这里单独克隆一份。
+        let relocation_db_label = current_db_label.clone();
+        let relocate_btn = self.primary_button(
+            "移动到安全目录",
+            true,
+            |this, _, _| {
+                this.active_dialog = Some(DialogState::ExeRelocationPrompt);
+            },
+            cx,
+        );
 
         div()
             .flex()
@@ -15539,6 +15665,32 @@ impl RepositoryView {
                                 ),
                         )
                         .child(migrate_btn),
+                )
+            })
+            .when(relocation_available, move |container| {
+                container.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_size(px(12.0))
+                        .child(
+                            div()
+                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .child("程序位置"),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(format!("当前：{relocation_db_label}")),
+                        )
+                        .child(
+                            div().text_color(rgb(ui_theme::MUTED_FOREGROUND)).child(
+                                "程序当前位于可能被清理的目录（临时/聊天软件接收/下载目录），\
+                                 建议把程序与数据移动到独立的安全目录。",
+                            ),
+                        )
+                        .child(relocate_btn),
                 )
             })
             .child(
@@ -17857,6 +18009,14 @@ fn main() {
             // 启动最早期执行待处理的便携迁移（若用户上次已同意迁移）；
             // 必须在打开任何数据库连接之前完成文件搬运。
             let _ = khaslana::apply_pending_portable_migration();
+            // 程序搬迁（exe 位于危险目录时用户已同意移动）：把程序与数据
+            // 搬到安全目录后从新位置重启；成功路径内部直接退出进程。
+            let _ = khaslana::apply_pending_exe_relocation();
+            // 记录「上次数据目录」指针：exe 被手动挪走或旧位置副本再次
+            // 运行时按指针延续旧数据（指针失效即忽略）。
+            if let Some(data_dir) = khaslana::storage::active_data_dir() {
+                khaslana::record_last_data_home(&data_dir);
+            }
             init_yororen_components(cx);
             cx.set_global(GlobalTheme::new(cx.window_appearance()));
             cx.set_global(I18n::with_embedded(

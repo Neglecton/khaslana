@@ -65,12 +65,35 @@ jobs:
           EOFJ
           cd ..
 
+      - name: Build installer
+        # Inno Setup 7 用户级安装器（免管理员，默认装到 %LOCALAPPDATA%\Programs\Khaslana，
+        # 与应用内「移动到安全目录」的目标一致）。从官方 GitHub Release 下载固定版本的
+        # 64 位版安装（runner 在 Azure 机房，直连 GitHub 稳定），静默安装后用固定路径调
+        # ISCC；版本号经 /D 注入，源文件与便携 zip 同一打包目录。
+        shell: pwsh
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          $inno = "$env:TEMP\innosetup-7.1.0-x64.exe"
+          curl.exe -fsSL -o $inno "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          Start-Process -Wait -FilePath $inno -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART"
+          $VERSION = $env:VERSION_TAG.TrimStart("v")
+          $iscc = "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC not found at $iscc" }
+          & $iscc "/DAppVersion=$VERSION" installer\khaslana.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = "dist\khaslana-setup-v$VERSION-windows-x86_64.exe"
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $setup -Leaf)" | Out-File -Encoding ascii "$setup.sha256"
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*setup*.exe
+            dist/*setup*.exe.sha256
             dist/khaslana-update.json
 
       - name: Publish to CNB
@@ -81,10 +104,13 @@ jobs:
         run: |
           VERSION="${VERSION_TAG#v}"
           ZIP="khaslana-v${VERSION}-windows-x86_64.zip"
+          SETUP="khaslana-setup-v${VERSION}-windows-x86_64.exe"
           git clone "https://cnb:${CNB_TOKEN}@cnb.cool/suhoan/khaslana-release.git" cnb-release
           mkdir -p "cnb-release/releases/v${VERSION}"
           cp "dist/${ZIP}" "cnb-release/releases/v${VERSION}/${ZIP}"
           cp "dist/${ZIP}.sha256" "cnb-release/releases/v${VERSION}/${ZIP}.sha256"
+          cp "dist/${SETUP}" "cnb-release/releases/v${VERSION}/${SETUP}"
+          cp "dist/${SETUP}.sha256" "cnb-release/releases/v${VERSION}/${SETUP}.sha256"
           cp "dist/khaslana-update.json" "cnb-release/khaslana-update.json"
           cd cnb-release
           git config user.name "github-actions"

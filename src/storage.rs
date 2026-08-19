@@ -26,6 +26,13 @@ const PORTABLE_MIGRATED_MARKER: &str = ".migrated_to_portable";
 const PORTABLE_PENDING_MARKER: &str = ".pending_portable_migration";
 /// schema_meta 中记录「用户已忽略便携迁移提示」的键。
 const PORTABLE_MIGRATION_DISMISSED_KEY: &str = "portable_migration_dismissed";
+/// schema_meta 中记录「用户已忽略程序位置风险提示」的键。
+const EXE_RELOCATION_DISMISSED_KEY: &str = "exe_relocation_dismissed";
+/// 固定数据目录下的待搬迁标记文件名：内容为目标目录路径。标记必须放在
+/// 固定目录（安全位置）而非 exe 旁——危险目录随时可能被清理。
+const EXE_RELOCATION_PENDING_MARKER: &str = "pending-relocation";
+/// 固定数据目录下的「上次数据目录」指针文件名，内容为上次实际使用的数据目录。
+const LAST_DATA_HOME_POINTER_FILE: &str = "last-data-home.txt";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RemoteCredentialBindings {
@@ -149,6 +156,20 @@ impl AppStorage {
     /// 标记永久忽略「迁移到便携目录」提示。
     pub fn mark_portable_migration_dismissed(&self) -> Result<()> {
         self.set_meta_value(PORTABLE_MIGRATION_DISMISSED_KEY, "1")
+    }
+
+    /// 是否已永久忽略「程序位置风险」提示。
+    pub fn exe_relocation_dismissed(&self) -> bool {
+        self.get_meta_value(EXE_RELOCATION_DISMISSED_KEY)
+            .unwrap_or(None)
+            .as_deref()
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
+    /// 标记永久忽略「程序位置风险」提示。
+    pub fn mark_exe_relocation_dismissed(&self) -> Result<()> {
+        self.set_meta_value(EXE_RELOCATION_DISMISSED_KEY, "1")
     }
 
     pub fn load_session_state(&self) -> Result<Option<SessionState>> {
@@ -344,36 +365,169 @@ pub fn portable_pending_marker() -> Option<PathBuf> {
     legacy_database_dir().map(|dir| dir.join(PORTABLE_PENDING_MARKER))
 }
 
-/// 根据可执行文件位置与旧目录状态，决定本次启动应使用的数据库文件路径。
+// ── exe 位置风险与数据目录解析 ────────────────────────────────────────────
+
+/// exe 所在位置的风险分级，决定新用户数据目录的落点与是否弹搬迁提示。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExeLocationRisk {
+    /// 普通目录：维持便携模式（数据放 exe 旁 `data/`）。
+    Safe,
+    /// 常见下载目录：用户可能长期存放，但存储感知等清理机制可能删除。
+    Downloads,
+    /// 临时目录 / 聊天软件接收目录 / 回收站：随时可能被自动清理，
+    /// 数据绝不能落在这里（微信 `WeChat Files`、QQ `Tencent Files`、
+    /// Telegram Desktop、浏览器「直接打开」落到的 `%TEMP%` 等）。
+    Volatile,
+}
+
+/// 临时/系统清理类目录组件（按完整组件小写匹配，避免误伤 `Templates` 等）。
+const VOLATILE_COMPONENTS: &[&str] = &["temp", "tmp", "$recycle.bin", "inetcache"];
+/// 聊天软件文件接收目录的特征组件。
+const VOLATILE_APP_COMPONENTS: &[&str] = &["wechat files", "tencent files", "telegram desktop"];
+
+/// 对 exe 路径做风险分级（纯函数，可单测）。Volatile 优先于 Downloads：
+/// 同时命中（如 Telegram Desktop 在 Downloads 下）按更危险的算。
+pub fn classify_exe_location(exe_path: &Path) -> ExeLocationRisk {
+    let mut risk = ExeLocationRisk::Safe;
+    for component in exe_path.components() {
+        let Some(name) = component.as_os_str().to_str() else {
+            continue;
+        };
+        let name = name.to_lowercase();
+        if VOLATILE_COMPONENTS.contains(&name.as_str())
+            || VOLATILE_APP_COMPONENTS.contains(&name.as_str())
+        {
+            return ExeLocationRisk::Volatile;
+        }
+        if name == "downloads" {
+            risk = ExeLocationRisk::Downloads;
+        }
+    }
+    risk
+}
+
+/// 当前进程 exe 位置的风险分级；取不到 exe 路径时按 Safe 处理（不阻断启动）。
+pub fn current_exe_location_risk() -> ExeLocationRisk {
+    std::env::current_exe()
+        .map(|exe| classify_exe_location(&exe))
+        .unwrap_or(ExeLocationRisk::Safe)
+}
+
+/// 固定数据目录（不随 exe 位置漂移；Windows 下 `%LOCALAPPDATA%\Khaslana`）。
+/// exe 位于危险/下载目录时，新用户的数据落在这里。
+pub fn fixed_database_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "Khaslana").map(|dirs| dirs.data_local_dir().to_path_buf())
+}
+
+/// 固定数据库文件路径。
+pub fn fixed_database_path() -> Option<PathBuf> {
+    fixed_database_dir().map(|dir| dir.join(DB_FILE_NAME))
+}
+
+/// 「上次数据目录」指针文件路径（固定目录下）。exe 被手动挪走或旧位置
+/// 副本再次运行时，若 exe 旁已无数据，则按指针延续旧数据，避免「挪一下
+/// exe 就丢全部设置」；指针指向的库失效时忽略。
+pub fn last_data_home_pointer() -> Option<PathBuf> {
+    fixed_database_dir().map(|dir| dir.join(LAST_DATA_HOME_POINTER_FILE))
+}
+
+/// 读取指针指向的数据目录（无指针/内容空白返回 None）。
+fn read_last_data_home() -> Option<PathBuf> {
+    let pointer = last_data_home_pointer()?;
+    let text = fs::read_to_string(pointer).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+/// 记录本次实际使用的数据目录到指针（best-effort，失败仅记日志）。
+/// 数据目录就是固定目录时不写（自指无意义）。
+pub fn record_last_data_home(data_dir: &Path) {
+    if fixed_database_dir().as_deref() == Some(data_dir) {
+        return;
+    }
+    let Some(pointer) = last_data_home_pointer() else {
+        return;
+    };
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = pointer.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer, data_dir.to_string_lossy().as_bytes())
+    };
+    if let Err(err) = write() {
+        tracing::warn!("写入数据目录指针失败：{err}");
+    }
+}
+
+/// 程序搬迁的目标目录（程序与数据一起搬到这里；Windows 下
+/// `%LOCALAPPDATA%\Programs\Khaslana`，用户级安装的常见约定位置）。
+pub fn exe_relocation_target_dir() -> Option<PathBuf> {
+    fixed_database_dir().and_then(|fixed| {
+        fixed
+            .parent()
+            .map(|local| local.join("Programs").join("Khaslana"))
+    })
+}
+
+/// 根据可执行文件位置、旧目录状态与 exe 风险分级，决定本次启动应使用的
+/// 数据库文件路径。
 ///
 /// 解析顺序：
-/// 1. 旧目录存在已迁移标记 → 强制走便携路径（即使旧库文件仍在）；
-/// 2. 旧库文件存在 → 继续使用旧路径（老用户兼容，不被动迁移）；
-/// 3. 两者都不满足 → 使用便携路径（新机器/新安装），由 [`AppStorage::open`] 负责创建。
+/// 1. exe 旁便携库已存在 → 便携（真正在用的便携安装，含 U 盘场景，零打扰）；
+/// 2. 指针指向的库仍存在 → 指针目录（exe 被挪走/旧位置副本运行时延续数据）；
+/// 3. 旧库存在且未迁移过 → 旧路径（老用户兼容，不被动迁移）；
+/// 4. 已迁移标记（旧库已弃用）→ 按新装流程（不回读旧库）；
+/// 5. 全部无既有数据时：exe 位置安全 → 便携（维持便携哲学）；
+///    exe 位于下载/危险目录 → 固定目录（数据永不落在可能被清理的位置）。
 fn pick_active_path(
     legacy: Option<PathBuf>,
     portable: Option<PathBuf>,
     legacy_dir: Option<PathBuf>,
+    fixed: Option<PathBuf>,
+    pointer_db: Option<PathBuf>,
+    risk: ExeLocationRisk,
 ) -> Option<PathBuf> {
+    if portable.as_ref().is_some_and(|p| p.exists()) {
+        return portable;
+    }
+    if pointer_db.as_ref().is_some_and(|p| p.exists()) {
+        return pointer_db;
+    }
     let migrated = legacy_dir
         .as_ref()
         .map(|dir| dir.join(PORTABLE_MIGRATED_MARKER).exists())
         .unwrap_or(false);
-    if migrated {
-        return portable.or(legacy);
-    }
-    if legacy.as_ref().map(|p| p.exists()).unwrap_or(false) {
+    if !migrated && legacy.as_ref().is_some_and(|p| p.exists()) {
         return legacy;
     }
-    portable.or(legacy)
+    fresh_data_home(portable, fixed, risk).or(legacy)
 }
 
-/// 应用当前应使用的数据库文件路径（默认便携，兼容回退到旧路径）。
+/// 没有任何既有数据时的新家选择：安全位置维持便携，危险/下载目录落固定目录。
+fn fresh_data_home(
+    portable: Option<PathBuf>,
+    fixed: Option<PathBuf>,
+    risk: ExeLocationRisk,
+) -> Option<PathBuf> {
+    match risk {
+        ExeLocationRisk::Safe => portable.or(fixed),
+        _ => fixed.or(portable),
+    }
+}
+
+/// 应用当前应使用的数据库文件路径（默认便携，兼容回退到旧路径；
+/// exe 位于危险/下载目录且无既有数据时落固定目录）。
 pub fn default_database_path() -> Option<PathBuf> {
     let legacy = legacy_database_path();
     let portable = portable_database_path();
     let legacy_dir = legacy_database_dir();
-    pick_active_path(legacy, portable, legacy_dir)
+    let fixed = fixed_database_path();
+    let pointer_db = read_last_data_home().map(|dir| dir.join(DB_FILE_NAME));
+    let risk = current_exe_location_risk();
+    pick_active_path(legacy, portable, legacy_dir, fixed, pointer_db, risk)
 }
 
 /// 应用当前应使用的数据目录（数据库所在目录），与 DB 同一套便携/旧目录
@@ -496,6 +650,117 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+// ── 程序搬迁（exe 位于危险目录时移动程序与数据到安全目录） ────────────────
+
+/// 待搬迁标记文件路径（固定目录下）；内容为目标目录路径。
+pub fn exe_relocation_pending_marker() -> Option<PathBuf> {
+    fixed_database_dir().map(|dir| dir.join(EXE_RELOCATION_PENDING_MARKER))
+}
+
+/// 用户确认搬迁：写入待搬迁标记（目标为 [`exe_relocation_target_dir`]），
+/// 随后由调用方重启应用，下次启动最早期执行搬运。
+pub fn request_exe_relocation(target_dir: &Path) -> Result<()> {
+    let marker = exe_relocation_pending_marker()
+        .ok_or_else(|| GitError::Message("无法定位固定数据目录".to_string()))?;
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| GitError::Message(format!("创建固定数据目录失败：{err}")))?;
+    }
+    fs::write(&marker, target_dir.to_string_lossy().as_bytes())
+        .map_err(|err| GitError::Message(format!("写入搬迁标记失败：{err}")))
+}
+
+/// 待执行搬迁的启动期结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExeRelocationOutcome {
+    /// 没有待搬迁标记，本次启动无需搬运。
+    Noop,
+    /// 搬迁失败（数据未动），记录原因供日志。
+    Failed(String),
+}
+
+/// 应用启动最早期（打开任何数据库连接之前、便携迁移之后）调用。
+///
+/// 读取固定目录下的待搬迁标记，把 exe 与 exe 旁 `data/` 搬到目标目录，
+/// 验证目标库可读后删除标记、启动目标目录的新实例并退出当前进程。
+/// 任一步失败不 panic：记录日志、删除标记（避免启动循环）、照常启动。
+/// 成功路径直接 `exit(0)`，不返回。
+pub fn apply_pending_exe_relocation() -> ExeRelocationOutcome {
+    let Some(marker) = exe_relocation_pending_marker() else {
+        return ExeRelocationOutcome::Noop;
+    };
+    if !marker.exists() {
+        return ExeRelocationOutcome::Noop;
+    }
+    let outcome = run_pending_exe_relocation(&marker);
+    // 无论成败都清除标记：成功时搬迁已完成；失败时避免下次启动循环重试。
+    let _ = fs::remove_file(&marker);
+    match outcome {
+        Ok(target_exe) => {
+            if let Err(err) = std::process::Command::new(&target_exe).spawn() {
+                tracing::error!("启动搬迁后的新实例失败：{err}");
+                return ExeRelocationOutcome::Failed(format!("启动新实例失败：{err}"));
+            }
+            std::process::exit(0);
+        }
+        Err(message) => {
+            tracing::warn!("exe relocation failed: {message}");
+            ExeRelocationOutcome::Failed(message)
+        }
+    }
+}
+
+fn run_pending_exe_relocation(marker: &Path) -> std::result::Result<PathBuf, String> {
+    let target_text = fs::read_to_string(marker).map_err(|err| err.to_string())?;
+    let target = PathBuf::from(target_text.trim());
+    if target.as_os_str().is_empty() {
+        return Err("搬迁标记内容为空".to_string());
+    }
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    perform_exe_relocation_files(&exe, portable_database_dir().as_deref(), &target)
+        .map_err(|err| err.to_string())
+}
+
+/// 执行搬迁的纯文件操作（可单测）：复制 exe 到目标目录、搬运 exe 旁
+/// `data/`（staging 拷贝 + 验证库可读 + rename，与便携迁移同一套路），
+/// 返回目标 exe 路径。失败时目标目录可能残留 staging，但不影响旧数据。
+fn perform_exe_relocation_files(
+    exe: &Path,
+    src_data_dir: Option<&Path>,
+    target_dir: &Path,
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(target_dir)?;
+    let target_exe = target_dir.join(
+        exe.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("khaslana.exe")),
+    );
+    // 运行中的 exe 文件可以复制、不能删除；目标副本未运行，覆盖安全。
+    fs::copy(exe, &target_exe)?;
+    if let Some(src_dir) = src_data_dir
+        && src_dir.exists()
+    {
+        let dst_dir = target_dir.join("data");
+        let staging = target_dir.join("data.relocating");
+        let _ = fs::remove_dir_all(&staging);
+        copy_dir_recursive(src_dir, &staging)?;
+        // 验证 staging 里的库可打开且核心表存在，确保拷贝结果可用。
+        let staged_db = staging.join(DB_FILE_NAME);
+        if staged_db.exists() {
+            let conn = Connection::open(&staged_db)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            conn.query_row("SELECT count(*) FROM schema_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        }
+        let _ = fs::remove_dir_all(&dst_dir);
+        fs::rename(&staging, &dst_dir)?;
+        // 旧数据在验证通过后尽力清理；失败不影响搬迁结果。
+        let _ = fs::remove_dir_all(src_dir);
+    }
+    Ok(target_exe)
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {

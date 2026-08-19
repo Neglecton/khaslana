@@ -45,6 +45,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 
 - `Cargo.toml`：包元信息、依赖和构建依赖。
 - `build.rs`：Windows 下嵌入应用图标资源。
+- `installer/khaslana.iss`：Inno Setup 7 安装器脚本（用户级安装，见 §6 发版产物说明），版本经 `/DAppVersion` 注入。
 - `assets/app.ico`：应用图标。
 - `assets/icons/`：应用内自绘矢量图标，当前用于顶部操作栏和工作流入口，通过 `src/assets.rs` 嵌入到 GPUI asset source。
 - `assets/windows/app.rc`：Windows 资源脚本。
@@ -192,13 +193,19 @@ diff 自动编码检测使用有限字节样本，UI 对最近查看的工作区
 
 ### 4.5 持久化数据
 
-默认情况下，主程序持久化数据存放在**可执行文件同级的 `data/` 目录**下的 `khaslana.sqlite3`（便携目录，由 `std::env::current_exe` 推导）。为兼容老版本升级，启动时按以下优先级解析当前应使用的库路径（`default_database_path`）：
+默认情况下，主程序持久化数据存放在**可执行文件同级的 `data/` 目录**下的 `khaslana.sqlite3`（便携目录，由 `std::env::current_exe` 推导）。为兼容老版本升级并防止数据落入易失目录，启动时按以下优先级解析当前应使用的库路径（`default_database_path` / `pick_active_path`）：
 
-1. 旧目录（`directories::ProjectDirs::from("", "", "Khaslana")` 的 `config_dir`，Windows 下为 `%APPDATA%\Khaslana`）存在 `.migrated_to_portable` 标记 → 强制走便携路径；
-2. 旧库文件存在 → 继续使用旧路径（老用户兼容，不被动迁移）；
-3. 两者都不满足 → 使用便携路径（新机器/新安装），由 `AppStorage::open` 自动创建。
+1. exe 旁便携库已存在 → 便携（真正在用的便携安装，含 U 盘场景，零打扰）；
+2. 「上次数据目录」指针（`%LOCALAPPDATA%\Khaslana\last-data-home.txt`，`record_last_data_home` 在每次启动后 best-effort 写入）指向的库仍存在 → 指针目录（exe 被手动挪走或旧位置副本再次运行时延续数据，指针失效即忽略）；
+3. 旧目录（`directories::ProjectDirs::from("", "", "Khaslana")` 的 `config_dir`，Windows 下为 `%APPDATA%\Khaslana`）库文件存在且无 `.migrated_to_portable` 标记 → 继续使用旧路径（老用户兼容，不被动迁移）；
+4. 已迁移标记 → 不回读已弃用的旧库，按新装流程；
+5. 全部无既有数据时：exe 位置安全 → 便携；**exe 位于危险/下载目录 → 固定目录**（`%LOCALAPPDATA%\Khaslana`，`fixed_database_dir`）——数据永不落在可能被清理的位置。
 
-C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪后弹窗询问是否「迁移到便携目录」。用户确认后写入待迁移标记 `.pending_portable_migration` 并重启应用，下次启动最早期（打开任何连接之前）由 `apply_pending_portable_migration` 把旧库与 `updates/` 目录搬运到便携目录，验证新库可读后删除旧数据并写入 `.migrated_to_portable` 标记；用户选择「保持现状」则把 `portable_migration_dismissed` 写入 `schema_meta`，永久不再提示。工作流模板目录同样便携化到 `data/workflows/`，首次加载时若便携目录为空且旧目录 `~/.khaslana/workflows` 存在模板则一次性拷贝。
+**exe 位置风险分级**（`classify_exe_location`，按路径组件小写整体匹配，`Templates` 等不误伤）：`Volatile`（`temp`/`tmp`/`$recycle.bin`/`inetcache` 组件或 `WeChat Files`/`Tencent Files`/`Telegram Desktop` 等聊天软件接收目录）、`Downloads`（`downloads` 组件）、`Safe`。风险只影响「无既有数据的新家选择」与搬迁提示，绝不改判已有数据的归属。
+
+**程序搬迁**：exe 位于危险/下载目录时，启动就绪后弹「移动到安全目录」对话框（`DialogState::ExeRelocationPrompt`，dismiss 键 `exe_relocation_dismissed` 存 `schema_meta`；设置中心「更新设置」页在风险存在时常驻手动入口）。确认后 `request_exe_relocation` 把目标路径写入**固定目录下**的 `pending-relocation` 标记（绝不能写进危险目录）并重启；下次启动最早期（便携迁移之后、开库之前）`apply_pending_exe_relocation` 复制 exe 并把 exe 旁 `data/` staging 拷贝 + 验证库可读 + rename 到目标（`%LOCALAPPDATA%\Programs\Khaslana`），删除标记后从新位置启动新实例并退出；失败记日志删标记照常启动。搬迁后旧位置 exe 再被运行时经指针重定向到新家，数据不散。
+
+C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪后弹窗询问是否「迁移到便携目录」（与搬迁提示同轮只弹一个，便携迁移优先）。用户确认后写入待迁移标记 `.pending_portable_migration` 并重启应用，下次启动最早期（打开任何连接之前）由 `apply_pending_portable_migration` 把旧库与 `updates/` 目录搬运到便携目录，验证新库可读后删除旧数据并写入 `.migrated_to_portable` 标记；用户选择「保持现状」则把 `portable_migration_dismissed` 写入 `schema_meta`，永久不再提示。工作流模板目录跟随实际激活的数据目录（`active_data_dir().join("workflows")`，与 DB / ai-reviews 同源），首次加载时若该目录为空且旧目录 `~/.khaslana/workflows` 存在模板则一次性拷贝。
 
 当前数据库保存：
 
@@ -211,7 +218,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 全局主题偏好，支持跟随系统、浅色和深色。
 - 快捷键绑定（`shortcut_bindings` 表，单行 JSON payload，action_id → keystroke 映射）。
 - 凭据记录索引等非密元数据。
-- 便携迁移相关标记（`portable_migration_dismissed` 等），存在 `schema_meta` 表。
+- 便携迁移相关标记（`portable_migration_dismissed`、`exe_relocation_dismissed` 等），存在 `schema_meta` 表。
 
 数据库之外，同一数据目录还保存非 DB 数据：AI 评审记录落在 `<数据目录>/ai-reviews/<repo哈希8>/<毫秒>.json`（见 `src/ai/review_store.rs`，按仓库保留最近 30 条），工作流模板在 `data/workflows/`。
 
@@ -384,7 +391,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 每次实现完计划后必须执行 `cargo build --release`，并修复所有出现的错误和警告（无论相关代码是不是本次写的）。只有 release 构建零错误零警告才算实现完成。
 
-正式发布使用 `release-perf` profile（fat LTO + codegen-units=1，见 Cargo.toml；产物在 `target/release-perf/`），GitHub 发布工作流 `.github/workflows/release.yml` 按 tag 触发并用该 profile 构建打包。发版流程：改 `Cargo.toml` version 与 `src/tests/update.rs` 的版本断言 -> 提交 -> 打 `v*` tag 推送。
+正式发布使用 `release-perf` profile（fat LTO + codegen-units=1，见 Cargo.toml；产物在 `target/release-perf/`），GitHub 发布工作流 `.github/workflows/release.yml` 按 tag 触发并用该 profile 构建打包。发版产物（双渠道同步上传：GitHub Releases + CNB `khaslana-release` 仓库）：便携 zip（`khaslana-v*-windows-x86_64.zip`）、**Inno Setup 7 安装器**（`khaslana-setup-v*-windows-x86_64.exe`，脚本 `installer/khaslana.iss`：用户级安装免管理员，默认目录 `%LOCALAPPDATA%\Programs\Khaslana` 与应用内「移动到安全目录」一致，卸载不删运行期 `data\`；CI 从官方 GitHub Release 下载 `innosetup-7.1.0-x64.exe` 静默安装后经 `C:\Program Files\Inno Setup 7\ISCC.exe` 编译，升 Inno 版本时改 URL；架构标识用 `x64compatible`——Inno 7 中 `x64` 已弃用）、两者各自的 `.sha256` 与 `khaslana-update.json`（更新清单只引用 zip——自更新走 zip 原位替换，安装器仅首次安装用）。安装器本地构建：**`cargo setup` 一键完成**（`.cargo/config.toml` 的 alias → `src/bin/khaslana_packager.rs`，纯 std：release-perf 构建 -> 组装 `dist/package/` -> 探测 ISCC（Inno 7 优先）编译，版本取编译期 `CARGO_PKG_VERSION`）；或按 CI 相同步骤手动执行（Git Bash 下调 ISCC 需 `MSYS_NO_PATHCONV=1` 防止 `/D` 被转成路径，打包器 bin 无此问题）。发布工作流不复用打包器（显式分步执行，产物内容一致）。发版流程：改 `Cargo.toml` version 与 `src/tests/update.rs` 的版本断言 -> 提交 -> 打 `v*` tag 推送。
 
 ## 7. 测试现状
 

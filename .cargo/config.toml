@@ -1,2 +1,8 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# 一键打包安装器：构建 release-perf -> 组装 dist/package -> Inno Setup
+# 编译 setup 到 dist/（实现见 src/bin/khaslana_packager.rs）。
+[alias]
+setup = "run --bin khaslana_packager"
+

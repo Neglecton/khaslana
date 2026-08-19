@@ -945,9 +945,11 @@ fn workflow_progress_entry(event: &WorkflowProgressEvent) -> WorkflowLogEntry {
     }
 }
 
-/// 工作流模板目录，统一指向便携数据目录下的 `workflows/` 子目录。
+/// 工作流模板目录，跟随实际激活的数据目录（与 DB / ai-reviews 同源，
+/// 经 `active_data_dir` 解析）下的 `workflows/` 子目录。不能直接用
+/// `portable_database_dir`：exe 位于危险目录时数据不落在 exe 旁。
 pub(crate) fn workflow_templates_dir() -> Option<PathBuf> {
-    khaslana::portable_database_dir().map(|dir| dir.join("workflows"))
+    khaslana::storage::active_data_dir().map(|dir| dir.join("workflows"))
 }
 
 /// 旧版工作流模板目录（`~/.khaslana/workflows`），仅用于一次性便携迁移的来源。

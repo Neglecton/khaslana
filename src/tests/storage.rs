@@ -295,6 +295,9 @@ fn pick_active_path_prefers_portable_when_migrated_marker_present() {
             Some(legacy_db.clone()),
             Some(portable_db.clone()),
             Some(legacy_dir.to_path_buf()),
+            None,
+            None,
+            ExeLocationRisk::Safe,
         ),
         Some(portable_db)
     );
@@ -314,12 +317,15 @@ fn pick_active_path_prefers_legacy_when_db_exists() {
             Some(legacy_db.clone()),
             Some(portable_db.clone()),
             Some(legacy_dir.to_path_buf()),
+            None,
+            None,
+            ExeLocationRisk::Safe,
         ),
         Some(legacy_db)
     );
 }
 
-// 旧库文件不存在（新机器）时默认走便携路径。
+// 旧库文件不存在（新机器、exe 位置安全）时默认走便携路径。
 #[test]
 fn pick_active_path_defaults_to_portable_for_new_machine() {
     let tmp = tempfile::tempdir().unwrap();
@@ -332,6 +338,117 @@ fn pick_active_path_defaults_to_portable_for_new_machine() {
             Some(legacy_db.clone()),
             Some(portable_db.clone()),
             Some(legacy_dir.to_path_buf()),
+            None,
+            None,
+            ExeLocationRisk::Safe,
+        ),
+        Some(portable_db)
+    );
+}
+
+// exe 位于危险/下载目录且无任何既有数据时，新库落固定目录（数据永不
+// 落在可能被清理的位置）；exe 位置安全时维持便携。
+#[test]
+fn pick_active_path_routes_fresh_data_away_from_risky_exe_location() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = tmp.path().join("portable").join(DB_FILE_NAME);
+    let fixed_db = tmp.path().join("fixed").join(DB_FILE_NAME);
+    for risk in [ExeLocationRisk::Volatile, ExeLocationRisk::Downloads] {
+        assert_eq!(
+            pick_active_path(
+                Some(legacy_db.clone()),
+                Some(portable_db.clone()),
+                Some(legacy_dir.clone()),
+                Some(fixed_db.clone()),
+                None,
+                risk,
+            ),
+            Some(fixed_db.clone()),
+            "风险位置 {risk:?} 的新用户数据应落固定目录"
+        );
+    }
+    // 固定目录不可用（极端情况）时退回便携兜底，不能没有家。
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            Some(portable_db.clone()),
+            Some(legacy_dir.clone()),
+            None,
+            None,
+            ExeLocationRisk::Volatile,
+        ),
+        Some(portable_db.clone())
+    );
+}
+
+// exe 旁便携库已存在：真正在用的便携安装（含 U 盘场景），即使 exe 位于
+// 危险目录也零打扰沿用（搬迁由对话引导，解析层不改判）。
+#[test]
+fn pick_active_path_prefers_existing_portable_even_in_risky_location() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    fs::write(&legacy_db, b"legacy").unwrap();
+    let portable_dir = tmp.path().join("portable");
+    fs::create_dir_all(&portable_dir).unwrap();
+    let portable_db = portable_dir.join(DB_FILE_NAME);
+    fs::write(&portable_db, b"portable").unwrap();
+    let fixed_db = tmp.path().join("fixed").join(DB_FILE_NAME);
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db),
+            Some(portable_db.clone()),
+            Some(legacy_dir),
+            Some(fixed_db),
+            Some(tmp.path().join("pointer").join(DB_FILE_NAME)),
+            ExeLocationRisk::Volatile,
+        ),
+        Some(portable_db)
+    );
+}
+
+// 指针重定向：exe 旁无数据但指针指向的库仍存在时延续旧数据；
+// 指针失效（目录被删）时忽略，按新装流程解析。
+#[test]
+fn pick_active_path_follows_and_ignores_stale_data_home_pointer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy_dir = tmp.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_db = legacy_dir.join(DB_FILE_NAME);
+    let portable_db = tmp.path().join("portable").join(DB_FILE_NAME);
+    let fixed_db = tmp.path().join("fixed").join(DB_FILE_NAME);
+    let old_home = tmp.path().join("old-home");
+    fs::create_dir_all(&old_home).unwrap();
+    let pointer_db = old_home.join(DB_FILE_NAME);
+    fs::write(&pointer_db, b"old").unwrap();
+
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db.clone()),
+            Some(portable_db.clone()),
+            Some(legacy_dir.clone()),
+            Some(fixed_db.clone()),
+            Some(pointer_db.clone()),
+            ExeLocationRisk::Safe,
+        ),
+        Some(pointer_db.clone()),
+        "exe 挪走后应按指针延续旧数据"
+    );
+
+    // 指针失效：指向的库不存在 → 忽略指针，安全位置走便携。
+    fs::remove_file(&pointer_db).unwrap();
+    assert_eq!(
+        pick_active_path(
+            Some(legacy_db),
+            Some(portable_db.clone()),
+            Some(legacy_dir),
+            Some(fixed_db),
+            Some(pointer_db),
+            ExeLocationRisk::Safe,
         ),
         Some(portable_db)
     );
@@ -348,9 +465,57 @@ fn pick_active_path_falls_back_to_legacy_without_portable() {
         pick_active_path(
             Some(legacy_db.clone()),
             None,
-            Some(legacy_dir.to_path_buf())
+            Some(legacy_dir.to_path_buf()),
+            None,
+            None,
+            ExeLocationRisk::Safe,
         ),
         Some(legacy_db)
+    );
+}
+
+// exe 位置风险分级：按路径组件匹配，Volatile 优先于 Downloads，
+// "Templates" 这类含 temp 前缀的正常目录不误伤。
+#[test]
+fn classify_exe_location_detects_volatile_and_downloads() {
+    use ExeLocationRisk::{Downloads, Safe, Volatile};
+    let volatile_cases = [
+        r"C:\Users\u\AppData\Local\Temp\khaslana\khaslana.exe",
+        r"C:\Users\u\AppData\Local\Temp\khaslana.exe",
+        r"D:\tmp\khaslana.exe",
+        r"C:\$Recycle.Bin\S-1-5\khaslana.exe",
+        r"D:\WeChat Files\wxid_abc\FileStorage\File\2026-08\khaslana.exe",
+        r"E:\Tencent Files\123456\FileRecv\khaslana.exe",
+        r"C:\Users\u\Downloads\Telegram Desktop\khaslana.exe",
+        r"C:\Users\u\AppData\Local\Microsoft\Windows\INetCache\khaslana.exe",
+    ];
+    for path in volatile_cases {
+        assert_eq!(
+            classify_exe_location(Path::new(path)),
+            Volatile,
+            "应判危险：{path}"
+        );
+    }
+    assert_eq!(
+        classify_exe_location(Path::new(r"C:\Users\u\Downloads\khaslana.exe")),
+        Downloads
+    );
+    // 正常目录：组件级匹配不误伤（Templates 不等于 temp）。
+    for path in [
+        r"C:\Users\u\Templates\khaslana.exe",
+        r"D:\Tools\khaslana\khaslana.exe",
+        r"C:\Program Files\TempUtils\khaslana.exe",
+    ] {
+        assert_eq!(
+            classify_exe_location(Path::new(path)),
+            Safe,
+            "应判安全：{path}"
+        );
+    }
+    // 大小写不敏感。
+    assert_eq!(
+        classify_exe_location(Path::new(r"D:\WeChat FILES\x\khaslana.exe")),
+        Volatile
     );
 }
 
@@ -417,4 +582,63 @@ fn meta_value_round_trip_and_portable_migration_dismissed() {
         storage.get_meta_value("custom_meta_key").unwrap(),
         Some("value42".to_string())
     );
+}
+
+// 程序搬迁文件操作：复制 exe、staging 拷贝 data、验证库可读后落位并清理旧目录。
+#[test]
+fn perform_exe_relocation_files_moves_program_and_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 模拟危险目录中的程序与数据。
+    let home = tmp.path().join("wechat-file");
+    let exe = home.join("khaslana.exe");
+    fs::create_dir_all(home.join("data").join("ai-reviews")).unwrap();
+    fs::write(&exe, b"exe-bytes").unwrap();
+    let db_path = home.join("data").join(DB_FILE_NAME);
+    {
+        let storage = AppStorage::open(&db_path).unwrap();
+        storage.set_meta_value("relocation-test", "1").unwrap();
+    }
+    fs::write(home.join("data").join("ai-reviews").join("abc.json"), b"{}").unwrap();
+
+    let target = tmp.path().join("Programs").join("Khaslana");
+    let target_exe = perform_exe_relocation_files(&exe, Some(&home.join("data")), &target).unwrap();
+    assert_eq!(target_exe, target.join("khaslana.exe"));
+    assert_eq!(fs::read(&target_exe).unwrap(), b"exe-bytes");
+    // 数据整体落位且库可打开。
+    let relocated_db = target.join("data").join(DB_FILE_NAME);
+    assert!(relocated_db.exists());
+    let storage = AppStorage::open(&relocated_db).unwrap();
+    assert_eq!(
+        storage
+            .get_meta_value("relocation-test")
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    assert!(
+        target
+            .join("data")
+            .join("ai-reviews")
+            .join("abc.json")
+            .exists()
+    );
+    // staging 不残留；旧数据目录被清理（旧 exe 仍在，属预期——运行中的
+    // exe 不能删，由用户或后续清理处理）。
+    assert!(!target.join("data.relocating").exists());
+    assert!(!home.join("data").exists());
+}
+
+// 没有数据目录（仅一个裸 exe）时搬迁也成立：只复制程序。
+#[test]
+fn perform_exe_relocation_files_works_without_data_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("Temp");
+    fs::create_dir_all(&home).unwrap();
+    let exe = home.join("khaslana.exe");
+    fs::write(&exe, b"exe-bytes").unwrap();
+
+    let target = tmp.path().join("target");
+    let target_exe = perform_exe_relocation_files(&exe, Some(&home.join("data")), &target).unwrap();
+    assert_eq!(fs::read(&target_exe).unwrap(), b"exe-bytes");
+    assert!(!target.join("data").exists());
 }
