@@ -17,7 +17,10 @@ pub(crate) const BROWSE_ROW_HEIGHT: f32 = 18.0;
 use crate::{
     BrowseViewMode, CHANGE_ROW_HEIGHT, EncodingMenuTarget, RepositoryView, ResizeTarget,
     diff_encoding_label, encoding_info_label,
-    ui::{components::segmented_button, theme as ui_theme},
+    ui::{
+        components::{list_row_surface, segmented_button},
+        theme as ui_theme,
+    },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame, section_header},
 };
 
@@ -294,8 +297,8 @@ impl RepositoryView {
             ui_theme::FOREGROUND
         };
 
-        div()
-            .id(format!("browse-row-{}", entry.path))
+        // 统一列表行语言：无边框胶囊 + PRIMARY_SUBTLE 选中底 + 左缘主色条
+        list_row_surface(format!("browse-row-{}", entry.path), is_selected)
             .flex()
             .flex_none()
             .w_full()
@@ -306,21 +309,8 @@ impl RepositoryView {
             .pl(indent)
             .pr(px(8.0))
             .py_1()
-            .rounded_sm()
             .cursor_pointer()
             .overflow_hidden()
-            .bg(if is_selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if is_selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 if is_dir {
                     this.toggle_browse_dir(path_for_click.clone());

@@ -16,7 +16,7 @@ use khaslana::{BrowseCompareFile, ChangeState};
 use crate::ui::theme::rgb;
 use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
-    ui::theme as ui_theme,
+    ui::{components::list_row_surface, theme as ui_theme},
     ui_helpers::{
         ScrollbarMode, change_state_badge, placeholder_row, scrollable_uniform_frame,
         section_header,
@@ -369,8 +369,8 @@ impl RepositoryView {
             CompareTreeRowKind::Directory { expanded } => {
                 let caret = if expanded { "▼" } else { "▶" };
                 let icon = if expanded { "📂" } else { "📁" };
-                div()
-                    .id(format!("browse-compare-dir:{}", row.path))
+                // 目录行与文件行同用统一列表行语言（目录无选中态）
+                list_row_surface(format!("browse-compare-dir:{}", row.path), false)
                     .flex()
                     .flex_none()
                     .w_full()
@@ -381,11 +381,8 @@ impl RepositoryView {
                     .pl(indent)
                     .pr(px(8.0))
                     .py_1()
-                    .rounded_sm()
                     .cursor_pointer()
                     .overflow_hidden()
-                    .bg(rgb(ui_theme::CARD))
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -434,8 +431,8 @@ impl RepositoryView {
                     status,
                 };
 
-                div()
-                    .id(format!("browse-compare-file:{}", row.path))
+                // 统一列表行语言：无边框胶囊 + PRIMARY_SUBTLE 选中底 + 左缘主色条
+                list_row_surface(format!("browse-compare-file:{}", row.path), selected)
                     .flex()
                     .flex_none()
                     .w_full()
@@ -446,19 +443,6 @@ impl RepositoryView {
                     .pl(indent)
                     .pr(px(8.0))
                     .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(if selected {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
-                    })
-                    .bg(if selected {
-                        rgb(ui_theme::ACCENT)
-                    } else {
-                        rgb(ui_theme::CARD)
-                    })
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,

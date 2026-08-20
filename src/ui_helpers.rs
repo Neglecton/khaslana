@@ -634,53 +634,17 @@ pub(crate) fn nav_list(
     )
 }
 
-pub(crate) fn nav_row(
-    id: impl Into<SharedString>,
-    selected: bool,
-    emphasized: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id.into())
-        .flex()
-        .flex_none()
-        .h(px(NAV_ROW_HEIGHT))
-        .min_h(px(NAV_ROW_HEIGHT))
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .bg(if selected {
-            rgb(ui_theme::ACCENT)
-        } else if emphasized {
-            rgb(ui_theme::ACCENT)
-        } else {
-            rgb(ui_theme::CARD)
-        })
-        .border_1()
-        .border_color(if selected {
-            rgb(ui_theme::PRIMARY)
-        } else if emphasized {
-            rgb(ui_theme::PRIMARY)
-        } else {
-            rgb(COLOR_BORDER)
-        })
-}
-
+/// 列表占位行（空态/加载中）：无边框、居中、弱化文字。
+/// 虚拟列表行内使用（高度受行高约束），所以保持单行轻量形态。
 pub(crate) fn placeholder_row(text: &'static str) -> impl IntoElement {
     div()
         .flex_none()
+        .w_full()
         .min_h(px(NAV_ROW_HEIGHT))
-        .mx_1()
-        .my_1()
-        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
         .py_2()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(ui_theme::BORDER))
-        .bg(rgb(ui_theme::CARD))
         .text_size(px(12.0))
         .text_color(rgb(COLOR_TEXT_FAINT))
         .line_height(px(18.0))
@@ -782,6 +746,8 @@ pub(crate) fn commit_time_label(seconds: i64) -> String {
 }
 
 pub(crate) fn author_avatar(author: &str) -> impl IntoElement {
+    // 头像底色用 (底色, 渐变伙伴色) 135° 渐变，与品牌渐变同语言
+    let (base, gradient_to) = avatar_palette_colors(author);
     div()
         .flex_none()
         .size(px(20.0))
@@ -789,23 +755,33 @@ pub(crate) fn author_avatar(author: &str) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(author_avatar_color(author)))
+        .bg(ui_theme::token_gradient(base, gradient_to, 135.0))
         .text_color(rgb(COLOR_SURFACE))
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::BOLD)
         .child(author_avatar_initial(author))
 }
 
-fn author_avatar_color(author: &str) -> u32 {
-    const PALETTE: [u32; 10] = [
-        0x6366f1, 0x3b82f6, 0x06b6d4, 0x14b8a6, 0x22c55e, 0x84cc16, 0xf59e0b, 0xf97316, 0xef4444,
-        0xa855f7,
-    ];
+/// 头像配色板：按名称哈希取 (底色, 渐变伙伴色)，伙伴色与底色同亮度带、色相偏移。
+const AVATAR_PALETTE: [(u32, u32); 10] = [
+    (0x6366f1, 0x8b5cf6), // indigo → violet
+    (0x3b82f6, 0x6366f1), // blue → indigo
+    (0x06b6d4, 0x3b82f6), // cyan → blue
+    (0x14b8a6, 0x06b6d4), // teal → cyan
+    (0x22c55e, 0x14b8a6), // green → teal
+    (0x84cc16, 0x22c55e), // lime → green
+    (0xf59e0b, 0xf97316), // amber → orange
+    (0xf97316, 0xef4444), // orange → red
+    (0xef4444, 0xdb2777), // red → pink
+    (0xa855f7, 0xd946ef), // purple → fuchsia
+];
+
+fn avatar_palette_colors(key: &str) -> (u32, u32) {
     let mut hash = 0u32;
-    for byte in author.bytes() {
+    for byte in key.bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
     }
-    PALETTE[(hash as usize) % PALETTE.len()]
+    AVATAR_PALETTE[(hash as usize) % AVATAR_PALETTE.len()]
 }
 
 fn author_avatar_initial(author: &str) -> String {
@@ -820,6 +796,7 @@ fn author_avatar_initial(author: &str) -> String {
 /// 仓库切换下拉里的仓库头像：圆角方形色块 + 1~2 字母缩写，颜色按名称哈希取色。
 /// 与提交行作者头像（圆形）形状区分，避免视觉混淆。
 pub(crate) fn repo_avatar(name: &str) -> impl IntoElement {
+    let (base, gradient_to) = avatar_palette_colors(name);
     div()
         .flex_none()
         .size(px(28.0))
@@ -827,7 +804,7 @@ pub(crate) fn repo_avatar(name: &str) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgb(author_avatar_color(name)))
+        .bg(ui_theme::token_gradient(base, gradient_to, 135.0))
         .text_color(rgb(COLOR_SURFACE))
         .text_size(px(12.0))
         .font_weight(gpui::FontWeight::BOLD)

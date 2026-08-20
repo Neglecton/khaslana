@@ -95,8 +95,9 @@ use ui::{
     components::{
         AppToastKind, FeedbackMessage, InputFrameSize, accent_strip, app_panel, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
-        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
-        input_frame, list_row_surface, mode_pill, segmented_button, toggle_box,
+        dialog_panel as ui_dialog_panel, empty_state, feedback_bubble, feedback_stack, glass_menu,
+        hero_toolbar, input_frame, list_row_surface, mode_pill, segmented_button, toggle_box,
+        top_hairline,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
     theme as ui_theme,
@@ -2596,6 +2597,8 @@ pub(crate) struct RepositoryView {
     history_details_top_hint: Arc<Cell<f32>>,
     pub(crate) browse_tree_width: f32,
     pub(crate) history_graph_width: f32,
+    /// 提交图分割条（隐形把手）是否被悬停：任一行把手悬停时整列浮现淡线
+    history_graph_splitter_hover: bool,
     resizing_sidebar_width: Option<ResizeState>,
     resizing_changes_width: Option<ResizeState>,
     resizing_workflow_templates_width: Option<ResizeState>,
@@ -2820,6 +2823,7 @@ impl RepositoryView {
             history_details_top_hint: Arc::new(Cell::new(0.0)),
             browse_tree_width: DEFAULT_BROWSE_TREE_WIDTH,
             history_graph_width: DEFAULT_HISTORY_GRAPH_WIDTH,
+            history_graph_splitter_hover: false,
             resizing_sidebar_width: None,
             resizing_changes_width: None,
             resizing_workflow_templates_width: None,
@@ -12286,6 +12290,8 @@ impl RepositoryView {
             .flex()
             .items_center()
             .gap_2()
+            .mx_1()
+            .rounded(px(ui_theme::RADIUS_XS))
             .px_3()
             .py_2()
             .cursor_pointer()
@@ -12431,21 +12437,24 @@ impl RepositoryView {
                 div()
                     .id("settings-center-panel")
                     .track_focus(&self.settings_center_focus)
+                    .relative()
                     .w(px(900.0))
                     // 固定高度，弹窗大小不随分类内容多少变化；内容超出由右侧内容区滚动。
                     .h(px(640.0))
                     .min_w(px(0.0))
-                    .rounded_sm()
+                    .rounded(px(ui_theme::RADIUS_MD))
                     .border_1()
                     .border_color(rgb(ui_theme::BORDER))
                     .bg(rgb(ui_theme::CARD))
-                    .shadow_lg()
+                    .shadow_xl()
                     .flex()
                     .flex_col()
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
+                    // 深色主题顶部高光线
+                    .child(top_hairline())
                     // 顶栏
                     .child(
                         div()
@@ -12506,6 +12515,8 @@ impl RepositoryView {
                                             .flex()
                                             .items_center()
                                             .gap_2()
+                                            .mx_2()
+                                            .rounded(px(ui_theme::RADIUS_XS))
                                             .px_3()
                                             .py_2()
                                             .text_size(px(12.0))
@@ -13785,6 +13796,8 @@ impl RepositoryView {
         } else {
             "暂存此文件"
         };
+        // 按钮元素 id 需带路径唯一（path 稍后会被 move 进事件闭包，这里先构造）
+        let row_action_id = format!("{row_action_label}-{path}");
         let row_action_enabled = !self.busy;
         let row_action_click: std::sync::Arc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)> =
             if is_staged {
@@ -13852,9 +13865,9 @@ impl RepositoryView {
                 .truncate()
                 .child(change.path),
         )
-        // 设计图：行内图标按钮 20×20
+        // 设计图：行内图标按钮 20×20；id 带文件路径保证唯一
         .child(self.change_row_icon_button(
-            row_action_label,
+            row_action_id,
             row_action_icon,
             ui_theme::MUTED_FOREGROUND,
             row_action_enabled,
@@ -14141,7 +14154,16 @@ impl RepositoryView {
                         }
                     })
                     .unwrap_or(empty_message);
-                diff_line(DiffLineKind::Context, None, None, message.to_string(), None)
+                // 空态占位：居中弱化文字，不用 diff 行的等宽/行号槽视觉
+                div()
+                    .flex()
+                    .w_full()
+                    .h(px(DIFF_ROW_HEIGHT))
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(message.to_string())
                     .into_any_element()
             }
         }
@@ -15941,7 +15963,14 @@ impl RepositoryView {
             .map(|snapshot| snapshot.remotes.clone())
             .unwrap_or_default();
         let rows = if remotes.is_empty() {
-            vec![placeholder_row("暂无远端。可以点击“新增远端”添加。").into_any_element()]
+            vec![
+                empty_state(
+                    Some(ToolbarIcon::Globe),
+                    "暂无远端",
+                    Some("可以点击“新增远端”添加"),
+                )
+                .into_any_element(),
+            ]
         } else {
             remotes
                 .into_iter()
@@ -16689,8 +16718,12 @@ impl RepositoryView {
     fn render_credential_manager_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = if self.credential_records.is_empty() {
             vec![
-                placeholder_row("暂无已保存凭据。远程操作时勾选保存后会出现在这里。")
-                    .into_any_element(),
+                empty_state(
+                    Some(ToolbarIcon::Credentials),
+                    "暂无已保存凭据",
+                    Some("远程操作时勾选保存后会出现在这里"),
+                )
+                .into_any_element(),
             ]
         } else {
             self.credential_records

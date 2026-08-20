@@ -1,4 +1,4 @@
-use crate::ui::theme::rgb;
+use crate::ui::theme::{rgb, rgba};
 use gpui::{
     Context, CursorStyle, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathBuilder, div, point, prelude::*, px, uniform_list,
@@ -11,7 +11,7 @@ use crate::{
     column_splitter_should_clear_resize, commit_time_label, history_scope_button, placeholder_row,
     scrollable_frame_when, scrollable_uniform_frame, section_header, section_header_action,
     ui::{
-        components::{metric_badge, tooltip_text},
+        components::{list_row_surface, metric_badge, tooltip_text},
         theme as ui_theme,
     },
 };
@@ -22,8 +22,9 @@ const HISTORY_GRAPH_ROW_HEIGHT: f32 = 36.0;
 const MAX_COMMIT_REF_LABELS: usize = 3;
 const GRAPH_LANE_START: f32 = 12.0;
 const GRAPH_LANE_SPACING: f32 = 14.0;
-// 图形列右侧的拖拽分割条宽度，行内流式排布，自动与图形列对齐。
-const GRAPH_SPLITTER_WIDTH: f32 = 6.0;
+// 图形列右侧的拖拽分割条（隐形把手）宽度，行内流式排布，自动与图形列对齐；
+// 与其它列分割线一致取 8px，更容易抓取。
+const GRAPH_SPLITTER_WIDTH: f32 = 8.0;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommitGraphRow {
     lane: usize,
@@ -224,20 +225,34 @@ impl RepositoryView {
             .children(graph_resize_overlay)
     }
 
-    /// 提交图列右侧的行内拖拽分割条：流式排布自动与图形列对齐，吞掉点击避免误选提交。
-    fn render_history_graph_splitter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 提交图列右侧的行内拖拽分割条（隐形把手）：流式排布自动与图形列对齐，吞掉点击避免误选提交。
+    /// 静止时不画线，悬停任一行把手整列浮现主题色淡线，拖拽中为主题色实线；双击复位。
+    fn render_history_graph_splitter(
+        &self,
+        row_short_oid: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let active = self.resize_state(ResizeTarget::HistoryGraph).is_some();
         // 弹窗或弹层菜单打开时不显示拖拽光标、不响应，与列分割线行为一致
         let interactive = column_splitter_accepts_mouse_events(
             self.active_dialog.is_some(),
             self.any_popup_menu_open(),
         );
+        // 悬停标志整列共享：单行 36px 的线段反馈太破碎
+        let hovered = interactive && self.history_graph_splitter_hover;
         div()
+            .id(format!("graph-splitter-{row_short_oid}"))
             .flex_none()
             .relative()
             .w(px(GRAPH_SPLITTER_WIDTH))
             .h_full()
             .when(interactive, |this| this.cursor(CursorStyle::ResizeColumn))
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if this.history_graph_splitter_hover != *hovered {
+                    this.history_graph_splitter_hover = *hovered;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -259,19 +274,31 @@ impl RepositoryView {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(2.0))
-                    .top(px(0.0))
-                    .bottom(px(0.0))
-                    .w(px(1.0))
-                    .bg(if active {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
-                    }),
-            )
+            // 静止无线；悬停 = 1px 主题色淡线（INPUT_SELECTION 自带透明度），拖拽 = 2px 主题色实线
+            .when(active || hovered, |this| {
+                if active {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(3.0))
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .w(px(2.0))
+                            .rounded(px(ui_theme::RADIUS_PILL))
+                            .bg(rgb(ui_theme::PRIMARY)),
+                    )
+                } else {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(3.0))
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .w(px(1.0))
+                            .bg(rgba(ui_theme::INPUT_SELECTION)),
+                    )
+                }
+            })
     }
 
     /// 拖拽提交图列宽期间的窗口级鼠标事件承载层：无命中区，不拦截列表点击。
@@ -386,24 +413,32 @@ impl RepositoryView {
             .gap_1()
             .pr_2()
             .h(px(HISTORY_GRAPH_ROW_HEIGHT))
-            .rounded_sm()
+            .rounded(px(ui_theme::RADIUS_XS))
             .cursor_pointer()
+            // 统一列表行语言：无边框，选中 = 主色淡底 + 左缘主色条；未推送保留警告语义
             .bg(if selected {
-                rgb(ui_theme::ACCENT)
+                rgb(ui_theme::PRIMARY_SUBTLE)
             } else if unpushed {
                 rgb(ui_theme::COLOR_WARNING)
             } else {
                 rgb(ui_theme::CARD)
             })
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else if unpushed {
-                rgb(ui_theme::COLOR_WARNING)
-            } else {
-                rgb(ui_theme::BORDER)
+            .when(!selected && !unpushed, |this| {
+                this.hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .when(selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(3.0))
+                        .top(px(6.0))
+                        .bottom(px(6.0))
+                        .flex_none()
+                        .w(px(2.0))
+                        .rounded(px(ui_theme::RADIUS_PILL))
+                        .bg(rgb(ui_theme::PRIMARY)),
+                )
+            })
             .when(unpushed, |this| {
                 this.child(
                     div()
@@ -439,7 +474,7 @@ impl RepositoryView {
             // 泳道线会断裂，隐藏最干净。
             .when(self.history_file_filter.is_none(), |this| {
                 this.child(render_commit_graph_cell(graph, self.history_graph_width))
-                    .child(self.render_history_graph_splitter(cx))
+                    .child(self.render_history_graph_splitter(&row_short_oid, cx))
             })
             .child(
                 div()
@@ -789,8 +824,8 @@ impl RepositoryView {
             .map(|old_path| format!("{old_path} -> {}", file.path))
             .unwrap_or_else(|| file.path.clone());
 
-        div()
-            .id(format!("commit-file-{}", file.path))
+        // 统一列表行语言：无边框胶囊 + PRIMARY_SUBTLE 选中底 + 左缘主色条
+        list_row_surface(format!("commit-file-{}", file.path), selected)
             .flex()
             .flex_none()
             .w_full()
@@ -800,21 +835,8 @@ impl RepositoryView {
             .h(px(CHANGE_ROW_HEIGHT))
             .px_2()
             .py_1()
-            .rounded_sm()
             .cursor_pointer()
             .overflow_hidden()
-            .bg(if selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.select_history_file(path.clone());
                 cx.notify();
@@ -958,9 +980,9 @@ fn active_lane_indices(lanes: &[Option<String>], current_lane: usize) -> Vec<usi
     indices
 }
 
-// 由图形列宽推算最右可绘制泳道索引：为圆点半径与右侧分割条预留空间，避免圆点被分割条遮挡。
+// 由图形列宽推算最右可绘制泳道索引：为圆点半径与右侧隐形把手预留空间，避免圆点被把手遮挡。
 fn graph_max_lane(width: f32) -> usize {
-    let usable = width - GRAPH_LANE_START - 9.0;
+    let usable = width - GRAPH_LANE_START - 14.0;
     if usable < 0.0 {
         0
     } else {
@@ -1388,10 +1410,12 @@ mod tests {
     }
 
     // 可见泳道上限随列宽增长，过窄时回退到 0。
+    // 预留 12 起绘 + 14（圆点半径 + 8px 隐形把手）：把手加宽后最小宽 64 下收缩到 2。
     #[test]
     fn graph_max_lane_scales_with_width() {
         assert_eq!(graph_max_lane(20.0), 0);
-        assert_eq!(graph_max_lane(64.0), 3);
+        assert_eq!(graph_max_lane(40.0), 1);
+        assert_eq!(graph_max_lane(64.0), 2);
         assert_eq!(graph_max_lane(96.0), 5);
         assert_eq!(graph_max_lane(480.0), 32);
     }

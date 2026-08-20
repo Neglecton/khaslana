@@ -13,7 +13,11 @@ use khaslana::{
 
 use crate::{
     MainMode, RepositoryView,
-    ui::{components::app_panel, theme as ui_theme},
+    ui::{
+        components::{app_panel, empty_state},
+        icons::ToolbarIcon,
+        theme as ui_theme,
+    },
     ui_helpers::{ScrollbarMode, scrollable_uniform_frame},
 };
 
@@ -676,14 +680,12 @@ impl RepositoryView {
                 Some(view) => self
                     .render_fallback_conflict_detail(view, cx)
                     .into_any_element(),
-                None => div()
-                    .flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("请选择一个冲突文件")
-                    .into_any_element(),
+                None => empty_state(
+                    Some(ToolbarIcon::Search),
+                    "请选择一个冲突文件",
+                    None::<&'static str>,
+                )
+                .into_any_element(),
             })
     }
 

@@ -628,18 +628,21 @@ impl RepositoryView {
             .id(format!("remote-{}", remote.name))
             .flex()
             .items_center()
+            .mx(px(4.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .gap(px(8.0))
             .px(px(16.0))
             .pl(px(24.0))
             .py(px(4.0))
+            // 选中（当前操作目标远端）= 主色淡底，与分支行统一选中语言
             .bg(if selected {
-                rgb(ui_theme::SIDEBAR_ACCENT)
+                rgb(ui_theme::PRIMARY_SUBTLE)
             } else {
                 rgb(ui_theme::SIDEBAR)
             })
             .hover(move |this| {
                 if selected {
-                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
+                    this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
                 } else {
                     this.bg(rgb(ui_theme::ACCENT))
                 }
@@ -725,6 +728,8 @@ impl RepositoryView {
             .id(format!("tag-{}", tag.name))
             .flex()
             .items_center()
+            .mx(px(4.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .gap(px(8.0))
             .px(px(16.0))
             .pl(px(24.0))
@@ -772,6 +777,8 @@ impl RepositoryView {
             .id(format!("stash-{}", stash.index))
             .flex()
             .items_center()
+            .mx(px(4.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .gap(px(8.0))
             .px(px(16.0))
             .pl(px(24.0))
@@ -821,15 +828,12 @@ impl RepositoryView {
         let ahead = branch.ahead.unwrap_or(0);
         let behind = branch.behind.unwrap_or(0);
 
-        // 设计图：
-        // 活跃分支：bg $--sidebar-accent, 左侧 HEAD 圆点 6×6 $--primary,
-        //   名称 fontWeight 600 $--sidebar-primary-foreground, upstream 小字 $--muted-foreground
-        // 非活跃分支：bg 透明, 左侧空 24px, 名称 normal weight $--sidebar-accent-foreground
-        // 远端分支：名称 $--muted-foreground
+        // 统一列表行语言：胶囊圆角 + 内缩；当前分支 = 主色淡底 + HEAD 点，
+        // 右键选中 = SECONDARY（与 hover 区分），普通行透明。
         let row_bg = if is_current {
-            ui_theme::SIDEBAR_ACCENT
+            ui_theme::PRIMARY_SUBTLE
         } else if selected {
-            ui_theme::SIDEBAR_ACCENT
+            ui_theme::SECONDARY
         } else {
             ui_theme::SIDEBAR
         };
@@ -876,14 +880,16 @@ impl RepositoryView {
             .id(format!("branch-{}", branch.name))
             .flex()
             .items_center()
+            .mx(px(4.0))
+            .rounded(px(ui_theme::RADIUS_XS))
             .gap(px(6.0))
             .px(px(16.0))
             .py(px(2.0))
             .pl(px(22.0))
             .bg(rgb(row_bg))
             .hover(move |this| {
-                if is_current {
-                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
+                if is_current || selected {
+                    this.bg(rgb(row_bg))
                 } else {
                     this.bg(rgb(ui_theme::ACCENT))
                 }

@@ -12,7 +12,8 @@ use crate::ui::theme::rgb;
 use crate::{
     FieldId, RepositoryView,
     ui::{
-        components::{dialog_actions, dialog_overlay},
+        components::{dialog_actions, dialog_overlay, empty_state},
+        icons::ToolbarIcon,
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, scrollable_frame_when},
@@ -982,11 +983,7 @@ impl RepositoryView {
                 .child(format!("加载失败：{error}"))
                 .into_any_element()
         } else if state.records.is_empty() {
-            div()
-                .py_6()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                .child("暂无评审记录")
+            empty_state(Some(ToolbarIcon::Ai), "暂无评审记录", None::<&'static str>)
                 .into_any_element()
         } else {
             // 滚动结构照仓库切换下拉同构：外层有界 + scrollable_frame_when

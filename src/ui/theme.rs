@@ -145,7 +145,7 @@ theme_tokens! {
     92: DIFF_HUNK_BG => 0xE9E9EE, 0x2A2D36;
 
     // ── 弹窗和对话 ────────────────────────────────────────
-    52: DIALOG_OVERLAY => 0x0f172a55, 0x00000088;
+    52: DIALOG_OVERLAY => 0x0f172a73, 0x00000099;
     53: TOOLTIP_BG => 0x2A2933, 0x2A2933;
     54: TOOLTIP_BORDER => 0x3A3955, 0x555768;
 
@@ -194,6 +194,10 @@ theme_tokens! {
     88: SCROLLBAR_TRACK => 0xF5F5F5CC, 0x24262DCC;
     89: SCROLLBAR_THUMB => 0xC5C5CBDD, 0x555863DD;
     90: SCROLLBAR_THUMB_ACTIVE => 0x939399EE, 0x777A86EE;
+
+    // ── 材质感 ─────────────────────────────────────────────
+    // 顶部高光线：深色下为 4% 白（增加表面立体感），浅色全透明自动隐身。
+    94: SURFACE_HIGHLIGHT => 0x00000000, 0xFFFFFF0A;
 }
 
 // ── 主色族 token（受 accent 预设动态控制）─────────────────
@@ -471,6 +475,7 @@ pub(crate) fn accent_glow(blur: f32) -> BoxShadow {
 
 // ── 圆角常量 ──────────────────────────────────────────────
 pub(crate) const RADIUS_XS: f32 = 8.0;
+pub(crate) const RADIUS_MD: f32 = 12.0;
 pub(crate) const RADIUS_PILL: f32 = 999.0;
 
 #[cfg(test)]
@@ -622,6 +627,19 @@ mod tests {
             0x5749F4
         );
         set_active_accent(0);
+    }
+
+    #[test]
+    fn surface_highlight_is_invisible_in_light_theme_only() {
+        // 浅色主题高光线全透明（隐身），深色为 4% 白
+        assert_eq!(
+            resolve_color_for_variant(SURFACE_HIGHLIGHT, ThemeVariant::Light),
+            0x00000000
+        );
+        assert_eq!(
+            resolve_color_for_variant(SURFACE_HIGHLIGHT, ThemeVariant::Dark),
+            0xFFFFFF0A
+        );
     }
 
     #[test]

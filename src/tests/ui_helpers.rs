@@ -52,3 +52,17 @@ fn repo_initials_empty() {
     assert_eq!(repo_initials(""), "?");
     assert_eq!(repo_initials("---"), "?");
 }
+
+#[test]
+fn avatar_palette_pairs_are_distinct() {
+    // 每对 (底色, 渐变伙伴色) 两色必须不同，否则头像渐变退化成纯色
+    for (base, gradient_to) in AVATAR_PALETTE {
+        assert_ne!(base, gradient_to);
+    }
+    // 相同键稳定取同一对颜色
+    assert_eq!(
+        avatar_palette_colors("alice"),
+        avatar_palette_colors("alice")
+    );
+    assert_eq!(avatar_palette_colors(""), avatar_palette_colors(""));
+}

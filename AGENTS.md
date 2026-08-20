@@ -82,7 +82,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
 - `src/submodule_view.rs`：子模块弹窗 UI 和按需加载/更新动作，包括远端超前/落后状态展示、同步记录版本、更新全部到远端最新和更新单个子模块到远端最新。
-- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板、主题感知的 `rgb` / `rgba` 入口与品牌渐变/辉光 helper（`primary_background` / `token_gradient` / `accent_glow`，见 §8 约定），`components.rs` 封装按钮、toast、tooltip、section header、品牌渐变饰条（`accent_strip`）等项目级 UI helper，`mod.rs` 统一导出。
+- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板、主题感知的 `rgb` / `rgba` 入口与品牌渐变/辉光 helper（`primary_background` / `token_gradient` / `accent_glow`，见 §8 约定），`components.rs` 封装按钮、toast、tooltip、section header、品牌渐变饰条（`accent_strip`）、分级空状态（`empty_state`）、顶部高光线（`top_hairline`）与统一列表行选中态（`list_row_surface`）等项目级 UI helper，`mod.rs` 统一导出。
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
 - `src/shortcuts_view.rs`：快捷键设置页 UI，包括 `format_keystroke`（keystroke → 显示文本）、录制态交互（按下组合键录入，冲突拒绝并提示）和恢复默认。
@@ -244,6 +244,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 已暂存和未暂存变更列表使用虚拟化渲染，上万文件时仅创建可见行
 - 单选、多选、范围选择变更
 - 暂存选中、暂存全部
+- 变更行行尾的 +/- 图标按钮（`change_row_icon_button`）：**mouse down 触发 + stop_propagation**，点击即对该文件暂存/取消暂存且不改变行选中态（不用 on_click——行在 mouse down 阶段改选区并重渲染，click 的 down/up 跨帧配对不可靠；按钮元素 id 带文件路径保证唯一，共享 id 会让元素状态在多行按钮间互相覆盖）
 - 按块/按行部分暂存（双向，仅工作区差异视图）：点击 +/- 行选择（Ctrl/Cmd 多选、Shift 范围，选中行整行半透明主题色打底 + 左缘 2px 主题色条；高亮层渲染在行背景之后，否则会被行自身不透明背景遮盖），hunk 分隔行右侧「暂存此块/取消暂存此块」按钮（`diff_hunk_action_button`，紧凑无边框样式，总高不超过 22px 的 hunk 行高），选区非空时差异标题栏出现「暂存选中行(N)/取消暂存选中行(N)」按钮（与「全文/编码」按钮同规格，不撑高标题栏）；按当前差异 scope 决定方向（DiffLine.hunk_index 提供块分组）。暂存/取消暂存（整文件或按块/按行，消息名单 `operation_refreshes_worktree_diff`）完成后差异面板跟随刷新（`refresh_diff_after_stage_change`）：文件在当前 scope 仍有改动时原位重载，整文件挪到对侧列表时清空，避免残留失效的按块按钮；存在性判定 `diff_scope_still_present` 对「未暂存 scope 且路径在快照中完全缺失」视为仍存在（未跟踪文件不在操作快照的 fast 状态里）。该刷新在 `OperationFinished` 中必须先于全量状态补全/分支同步请求执行，且这些请求改按刷新后的最新 `repository_load_id` 发起——`load_diff` 会经 spawn_operation 递增代际（diff 缓存失效机制），沿用旧代际的结果会被代际守卫丢弃，变更列表将停留在不含未跟踪文件的操作快照上。可折叠 diff 头部只折叠纯文件头（diff --git / index / --- / +++），首个 `@@` hunk 头虽同为 Header kind 但始终留在正文渲染，折叠时不能吞掉（否则首个 hunk 缺「暂存此块」入口且行号跳变，回归测试 `diff_render_rows_keep_first_hunk_header_in_body`）
 - 取消暂存选中、取消暂存全部
 - 暂存区文件右键可复制绝对路径或打开文件所在目录
@@ -289,7 +290,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 
 - 当前分支 / 所有分支提交历史
 - 拓扑排序提交图
-- 提交图列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位），可见泳道数随列宽动态计算，超出以省略号提示
+- 提交图列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位），可见泳道数随列宽动态计算，超出以省略号提示；分割条为**隐形把手**（8px 命中区）：静止不画线（与无边框列表行协调），悬停任一行把手时整列浮现 1px 主题色淡线（共享 `history_graph_splitter_hover` 标志），拖拽中为 2px 主题色实线
 - 提交图泳道不按加载窗口剪枝，保证线条跨行连续、跨页加载时上方布局不抖动
 - 提交引用标签，包括本地分支、远端分支、tag、HEAD
 - 切换分支、提交、合并、变基、拉取、推送等操作完成后自动后台刷新提交记录和引用标签（含 HEAD），无需人工刷新
@@ -345,6 +346,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - Khaslana 语义色、自绘输入框和 Yororen 组件使用一致的深浅色模式
 - 主题色更换：在外观设置中可从 9 种预置主题色（靛蓝、紫罗兰、玫红、橙、青、翠绿、石墨、金棕、天蓝）中选择，默认为靛蓝。主题色影响主色族（按钮、选中态、链接、输入框聚焦边框/选区、HEAD 标签、进度条等），Yororen 组件的聚焦边框也跟随主题色。主题色预设定义在 `src/ui/theme.rs` 的 `ACCENT_PRESETS`，运行时通过 `ACTIVE_ACCENT` 原子和 `resolve_accent_token` 动态解析，业务 view 无需感知。主题色索引持久化到 `theme_preferences.accent` 列。
 - 品牌渐变与辉光（精致现代风格，无开关、唯一默认样式）：每套主题色预设含手工调配的渐变伙伴色 `AccentPalette.gradient_to`（与 primary 同亮度带、色相偏移，token `PRIMARY_GRADIENT_TO`）。品牌元素使用两色渐变——主按钮（`primary_background(120°)` + 常态/hover 主题色辉光）、激活模式药丸与状态药丸、HEAD 徽标、底部进度条填充、工具栏下方 2px 渐变饰条（`accent_strip`）与欢迎页光球；输入框聚焦用主题色辉光阴影（`accent_glow`，复用 `INPUT_SELECTION` 透明度），状态栏 busy 圆点辉光。渐变只落在品牌元素，工具栏/侧边栏/内容区表面保持纯色，diff 与语法高亮配色不受影响。
+- 列表选中态、空状态与弹窗层级已统一（2026-08-20 二批 UI 刷新）：列表行选中统一为「无边框胶囊圆角 + `PRIMARY_SUBTLE` 选中底 + 左缘 2px 主题色条 + hover SECONDARY」语言（`list_row_surface`，覆盖工作区变更、冲突文件、提交文件列表、侧边栏分支/远端/标签/贮藏行、历史提交行、仓库切换下拉行、分支浏览/比较文件树与工作流模板列表）；语义状态叠加其上——已暂存未选中行保持 ACCENT 灰底、未推送提交保持警告底 + 3px 左警告条、当前分支保持 HEAD 点 + semibold + PRIMARY_SUBTLE。空状态分级：虚拟列表行内用 `placeholder_row`（居中单行弱化文字），整块区域（弹窗/详情面板）用 `empty_state(icon, title, hint)`；diff 区空态为居中弱化行（不走 diff_line 等宽行号槽）。对话框 `RADIUS_MD`(12px) + `shadow_xl` + 标题行无分割线，遮罩加深（浅 45%/深 60%）；作者/仓库头像为 (底色, 渐变伙伴色) 135° 渐变色块（`AVATAR_PALETTE`）。
 
 ### 5.9 设置中心
 
@@ -421,6 +423,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - 用户可见文案保持中文；blame 功能的 UI 术语统一用「追溯」，不直接暴露英文 blame。
 - 语法高亮统一经 `src/syntax.rs`（syntect）计算、`syntax_styled_text` 渲染；颜色来自 syntect 内置主题按深浅二选一，不自建 scope 映射，也不把 span 颜色混入 `ui/theme.rs` 语义 token 体系。新视图接入按「内容落位 → `schedule_syntax_highlight` → `SyntaxHighlighted` 回填（Arc 身份守卫）」模式。
 - 品牌渐变与辉光阴影一律经 `src/ui/theme.rs` 的 `primary_background(angle)` / `token_gradient(from, to, angle)` / `accent_glow(blur)` helper 获取，业务 view 不直接调用 gpui 的 `linear_gradient` / `BoxShadow`；渐变两色来自 accent 预设的 `gradient_to` 伙伴色，随主题色与深浅切换自动生效。渐变只用于品牌元素（主按钮、激活药丸、HEAD 徽标、进度条、饰条、欢迎页光球），工具栏/侧边栏/内容区等大面积表面保持纯色。gpui 渐变仅支持两色 stop，文字与边框色不支持渐变。
+- 新增列表行选中态一律复用统一语言：无边框胶囊（`RADIUS_XS`）+ `PRIMARY_SUBTLE` 选中底 + 左缘 2px 主题色条 + hover SECONDARY（参照 `list_row_surface` / `branch_row` / `commit_row`），不要回退到「边框 + 灰底 + shadow_sm」旧样式；语义状态（已暂存、未推送警告、当前分支）以底色/左条叠加表达。空状态分级：虚拟列表行内用 `placeholder_row`，整块区域用 `empty_state`；对话框外壳用 `dialog_panel`（`RADIUS_MD` + `shadow_xl`），浮层深色立体感经 `top_hairline()`（token `SURFACE_HIGHLIGHT`，浅色自动透明），不另写零散样式。
 - Git 业务能力优先放在 `GitService`。
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。

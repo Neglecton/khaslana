@@ -297,12 +297,69 @@ pub(crate) fn app_shell_surface() -> Div {
     div().relative().size_full().bg(rgb(theme::BACKGROUND))
 }
 
-/// 工具栏 — 扁平边框条，去掉旧版阴影、玻璃态、内部高亮线
+/// 工具栏 — 扁平边框条；深色主题带顶部高光线增强立体感
 pub(crate) fn hero_toolbar() -> Div {
     div()
+        .relative()
         .border_b_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::CARD))
+        .child(top_hairline())
+}
+
+/// 顶部高光线 — 深色主题下的 1px 4% 白线，增加表面立体感；浅色全透明隐身。
+/// 挂在工具栏/浮层顶部（父容器需 relative）。
+pub(crate) fn top_hairline() -> Div {
+    div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .h(px(1.0))
+        .bg(gpui::solid_background(rgba(theme::SURFACE_HIGHLIGHT)))
+}
+
+/// 全区域空状态：居中列 = 可选 muted 图标 + 主文案 + 可选副文案，无边框。
+/// 用于有整块展示空间的空态（对话框、详情面板）；虚拟列表行内请用 placeholder_row。
+pub(crate) fn empty_state(
+    icon: Option<ToolbarIcon>,
+    title: impl Into<gpui::SharedString>,
+    hint: Option<impl Into<gpui::SharedString>>,
+) -> Div {
+    div()
+        .flex()
+        .w_full()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .py(px(32.0))
+        .when_some(icon, |this, icon| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .size(px(24.0))
+                    .items_center()
+                    .justify_center()
+                    .child(toolbar_icon(icon, theme::MUTED_FOREGROUND)),
+            )
+        })
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(theme::MUTED_FOREGROUND))
+                .child(title.into()),
+        )
+        .when_some(hint, |this, hint| {
+            this.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme::MUTED_FOREGROUND))
+                    .child(hint.into()),
+            )
+        })
 }
 
 /// 品牌渐变饰条 — 紧贴工具栏下方的 2px 主色渐变线，整窗的品牌信号
@@ -318,14 +375,16 @@ pub(crate) fn flat_panel() -> Div {
     div()
 }
 
-/// 玻璃面板 — 保留给弹窗/上下文菜单等需要浮层效果的场景
+/// 玻璃面板 — 保留给弹窗/上下文菜单等需要浮层效果的场景；深色带顶部高光线
 pub(crate) fn glass_panel() -> Div {
     div()
+        .relative()
         .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::CARD))
         .shadow_lg()
+        .child(top_hairline())
 }
 
 /// 菜单容器 — 弹出菜单使用
@@ -370,19 +429,20 @@ pub(crate) fn dialog_overlay() -> Div {
         .occlude()
 }
 
-/// 对话框面板
+/// 对话框面板 — 大圆角 + 深阴影；标题行用留白分隔（无分割线），深色带顶部高光线
 pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div> {
     let title: gpui::SharedString = title.into();
     let id_suffix: String = title.to_string();
     div()
         .id(format!("dialog-{id_suffix}"))
+        .relative()
         .w(px(480.0))
         .p_4()
-        .rounded(px(theme::RADIUS_XS))
+        .rounded(px(theme::RADIUS_MD))
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::CARD))
-        .shadow_lg()
+        .shadow_xl()
         .flex()
         .flex_col()
         .gap_3()
@@ -391,15 +451,14 @@ pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div
         .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
             cx.stop_propagation();
         })
+        .child(top_hairline())
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .pb_1()
-                .border_b_1()
-                .border_color(rgb(theme::BORDER))
+                .pb_2()
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -546,23 +605,34 @@ pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
 }
 
 /// 列表行表面 — 选中/未选中
+/// 列表行统一选中态：无边框无阴影，选中 = 主色淡底 + 左缘 2px 主色条，hover = SECONDARY。
+/// 已暂存等语义标记由调用方在返回值上叠加 bg 覆盖。
 pub(crate) fn list_row_surface(id: String, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
+        .relative()
         .rounded(px(theme::RADIUS_XS))
-        .border_1()
-        .border_color(if selected {
-            rgb(theme::PRIMARY)
-        } else {
-            rgb(theme::BORDER)
-        })
         .bg(if selected {
-            rgb(theme::ACCENT)
+            rgb(theme::PRIMARY_SUBTLE)
         } else {
             rgb(theme::CARD)
         })
-        .shadow_sm()
-        .hover(|this| this.bg(rgb(theme::SECONDARY)))
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left(px(3.0))
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .flex_none()
+                    .w(px(2.0))
+                    .rounded(px(theme::RADIUS_PILL))
+                    .bg(rgb(theme::PRIMARY)),
+            )
+        })
+        .when(!selected, |this| {
+            this.hover(|this| this.bg(rgb(theme::SECONDARY)))
+        })
 }
 
 /// 状态药丸
@@ -654,7 +724,7 @@ pub(crate) fn feedback_bubble(
         .border_1()
         .border_color(rgb(border))
         .bg(rgb(theme::CARD))
-        .shadow_lg()
+        .shadow_xl()
         .flex()
         .gap_3()
         .child(feedback_icon(dot, soft_bg, text))
@@ -1019,7 +1089,7 @@ impl RepositoryView {
     /// hover 显示 ACCENT 背景
     pub(crate) fn change_row_icon_button(
         &self,
-        label: &'static str,
+        id: String,
         icon: ToolbarIcon,
         icon_color: u32,
         enabled: bool,
@@ -1027,7 +1097,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .id(label)
+            .id(id)
             .flex_none()
             .size(px(20.0))
             .rounded(px(theme::RADIUS_XS))
@@ -1037,15 +1107,22 @@ impl RepositoryView {
             .when(enabled, |this| {
                 this.cursor_pointer()
                     .hover(|this| this.bg(rgb(theme::ACCENT)))
-                    .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                if enabled {
-                    on_click(this, window, cx);
-                    cx.notify();
-                }
-            }))
+            // 按下即触发并阻止冒泡到所在行：点击加减号直接暂存/取消暂存该文件，不改变行选中态
+            //（子元素监听器后注册，冒泡阶段先于行处理器派发，stop_propagation 有效——提交图分割条同款模式）。
+            // 不用 on_click：行在 mouse down 阶段就改选区并触发重渲染，click 的 down/up 跨帧配对不可靠；
+            // id 需按文件路径唯一，共享 id 会让元素状态（pending 点击/按压态）在多行按钮间互相覆盖。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if enabled {
+                        on_click(this, window, cx);
+                        cx.notify();
+                    }
+                }),
+            )
             .child(toolbar_icon(icon, icon_color))
     }
 

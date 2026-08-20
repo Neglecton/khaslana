@@ -10,7 +10,7 @@ use yororen_ui::theme::ActiveTheme;
 use crate::{
     FieldId, RepositoryView, ScrollbarMode, scrollable_frame_intrinsic,
     ui::{
-        components::{dialog_actions, toggle_box},
+        components::{dialog_actions, empty_state, toggle_box},
         theme as ui_theme,
     },
 };
@@ -503,14 +503,7 @@ impl RepositoryView {
             .track_scroll(&handle)
             .py_1()
             .when(!content_present, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .child("暂无远端分支，请点击刷新获取"),
-                )
+                this.child(empty_state(None, "暂无远端分支", Some("请点击刷新获取")))
             })
             .children(
                 branches

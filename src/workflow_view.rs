@@ -15,12 +15,13 @@ use khaslana::{
 
 use crate::{
     FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
-    ScrollbarMode, TextFieldState, UiEvent, placeholder_row, scrollable_frame_when,
-    section_header_action, send_ui_event,
+    ScrollbarMode, TextFieldState, UiEvent, scrollable_frame_when, section_header_action,
+    send_ui_event,
     system::open_directory,
     tasks::TaskKind,
     ui::{
-        components::{dialog_actions, section_title},
+        components::{dialog_actions, empty_state, list_row_surface, section_title},
+        icons::ToolbarIcon,
         theme as ui_theme,
     },
 };
@@ -308,7 +309,7 @@ impl RepositoryView {
             .preview
             .as_ref()
             .map(|preview| preview.name.clone())
-            .unwrap_or_else(|| "选择或双击模板后显示预览".to_string());
+            .unwrap_or_else(|| "选择模板后显示预览".to_string());
 
         div()
             .flex()
@@ -396,8 +397,12 @@ impl RepositoryView {
             .unwrap_or_else(|| "无法定位模板目录".to_string());
         let rows = if self.workflow_templates.is_empty() {
             vec![
-                placeholder_row("暂无工作流模板。可以把 .json5/.jsonc 放入模板目录。")
-                    .into_any_element(),
+                empty_state(
+                    Some(ToolbarIcon::Workflow),
+                    "暂无工作流模板",
+                    Some("可以把 .json5/.jsonc 放入模板目录"),
+                )
+                .into_any_element(),
             ]
         } else {
             self.workflow_templates
@@ -483,6 +488,8 @@ impl RepositoryView {
                     .id("workflow-template-list")
                     .flex()
                     .flex_col()
+                    // 去掉行底部分割线后由 gap 分隔行
+                    .gap_1()
                     .flex_1()
                     .min_h(px(0.0))
                     .p_2()
@@ -513,67 +520,59 @@ impl RepositoryView {
             .selected_template_path
             .as_ref()
             .is_some_and(|selected| selected == &template.path);
-        div()
-            .id(format!("workflow-template-{}", template.path.display()))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .bg(if selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
-                this.workflow_state.selected_template_path = Some(click_path.clone());
-                if event.standard_click() && event.click_count() >= 2 && !this.busy {
-                    this.load_workflow_file(click_path.clone(), cx);
-                }
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .font_weight(if selected {
-                        gpui::FontWeight::BOLD
-                    } else {
-                        gpui::FontWeight::NORMAL
-                    })
-                    .text_color(if has_error {
-                        rgb(ui_theme::DESTRUCTIVE)
-                    } else {
-                        rgb(ui_theme::FOREGROUND)
-                    })
-                    .child(template.display_name.clone()),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(format!(
-                        "{} · {}{}",
-                        template.file_name,
-                        template.modified_label,
-                        template
-                            .error
-                            .as_ref()
-                            .map(|error| format!(" · {error}"))
-                            .unwrap_or_default()
-                    )),
-            )
+        // 统一列表行语言：无边框胶囊 + PRIMARY_SUBTLE 选中底 + 左缘主色条；行间距由容器 gap 提供
+        list_row_surface(
+            format!("workflow-template-{}", template.path.display()),
+            selected,
+        )
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+            this.workflow_state.selected_template_path = Some(click_path.clone());
+            // 单击即切换加载该工作流；busy 时仅选中不加载
+            if !this.busy {
+                this.load_workflow_file(click_path.clone(), cx);
+            }
+            cx.notify();
+        }))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .text_size(px(12.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if has_error {
+                    rgb(ui_theme::DESTRUCTIVE)
+                } else {
+                    rgb(ui_theme::FOREGROUND)
+                })
+                .child(template.display_name.clone()),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .text_size(px(11.0))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child(format!(
+                    "{} · {}{}",
+                    template.file_name,
+                    template.modified_label,
+                    template
+                        .error
+                        .as_ref()
+                        .map(|error| format!(" · {error}"))
+                        .unwrap_or_default()
+                )),
+        )
     }
 
     pub(crate) fn workflow_input_field(&self, index: usize) -> &TextFieldState {
@@ -806,7 +805,16 @@ impl RepositoryView {
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(|| vec![placeholder_row("暂无工作流预览").into_any_element()]);
+            .unwrap_or_else(|| {
+                vec![
+                    empty_state(
+                        Some(ToolbarIcon::Workflow),
+                        "暂无工作流预览",
+                        None::<&'static str>,
+                    )
+                    .into_any_element(),
+                ]
+            });
         let content_present = self
             .workflow_state
             .preview
@@ -847,7 +855,7 @@ impl RepositoryView {
 
     fn render_workflow_log(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = if self.workflow_state.log.is_empty() {
-            vec![placeholder_row("运行后显示步骤日志").into_any_element()]
+            vec![empty_state(None, "运行后显示步骤日志", None::<&'static str>).into_any_element()]
         } else {
             self.workflow_state
                 .log
