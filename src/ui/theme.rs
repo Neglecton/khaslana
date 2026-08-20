@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{Rgba, WindowAppearance, rgb as gpui_rgb, rgba as gpui_rgba};
+use gpui::{
+    Background, BoxShadow, Rgba, WindowAppearance, linear_color_stop, linear_gradient, point, px,
+    rgb as gpui_rgb, rgba as gpui_rgba,
+};
 use khaslana::ThemeMode;
 
 // Khaslana 运行时主题色。业务视图继续传递 u32 语义 token，最终在 rgb/rgba 入口解析，
@@ -203,6 +206,8 @@ pub(crate) const INPUT_BORDER_FOCUSED: u32 = THEME_TOKEN_PREFIX | 48;
 pub(crate) const INPUT_SELECTION: u32 = THEME_TOKEN_PREFIX | 50;
 pub(crate) const REF_HEAD_BG: u32 = THEME_TOKEN_PREFIX | 72;
 pub(crate) const PROGRESS_FILL: u32 = THEME_TOKEN_PREFIX | 87;
+/// 主色渐变终点（品牌元素的渐变伙伴色，与 primary 同亮度带、色相偏移）
+pub(crate) const PRIMARY_GRADIENT_TO: u32 = THEME_TOKEN_PREFIX | 93;
 
 /// 一个主题色预设的浅色/深色色对。元组按 (浅色, 深色) 顺序。
 #[derive(Clone, Copy, Debug)]
@@ -221,6 +226,9 @@ pub(crate) struct AccentPalette {
     pub head_bg: (u32, u32),
     /// 进度条填充色
     pub progress_fill: (u32, u32),
+    /// 主色渐变伙伴色（主按钮、激活药丸等品牌元素的渐变终点，
+    /// 与 primary 同亮度带、色相偏移，保证渐变柔和可读）
+    pub gradient_to: (u32, u32),
 }
 
 /// 预置主题色。索引 0「靛蓝」为默认，其值与历史硬编码完全一致（回归保护）。
@@ -237,6 +245,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x5749F433, 0x9A92FF55),
             head_bg: (0x5749F4, 0x9A92FF),
             progress_fill: (0x5749F4, 0x9A92FF),
+            gradient_to: (0x8B5CF6, 0xC4B5FD),
         },
     ),
     // 1 紫罗兰
@@ -250,6 +259,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x7C3AED33, 0xA78BFA55),
             head_bg: (0x7C3AED, 0xA78BFA),
             progress_fill: (0x7C3AED, 0xA78BFA),
+            gradient_to: (0xC026D3, 0xE879F9),
         },
     ),
     // 2 玫红
@@ -263,6 +273,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0xDB277733, 0xF472B655),
             head_bg: (0xDB2777, 0xF472B6),
             progress_fill: (0xDB2777, 0xF472B6),
+            gradient_to: (0x9333EA, 0xC084FC),
         },
     ),
     // 3 橙
@@ -276,6 +287,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0xEA580C33, 0xFB923C55),
             head_bg: (0xEA580C, 0xFB923C),
             progress_fill: (0xEA580C, 0xFB923C),
+            gradient_to: (0xE11D48, 0xFB7185),
         },
     ),
     // 4 青
@@ -289,6 +301,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x0891B233, 0x22D3EE55),
             head_bg: (0x0891B2, 0x22D3EE),
             progress_fill: (0x0891B2, 0x22D3EE),
+            gradient_to: (0x4F46E5, 0x818CF8),
         },
     ),
     // 5 翠绿
@@ -302,6 +315,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x16A34A33, 0x4ADE8055),
             head_bg: (0x16A34A, 0x4ADE80),
             progress_fill: (0x16A34A, 0x4ADE80),
+            gradient_to: (0x0D9488, 0x2DD4BF),
         },
     ),
     // 6 石墨
@@ -315,6 +329,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x37415133, 0x9CA3AF55),
             head_bg: (0x374151, 0x9CA3AF),
             progress_fill: (0x374151, 0x9CA3AF),
+            gradient_to: (0x111827, 0xD1D5DB),
         },
     ),
     // 7 金棕
@@ -328,6 +343,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0xA1620733, 0xFACC1555),
             head_bg: (0xA16207, 0xFACC15),
             progress_fill: (0xA16207, 0xFACC15),
+            gradient_to: (0xEA580C, 0xFDBA74),
         },
     ),
     // 8 天蓝
@@ -341,6 +357,7 @@ pub(crate) const ACCENT_PRESETS: &[(&str, AccentPalette)] = &[
             selection: (0x2563EB33, 0x60A5FA55),
             head_bg: (0x2563EB, 0x60A5FA),
             progress_fill: (0x2563EB, 0x60A5FA),
+            gradient_to: (0x7C3AED, 0xA78BFA),
         },
     ),
 ];
@@ -383,6 +400,7 @@ fn resolve_accent_token(color: u32, variant: ThemeVariant) -> Option<u32> {
         INPUT_SELECTION => Some(pick(accent.selection)),
         REF_HEAD_BG => Some(pick(accent.head_bg)),
         PROGRESS_FILL => Some(pick(accent.progress_fill)),
+        PRIMARY_GRADIENT_TO => Some(pick(accent.gradient_to)),
         _ => None,
     }
 }
@@ -420,8 +438,39 @@ pub(crate) fn rgba(color: u32) -> Rgba {
     gpui_rgba(resolve_color(color))
 }
 
+// ── 品牌渐变与辉光 ────────────────────────────────────────
+// gpui 的 linear_gradient 仅支持两色渐变；角度 0 = 从顶部起顺时针（CSS 语义）。
+// 业务 view 一律通过这些 helper 取渐变背景与辉光，不直接调用 gpui::linear_gradient，
+// 保证主题/accent/深浅解析仍集中在本文件。
+
+/// 通用两 token 渐变背景；token 经主题感知解析，字面色同样可用。
+pub(crate) fn token_gradient(from: u32, to: u32, angle: f32) -> Background {
+    linear_gradient(
+        angle,
+        linear_color_stop(rgb(from), 0.0),
+        linear_color_stop(rgb(to), 1.0),
+    )
+}
+
+/// 主色渐变背景（主按钮、激活药丸、HEAD 标签、进度条等品牌元素）。
+pub(crate) fn primary_background(angle: f32) -> Background {
+    token_gradient(PRIMARY, PRIMARY_GRADIENT_TO, angle)
+}
+
+/// 单层主题色辉光阴影；颜色复用 INPUT_SELECTION 的透明度
+///（浅色 33% / 深色 55%，深色下更亮以保持可见）。
+/// 多层辉光叠加时调用方自行组 vec，如 `vec![accent_glow(12.0), accent_glow(28.0)]`。
+pub(crate) fn accent_glow(blur: f32) -> BoxShadow {
+    BoxShadow {
+        color: rgba(INPUT_SELECTION).into(),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(blur),
+        spread_radius: px(0.0),
+    }
+}
+
 // ── 圆角常量 ──────────────────────────────────────────────
-pub(crate) const RADIUS_XS: f32 = 6.0;
+pub(crate) const RADIUS_XS: f32 = 8.0;
 pub(crate) const RADIUS_PILL: f32 = 999.0;
 
 #[cfg(test)]
@@ -480,6 +529,58 @@ mod tests {
         assert_eq!(palette.selection, (0x5749F433, 0x9A92FF55));
         assert_eq!(palette.head_bg, (0x5749F4, 0x9A92FF));
         assert_eq!(palette.progress_fill, (0x5749F4, 0x9A92FF));
+        assert_eq!(palette.gradient_to, (0x8B5CF6, 0xC4B5FD));
+    }
+
+    #[test]
+    fn accent_presets_define_visible_gradient_partners() {
+        // 每套预设都必须有非零且与 primary 可区分的渐变伙伴色，否则品牌渐变会退化成纯色
+        for (_, palette) in ACCENT_PRESETS {
+            assert_ne!(palette.gradient_to.0, 0, "浅色渐变伙伴色缺失");
+            assert_ne!(palette.gradient_to.1, 0, "深色渐变伙伴色缺失");
+            assert_ne!(
+                palette.gradient_to.0, palette.primary.0,
+                "浅色渐变伙伴色与主色相同，渐变不可见"
+            );
+            assert_ne!(
+                palette.gradient_to.1, palette.primary.1,
+                "深色渐变伙伴色与主色相同，渐变不可见"
+            );
+        }
+    }
+
+    #[test]
+    fn primary_gradient_token_follows_accent_presets() {
+        set_active_accent(0);
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY_GRADIENT_TO, ThemeVariant::Light),
+            0x8B5CF6
+        );
+        // 切换到紫罗兰（索引 1）后渐变伙伴色跟随
+        set_active_accent(1);
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY_GRADIENT_TO, ThemeVariant::Light),
+            0xC026D3
+        );
+        assert_eq!(
+            resolve_color_for_variant(PRIMARY_GRADIENT_TO, ThemeVariant::Dark),
+            0xE879F9
+        );
+        set_active_accent(0);
+    }
+
+    #[test]
+    fn primary_background_builds_two_stop_gradient_from_tokens() {
+        set_active_accent(0);
+        assert_eq!(
+            primary_background(90.0),
+            linear_gradient(
+                90.0,
+                linear_color_stop(rgb(PRIMARY), 0.0),
+                linear_color_stop(rgb(PRIMARY_GRADIENT_TO), 1.0),
+            )
+        );
+        set_active_accent(0);
     }
 
     #[test]

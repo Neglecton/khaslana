@@ -93,7 +93,7 @@ use text_input::{
 use ui::theme::rgb;
 use ui::{
     components::{
-        AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
+        AppToastKind, FeedbackMessage, InputFrameSize, accent_strip, app_panel, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
         dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
         input_frame, list_row_surface, mode_pill, segmented_button, toggle_box,
@@ -14444,7 +14444,11 @@ impl RepositoryView {
                         ui_theme::PRIMARY
                     } else {
                         ui_theme::GIT_ADDED
-                    })),
+                    }))
+                    // busy 态圆点带主题色辉光，强化「运行中」信号
+                    .when(self.busy, |this| {
+                        this.shadow(vec![ui_theme::accent_glow(6.0)])
+                    }),
             )
             .child(
                 div()
@@ -14495,6 +14499,92 @@ impl RepositoryView {
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
+    }
+
+    /// 欢迎页 — 未打开任何仓库时的品牌空状态：渐变光球 + 打开/克隆快捷入口
+    fn render_welcome(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("welcome-root")
+            .flex()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("welcome-card")
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(28.0))
+                    // 品牌光球：135° 主色渐变 + 双层辉光
+                    .child(
+                        div()
+                            .id("welcome-orb")
+                            .flex()
+                            .flex_none()
+                            .size(px(80.0))
+                            .rounded_full()
+                            .items_center()
+                            .justify_center()
+                            .bg(ui_theme::token_gradient(
+                                ui_theme::PRIMARY,
+                                ui_theme::PRIMARY_GRADIENT_TO,
+                                135.0,
+                            ))
+                            .shadow(vec![
+                                ui_theme::accent_glow(18.0),
+                                ui_theme::accent_glow(40.0),
+                            ])
+                            .child(
+                                div()
+                                    .text_size(px(34.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                                    .child("K"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(26.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child("Khaslana"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child("轻量但完整的 Git 桌面客户端"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(self.primary_button(
+                                "打开仓库",
+                                true,
+                                |this: &mut Self, _window, _cx| this.browse_open(),
+                                cx,
+                            ))
+                            .child(self.button(
+                                "克隆仓库",
+                                true,
+                                |this: &mut Self, window, _cx| this.open_clone_dialog(window),
+                                cx,
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn has_active_loading(&self) -> bool {
@@ -17106,7 +17196,11 @@ impl Render for RepositoryView {
                 }))
             })
             .child(self.render_toolbar(window, cx))
-            .child(
+            .child(accent_strip())
+            .child(if self.active_tab().is_none() {
+                // 未打开任何仓库：整排替换为品牌欢迎页
+                self.render_welcome(cx).into_any_element()
+            } else {
                 div()
                     .flex()
                     .flex_1()
@@ -17134,8 +17228,9 @@ impl Render for RepositoryView {
                         MainMode::Stash => self.render_stash_preview_view(cx).into_any_element(),
                         MainMode::Browse => self.render_browse_view(cx).into_any_element(),
                         MainMode::Blame => self.render_blame_view(cx).into_any_element(),
-                    }),
-            )
+                    })
+                    .into_any_element()
+            })
             .child(self.render_status())
             .child(self.render_branch_context_menu(cx))
             .child(self.render_remote_context_menu(cx))

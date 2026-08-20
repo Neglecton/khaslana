@@ -82,7 +82,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
 - `src/submodule_view.rs`：子模块弹窗 UI 和按需加载/更新动作，包括远端超前/落后状态展示、同步记录版本、更新全部到远端最新和更新单个子模块到远端最新。
-- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
+- `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板、主题感知的 `rgb` / `rgba` 入口与品牌渐变/辉光 helper（`primary_background` / `token_gradient` / `accent_glow`，见 §8 约定），`components.rs` 封装按钮、toast、tooltip、section header、品牌渐变饰条（`accent_strip`）等项目级 UI helper，`mod.rs` 统一导出。
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
 - `src/shortcuts_view.rs`：快捷键设置页 UI，包括 `format_keystroke`（keystroke → 显示文本）、录制态交互（按下组合键录入，冲突拒绝并提示）和恢复默认。
@@ -229,6 +229,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 ### 5.1 仓库和会话
 
 - 打开本地仓库
+- 未打开任何仓库时主区域显示品牌欢迎页（`render_welcome`）：渐变光球 + 「打开仓库 / 克隆仓库」快捷入口，整排替换侧边栏与内容区
 - 克隆远端仓库，并根据 URL 推断目录名，默认递归克隆子模块
 - 多仓库并存（仓库切换下拉：置顶克隆/打开 + 搜索仓库 + 打开项目[活动置顶] + 最近项目，按最近时间排序，下拉项可关闭已打开仓库）。「搜索仓库」位于打开仓库下面，默认为按钮，点击展开为输入框 + 小叉（收起恢复按钮并取消过滤）；每输入/删除一个字符实时过滤打开/最近两区（名称或完整路径子串匹配，大小写不敏感，`filter_repo_switcher_sections`，区内名称命中排在仅路径命中之前）；无结果显示「没有匹配的仓库」占位。键盘导航：↑↓ 在过滤结果上环绕移动高亮（`repo_switcher_highlight` 扁平索引，文本变化即复位），回车切换/打开高亮项（无高亮取第一项），Esc 关闭下拉。下拉菜单固定锚定在触发器按钮正下方（非鼠标位置），点击菜单外部或再次点击触发器按钮均关闭，复用根层 `capture_any_mouse_down` 的点击外部关闭机制；命中判定带 4px 边缘容差（`point_in_repo_switcher`），避免菜单左缘与侧边栏分栏分割线重合时，点在边框上的点击被误判为外部而关闭菜单并触发分割线拖拽（分割线的 `start_resize_column` 不再调用 `close_popups`，统一由根层捕获关闭）；弹层菜单（`any_popup_menu_open`：仓库切换下拉、各类右键菜单、编码菜单）打开期间全部分割线（列分割线与提交图列宽分割条）不响应鼠标、不显示拖拽光标（`column_splitter_accepts_mouse_events` 双参数门控），遮挡层打开也会中止进行中的拖拽。
 - 自动保存和恢复会话
@@ -343,6 +344,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 跟随系统模式会响应操作系统窗口外观变化
 - Khaslana 语义色、自绘输入框和 Yororen 组件使用一致的深浅色模式
 - 主题色更换：在外观设置中可从 9 种预置主题色（靛蓝、紫罗兰、玫红、橙、青、翠绿、石墨、金棕、天蓝）中选择，默认为靛蓝。主题色影响主色族（按钮、选中态、链接、输入框聚焦边框/选区、HEAD 标签、进度条等），Yororen 组件的聚焦边框也跟随主题色。主题色预设定义在 `src/ui/theme.rs` 的 `ACCENT_PRESETS`，运行时通过 `ACTIVE_ACCENT` 原子和 `resolve_accent_token` 动态解析，业务 view 无需感知。主题色索引持久化到 `theme_preferences.accent` 列。
+- 品牌渐变与辉光（精致现代风格，无开关、唯一默认样式）：每套主题色预设含手工调配的渐变伙伴色 `AccentPalette.gradient_to`（与 primary 同亮度带、色相偏移，token `PRIMARY_GRADIENT_TO`）。品牌元素使用两色渐变——主按钮（`primary_background(120°)` + 常态/hover 主题色辉光）、激活模式药丸与状态药丸、HEAD 徽标、底部进度条填充、工具栏下方 2px 渐变饰条（`accent_strip`）与欢迎页光球；输入框聚焦用主题色辉光阴影（`accent_glow`，复用 `INPUT_SELECTION` 透明度），状态栏 busy 圆点辉光。渐变只落在品牌元素，工具栏/侧边栏/内容区表面保持纯色，diff 与语法高亮配色不受影响。
 
 ### 5.9 设置中心
 
@@ -418,6 +420,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - 代码修改要有中文注释，完成后应当检查`AGENTS.md`内容是否需要调整。
 - 用户可见文案保持中文；blame 功能的 UI 术语统一用「追溯」，不直接暴露英文 blame。
 - 语法高亮统一经 `src/syntax.rs`（syntect）计算、`syntax_styled_text` 渲染；颜色来自 syntect 内置主题按深浅二选一，不自建 scope 映射，也不把 span 颜色混入 `ui/theme.rs` 语义 token 体系。新视图接入按「内容落位 → `schedule_syntax_highlight` → `SyntaxHighlighted` 回填（Arc 身份守卫）」模式。
+- 品牌渐变与辉光阴影一律经 `src/ui/theme.rs` 的 `primary_background(angle)` / `token_gradient(from, to, angle)` / `accent_glow(blur)` helper 获取，业务 view 不直接调用 gpui 的 `linear_gradient` / `BoxShadow`；渐变两色来自 accent 预设的 `gradient_to` 伙伴色，随主题色与深浅切换自动生效。渐变只用于品牌元素（主按钮、激活药丸、HEAD 徽标、进度条、饰条、欢迎页光球），工具栏/侧边栏/内容区等大面积表面保持纯色。gpui 渐变仅支持两色 stop，文字与边框色不支持渐变。
 - Git 业务能力优先放在 `GitService`。
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。

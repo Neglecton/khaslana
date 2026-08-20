@@ -33,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
 # 语法高亮：纯 Rust 后端（fancy-regex，免 oniguruma C 依赖），内置默认语法与主题 dump；
+# 语法高亮：纯 Rust 后端（fancy-regex，免 oniguruma C 依赖），内置默认语法与主题 dump；
 # 用于追溯/浏览内容/冲突工作台/diff 全文视图的只读代码着色。
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 thiserror = "2"

@@ -1207,6 +1207,8 @@ fn commit_ref_label(
     reference: CommitRefInfo,
 ) -> impl IntoElement {
     let tooltip = commit_ref_tooltip(&reference);
+    // HEAD 徽标用品牌渐变底；本地/远端/标签徽章保持原语义色系
+    let is_head = matches!(reference.kind, CommitRefKind::Head);
     let (bg, border, fg, label) = match reference.kind {
         CommitRefKind::LocalBranch => (
             ui_theme::REF_LOCAL_BG,
@@ -1243,7 +1245,11 @@ fn commit_ref_label(
         .rounded_sm()
         .border_1()
         .border_color(rgb(border))
-        .bg(rgb(bg))
+        .bg(if is_head {
+            ui_theme::primary_background(90.0)
+        } else {
+            gpui::solid_background(rgb(bg))
+        })
         .text_size(px(10.0))
         .text_color(rgb(fg))
         .truncate()

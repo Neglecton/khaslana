@@ -225,9 +225,10 @@ pub(crate) fn mode_pill(
         .justify_center()
         .cursor_pointer()
         .bg(if active {
-            rgb(theme::PRIMARY)
+            // 激活态用横向品牌渐变，是工具栏最显眼的现代化信号
+            theme::primary_background(90.0)
         } else {
-            rgb(theme::CARD)
+            gpui::solid_background(rgb(theme::CARD))
         })
         .text_color(if active {
             rgb(theme::PRIMARY_FOREGROUND)
@@ -302,6 +303,14 @@ pub(crate) fn hero_toolbar() -> Div {
         .border_b_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::CARD))
+}
+
+/// 品牌渐变饰条 — 紧贴工具栏下方的 2px 主色渐变线，整窗的品牌信号
+pub(crate) fn accent_strip() -> Div {
+    div()
+        .flex_none()
+        .h(px(2.0))
+        .bg(theme::primary_background(90.0))
 }
 
 /// 扁平面板 — 无装饰纯色容器，无边框无阴影
@@ -461,7 +470,8 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
             this.hover(|this| this.bg(rgb(theme::ACCENT)))
         })
         .when(focused, |this| {
-            this.shadow_sm()
+            // 聚焦态：主题色辉光取代默认灰阴影，边框保持主色
+            this.shadow(vec![theme::accent_glow(10.0)])
                 .border_color(rgb(theme::INPUT_BORDER_FOCUSED))
         })
 }
@@ -570,12 +580,12 @@ pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement
             rgb(theme::BORDER)
         })
         .bg(if active {
-            rgb(theme::ACCENT)
+            theme::primary_background(90.0)
         } else {
-            rgb(theme::CARD)
+            gpui::solid_background(rgb(theme::CARD))
         })
         .text_color(if active {
-            rgb(theme::PRIMARY)
+            rgb(theme::PRIMARY_FOREGROUND)
         } else {
             rgb(theme::MUTED_FOREGROUND)
         })
@@ -725,7 +735,7 @@ pub(crate) fn bottom_progress_bar(phase: u64) -> impl IntoElement {
                 .left(px(offset))
                 .w(px(260.0))
                 .rounded_full()
-                .bg(rgb(theme::PROGRESS_FILL)),
+                .bg(theme::primary_background(90.0)),
         )
 }
 
@@ -1108,6 +1118,13 @@ impl RepositoryView {
         } else {
             theme::MUTED_FOREGROUND
         };
+        // 主色调按钮使用品牌渐变背景；hover 无法简单换渐变色，改用主题色辉光反馈
+        let primary_tone = enabled && tone == ButtonTone::Primary;
+        let button_bg = if primary_tone {
+            theme::primary_background(120.0)
+        } else {
+            gpui::solid_background(rgb(bg_color))
+        };
         div()
             .id(label)
             .relative()
@@ -1121,7 +1138,7 @@ impl RepositoryView {
             .border_1()
             .border_color(rgb(palette.border))
             .rounded(px(theme::RADIUS_XS))
-            .bg(rgb(bg_color))
+            .bg(button_bg)
             .text_color(rgb(text_color))
             .text_size(px(12.0))
             .font_weight(if tone == ButtonTone::Primary {
@@ -1132,8 +1149,15 @@ impl RepositoryView {
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.78))
             .when(enabled, |this| {
-                this.hover(move |this| this.bg(rgb(palette.hover_bg)))
-                    .active(|this| this.opacity(0.82))
+                if primary_tone {
+                    // 渐变按钮：常态微辉光，hover 辉光增强，按压降不透明度
+                    this.shadow(vec![theme::accent_glow(8.0)])
+                        .hover(|this| this.shadow(vec![theme::accent_glow(14.0)]))
+                        .active(|this| this.opacity(0.82))
+                } else {
+                    this.hover(move |this| this.bg(rgb(palette.hover_bg)))
+                        .active(|this| this.opacity(0.82))
+                }
             })
             .when_some(disabled_reason, |this, tooltip| {
                 this.tooltip(move |_window, cx| tooltip_text(tooltip, cx))
