@@ -12575,14 +12575,10 @@ impl RepositoryView {
         // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
         let settings_content_handle = self.scroll_handle("settings-center-content");
 
+        // 遮罩不承载关闭：点击遮罩背景、遮罩上方的通知气泡（含其关闭按钮）
+        // 都不关闭设置中心——唯一关闭入口是弹窗右上角的「✕」（Ctrl+, 快捷键
+        // 保留 toggle 语义）。遮罩自身 occlude() 挡住下层 UI 的点击。
         dialog_overlay()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.close_settings_center();
-                    cx.stop_propagation();
-                }),
-            )
             .child(
                 div()
                     .id("settings-center-panel")
@@ -14052,23 +14048,11 @@ impl RepositoryView {
     }
 
     fn render_feedback_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut left_stack = feedback_stack(false);
-        let mut right_stack = feedback_stack(true);
-
-        for feedback in self
-            .feedbacks
-            .iter()
-            .filter(|feedback| !feedback.kind.is_important())
-        {
-            left_stack = left_stack.child(feedback_bubble(feedback, cx));
-        }
-
-        for feedback in self
-            .feedbacks
-            .iter()
-            .filter(|feedback| feedback.kind.is_important())
-        {
-            right_stack = right_stack.child(feedback_bubble(feedback, cx));
+        // 所有通知气泡统一在右下角堆叠（按队列顺序），不再按重要度分左右；
+        // 每个气泡（成功/信息/警告/错误）都带关闭按钮（feedback_bubble 内置）。
+        let mut stack = feedback_stack();
+        for feedback in self.feedbacks.iter() {
+            stack = stack.child(feedback_bubble(feedback, cx));
         }
 
         div()
@@ -14077,8 +14061,7 @@ impl RepositoryView {
             .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .child(left_stack)
-            .child(right_stack)
+            .child(stack)
             // 状态文字已在底栏展示，操作期间只保留轻量进度线，避免重复悬浮框。
             .when(self.has_active_loading(), |this| {
                 this.child(bottom_progress_bar(self.progress_phase))

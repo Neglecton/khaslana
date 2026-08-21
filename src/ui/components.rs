@@ -8,15 +8,13 @@ use std::{
 };
 
 use crate::ui::theme::{rgb, rgba};
-use gpui::{
-    App, ClickEvent, Context, CursorStyle, Div, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, Render, Stateful, Window, div, prelude::*, px,
-};
-use yororen_ui::component::{IconName, icon};
-
 use crate::{
     RepositoryView,
     ui::{icons::ToolbarIcon, icons::toolbar_icon, theme},
+};
+use gpui::{
+    App, ClickEvent, Context, CursorStyle, Div, FocusHandle, IntoElement, KeyDownEvent,
+    MouseButton, Render, Stateful, Window, div, prelude::*, px,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,13 +753,13 @@ pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement
         .child(label)
 }
 
-/// Toast 容器定位
-pub(crate) fn feedback_stack(important: bool) -> Div {
+/// Toast 容器定位：所有通知气泡（Info/Success/Warning/Error）统一在右下角
+/// 堆叠展示；每个气泡自带关闭按钮（见 `feedback_bubble`）。
+pub(crate) fn feedback_stack() -> Div {
     div()
         .absolute()
         .bottom(px(54.0))
-        .when(important, |this| this.right(px(18.0)))
-        .when(!important, |this| this.left(px(18.0)))
+        .right(px(18.0))
         .w(px(340.0))
         .flex()
         .flex_col()
@@ -822,6 +820,9 @@ pub(crate) fn feedback_bubble(
         .child(feedback_icon(dot, soft_bg, text))
         .child(
             div()
+                // 文字列占满剩余宽度：关闭按钮被推到气泡右缘（配合行首图标的
+                // 顶部对齐，关闭按钮落在气泡右上角），而不是挤在文字后面。
+                .flex_1()
                 .min_w(px(0.0))
                 .flex()
                 .flex_col()
@@ -858,7 +859,9 @@ pub(crate) fn feedback_bubble(
                     this.feedbacks.retain(|feedback| feedback.id != feedback_id);
                     cx.notify();
                 }))
-                .child(icon(IconName::Close).size(px(12.0)).inherit_color(true)),
+                // 关闭按钮图标走项目自绘 toolbar_icon（svg 直连、与侧边栏 ✕ 同款）。
+                // 此前用的 yororen Icon 包装在该气泡内未渲染出图形（仅剩 22px 空槽）。
+                .child(toolbar_icon(ToolbarIcon::Close, theme::MUTED_FOREGROUND)),
         )
 }
 

@@ -363,7 +363,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 
 - titlebar 右侧「设置」按钮（原生窗口控制区左侧、紧邻最小化按钮）打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）；快捷键 Ctrl+, 等效。
 - 左侧 7 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置、快捷键。
-- 右侧内容面板渲染对应分类的表单/列表。设置中心只通过右上角「×」（及背景点击、Esc）关闭，各分类页面不再有「关闭/取消」按钮。
+- 右侧内容面板渲染对应分类的表单/列表。设置中心只通过右上角「×」关闭（Ctrl+, 快捷键保留 toggle 语义）；点击遮罩背景、遮罩上方的通知气泡（含气泡关闭按钮）都**不**关闭设置中心——遮罩自身 `occlude()` 挡住下层 UI 的点击，通知气泡层级在设置中心之上、保持可交互。各分类页面不再有「关闭/取消」按钮。
 - 保存按钮统一逻辑：只保存当前分类页内容，按 `last_error` 经 `notify_settings_save` 提示成功/失败（失败 toast 带具体错误信息），成功后不关闭页面。基础 save 方法（如 `save_network_proxy_settings`）同时被输入框回车静默自动保存复用，提示逻辑只放在保存按钮闭包里。
 - 外观、更新、快捷键页为即时生效（无保存按钮），凭据管理为列表页（顶部「添加凭据/刷新」），均只靠「×」关闭。
 - 关闭设置中心时清掉可能残留的外部合并「保存并继续」待处理冲突路径（`external_merge_view::clear_pending_external_merge_path`）。
@@ -443,7 +443,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - 应用壳层固定采用 Focus Workbench：44px titlebar（「设置」按钮固定在原生窗口控制区左侧）、Context Navigator 承载模式按钮与仓库引用分组（无独立 Activity Rail 列；展开=标题+带文字模式按钮+分组列表，收起=48px 窄条箭头+模式图标，任何页面常驻）。Navigator 展开状态为单一共享值（`ContextNavigatorPreferences`，存于 RepositoryView 非 per-tab），模式切换与仓库切换都不得改变展开/收起。壳层必须保留 MainMode 加载副作用、RepoTabState per-tab 状态、窗口原生命中区、仓库切换下拉锚定/关闭、overlay 顺序和 blocker 行为。
 - 宽度策略必须保持为可测试的纯函数，并以 `Window::viewport_size()` 的逻辑像素宽度作为运行时输入；titlebar 不设 overflow 收纳，「贮藏」和「子模块」与其他命令在所有宽度常驻内联，「设置」固定在窗口控制区左侧。Context Navigator 在窄窗以不改写停靠偏好的临时覆盖层展开，不能压坏 titlebar 或窗口控制区。
 - 主界面、弹框和输入框外壳应优先复用 `src/ui/components.rs` 的项目级 helper，例如 `app_panel`、`page_header`、`command_group`、`empty_state`、`dialog_panel`、`dialog_overlay`、`input_frame`、`segmented_button`、`list_row_surface`、`status_pill`。平面列表行默认不应有完整边框或阴影；选中态使用淡背景和指示条。
-- 图标按钮必须有可访问标签 tooltip，禁用态必须能解释不可用原因；文字按钮默认不为 enabled 状态显示 tooltip，只有禁用原因或特殊风险说明才显示提示文字。点击反馈应写入项目级反馈队列，轻量提示放左下角，失败/冲突/凭据等重要提示放右下角。
+- 图标按钮必须有可访问标签 tooltip，禁用态必须能解释不可用原因；文字按钮默认不为 enabled 状态显示 tooltip，只有禁用原因或特殊风险说明才显示提示文字。点击反馈应写入项目级反馈队列，所有通知气泡（成功/信息/警告/错误）统一在右下角堆叠展示，每个气泡自带关闭按钮。
 - 反馈、toast、错误提示和加载进度必须走 `src/ui/components.rs` 的项目级 helper，例如 `feedback_bubble`、`feedback_stack`、`inline_error_bubble`、`bottom_progress_bar`；操作状态文字只在底部状态栏展示，不再叠加悬浮加载框。业务 view 不应直接使用 Yororen 默认 `notification_host` 或另写零散提示样式。
 - 阴影仅用于菜单、对话框、toast 等明确浮层；不新增装饰性渐变、玻璃态或持续动画。尺寸使用 GPUI 逻辑像素以适配 Windows DPI。
 - 自绘输入框的编辑、IME、选区和光标逻辑保留在 `src/text_input.rs`，但颜色必须来自 `src/ui/theme.rs`，不要在输入框绘制代码里硬编码色值。
