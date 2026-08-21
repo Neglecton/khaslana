@@ -22,6 +22,22 @@ pub(crate) enum ChangeSectionHeight {
     Fill,
 }
 
+/// 变更分区空状态行：无边框、无卡片底、水平居中的弱化提示
+/// （通用 `placeholder_row` 的卡片框在变更分区里显得多余）。
+/// 行高保持 `CHANGE_ROW_HEIGHT`，紧凑模式的布局节奏不变。
+fn change_section_empty_row(text: &'static str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w_full()
+        .min_h(px(CHANGE_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .child(text)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChangeSectionsLayout {
     pub(crate) staged: ChangeSectionHeight,
@@ -122,8 +138,8 @@ impl RepositoryView {
             .w(px(self.changes_width))
             .min_w(px(self.changes_width))
             .min_h(px(0.0))
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
+            // 右侧分隔线由紧随的列分割条（Changes）统一绘制；
+            // 面板不得再自画右边框，否则出现两条平行框线。
             .child(
                 div()
                     .flex()
@@ -299,7 +315,10 @@ impl RepositoryView {
                                 move |this, range: std::ops::Range<usize>, _window, cx| {
                                     if count == 0 {
                                         return range
-                                            .map(|_| placeholder_row(empty_text).into_any_element())
+                                            .map(|_| {
+                                                change_section_empty_row(empty_text)
+                                                    .into_any_element()
+                                            })
                                             .collect::<Vec<_>>();
                                     }
                                     let indexes = this.change_indexes.for_scope(&scope_for_list);

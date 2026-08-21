@@ -573,8 +573,8 @@ impl RepositoryView {
             .w(px(file_list_width))
             .min_w(px(file_list_width))
             .min_h(px(0.0))
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER))
+            // 右侧分隔线由紧随的列分割条（HistoryInspectorFiles）统一绘制，
+            // 面板不自画右边框，避免出现两条平行框线。
             .child(section_header("提交文件"))
             .child(scrollable_uniform_frame(
                 "commit-file-list",

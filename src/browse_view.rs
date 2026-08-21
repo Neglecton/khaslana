@@ -231,8 +231,8 @@ impl RepositoryView {
             .min_w(px(self.browse_tree_width))
             .min_h(px(0.0))
             .h_full()
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
+            // 右侧分隔线由紧随的列分割条（BrowseFiles）统一绘制，
+            // 面板不自画右边框，避免出现两条平行框线。
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(page_header("分支浏览", Some("目标引用的只读文件树")))
             // 目标引用与退出操作保持在平面命令行，不额外堆叠卡片。

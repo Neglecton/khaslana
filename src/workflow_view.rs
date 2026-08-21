@@ -608,8 +608,8 @@ impl RepositoryView {
             .w(px(width))
             .min_w(px(crate::MIN_WORKFLOW_TEMPLATES_WIDTH))
             .min_h(px(0.0))
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
+            // 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
+            // 面板不自画右边框，避免出现两条平行框线。
             .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
                 div()

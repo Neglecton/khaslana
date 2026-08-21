@@ -464,6 +464,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - 子模块的克隆和更新必须复用现有凭据回调和代理策略，不能绕开 `GitService` 直接使用裸 libgit2 默认网络选项。
 - 新增或修改会写入工作区的 Git 操作时，必须复用 `src/git/worktree_compat.rs`，不能直接调用 `checkout_tree`、`checkout_index`、`checkout_head`，也不能绕过其中对 reset、revert、rebase、stash 和子模块更新的包装。Windows 下只允许跳过“受 Git 管理的文件已正确处理、但空父目录因占用无法删除”的情况；锁定文件、冲突和本地修改保护仍必须报错。
 - 右键菜单和弹窗位置应复用现有菜单定位/对话框样式。
+- 紧邻列分割条（`render_column_splitter`）的面板不得自画 `border_r_1` 右边框——分割条内嵌的 1px 线就是分隔线，面板再画一条会出现两条平行框线（工作区变更列、历史提交文件列、工作流模板列、分支浏览树均已遵循）。
 - 可滚动面板的结构参照仓库切换下拉（`render_ai_review_panel` 全区域模式同构）：外层有界（flex_1/flex_none + min_h 0 或 max_h）+ `scrollable_frame_when` 作直接子元素（内部自带 flex_1 + min_h 0）+ 内容 div 只挂 `.id().overflow_y_scroll().track_scroll()`。不要在内容 div 上再叠 flex_1/min_h 或插入额外包裹层——高度约束不会沿多层 flex 收缩链传递确定高度，多一层滚动就失效。
 
 ## 9. 已知风险和维护重点
