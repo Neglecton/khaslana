@@ -16,6 +16,8 @@ pub const COMMIT_TRACE_OID_LIMIT: usize = 2000;
 impl GitService {
     /// 收集分支的可达提交 OID 集合（图谱页高亮用）。
     ///
+    /// 分支按「本地优先、远端兜底」解析：本地分支名直接命中，远端分支用
+    /// 完整短名（如 `origin/feature`）按 Remote 类型命中。
     /// - `ahead_only = false`：分支全谱系（含祖先），高亮出该分支的完整主干路径；
     /// - `ahead_only = true`：仅分支领先 HEAD 的提交（push 分支 tip / hide HEAD），
     ///   看该分支相对当前 HEAD 的增量动向。
@@ -27,13 +29,14 @@ impl GitService {
         branch: &str,
         ahead_only: bool,
     ) -> Result<(Vec<String>, bool)> {
-        let local_branch = repo
+        let branch_ref = repo
             .find_branch(branch, BranchType::Local)
-            .map_err(|_| crate::types::GitError::Message(format!("本地分支不存在：{branch}")))?;
-        let Some(tip) = local_branch.get().target() else {
+            .or_else(|_| repo.find_branch(branch, BranchType::Remote))
+            .map_err(|_| crate::types::GitError::Message(format!("分支不存在：{branch}")))?;
+        let Some(tip) = branch_ref.get().target() else {
             return Ok((Vec::new(), false));
         };
-        drop(local_branch);
+        drop(branch_ref);
 
         let mut walk = repo.revwalk()?;
         walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;

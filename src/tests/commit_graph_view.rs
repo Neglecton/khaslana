@@ -123,3 +123,57 @@ fn commit_graph_row_height_matches_history_rows() {
     assert_eq!(COMMIT_GRAPH_ROW_HEIGHT, 48.0);
     assert!(GRAPH_REF_LABEL_CAP > 1);
 }
+
+fn test_branch(name: &str, remote: bool, upstream: Option<&str>) -> BranchInfo {
+    BranchInfo {
+        name: name.to_string(),
+        kind: if remote {
+            BranchKind::Remote
+        } else {
+            BranchKind::Local
+        },
+        is_head: false,
+        upstream: upstream.map(|upstream| upstream.to_string()),
+        ahead: None,
+        behind: None,
+    }
+}
+
+// 分支下拉分组过滤：空查询全量分组；按名字或 upstream 子串过滤（大小写不敏感）；
+// 两组全空时由调用方显示「没有匹配的分支」占位。
+#[test]
+fn branch_menu_groups_split_and_filter_by_kind() {
+    let branches = vec![
+        test_branch("main", false, Some("origin/main")),
+        test_branch("feature/login", false, None),
+        test_branch("origin/main", true, None),
+        test_branch("origin/hotfix", true, None),
+    ];
+
+    // 空查询：本地/远端各归各组。
+    let (local, remote) = commit_graph_branch_menu_groups(&branches, "");
+    assert_eq!(local.len(), 2);
+    assert_eq!(remote.len(), 2);
+    assert!(
+        remote
+            .iter()
+            .all(|branch| branch.name.starts_with("origin/"))
+    );
+
+    // 按名字子串过滤（远端全名命中）。
+    let (local, remote) = commit_graph_branch_menu_groups(&branches, "hotfix");
+    assert!(local.is_empty());
+    assert_eq!(remote.len(), 1);
+    assert_eq!(remote[0].name, "origin/hotfix");
+
+    // 按 upstream 过滤（大小写不敏感）。
+    let (local, remote) = commit_graph_branch_menu_groups(&branches, "ORIGIN/MAIN");
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].name, "main");
+    assert_eq!(remote.len(), 1);
+
+    // 无命中：两组皆空。
+    let (local, remote) = commit_graph_branch_menu_groups(&branches, "不存在");
+    assert!(local.is_empty());
+    assert!(remote.is_empty());
+}

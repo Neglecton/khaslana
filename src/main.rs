@@ -291,7 +291,7 @@ pub(crate) fn find_shortcut_conflict(
         .copied()
 }
 
-const DEFAULT_SIDEBAR_WIDTH: f32 = 350.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const DEFAULT_CHANGES_WIDTH: f32 = 350.0;
 const MIN_COLUMN_WIDTH: f32 = 240.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
@@ -382,6 +382,7 @@ enum FieldId {
     RemoteBranchSearch,
     RepoSwitcherSearch,
     CommitGraphSearch,
+    CommitGraphBranchSearch,
     SidebarLocalBranchSearch,
     SidebarRemoteBranchSearch,
     ProxyHttpUrl,
@@ -460,6 +461,10 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     // 未注册时 focused_field 找不到字段，输入框会静默丢弃全部键盘/IME 输入。
     (FieldId::CommitGraphSearch, |view: &RepositoryView| {
         &view.commit_graph_search
+    }),
+    // 图谱页分支高亮下拉的菜单内搜索（打开菜单即清空并聚焦）。
+    (FieldId::CommitGraphBranchSearch, |view: &RepositoryView| {
+        &view.commit_graph_branch_search
     }),
     (
         FieldId::SidebarLocalBranchSearch,
@@ -2794,6 +2799,8 @@ pub(crate) struct RepositoryView {
     /// 提交图谱页的谱系搜索框（按摘要/作者/短 SHA 过滤已加载提交）。
     /// 全局共享一份搜索词，跨模式跳转与 tab 切换均保留。
     commit_graph_search: TextFieldState,
+    /// 提交图谱页分支高亮下拉的菜单内搜索框（打开菜单即清空并聚焦）。
+    commit_graph_branch_search: TextFieldState,
     /// 搜索框是否展开：默认只显示「搜索仓库」按钮，点击后替换为输入框 + 小叉。
     repo_switcher_search_open: bool,
     /// 键盘导航高亮的仓库行（打开区在前、最近区在后的扁平索引）；文本变化时复位。
@@ -3027,6 +3034,7 @@ impl RepositoryView {
             repo_switcher_recent: Vec::new(),
             repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
             commit_graph_search: TextFieldState::new(cx, "搜索提交/作者/SHA"),
+            commit_graph_branch_search: TextFieldState::new(cx, "搜索分支"),
             repo_switcher_search_open: false,
             repo_switcher_highlight: None,
             save_credential: false,
@@ -6178,6 +6186,7 @@ impl RepositoryView {
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
+            FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
             FieldId::SidebarRemoteBranchSearch => &mut self.sidebar_remote_branch_search,
             FieldId::ProxyHttpUrl => &mut self.proxy_http_url,
@@ -6257,6 +6266,7 @@ impl RepositoryView {
         self.encoding_menu_closed_by_capture = None;
         self.commit_graph_branch_menu_closed_by_capture = false;
         self.active_tab_state_mut().commit_graph.branch_menu_open = false;
+        self.commit_graph_branch_search.clear();
         self.context_navigator_overlay_open = false;
         self.close_repo_switcher();
     }
@@ -9083,6 +9093,7 @@ impl RepositoryView {
         self.commit_context_menu = None;
         self.active_dialog = None;
         self.commit_graph.branch_menu_open = false;
+        self.commit_graph_branch_search.clear();
         self.encoding_menu_target = if self.encoding_menu_target == Some(target) {
             None
         } else {
@@ -9653,10 +9664,11 @@ impl RepositoryView {
     }
 
     /// 图谱页分支高亮下拉的展开/收起（与编码菜单同一套防重开模式）。
-    fn toggle_commit_graph_branch_menu(&mut self) {
+    fn toggle_commit_graph_branch_menu(&mut self, window: &mut Window) {
         if self.commit_graph_branch_menu_closed_by_capture {
             self.commit_graph_branch_menu_closed_by_capture = false;
             self.commit_graph.branch_menu_open = false;
+            self.commit_graph_branch_search.clear();
             return;
         }
         // 互斥关闭其余弹层菜单
@@ -9669,6 +9681,11 @@ impl RepositoryView {
         self.encoding_menu_target = None;
         self.active_dialog = None;
         self.commit_graph.branch_menu_open = !self.commit_graph.branch_menu_open;
+        if self.commit_graph.branch_menu_open {
+            // 打开即清空上次搜索词并聚焦搜索框，输入即过滤（仓库切换下拉同款）。
+            self.commit_graph_branch_search.clear();
+            window.focus(&self.commit_graph_branch_search.focus);
+        }
     }
 
     /// 设置/清除分支动向高亮；Some 时后台计算谱系 OID 集合。
@@ -16496,6 +16513,7 @@ impl Render for RepositoryView {
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
                     this.commit_graph.branch_menu_open = false;
+                    this.commit_graph_branch_search.clear();
                     this.commit_graph_branch_menu_closed_by_capture = closed_branch_menu;
                     this.close_repo_switcher();
                     cx.notify();

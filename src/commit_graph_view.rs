@@ -15,7 +15,7 @@ use gpui::{
     Context, CursorStyle, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathBuilder, div, point, prelude::*, px, uniform_list,
 };
-use khaslana::CommitInfo;
+use khaslana::{BranchInfo, BranchKind, CommitInfo};
 
 use crate::{
     RepositoryView, ResizeTarget, ScrollbarMode, column_splitter_accepts_mouse_events,
@@ -25,6 +25,7 @@ use crate::{
     },
     menu_separator, placeholder_row, scrollable_frame_when, scrollable_uniform_frame,
     section_header_action,
+    sidebar_view::sidebar_branch_matches_normalized_query,
     ui::{
         components::{
             command_group, glass_menu, list_row_surface, page_header, segmented_button,
@@ -353,6 +354,40 @@ fn paint_graph_circle(
     }
 }
 
+/// 分支高亮下拉的分组过滤（纯函数）：按查询词把 snapshot.branches 拆成
+/// 本地/远端两组（匹配规则与侧边栏分支搜索一致：名字或 upstream 子串、
+/// ASCII 无分配 + Unicode 回退；空查询返回全量）。远端条目名含 `origin/` 前缀。
+pub(crate) fn commit_graph_branch_menu_groups<'a>(
+    branches: &'a [BranchInfo],
+    query: &str,
+) -> (Vec<&'a BranchInfo>, Vec<&'a BranchInfo>) {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for branch in branches {
+        if !sidebar_branch_matches_normalized_query(branch, query) {
+            continue;
+        }
+        match branch.kind {
+            BranchKind::Local => local.push(branch),
+            BranchKind::Remote => remote.push(branch),
+        }
+    }
+    (local, remote)
+}
+
+/// 下拉内的分组标题（本地分支 / 远端分支）。
+fn commit_graph_branch_group_label(label: &'static str) -> gpui::AnyElement {
+    div()
+        .id(format!("commit-graph-branch-group-{label}"))
+        .px_3()
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .text_size(px(10.0))
+        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .child(label)
+        .into_any_element()
+}
+
 /// 真分段控件的选项：无独立边框（外框由分组容器提供），选中项主色底 + 加粗，
 /// 未选中项仅 hover 反馈。与相邻选项间由容器插入 1px 分隔线。
 fn scope_segment_option(
@@ -430,7 +465,7 @@ impl RepositoryView {
             .child(self.render_commit_graph_list(search_query, cx))
             .child(self.render_commit_graph_details_card(cx))
             .when(self.commit_graph.branch_menu_open, |this| {
-                this.child(self.render_commit_graph_branch_menu(cx))
+                this.child(self.render_commit_graph_branch_menu(window, cx))
             })
             .when(
                 self.resize_state(ResizeTarget::HistoryGraph).is_some() && graph_visible,
@@ -543,9 +578,9 @@ impl RepositoryView {
                     .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.toggle_commit_graph_branch_menu();
+                            this.toggle_commit_graph_branch_menu(window);
                             cx.notify();
                         }),
                     )
@@ -622,25 +657,73 @@ impl RepositoryView {
     }
 
     /// 分支高亮下拉菜单（glass_menu，锚定在工具行下方）。
-    fn render_commit_graph_branch_menu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// 分支高亮下拉：顶部搜索框（打开即聚焦）+ 本地/远端分组列表 + 底部「关闭高亮」。
+    fn render_commit_graph_branch_menu(
+        &self,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let branches = self
             .snapshot
             .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .branches
-                    .iter()
-                    .map(|branch| branch.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let scroll_handle = self.scroll_handle(COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID);
+            .map(|snapshot| snapshot.branches.as_slice())
+            .unwrap_or(&[]);
+        let query = self.commit_graph_branch_search.value.trim().to_lowercase();
+        let (local_branches, remote_branches) = commit_graph_branch_menu_groups(branches, &query);
         let highlight_branch = self.commit_graph.highlight_branch.clone();
+        let remote_loading =
+            self.loading.remote() && remote_branches.is_empty() && query.is_empty();
+        let scroll_handle = self.scroll_handle(COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID);
+
         // 先物化条目再挂载：闭包内同时借用 self 与 cx 会引发逃逸借用。
-        let mut branch_items = Vec::new();
-        for name in &branches {
-            let selected = highlight_branch.as_deref() == Some(name.as_str());
-            branch_items.push(self.commit_graph_branch_menu_item(Some(name.clone()), selected, cx));
+        let mut list_children: Vec<gpui::AnyElement> = Vec::new();
+        if !local_branches.is_empty() || !remote_branches.is_empty() || !remote_loading {
+            list_children.push(commit_graph_branch_group_label("本地分支"));
+            for branch in &local_branches {
+                let selected = highlight_branch.as_deref() == Some(branch.name.as_str());
+                list_children.push(self.commit_graph_branch_menu_item(
+                    &branch.name,
+                    selected,
+                    false,
+                    cx,
+                ));
+            }
+            if !remote_branches.is_empty() || remote_loading {
+                list_children.push(commit_graph_branch_group_label("远端分支"));
+                for branch in &remote_branches {
+                    let selected = highlight_branch.as_deref() == Some(branch.name.as_str());
+                    list_children.push(self.commit_graph_branch_menu_item(
+                        &branch.name,
+                        selected,
+                        true,
+                        cx,
+                    ));
+                }
+                if remote_loading {
+                    list_children.push(
+                        div()
+                            .id("commit-graph-branch-remote-loading")
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child("远端分支加载中...")
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        if list_children.is_empty() {
+            list_children.push(
+                div()
+                    .id("commit-graph-branch-empty")
+                    .px_3()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("没有匹配的分支")
+                    .into_any_element(),
+            );
         }
 
         glass_menu()
@@ -648,20 +731,27 @@ impl RepositoryView {
             // 锚定在工具行（单行）触发器正下方：页头 40 + 工具行 44。
             .top(px(84.0))
             .left(px(ui_theme::SPACE_3))
-            .w(px(240.0))
+            .w(px(260.0))
             .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                 cx.stop_propagation();
             })
             .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
                 cx.stop_propagation();
             })
+            // 搜索框：打开菜单即聚焦，输入即过滤（本地/远端两组共用）。
             .child(
                 div()
-                    .px_3()
+                    .id("commit-graph-branch-search-row")
+                    .flex()
+                    .items_center()
+                    .px_2()
                     .py_1()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("选择要追踪的分支"),
+                    .child(div().flex_1().min_w(px(0.0)).child(self.input(
+                        crate::FieldId::CommitGraphBranchSearch,
+                        true,
+                        window,
+                        cx,
+                    ))),
             )
             .child(menu_separator())
             .child(
@@ -670,42 +760,53 @@ impl RepositoryView {
                     .max_h(px(320.0))
                     .overflow_y_scroll()
                     .track_scroll(&scroll_handle)
-                    .child(self.commit_graph_branch_menu_item(
-                        None,
-                        self.commit_graph.highlight_branch.is_none(),
-                        cx,
-                    ))
-                    .children(branch_items),
+                    .children(list_children),
             )
+            .child(menu_separator())
+            // 「关闭高亮」固定底部，不受搜索过滤影响。
+            .child(self.commit_graph_branch_menu_item(
+                "off",
+                self.commit_graph.highlight_branch.is_none(),
+                false,
+                cx,
+            ))
             .into_any_element()
     }
 
     fn commit_graph_branch_menu_item(
         &self,
-        branch: Option<String>,
+        branch: &str,
         selected: bool,
+        remote: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let label = match &branch {
-            Some(name) => {
-                if selected {
-                    format!("✓ {name}")
-                } else {
-                    format!("  {name}")
-                }
-            }
-            None => "  关闭高亮".to_string(),
+        // "off" 是关闭高亮的哨兵值，与任何真实分支名（含 "/"）不冲突。
+        let is_off = branch == "off";
+        let label = if is_off {
+            "关闭高亮".to_string()
+        } else if selected {
+            format!("✓ {branch}")
+        } else {
+            branch.to_string()
         };
+        let id = if is_off {
+            "commit-graph-branch-off".to_string()
+        } else if remote {
+            format!("commit-graph-branch-remote-{branch}")
+        } else {
+            format!("commit-graph-branch-local-{branch}")
+        };
+        let branch_for_click = (!is_off).then(|| branch.to_string());
         div()
-            .id(format!(
-                "commit-graph-branch-{}",
-                branch.as_deref().unwrap_or("off")
-            ))
+            .id(id)
             .px_3()
             .py_1()
             .text_size(px(12.0))
+            // 远端分支名（origin/…）用次要色与本地分支区分（选中仍以主色突出）。
             .text_color(rgb(if selected {
                 ui_theme::PRIMARY
+            } else if remote {
+                ui_theme::CONTENT_SECONDARY
             } else {
                 ui_theme::FOREGROUND
             }))
@@ -718,7 +819,7 @@ impl RepositoryView {
             .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
-                this.set_commit_graph_highlight(branch.clone());
+                this.set_commit_graph_highlight(branch_for_click.clone());
                 cx.notify();
             }))
             .child(label)

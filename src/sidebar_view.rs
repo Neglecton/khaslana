@@ -41,7 +41,8 @@ fn sidebar_text_contains_normalized_query(value: &str, query: &str) -> bool {
     }
 }
 
-fn sidebar_branch_matches_normalized_query(branch: &BranchInfo, query: &str) -> bool {
+/// 分支名/upstream 与已归一化查询词的匹配（提交图谱页分支下拉复用同一规则）。
+pub(crate) fn sidebar_branch_matches_normalized_query(branch: &BranchInfo, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }

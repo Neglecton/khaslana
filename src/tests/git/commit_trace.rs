@@ -27,6 +27,9 @@ fn build_trace_repo() -> (tempfile::TempDir, [git2::Oid; 4]) {
     git_support::write_file(dir.path(), "b.txt", "feat 2\n");
     let feat2 = git_support::commit_all(&repo, "feat-2");
 
+    // 造一个远端引用 origin/feature 指向 feature tip：验证远端分支解析。
+    repo.reference("refs/remotes/origin/feature", feat2, true, "test remote")
+        .unwrap();
     // HEAD 回到 main：ahead_only 语义以 HEAD 可达集为基准。
     repo.set_head("refs/heads/main").unwrap();
 
@@ -66,6 +69,31 @@ fn ahead_only_trace_excludes_head_reachable_commits() {
     assert!(!set.contains(&base.to_string()));
 }
 
+// 远端分支用完整短名（origin/feature）解析：谱系与本地同名分支一致，
+// ahead_only 同样按 HEAD 可达集裁剪。
+#[test]
+fn remote_branch_resolves_with_full_name() {
+    let (dir, [base, _feat1, feat2, main_tip]) = build_trace_repo();
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let svc = git_support::service();
+
+    let (oids, _) = svc
+        .branch_commit_oids(&repo, "origin/feature", false)
+        .unwrap();
+    let set: HashSet<String> = oids.iter().map(|oid| oid.clone()).collect();
+    assert_eq!(set.len(), 3);
+    assert!(set.contains(&feat2.to_string()));
+    assert!(set.contains(&base.to_string()));
+    assert!(!set.contains(&main_tip.to_string()));
+
+    let (oids, _) = svc
+        .branch_commit_oids(&repo, "origin/feature", true)
+        .unwrap();
+    let set: HashSet<String> = oids.iter().map(|oid| oid.clone()).collect();
+    assert_eq!(set.len(), 2);
+    assert!(!set.contains(&base.to_string()));
+}
+
 #[test]
 fn trace_missing_branch_reports_chinese_error() {
     let (dir, _oids) = build_trace_repo();
@@ -73,7 +101,7 @@ fn trace_missing_branch_reports_chinese_error() {
     let svc = git_support::service();
 
     let err = svc.branch_commit_oids(&repo, "nope", false).unwrap_err();
-    assert!(err.to_string().contains("本地分支不存在"));
+    assert!(err.to_string().contains("分支不存在"));
 }
 
 #[test]
