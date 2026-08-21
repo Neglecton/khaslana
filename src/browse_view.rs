@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::ui::theme::rgb;
 use gpui::{
@@ -14,11 +15,31 @@ use khaslana::{BrowseEntry, BrowseEntryKind, BrowseListMode};
 /// 内容视图每行高度（px），与 `browse_content_line` 中的 `h(px(18.0))` 一致。
 pub(crate) const BROWSE_ROW_HEIGHT: f32 = 18.0;
 
+/// Focus Workbench 内容画布的模式标签，保持分支比较的全文语义明确可见。
+pub(crate) fn browse_canvas_mode_label(
+    is_compare: bool,
+    view_mode: BrowseViewMode,
+) -> &'static str {
+    match view_mode {
+        BrowseViewMode::Content if is_compare => "目标分支全文",
+        BrowseViewMode::Content => "文件内容",
+        BrowseViewMode::Diff => "与当前分支差异",
+    }
+}
+
+/// 文件树层级使用统一的紧凑缩进尺度，避免页面布局散落魔法数。
+pub(crate) const fn browse_tree_indent(depth: usize) -> f32 {
+    ui_theme::SPACE_3 * depth as f32
+}
+
 use crate::{
     BrowseViewMode, CHANGE_ROW_HEIGHT, EncodingMenuTarget, RepositoryView, ResizeTarget,
     diff_encoding_label, encoding_info_label,
-    ui::{components::segmented_button, theme as ui_theme},
-    ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame, section_header},
+    ui::{
+        components::{command_group, empty_state, list_row_surface, page_header, segmented_button},
+        theme as ui_theme,
+    },
+    ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
 };
 
 /// 展平后的可见文件树行，用于虚拟列表渲染。
@@ -113,6 +134,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
+            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(match self.browse.list_mode {
                 BrowseListMode::Tree => self.render_browse_file_tree(cx).into_any_element(),
                 BrowseListMode::Compare => self.render_browse_compare_files(cx).into_any_element(),
@@ -142,12 +164,17 @@ impl RepositoryView {
             })
             .unwrap_or_default();
 
-        let rows = flatten_browse_tree(&self.browse.entries_by_dir, &self.browse.expanded);
+        // 同一帧的行数和可见项必须共享快照，避免处理器在滚动期间重建整棵树。
+        let rows = Arc::new(flatten_browse_tree(
+            &self.browse.entries_by_dir,
+            &self.browse.expanded,
+        ));
         let row_count = rows.len().max(1);
         let has_target = self.browse.target.is_some();
         let content_present = !rows.is_empty();
         let handle = self.uniform_scroll_handle("browse-tree-scroll");
         let list_handle = handle.clone();
+        let rows_snapshot = Arc::clone(&rows);
 
         let content = div()
             .id("browse-tree-list")
@@ -156,8 +183,9 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .p_2()
-            .bg(rgb(ui_theme::CARD))
+            .px(px(ui_theme::SPACE_2))
+            .pb(px(ui_theme::SPACE_2))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     "browse-tree-list",
@@ -165,21 +193,21 @@ impl RepositoryView {
                     cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                         range
                             .map(|index| {
-                                let rows = flatten_browse_tree(
-                                    &this.browse.entries_by_dir,
-                                    &this.browse.expanded,
-                                );
-                                if rows.is_empty() {
-                                    return placeholder_row(if !has_target {
-                                        "正在解析引用..."
-                                    } else if this.browse.loading_tree {
-                                        "正在加载文件树..."
-                                    } else {
-                                        "仓库为空"
-                                    })
+                                if rows_snapshot.is_empty() {
+                                    return empty_state(
+                                        "文件树",
+                                        if !has_target {
+                                            "正在解析引用..."
+                                        } else if this.browse.loading_tree {
+                                            "正在加载文件树..."
+                                        } else {
+                                            "仓库为空"
+                                        },
+                                    )
                                     .into_any_element();
                                 }
-                                rows.get(index)
+                                rows_snapshot
+                                    .get(index)
                                     .cloned()
                                     .map(|row| this.browse_tree_row(row, cx).into_any_element())
                                     .unwrap_or_else(|| placeholder_row("").into_any_element())
@@ -203,45 +231,62 @@ impl RepositoryView {
             .min_w(px(self.browse_tree_width))
             .min_h(px(0.0))
             .h_full()
-            // 顶部信息栏：目标引用名 + 短 SHA + 关闭按钮
+            .border_r_1()
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .child(page_header("分支浏览", Some("目标引用的只读文件树")))
+            // 目标引用与退出操作保持在平面命令行，不额外堆叠卡片。
             .child(
                 div()
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
+                    .gap(px(ui_theme::SPACE_2))
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_2))
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap(px(ui_theme::SPACE_1))
                             .min_w(px(0.0))
                             .child(
                                 div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
                                     .child(target_display),
                             )
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(10.0))
+                                    .text_size(px(ui_theme::TYPE_META))
                                     .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),
                     )
-                    .child(self.button("关闭", !self.busy, |this, _, _| this.close_browse(), cx)),
+                    .child(command_group().child(self.button(
+                        "关闭",
+                        !self.busy,
+                        |this, _, _| this.close_browse(),
+                        cx,
+                    ))),
             )
-            .child(section_header("文件树"))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_2))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child("文件树"),
+            )
             .child(scrollable_uniform_frame(
                 "browse-tree-scroll",
                 ScrollbarMode::Vertical,
@@ -256,7 +301,7 @@ impl RepositoryView {
     fn browse_tree_row(&self, row: VisibleBrowseRow, cx: &mut Context<Self>) -> impl IntoElement {
         let entry = row.entry;
         let depth = row.depth;
-        let indent = px(12.0 * depth as f32);
+        let indent = px(browse_tree_indent(depth));
         let is_dir = entry.kind == BrowseEntryKind::Directory;
         let is_expanded = self.browse.expanded.contains(Path::new(&entry.path));
         let is_selected = self
@@ -289,38 +334,23 @@ impl RepositoryView {
         };
 
         let name_color = if is_submodule {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_TERTIARY
         } else {
-            ui_theme::FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         };
 
-        div()
-            .id(format!("browse-row-{}", entry.path))
+        list_row_surface(format!("browse-row-{}", entry.path), is_selected)
             .flex()
             .flex_none()
             .w_full()
             .min_w(px(0.0))
             .items_center()
-            .gap_1()
+            .gap(px(ui_theme::SPACE_1))
             .h(px(CHANGE_ROW_HEIGHT))
             .pl(indent)
-            .pr(px(8.0))
-            .py_1()
-            .rounded_sm()
+            .pr(px(ui_theme::SPACE_2))
             .cursor_pointer()
             .overflow_hidden()
-            .bg(if is_selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if is_selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 if is_dir {
                     this.toggle_browse_dir(path_for_click.clone());
@@ -333,8 +363,8 @@ impl RepositoryView {
                 div()
                     .flex_none()
                     .w(px(14.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                     .child(caret),
             )
             .child(
@@ -368,6 +398,7 @@ impl RepositoryView {
             .relative()
             .min_w(px(0.0))
             .h_full()
+            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_browse_content_header(cx))
             .child(if ai_review_full {
                 self.render_ai_review_panel(cx).into_any_element()
@@ -399,50 +430,30 @@ impl RepositoryView {
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|| "未选择文件".to_string());
 
-        let mode_label = match self.browse.view_mode {
-            BrowseViewMode::Content if self.browse.list_mode == BrowseListMode::Compare => {
-                "目标分支全文"
-            }
-            BrowseViewMode::Content => "文件内容",
-            BrowseViewMode::Diff => "与当前分支差异",
-        };
+        let mode_label = browse_canvas_mode_label(
+            self.browse.list_mode == BrowseListMode::Compare,
+            self.browse.view_mode,
+        );
 
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .child(
-                div().flex().items_center().gap_2().min_w(px(0.0)).child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(ui_theme::PRIMARY))
-                        .truncate()
-                        .child(format!("{mode_label}: {selected_path}")),
-                ),
-            )
+        page_header("内容画布", Some("所选文件的只读内容或差异"))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                    .min_w(px(0.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .truncate()
+                    .child(format!("{mode_label}: {selected_path}")),
+            )
+            .child(
+                command_group()
                     // 内容/差异切换
                     .child(
                         div()
                             .flex()
                             .flex_none()
                             .items_center()
-                            .gap_1()
-                            .rounded_sm()
-                            .bg(rgb(ui_theme::ACCENT))
-                            .p_1()
+                            .gap(px(ui_theme::SPACE_1))
                             .child(self.browse_mode_segment(BrowseViewMode::Content, "内容", cx))
                             .child(self.browse_mode_segment(BrowseViewMode::Diff, "差异", cx)),
                     )
@@ -478,16 +489,16 @@ impl RepositoryView {
             .id("browse-encoding")
             .relative()
             .flex_none()
-            .px_2()
-            .py_1()
-            .rounded_sm()
+            .px(px(ui_theme::SPACE_2))
+            .py(px(ui_theme::SPACE_1))
+            .rounded(px(ui_theme::RADIUS_XS))
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-            .text_size(px(11.0))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+            .text_size(px(ui_theme::TYPE_META))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -548,10 +559,10 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .p_2()
+            .p(px(ui_theme::SPACE_3))
             .font_family("Consolas, monospace")
-            .text_size(px(12.0))
-            .bg(rgb(ui_theme::CARD))
+            .text_size(px(ui_theme::TYPE_BODY))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .on_action(cx.listener(Self::on_browse_content_copy))
             .on_action(cx.listener(Self::on_browse_content_select_all))
             .on_mouse_down(
@@ -621,7 +632,7 @@ impl RepositoryView {
                         range
                             .map(|index| {
                                 let Some(content) = content.as_ref() else {
-                                    return placeholder_row(if this.browse.loading_content {
+                                    let detail = if this.browse.loading_content {
                                         "正在加载文件内容..."
                                     } else if this
                                         .browse
@@ -634,12 +645,15 @@ impl RepositoryView {
                                         "目标分支中不存在该文件，请切换到差异视图查看删除内容"
                                     } else {
                                         "请选择一个文件查看内容"
-                                    })
-                                    .into_any_element();
+                                    };
+                                    return empty_state("内容画布", detail).into_any_element();
                                 };
                                 if content.is_binary {
-                                    return placeholder_row("二进制文件，无法预览")
-                                        .into_any_element();
+                                    return empty_state(
+                                        "无法预览二进制文件",
+                                        "请切换到差异视图查看文件变更信息",
+                                    )
+                                    .into_any_element();
                                 }
                                 let line = content.lines.get(index).cloned().unwrap_or_default();
                                 this.browse_content_line(index, line).into_any_element()
@@ -682,13 +696,13 @@ impl RepositoryView {
             .items_start()
             .gap_2()
             .h(px(BROWSE_ROW_HEIGHT))
-            .when(selected, |this| this.bg(rgb(ui_theme::ACCENT)))
+            .when(selected, |this| this.bg(rgb(ui_theme::STATE_SELECTION)))
             .child(
                 div()
                     .flex_none()
                     .w(px(40.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                     .text_align(gpui::TextAlign::Right)
                     .child((index + 1).to_string()),
             )
@@ -699,7 +713,7 @@ impl RepositoryView {
                     .line_height(px(BROWSE_ROW_HEIGHT))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(crate::ui_helpers::syntax_styled_text(
                         &text,
                         crate::ui_helpers::syntax_spans_for_line(

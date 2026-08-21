@@ -2,12 +2,15 @@
 // 其中部分控件为预留的公共 API，可能暂未被业务 view 调用，属于有意保留。
 #![allow(dead_code)]
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::ui::theme::{rgb, rgba};
 use gpui::{
-    App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Render, Stateful, Window,
-    div, prelude::*, px,
+    App, ClickEvent, Context, CursorStyle, Div, FocusHandle, IntoElement, KeyDownEvent,
+    MouseButton, Render, Stateful, Window, div, prelude::*, px,
 };
 use yororen_ui::component::{IconName, icon};
 
@@ -206,53 +209,6 @@ pub(crate) fn pill_badge(
         .child(text.into())
 }
 
-/// 模式切换药丸按钮（工作区/提交记录/工作流）
-pub(crate) fn mode_pill(
-    id: String,
-    label: &'static str,
-    icon: Option<ToolbarIcon>,
-    active: bool,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(theme::RADIUS_PILL))
-        .px(px(14.0))
-        .py(px(6.0))
-        .justify_center()
-        .cursor_pointer()
-        .bg(if active {
-            rgb(theme::PRIMARY)
-        } else {
-            rgb(theme::CARD)
-        })
-        .text_color(if active {
-            rgb(theme::PRIMARY_FOREGROUND)
-        } else {
-            rgb(theme::MUTED_FOREGROUND)
-        })
-        .text_size(px(13.0))
-        .font_weight(if active {
-            gpui::FontWeight::SEMIBOLD
-        } else {
-            gpui::FontWeight::MEDIUM
-        })
-        .when_some(icon, |this, icon| {
-            this.child(toolbar_icon(
-                icon,
-                if active {
-                    theme::PRIMARY_FOREGROUND
-                } else {
-                    theme::MUTED_FOREGROUND
-                },
-            ))
-        })
-        .child(label)
-}
-
 /// 状态 pill — 如 diff 标题中的"已修改"
 pub(crate) fn status_pill_badge(
     text: impl Into<gpui::SharedString>,
@@ -296,17 +252,206 @@ pub(crate) fn app_shell_surface() -> Div {
     div().relative().size_full().bg(rgb(theme::BACKGROUND))
 }
 
-/// 工具栏 — 扁平边框条，去掉旧版阴影、玻璃态、内部高亮线
-pub(crate) fn hero_toolbar() -> Div {
-    div()
-        .border_b_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::CARD))
-}
-
 /// 扁平面板 — 无装饰纯色容器，无边框无阴影
 pub(crate) fn flat_panel() -> Div {
     div()
+}
+
+/// 页面标题行：标题、说明和命令组保持同一条基线，适合壳层和后续独立页面复用。
+pub(crate) fn page_header(title: &'static str, description: Option<&'static str>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .gap(px(theme::SPACE_3))
+        .min_h(px(40.0))
+        .px(px(theme::SPACE_4))
+        .border_b_1()
+        .border_color(rgb(theme::BORDER_MUTED))
+        .bg(rgb(theme::SURFACE_BASE))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex()
+                .items_baseline()
+                .gap(px(theme::SPACE_2))
+                .child(
+                    div()
+                        .text_size(px(theme::TYPE_PAGE_TITLE))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::CONTENT_PRIMARY))
+                        .child(title),
+                )
+                .when_some(description, |this, description| {
+                    this.child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(theme::TYPE_BODY))
+                            .text_color(rgb(theme::CONTENT_SECONDARY))
+                            .child(description),
+                    )
+                }),
+        )
+}
+
+/// 命令组：只负责紧凑排列，不携带阴影或容器边框。
+pub(crate) fn command_group() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(theme::SPACE_1))
+}
+
+/// 空状态：使用克制的图文层级而不是卡片堆叠。
+pub(crate) fn empty_state(title: &'static str, detail: &'static str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(theme::SPACE_2))
+        .p(px(theme::SPACE_6))
+        .text_align(gpui::TextAlign::Center)
+        .child(
+            div()
+                .text_size(px(theme::TYPE_TITLE))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::CONTENT_PRIMARY))
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(px(360.0))
+                .text_size(px(theme::TYPE_BODY))
+                .line_height(px(18.0))
+                .text_color(rgb(theme::CONTENT_SECONDARY))
+                .child(detail),
+        )
+}
+
+/// 通用图标按钮视觉底座。调用方追加 `on_click`；禁用态自动保留原因提示。
+/// 此无状态 helper 不持有 FocusHandle，需键盘可达的壳层控件应改用 `focusable_icon_button`。
+pub(crate) fn icon_button(
+    id: String,
+    icon_kind: ToolbarIcon,
+    label: &'static str,
+    enabled: bool,
+) -> Stateful<Div> {
+    let tooltip = if enabled {
+        label
+    } else {
+        "当前状态不可用"
+    };
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(theme::CONTROL_HEIGHT_REGULAR))
+        .rounded(px(theme::RADIUS_XS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(if enabled {
+            theme::CONTENT_SECONDARY
+        } else {
+            theme::CONTENT_TERTIARY
+        }))
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
+                .active(|this| this.opacity(0.8))
+        })
+        .when(!enabled, |this| this.cursor_not_allowed().opacity(0.55))
+        .tooltip(move |_window, cx| tooltip_text(tooltip, cx))
+        .child(toolbar_icon(
+            icon_kind,
+            if enabled {
+                theme::CONTENT_SECONDARY
+            } else {
+                theme::CONTENT_TERTIARY
+            },
+        ))
+}
+
+fn icon_button_key_activates(key: &str) -> bool {
+    matches!(key, "enter" | "space")
+}
+
+fn focusable_icon_button_disabled_reason(label: &'static str) -> &'static str {
+    match label {
+        "更多命令" => "当前操作进行中，暂不可展开更多命令",
+        "设置" => "当前操作进行中，暂不可打开设置",
+        "展开上下文导航" | "收起上下文导航" => "此页面不显示导航区",
+        _ => "当前状态不可用",
+    }
+}
+
+/// 带稳定焦点句柄的图标按钮。调用方在其 state 中持有 `FocusHandle`，因而能提供
+/// Tab 导航、Enter/Space 激活和仅键盘导航时显示的 focus-visible 环。
+pub(crate) fn focusable_icon_button(
+    id: String,
+    icon_kind: ToolbarIcon,
+    label: &'static str,
+    enabled: bool,
+    focus: &FocusHandle,
+    on_activate: impl Fn(&mut RepositoryView, &mut Window, &mut Context<RepositoryView>) + 'static,
+    cx: &mut Context<RepositoryView>,
+) -> Stateful<Div> {
+    let tooltip = if enabled {
+        label
+    } else {
+        focusable_icon_button_disabled_reason(label)
+    };
+    let on_activate = Arc::new(on_activate);
+    let keyboard_activate = Arc::clone(&on_activate);
+    let focus_for_click = focus.clone();
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(theme::CONTROL_HEIGHT_REGULAR))
+        .rounded(px(theme::RADIUS_XS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .track_focus(focus)
+        .tab_index(if enabled { 0 } else { -1 })
+        .tab_stop(enabled)
+        .text_color(rgb(if enabled {
+            theme::CONTENT_SECONDARY
+        } else {
+            theme::CONTENT_TERTIARY
+        }))
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
+                .active(|this| this.opacity(0.8))
+        })
+        .when(!enabled, |this| this.cursor_not_allowed().opacity(0.55))
+        .tooltip(move |_window, cx| tooltip_text(tooltip, cx))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            if enabled && icon_button_key_activates(event.keystroke.key.as_str()) {
+                keyboard_activate(this, window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_click(cx.listener(move |this, _event, window, cx| {
+            if enabled {
+                window.focus(&focus_for_click);
+                on_activate(this, window, cx);
+                cx.notify();
+            }
+        }))
+        .child(toolbar_icon(
+            icon_kind,
+            if enabled {
+                theme::CONTENT_SECONDARY
+            } else {
+                theme::CONTENT_TERTIARY
+            },
+        ))
 }
 
 /// 玻璃面板 — 保留给弹窗/上下文菜单等需要浮层效果的场景
@@ -422,11 +567,11 @@ pub(crate) fn danger_callout(message: impl Into<gpui::SharedString>) -> impl Int
         .py_2()
         .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::DESTRUCTIVE))
-        .bg(rgb(theme::COLOR_ERROR))
+        .border_color(rgb(theme::FEEDBACK_ERROR_BORDER))
+        .bg(rgb(theme::FEEDBACK_ERROR_BG))
         .text_size(px(12.0))
         .line_height(px(18.0))
-        .text_color(rgb(theme::COLOR_ERROR_FOREGROUND))
+        .text_color(rgb(theme::FEEDBACK_ERROR_TEXT))
         .child(message.into())
 }
 
@@ -535,24 +680,51 @@ pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
         )
 }
 
-/// 列表行表面 — 选中/未选中
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListRowVisualRule {
+    background: u32,
+    shows_selection_indicator: bool,
+}
+
+const fn list_row_visual_rule(selected: bool) -> ListRowVisualRule {
+    ListRowVisualRule {
+        background: if selected {
+            theme::PRIMARY_SUBTLE
+        } else {
+            theme::SURFACE_BASE
+        },
+        shows_selection_indicator: selected,
+    }
+}
+
+/// 平面列表行：默认无完整边框/阴影，选中态使用淡色底和左侧 2px 指示条。
 pub(crate) fn list_row_surface(id: String, selected: bool) -> Stateful<Div> {
+    let rule = list_row_visual_rule(selected);
     div()
         .id(id)
+        .relative()
+        .min_h(px(theme::ROW_HEIGHT_COMPACT))
         .rounded(px(theme::RADIUS_XS))
-        .border_1()
-        .border_color(if selected {
-            rgb(theme::PRIMARY)
-        } else {
-            rgb(theme::BORDER)
+        .bg(rgb(rule.background))
+        .hover(|this| {
+            if selected {
+                this.bg(rgb(theme::PRIMARY_SUBTLE))
+            } else {
+                this.bg(rgb(theme::STATE_HOVER))
+            }
         })
-        .bg(if selected {
-            rgb(theme::ACCENT)
-        } else {
-            rgb(theme::CARD)
+        .when(rule.shows_selection_indicator, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(theme::SPACE_1))
+                    .bottom(px(theme::SPACE_1))
+                    .left(px(0.0))
+                    .w(px(2.0))
+                    .rounded_full()
+                    .bg(rgb(theme::PRIMARY)),
+            )
         })
-        .shadow_sm()
-        .hover(|this| this.bg(rgb(theme::SECONDARY)))
 }
 
 /// 状态药丸
@@ -1174,3 +1346,7 @@ impl RepositoryView {
             )
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/ui/components.rs"]
+mod tests;

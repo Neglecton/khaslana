@@ -28,7 +28,7 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(self.toggle_row(
                 "ai-enabled",
                 "启用 AI 功能",
@@ -40,45 +40,55 @@ impl RepositoryView {
             ))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(format!("接口类型：{}", AiApiType::ChatCompletions.label())),
-            )
-            .child(
-                div()
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("连接配置"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(format!("接口类型：{}", AiApiType::ChatCompletions.label())),
+                    )
                     .child(self.input(FieldId::AiBaseUrl, false, window, cx))
                     .child(self.input(FieldId::AiApiKey, false, window, cx))
                     .child(self.input(FieldId::AiModel, false, window, cx)),
             )
             .child(
                 div()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 800 / 60s）。"),
             )
-            // 测试连接期间的进度/结果状态行：在弹窗内部展示，避免被弹窗遮挡。
+            // 测试连接期间的进度/结果状态行：在分类内容内展示，避免被设置中心遮挡。
             .when(self.busy, |this| {
                 this.child(
                     div()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(self.status.clone()),
                 )
             })
             .when(!self.busy && self.last_error.is_some(), |this| {
                 this.child(
                     div()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .text_size(px(12.0))
                         .text_color(rgb(ui_theme::DESTRUCTIVE))
                         .truncate()

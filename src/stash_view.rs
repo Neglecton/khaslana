@@ -10,8 +10,12 @@ use khaslana::{FileDiff, StashFileChange};
 use crate::{
     CHANGE_ROW_HEIGHT, DialogState, DiffHeaderTarget, EncodingMenuTarget, FieldId, MainMode,
     RepositoryView, ResizeTarget, ScrollbarMode, UiEvent, change_state_badge, dialog_actions,
-    menu_separator, perf_log, placeholder_row, scrollable_uniform_frame, section_header,
-    send_ui_event, tasks::TaskKind, ui::theme as ui_theme,
+    menu_separator, perf_log, placeholder_row, scrollable_uniform_frame, send_ui_event,
+    tasks::TaskKind,
+    ui::{
+        components::{command_group, list_row_surface, page_header},
+        theme as ui_theme,
+    },
 };
 
 #[derive(Clone, Debug, Default)]
@@ -38,6 +42,31 @@ impl StashPreviewState {
         self.stash_oid.is_some()
     }
 }
+
+/// 贮藏文件列表的平面行视觉规则：默认使用基础 surface，选中时只提升
+/// 选择底色，不再为每一行堆叠边框或卡片。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StashFileRowVisualRule {
+    background: u32,
+    text: u32,
+    selected: bool,
+}
+
+const fn stash_file_row_visual_rule(selected: bool) -> StashFileRowVisualRule {
+    StashFileRowVisualRule {
+        background: if selected {
+            ui_theme::STATE_SELECTION
+        } else {
+            ui_theme::SURFACE_BASE
+        },
+        text: ui_theme::CONTENT_PRIMARY,
+        selected,
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/stash_view.rs"]
+mod tests;
 
 impl RepositoryView {
     pub(crate) fn open_stash_dialog(&mut self) {
@@ -278,8 +307,8 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::CARD))
-            .child(self.render_stash_preview_header())
+            .bg(rgb(ui_theme::SURFACE_CANVAS))
+            .child(self.render_stash_preview_header(cx))
             .child(
                 div()
                     .flex()
@@ -292,49 +321,39 @@ impl RepositoryView {
             )
     }
 
-    fn render_stash_preview_header(&self) -> impl IntoElement {
-        let title = self
+    fn render_stash_preview_header(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let stash_label = self
             .stash_preview
             .stash_index
-            .map(|index| format!("贮藏详情：stash@{{{index}}}"))
-            .unwrap_or_else(|| "贮藏详情".to_string());
+            .map(|index| format!("stash@{{{index}}}"))
+            .unwrap_or_else(|| "未选择贮藏".to_string());
         let message = self
             .stash_preview
             .stash_message
             .clone()
             .unwrap_or_else(|| "请在左侧贮藏区右键选择“查看贮藏”".to_string());
 
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(0.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::PRIMARY))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .truncate()
-                            .child(message),
-                    ),
-            )
+        page_header("贮藏详情", Some("文件与差异预览")).child(
+            command_group()
+                .child(
+                    div()
+                        .max_w(px(280.0))
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .child(stash_label),
+                )
+                .child(
+                    div()
+                        .max_w(px(360.0))
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                        .child(message),
+                ),
+        )
     }
 
     fn render_stash_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -349,8 +368,8 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .p_2()
-            .bg(rgb(ui_theme::CARD))
+            .p(px(ui_theme::SPACE_2))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     "stash-file-list",
@@ -394,7 +413,29 @@ impl RepositoryView {
             .min_w(px(self.history_files_width))
             .min_h(px(0.0))
             .h_full()
-            .child(section_header("贮藏文件"))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .min_h(px(ui_theme::ROW_HEIGHT_REGULAR))
+                    .px(px(ui_theme::SPACE_3))
+                    .border_b_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child("贮藏文件")
+                    .child(
+                        div()
+                            .text_size(px(ui_theme::TYPE_META))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                            .child(self.stash_preview.files.len().to_string()),
+                    ),
+            )
             .child(scrollable_uniform_frame(
                 "stash-file-list",
                 ScrollbarMode::Vertical,
@@ -415,32 +456,19 @@ impl RepositoryView {
             .map(|old_path| format!("{old_path} -> {}", file.path))
             .unwrap_or_else(|| file.path.clone());
 
-        div()
-            .id(format!("stash-file-{}", file.path))
+        let visual = stash_file_row_visual_rule(selected);
+        list_row_surface(format!("stash-file-{}", file.path), visual.selected)
             .flex()
             .flex_none()
             .w_full()
             .min_w(px(0.0))
             .items_center()
-            .gap_1()
+            .gap(px(ui_theme::SPACE_1))
             .h(px(CHANGE_ROW_HEIGHT))
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .cursor_pointer()
+            .px(px(ui_theme::SPACE_2))
             .overflow_hidden()
-            .bg(if selected {
-                rgb(ui_theme::ACCENT)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .bg(rgb(visual.background))
+            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.select_stash_file(path.clone(), false);
                 cx.notify();
@@ -450,8 +478,8 @@ impl RepositoryView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .text_color(rgb(visual.text))
                     .truncate()
                     .child(path_label),
             )
@@ -500,7 +528,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("创建贮藏后，当前工作区会回到干净状态，后续可从左侧贮藏区应用或弹出。"),
             )
             .child(self.input(FieldId::StashMessage, false, window, cx))
@@ -540,19 +568,19 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(format!("确认删除 stash@{{{index}}}？")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(message),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND))
+                    .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
                     .child("删除后无法从贮藏列表恢复。"),
             )
             .child(

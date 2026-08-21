@@ -1,9 +1,24 @@
 use std::time::{Duration, Instant};
 
 use super::{
-    OPERATION_BLOCKER_VISIBLE_DELAY, OperationBlocker, should_render_operation_blocker,
+    OPERATION_BLOCKER_VISIBLE_DELAY, OperationBlocker, OperationBlockerOverlayVisual,
+    operation_blocker_overlay_visual, should_render_operation_blocker, ui_theme,
     wrap_operation_message,
 };
+
+#[test]
+fn operation_blocker_overlay_uses_semantic_overlay_roles() {
+    assert_eq!(
+        operation_blocker_overlay_visual(),
+        OperationBlockerOverlayVisual {
+            scrim: ui_theme::DIALOG_OVERLAY,
+            surface: ui_theme::SURFACE_OVERLAY,
+            border: ui_theme::BORDER_STRONG,
+            title: ui_theme::CONTENT_PRIMARY,
+            detail: ui_theme::CONTENT_SECONDARY,
+        }
+    );
+}
 
 #[test]
 fn operation_blocker_renders_only_when_modal_and_busy_and_delay_elapsed() {

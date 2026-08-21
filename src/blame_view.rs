@@ -13,7 +13,10 @@ use khaslana::BlameView;
 
 use crate::{
     EncodingMenuTarget, RepositoryView,
-    ui::{components::tooltip_text, theme as ui_theme},
+    ui::{
+        components::{command_group, page_header, tooltip_text},
+        theme as ui_theme,
+    },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
 };
 
@@ -29,6 +32,42 @@ const BLAME_GUTTER_AUTHOR_WIDTH: f32 = 72.0;
 const BLAME_GUTTER_DATE_WIDTH: f32 = 64.0;
 /// 行号列宽度（右对齐 + 两侧内边距，容纳 5 位行号）。
 const BLAME_LINENO_WIDTH: f32 = 48.0;
+
+/// 追溯行的视觉层级由状态决定，而不是由完整边框或卡片堆叠表达。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlameLineVisualRule {
+    row_background: u32,
+    gutter_background: u32,
+    content_foreground: u32,
+    shows_syntax: bool,
+}
+
+const fn blame_line_visual_rule(is_uncommitted: bool) -> BlameLineVisualRule {
+    if is_uncommitted {
+        BlameLineVisualRule {
+            row_background: ui_theme::FEEDBACK_WARNING_BG,
+            gutter_background: ui_theme::FEEDBACK_WARNING_BG,
+            content_foreground: ui_theme::FEEDBACK_WARNING_TEXT,
+            shows_syntax: false,
+        }
+    } else {
+        BlameLineVisualRule {
+            row_background: ui_theme::SURFACE_BASE,
+            gutter_background: ui_theme::SURFACE_SUNKEN,
+            content_foreground: ui_theme::CONTENT_PRIMARY,
+            shows_syntax: true,
+        }
+    }
+}
+
+/// 三列追溯布局的固定尺度，避免后续视觉调整意外改变既有信息密度。
+const fn blame_columns_layout() -> (f32, f32, f32) {
+    (BLAME_GUTTER_WIDTH, BLAME_LINENO_WIDTH, BLAME_ROW_HEIGHT)
+}
+
+#[cfg(test)]
+#[path = "tests/blame_view.rs"]
+mod tests;
 
 /// 按内容身份缓存的最宽行扫描（与 BrowseState::widest_line_cache 同一套模式）：
 /// 大文件打开期间每帧重算是 O(总字符)，虚拟列表的 with_width_from_item
@@ -60,7 +99,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_blame_header(cx))
             .child(self.render_blame_body(cx))
             // 编码选择下拉菜单（复用 diff 编码选择）
@@ -82,85 +121,82 @@ impl RepositoryView {
             .map(|view| view.encoding.label())
             .unwrap_or_else(|| self.current_diff_encoding_choice().label());
 
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_w(px(0.0))
-                    .child(
+        page_header("文件追溯", Some("提交归属与工作区变更")).child(
+            command_group()
+                .child(
+                    div()
+                        .id("blame-header-path")
+                        .max_w(px(360.0))
+                        .min_w(px(0.0))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .truncate()
+                        .tooltip(move |_window, cx| tooltip_text(tooltip_path.clone(), cx))
+                        .child(path),
+                )
+                .when(self.blame.loading, |this| {
+                    this.child(
                         div()
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::PRIMARY))
-                            .child("文件追溯"),
+                            .text_size(px(ui_theme::TYPE_META))
+                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                            .child("加载中..."),
                     )
-                    .child(
-                        div()
-                            .id("blame-header-path")
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .truncate()
-                            .tooltip(move |_window, cx| tooltip_text(tooltip_path.clone(), cx))
-                            .child(path),
-                    )
-                    .when(self.blame.loading, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                .child("加载中..."),
+                })
+                .child(
+                    div()
+                        .id("blame-encoding")
+                        .relative()
+                        .flex_none()
+                        .min_h(px(ui_theme::CONTROL_HEIGHT_COMPACT))
+                        .px(px(ui_theme::SPACE_2))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .border_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .bg(rgb(ui_theme::SURFACE_RAISED))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_encoding_menu(EncodingMenuTarget::Blame);
+                                cx.notify();
+                            }),
                         )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("blame-encoding")
-                            .relative()
-                            .flex_none()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(ui_theme::BORDER))
-                            .bg(rgb(ui_theme::CARD))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .text_size(px(11.0))
-                            .cursor_pointer()
-                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_encoding_menu(EncodingMenuTarget::Blame);
-                                    cx.notify();
-                                }),
-                            )
-                            .child(format!("编码：{encoding_label}")),
-                    )
-                    .child(self.button("关闭", !self.busy, |this, _, _| this.close_blame(), cx)),
-            )
+                        .child(format!("编码：{encoding_label}")),
+                )
+                .child(
+                    div()
+                        .id("blame-close")
+                        .flex_none()
+                        .min_h(px(ui_theme::CONTROL_HEIGHT_COMPACT))
+                        .px(px(ui_theme::SPACE_2))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .border_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .bg(rgb(ui_theme::SURFACE_RAISED))
+                        .text_size(px(ui_theme::TYPE_BODY))
+                        .text_color(rgb(if self.busy {
+                            ui_theme::CONTENT_TERTIARY
+                        } else {
+                            ui_theme::CONTENT_PRIMARY
+                        }))
+                        .when(!self.busy, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                        })
+                        .when(self.busy, |this| this.cursor_not_allowed().opacity(0.6))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            if !this.busy {
+                                this.close_blame();
+                                cx.notify();
+                            }
+                        }))
+                        .child("关闭"),
+                ),
+        )
     }
 
     /// 主体：虚拟列表渲染注释栏 + 行号 + 内容，双向滚动。
@@ -184,7 +220,7 @@ impl RepositoryView {
             .p_2()
             .font_family("Consolas, monospace")
             .text_size(px(12.0))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     "blame-list",
@@ -243,10 +279,11 @@ impl RepositoryView {
             .and_then(|hunk_index| view.hunks.get(*hunk_index));
         let is_hunk_first = hunk.is_some_and(|hunk| hunk.start_line == index + 1);
         let is_uncommitted = hunk.is_some_and(|hunk| hunk.commit.is_none());
-        let syntax_spans = if is_uncommitted {
-            None
-        } else {
+        let visual = blame_line_visual_rule(is_uncommitted);
+        let syntax_spans = if visual.shows_syntax {
             crate::ui_helpers::syntax_spans_for_line(&self.blame.syntax, index)
+        } else {
+            None
         };
 
         div()
@@ -255,9 +292,9 @@ impl RepositoryView {
             .w_full()
             .min_w(px(0.0))
             .items_center()
-            .h(px(BLAME_ROW_HEIGHT))
-            // 未提交行整行以警告色打底，与已提交行明显区分
-            .when(is_uncommitted, |this| this.bg(rgb(ui_theme::COLOR_WARNING)))
+            .h(px(blame_columns_layout().2))
+            // 未提交行整行以警告色打底，与已提交行明显区分；提交行使用基础 surface。
+            .bg(rgb(visual.row_background))
             // 列 1：注释栏（微灰底侧栏）
             .child(self.blame_gutter(hunk, is_hunk_first, is_uncommitted, index))
             // 列 2：行号（右对齐 + 内边距，与内容拉开距离）
@@ -271,7 +308,7 @@ impl RepositoryView {
                     .h(px(BLAME_ROW_HEIGHT))
                     .pr(px(8.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child((index + 1).to_string()),
             )
             // 列 3：内容（左内边距与行号隔开；已提交行带语法高亮）
@@ -283,11 +320,7 @@ impl RepositoryView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .pl(px(8.0))
-                    .text_color(rgb(if is_uncommitted {
-                        ui_theme::COLOR_WARNING_FOREGROUND
-                    } else {
-                        ui_theme::FOREGROUND
-                    }))
+                    .text_color(rgb(visual.content_foreground))
                     .child(crate::ui_helpers::syntax_styled_text(&text, syntax_spans)),
             )
     }
@@ -318,6 +351,7 @@ impl RepositoryView {
                 commit.summary
             )
         });
+        let visual = blame_line_visual_rule(is_uncommitted);
 
         div()
             .flex()
@@ -328,11 +362,9 @@ impl RepositoryView {
             .h(px(BLAME_ROW_HEIGHT))
             .pr(px(8.0))
             .overflow_hidden()
-            // 已提交行的注释栏铺微灰底，与代码区分区；未提交行保持整行
-            // 警告底（此处不再铺灰底，避免盖掉行背景）。
-            .when(!is_uncommitted, |this| {
-                this.bg(rgb(ui_theme::DIFF_HEADER_BG))
-            })
+            // 已提交行的注释栏铺微灰底，与代码区分区；未提交行沿用整行
+            // 警告底，确保警告行不会被侧栏底色覆盖。
+            .bg(rgb(visual.gutter_background))
             .id(format!("blame-gutter-{index}"))
             // 悬浮显示完整提交信息（作者/摘要被截断时的兜底查看入口）
             .when_some(commit_tooltip, |this, tooltip| {
@@ -354,7 +386,7 @@ impl RepositoryView {
                         .flex_none()
                         .w(px(BLAME_GUTTER_AUTHOR_WIDTH))
                         .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .truncate()
                         .child(commit.author.clone()),
                 )
@@ -363,7 +395,7 @@ impl RepositoryView {
                         .flex_none()
                         .w(px(BLAME_GUTTER_DATE_WIDTH))
                         .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(blame_date_label(commit.time)),
                 )
                 .child(
@@ -371,7 +403,7 @@ impl RepositoryView {
                         .flex_1()
                         .min_w(px(0.0))
                         .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .truncate()
                         .child(commit.summary.clone()),
                 )
@@ -384,9 +416,9 @@ impl RepositoryView {
                         .px_1()
                         .rounded_sm()
                         .border_1()
-                        .border_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                        .border_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
                         .text_size(px(10.0))
-                        .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                        .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
                         .child("未提交"),
                 )
             })

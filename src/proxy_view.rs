@@ -1,7 +1,7 @@
-use gpui::{Context, IntoElement, Window, div, prelude::*, px};
+use gpui::{Context, IntoElement, KeyDownEvent, Window, div, prelude::*, px};
 use khaslana::NetworkProxyMode;
 
-use crate::ui::theme::rgb;
+use crate::ui::{components::tooltip_text, theme::rgb};
 use crate::{
     FieldId, RepositoryView,
     ui::{
@@ -25,22 +25,38 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_2()
-                    .child(self.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
-                    .child(self.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
-                    .child(self.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx)),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(proxy_mode_help(self.proxy_mode)),
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("代理模式"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .p_1()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                            .child(self.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
+                            .child(self.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
+                            .child(self.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(proxy_mode_help(self.proxy_mode)),
+                    ),
             )
             .when(custom_enabled, |this| {
                 this.child(
@@ -48,6 +64,16 @@ impl RepositoryView {
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .child("自定义地址"),
+                        )
                         .child(self.input(FieldId::ProxyHttpUrl, false, window, cx))
                         .child(self.input(FieldId::ProxyHttpsUrl, false, window, cx))
                         .child(self.input(FieldId::ProxySocks5Url, false, window, cx))
@@ -55,22 +81,19 @@ impl RepositoryView {
                             div()
                                 .text_size(px(12.0))
                                 .line_height(px(18.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child("代理认证第一版请写在 URL 中，例如 http://user:pass@127.0.0.1:7890。"),
                         ),
                 )
             })
             .child(
                 div()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(remote_label),
             )
             .child(
@@ -100,15 +123,36 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.proxy_mode == mode;
-        segmented_button(format!("proxy-mode-{label}"), selected, !self.busy)
+        let enabled = !self.busy;
+        let disabled_reason = proxy_mode_disabled_reason(enabled);
+        segmented_button(format!("proxy-mode-{label}"), selected, enabled)
+            .when(enabled, |this| this.tab_index(0))
+            .when(!enabled, |this| this.tab_index(-1).tab_stop(false))
+            .when_some(disabled_reason, |this, reason| {
+                this.tooltip(move |_window, cx| tooltip_text(reason, cx))
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                if enabled
+                    && !this.busy
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.set_proxy_mode(mode);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                if !this.busy {
+                if enabled && !this.busy {
                     this.set_proxy_mode(mode);
                     cx.notify();
                 }
             }))
             .child(label)
     }
+}
+
+fn proxy_mode_disabled_reason(enabled: bool) -> Option<&'static str> {
+    (!enabled).then_some("当前操作进行中，请稍候")
 }
 
 fn proxy_mode_help(mode: NetworkProxyMode) -> &'static str {
@@ -122,3 +166,7 @@ fn proxy_mode_help(mode: NetworkProxyMode) -> &'static str {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/proxy_view.rs"]
+mod tests;

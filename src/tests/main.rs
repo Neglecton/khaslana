@@ -291,6 +291,33 @@ fn repo_switcher_hit_test_covers_menu_and_trigger() {
 }
 
 #[test]
+fn context_navigator_preferences_are_shared_across_modes() {
+    let mut preferences = ContextNavigatorPreferences::default();
+    assert!(preferences.is_visible(MainMode::Worktree));
+    assert!(preferences.is_visible(MainMode::History));
+    assert!(preferences.is_visible(MainMode::Workflow));
+
+    // 任一主模式收起后，切换到其它主模式保持收起，不随页面切换回弹。
+    preferences.toggle(MainMode::Worktree);
+    assert!(!preferences.is_visible(MainMode::Worktree));
+    assert!(!preferences.is_visible(MainMode::History));
+    assert!(!preferences.is_visible(MainMode::Workflow));
+
+    // 在历史页重新展开，工作区/工作流同样保持展开。
+    preferences.toggle(MainMode::History);
+    assert!(preferences.is_visible(MainMode::Worktree));
+    assert!(preferences.is_visible(MainMode::History));
+    assert!(preferences.is_visible(MainMode::Workflow));
+
+    // 专用模式不承载 Navigator，也不能误改共享的展开状态。
+    preferences.toggle(MainMode::Conflict);
+    assert!(!preferences.is_visible(MainMode::Conflict));
+    assert!(preferences.is_visible(MainMode::Worktree));
+    assert!(preferences.is_visible(MainMode::History));
+    assert!(preferences.is_visible(MainMode::Workflow));
+}
+
+#[test]
 fn stale_submodule_requests_do_not_match_current_state() {
     let mut state = SubmoduleDialogState::default();
     state.request_id = 8;

@@ -5,6 +5,7 @@ mod assets;
 mod blame_view;
 mod browse_compare_view;
 mod browse_view;
+mod chrome_view;
 mod conflicts;
 mod diff_view;
 mod external_merge_view;
@@ -30,6 +31,7 @@ mod tray;
 mod ui;
 mod ui_helpers;
 mod workflow_view;
+mod worktree_view;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -51,8 +53,8 @@ use gpui::{
     Focusable, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
     ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, img, point, prelude::*,
-    px, size, uniform_list,
+    WindowBounds, WindowOptions, actions, canvas, div, img, point, prelude::*, px, size,
+    uniform_list,
 };
 use khaslana::{
     AiProviderSettings, AiReviewRecord, AiReviewResult, AiReviewStep, BlameView, BranchKind,
@@ -93,12 +95,12 @@ use text_input::{
 use ui::theme::rgb;
 use ui::{
     components::{
-        AppToastKind, FeedbackMessage, InputFrameSize, app_panel, app_shell_surface,
-        bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
-        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, hero_toolbar,
-        input_frame, list_row_surface, mode_pill, segmented_button, toggle_box,
+        AppToastKind, FeedbackMessage, InputFrameSize, app_shell_surface, bottom_progress_bar,
+        danger_callout, dialog_actions, dialog_overlay, dialog_panel as ui_dialog_panel,
+        feedback_bubble, feedback_stack, glass_menu, input_frame, segmented_button, toggle_box,
+        tooltip_text,
     },
-    icons::{OauthBrand, ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
+    icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
 };
 use ui_helpers::*;
@@ -288,21 +290,27 @@ pub(crate) fn find_shortcut_conflict(
         .copied()
 }
 
-const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
-const DEFAULT_CHANGES_WIDTH: f32 = 330.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 350.0;
+const DEFAULT_CHANGES_WIDTH: f32 = 350.0;
 const MIN_COLUMN_WIDTH: f32 = 240.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const CHANGE_ROW_HEIGHT: f32 = 36.0;
-const DEFAULT_HISTORY_TOP_HEIGHT: f32 = 430.0;
-const MIN_HISTORY_TOP_HEIGHT: f32 = 180.0;
-const MAX_HISTORY_TOP_HEIGHT: f32 = 760.0;
-// 提交详情区高度（历史页左列上半部）：默认紧凑展示摘要+正文+元信息，可拖拽调整。
+// 提交详情区高度（历史检查器上半部）：默认紧凑展示摘要+正文+元信息，可拖拽调整。
 const DEFAULT_HISTORY_DETAILS_HEIGHT: f32 = 260.0;
 const MIN_HISTORY_DETAILS_HEIGHT: f32 = 120.0;
 const MAX_HISTORY_DETAILS_HEIGHT: f32 = 720.0;
 const DEFAULT_HISTORY_FILES_WIDTH: f32 = 520.0;
 const MIN_HISTORY_FILES_WIDTH: f32 = 260.0;
-const MAX_HISTORY_FILES_WIDTH: f32 = 720.0;
+// 提交导航列上限放宽到 1080：宽屏下摘要 + ref 徽标有足够信息密度可铺更宽。
+const MAX_HISTORY_FILES_WIDTH: f32 = 1080.0;
+// 历史检查器内「提交文件 | 差异」分栏（四象限下半部）：默认沿用固定窄栏值。
+const DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH: f32 = 370.0;
+const MIN_HISTORY_INSPECTOR_FILES_WIDTH: f32 = 220.0;
+const MAX_HISTORY_INSPECTOR_FILES_WIDTH: f32 = 720.0;
+// 工作流模板导航列：模板名 + 描述需要比通用列更宽的上限，独立于提交导航约束。
+const DEFAULT_WORKFLOW_TEMPLATES_WIDTH: f32 = 304.0;
+const MIN_WORKFLOW_TEMPLATES_WIDTH: f32 = 260.0;
+const MAX_WORKFLOW_TEMPLATES_WIDTH: f32 = 720.0;
 const DEFAULT_BROWSE_TREE_WIDTH: f32 = 400.0;
 const MIN_BROWSE_TREE_WIDTH: f32 = 240.0;
 const MAX_BROWSE_TREE_WIDTH: f32 = 640.0;
@@ -334,6 +342,8 @@ const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
 const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
+// Windows 原生窗口控制区（3×44px）固定占宽；壳层布局与本文件共用同一常量。
+pub(crate) const WINDOW_CONTROLS_WIDTH: f32 = 132.0;
 // 仓库切换下拉尺寸：宽 320 容纳完整路径，高 480 内部滚动。
 const REPO_SWITCHER_MENU_WIDTH: f32 = 320.0;
 const REPO_SWITCHER_MENU_HEIGHT: f32 = 480.0;
@@ -1389,6 +1399,8 @@ struct RepoTabState {
     pub(crate) diff_line_selection: BTreeSet<usize>,
     diff_line_selection_anchor: Option<usize>,
     pub(crate) main_mode: MainMode,
+    /// Context Navigator 的用户偏好按模式独立保存，属于仓库 tab；切换模式不覆盖手动选择。
+    pub(crate) context_navigator_preferences: ContextNavigatorPreferences,
     pub(crate) workflow_state: WorkflowState,
     pub(crate) history_commits: Vec<CommitInfo>,
     pub(crate) history_has_more: bool,
@@ -1453,6 +1465,7 @@ impl RepoTabState {
             diff_line_selection: BTreeSet::new(),
             diff_line_selection_anchor: None,
             main_mode: MainMode::Worktree,
+            context_navigator_preferences: ContextNavigatorPreferences::default(),
             workflow_state: WorkflowState::default(),
             history_commits: Vec::new(),
             history_has_more: false,
@@ -1654,7 +1667,7 @@ pub(crate) enum ResizeTarget {
     Changes,
     WorkflowTemplates,
     HistoryFiles,
-    HistoryTop,
+    HistoryInspectorFiles,
     HistoryDetails,
     HistoryGraph,
     BrowseFiles,
@@ -1669,6 +1682,37 @@ pub(crate) enum MainMode {
     Stash,
     Browse,
     Blame,
+}
+
+/// Context Navigator 偏好：单一展开状态跨工作区/历史/工作流共享，
+/// 切换主模式不改变展开/收起，避免用户在每个页面重复开合。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContextNavigatorPreferences {
+    visible: bool,
+}
+
+impl Default for ContextNavigatorPreferences {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+impl ContextNavigatorPreferences {
+    pub(crate) const fn is_visible(self, mode: MainMode) -> bool {
+        match mode {
+            MainMode::Worktree | MainMode::History | MainMode::Workflow => self.visible,
+            MainMode::Conflict | MainMode::Stash | MainMode::Browse | MainMode::Blame => false,
+        }
+    }
+
+    pub(crate) fn toggle(&mut self, mode: MainMode) {
+        match mode {
+            MainMode::Worktree | MainMode::History | MainMode::Workflow => {
+                self.visible = !self.visible
+            }
+            MainMode::Conflict | MainMode::Stash | MainMode::Browse | MainMode::Blame => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1997,8 +2041,9 @@ pub(crate) enum UiEvent {
         snapshot: RepositorySnapshot,
         log: Vec<WorkflowLogEntry>,
     },
-    WorkflowFileSelected {
-        path: Option<PathBuf>,
+    /// 工作流模板目录后台刷新结果（目录 IO/JSON5 解析不占 UI 线程）。
+    WorkflowTemplatesLoaded {
+        result: Result<Vec<WorkflowTemplateItem>, String>,
     },
     OpenRepositoryFolderSelected {
         path: Option<PathBuf>,
@@ -2585,14 +2630,15 @@ pub(crate) struct RepositoryView {
     pub(crate) sidebar_width: f32,
     pub(crate) changes_width: f32,
     pub(crate) workflow_templates_width: f32,
-    pub(crate) history_top_height: f32,
     pub(crate) history_files_width: f32,
+    /// 历史检查器内「提交文件 | 差异」分栏宽度（四象限下半部，视图偏好不持久化）。
+    pub(crate) history_inspector_files_width: f32,
     /// 提交详情区高度与折叠状态（视图偏好，不持久化）：`None` 表示未手动
-    /// 调整过，详情区与文件列表按上下对半分弹性分配。
+    /// 调整过，检查器使用默认详情高度。
     pub(crate) history_details_height: Option<f32>,
     pub(crate) history_details_collapsed: bool,
-    /// 历史页左列顶部窗口坐标（1px 标记 canvas 每帧记录）：对半分模式下
-    /// 开始拖拽时，用分割条点击位置减去该坐标推导详情区实际高度并固化。
+    /// 历史检查器顶部窗口坐标（1px 标记 canvas 每帧记录）：首次拖拽时，
+    /// 用分割条点击位置减去该坐标推导详情区实际高度并固化。
     history_details_top_hint: Arc<Cell<f32>>,
     pub(crate) browse_tree_width: f32,
     pub(crate) history_graph_width: f32,
@@ -2600,7 +2646,7 @@ pub(crate) struct RepositoryView {
     resizing_changes_width: Option<ResizeState>,
     resizing_workflow_templates_width: Option<ResizeState>,
     resizing_history_files_width: Option<ResizeState>,
-    resizing_history_top_height: Option<ResizeState>,
+    resizing_history_inspector_files_width: Option<ResizeState>,
     resizing_history_details_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
     resizing_history_graph_width: Option<ResizeState>,
@@ -2642,6 +2688,28 @@ pub(crate) struct RepositoryView {
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
     repo_switcher_menu: Option<RepoSwitcherMenu>,
+    /// 窄窗口下 Context Navigator 的临时覆盖态，不改写宽屏停靠偏好。
+    context_navigator_overlay_open: bool,
+    /// 壳层控件的稳定焦点句柄，不能在 render 中临时创建。
+    chrome_refresh_focus: FocusHandle,
+    chrome_fetch_focus: FocusHandle,
+    chrome_pull_focus: FocusHandle,
+    chrome_push_focus: FocusHandle,
+    chrome_stash_focus: FocusHandle,
+    chrome_submodule_focus: FocusHandle,
+    /// titlebar「设置」按钮（窗口控制区左侧）的焦点句柄。
+    chrome_settings_focus: FocusHandle,
+    /// Context Navigator 模式按钮的焦点句柄（收起窄条与展开态共用）。
+    nav_worktree_focus: FocusHandle,
+    nav_conflict_focus: FocusHandle,
+    nav_history_focus: FocusHandle,
+    nav_workflow_focus: FocusHandle,
+    /// Navigator 面板本体的稳定焦点句柄。
+    context_navigator_focus: FocusHandle,
+    /// 窄窗 Navigator 切换按钮的稳定焦点句柄，覆盖层关闭后返回此处。
+    context_navigator_toggle_focus: FocusHandle,
+    /// 仓库切换器触发器的稳定焦点句柄，菜单打开时保留作为 Escape 返回目标。
+    repo_switcher_focus: FocusHandle,
     /// 仓库切换下拉触发器按钮的窗口坐标矩形，paint 时记录，供菜单锚定与点击外部关闭。
     repo_switcher_anchor: Option<RepoSwitcherAnchor>,
     /// 仓库切换下拉展开时缓存的最近仓库列表（toggle 时同步加载，渲染时纯读）。
@@ -2812,9 +2880,9 @@ impl RepositoryView {
             restoring_session: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             changes_width: DEFAULT_CHANGES_WIDTH,
-            workflow_templates_width: DEFAULT_CHANGES_WIDTH,
-            history_top_height: DEFAULT_HISTORY_TOP_HEIGHT,
+            workflow_templates_width: DEFAULT_WORKFLOW_TEMPLATES_WIDTH,
             history_files_width: DEFAULT_HISTORY_FILES_WIDTH,
+            history_inspector_files_width: DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH,
             history_details_height: None,
             history_details_collapsed: false,
             history_details_top_hint: Arc::new(Cell::new(0.0)),
@@ -2824,7 +2892,7 @@ impl RepositoryView {
             resizing_changes_width: None,
             resizing_workflow_templates_width: None,
             resizing_history_files_width: None,
-            resizing_history_top_height: None,
+            resizing_history_inspector_files_width: None,
             resizing_history_details_height: None,
             resizing_browse_tree_width: None,
             resizing_history_graph_width: None,
@@ -2861,6 +2929,21 @@ impl RepositoryView {
             encoding_menu_target: None,
             encoding_menu_closed_by_capture: None,
             repo_switcher_menu: None,
+            context_navigator_overlay_open: false,
+            chrome_refresh_focus: cx.focus_handle(),
+            chrome_fetch_focus: cx.focus_handle(),
+            chrome_pull_focus: cx.focus_handle(),
+            chrome_push_focus: cx.focus_handle(),
+            chrome_stash_focus: cx.focus_handle(),
+            chrome_submodule_focus: cx.focus_handle(),
+            chrome_settings_focus: cx.focus_handle(),
+            nav_worktree_focus: cx.focus_handle(),
+            nav_conflict_focus: cx.focus_handle(),
+            nav_history_focus: cx.focus_handle(),
+            nav_workflow_focus: cx.focus_handle(),
+            context_navigator_focus: cx.focus_handle(),
+            context_navigator_toggle_focus: cx.focus_handle(),
+            repo_switcher_focus: cx.focus_handle(),
             repo_switcher_anchor: None,
             repo_switcher_recent: Vec::new(),
             repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
@@ -4845,6 +4928,9 @@ impl RepositoryView {
                     this.workflow_state.log.push(entry);
                 });
             }
+            UiEvent::WorkflowTemplatesLoaded { result } => {
+                self.apply_workflow_templates(result);
+            }
             UiEvent::WorkflowFinished {
                 tab_id,
                 message,
@@ -4891,15 +4977,6 @@ impl RepositoryView {
                     self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
                 }
                 self.notify_completion(&toast_message, cx);
-            }
-            UiEvent::WorkflowFileSelected { path } => {
-                if let Some(path) = path {
-                    self.set_main_mode(MainMode::Workflow);
-                    self.load_workflow_file(path, cx);
-                } else {
-                    self.status = "已取消选择工作流文件".to_string();
-                    self.last_error = None;
-                }
             }
             UiEvent::OpenRepositoryFolderSelected { path } => {
                 if let Some(path) = path {
@@ -6052,6 +6129,7 @@ impl RepositoryView {
         self.commit_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
+        self.context_navigator_overlay_open = false;
         self.close_repo_switcher();
     }
 
@@ -6061,6 +6139,8 @@ impl RepositoryView {
             self.close_repo_switcher();
             return;
         }
+        // 仓库切换与窄窗导航覆盖层互斥。
+        self.context_navigator_overlay_open = false;
         // 展开时同步加载最近仓库列表（SQLite 本地查询 < 1ms），渲染时纯读缓存。
         self.repo_switcher_recent = self.storage.load_recent_repos().unwrap_or_default();
         let viewport_size = window.viewport_size();
@@ -6089,10 +6169,11 @@ impl RepositoryView {
         self.repo_switcher_highlight = None;
     }
 
-    /// 是否有任一弹出菜单（仓库切换下拉、各类右键菜单、编码菜单）打开。
+    /// 是否有任一弹出菜单（仓库切换下拉、各类右键菜单、编码菜单）或窄窗导航覆盖层打开。
     /// 弹层没有全屏遮罩，期间分栏分割线等底层交互应暂停，避免抢走弹层边缘的点击。
     fn any_popup_menu_open(&self) -> bool {
-        self.repo_switcher_menu.is_some()
+        self.context_navigator_overlay_open
+            || self.repo_switcher_menu.is_some()
             || self.branch_context_menu.is_some()
             || self.remote_context_menu.is_some()
             || self.change_context_menu.is_some()
@@ -6116,7 +6197,7 @@ impl RepositoryView {
         }
         // 如果没有 active_dialog 但设置中心打开，关闭设置中心。
         if self.active_dialog.is_none() && self.settings_center.is_some() {
-            self.settings_center = None;
+            self.close_settings_center();
             return;
         }
         let closing_submodule_manager = self.active_dialog == Some(DialogState::SubmoduleManager);
@@ -9202,7 +9283,9 @@ impl RepositoryView {
             ResizeTarget::Changes => self.resizing_changes_width = Some(state),
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width = Some(state),
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = Some(state),
-            ResizeTarget::HistoryTop => self.resizing_history_top_height = Some(state),
+            ResizeTarget::HistoryInspectorFiles => {
+                self.resizing_history_inspector_files_width = Some(state)
+            }
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = Some(state),
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = Some(state),
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = Some(state),
@@ -9216,13 +9299,6 @@ impl RepositoryView {
         let current_x: f32 = event.position.x.into();
         let delta = current_x - resize.start_x;
         match target {
-            ResizeTarget::HistoryTop => {
-                let current_y: f32 = event.position.y.into();
-                let delta = current_y - resize.start_y;
-                let height = (resize.start_height + delta)
-                    .clamp(MIN_HISTORY_TOP_HEIGHT, MAX_HISTORY_TOP_HEIGHT);
-                self.set_row_height(target, height);
-            }
             ResizeTarget::HistoryDetails => {
                 let current_y: f32 = event.position.y.into();
                 let delta = current_y - resize.start_y;
@@ -9230,9 +9306,21 @@ impl RepositoryView {
                     .clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT);
                 self.set_row_height(target, height);
             }
-            ResizeTarget::HistoryFiles | ResizeTarget::WorkflowTemplates => {
+            ResizeTarget::HistoryFiles => {
                 let width = (resize.start_width + delta)
                     .clamp(MIN_HISTORY_FILES_WIDTH, MAX_HISTORY_FILES_WIDTH);
+                self.set_column_width(target, width);
+            }
+            ResizeTarget::WorkflowTemplates => {
+                let width = (resize.start_width + delta)
+                    .clamp(MIN_WORKFLOW_TEMPLATES_WIDTH, MAX_WORKFLOW_TEMPLATES_WIDTH);
+                self.set_column_width(target, width);
+            }
+            ResizeTarget::HistoryInspectorFiles => {
+                let width = (resize.start_width + delta).clamp(
+                    MIN_HISTORY_INSPECTOR_FILES_WIDTH,
+                    MAX_HISTORY_INSPECTOR_FILES_WIDTH,
+                );
                 self.set_column_width(target, width);
             }
             ResizeTarget::BrowseFiles => {
@@ -9258,7 +9346,9 @@ impl RepositoryView {
             ResizeTarget::Changes => self.resizing_changes_width = None,
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width = None,
             ResizeTarget::HistoryFiles => self.resizing_history_files_width = None,
-            ResizeTarget::HistoryTop => self.resizing_history_top_height = None,
+            ResizeTarget::HistoryInspectorFiles => {
+                self.resizing_history_inspector_files_width = None
+            }
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = None,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
@@ -9271,11 +9361,13 @@ impl RepositoryView {
             ResizeTarget::Sidebar => self.sidebar_width = DEFAULT_SIDEBAR_WIDTH,
             ResizeTarget::Changes => self.changes_width = DEFAULT_CHANGES_WIDTH,
             ResizeTarget::WorkflowTemplates => {
-                self.workflow_templates_width = DEFAULT_CHANGES_WIDTH
+                self.workflow_templates_width = DEFAULT_WORKFLOW_TEMPLATES_WIDTH
             }
             ResizeTarget::HistoryFiles => self.history_files_width = DEFAULT_HISTORY_FILES_WIDTH,
-            ResizeTarget::HistoryTop => self.history_top_height = DEFAULT_HISTORY_TOP_HEIGHT,
-            // 双击复位：回到上下对半分的默认分配。
+            ResizeTarget::HistoryInspectorFiles => {
+                self.history_inspector_files_width = DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH
+            }
+            // 双击复位：回到检查器的默认详情高度。
             ResizeTarget::HistoryDetails => self.history_details_height = None,
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
             ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
@@ -9288,7 +9380,8 @@ impl RepositoryView {
             ResizeTarget::Changes => self.changes_width,
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width,
             ResizeTarget::HistoryFiles => self.history_files_width,
-            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails => 0.0,
+            ResizeTarget::HistoryInspectorFiles => self.history_inspector_files_width,
+            ResizeTarget::HistoryDetails => 0.0,
             ResizeTarget::BrowseFiles => self.browse_tree_width,
             ResizeTarget::HistoryGraph => self.history_graph_width,
         }
@@ -9300,7 +9393,8 @@ impl RepositoryView {
             ResizeTarget::Changes => self.changes_width = width,
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width = width,
             ResizeTarget::HistoryFiles => self.history_files_width = width,
-            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails => {}
+            ResizeTarget::HistoryInspectorFiles => self.history_inspector_files_width = width,
+            ResizeTarget::HistoryDetails => {}
             ResizeTarget::BrowseFiles => self.browse_tree_width = width,
             ResizeTarget::HistoryGraph => self.history_graph_width = width,
         }
@@ -9308,7 +9402,6 @@ impl RepositoryView {
 
     fn row_height(&self, target: ResizeTarget) -> f32 {
         match target {
-            ResizeTarget::HistoryTop => self.history_top_height,
             ResizeTarget::HistoryDetails => self
                 .history_details_height
                 .unwrap_or(DEFAULT_HISTORY_DETAILS_HEIGHT),
@@ -9316,6 +9409,7 @@ impl RepositoryView {
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
             | ResizeTarget::HistoryFiles
+            | ResizeTarget::HistoryInspectorFiles
             | ResizeTarget::BrowseFiles
             | ResizeTarget::HistoryGraph => 0.0,
         }
@@ -9323,12 +9417,12 @@ impl RepositoryView {
 
     fn set_row_height(&mut self, target: ResizeTarget, height: f32) {
         match target {
-            ResizeTarget::HistoryTop => self.history_top_height = height,
             ResizeTarget::HistoryDetails => self.history_details_height = Some(height),
             ResizeTarget::Sidebar
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
             | ResizeTarget::HistoryFiles
+            | ResizeTarget::HistoryInspectorFiles
             | ResizeTarget::BrowseFiles
             | ResizeTarget::HistoryGraph => {}
         }
@@ -9340,7 +9434,7 @@ impl RepositoryView {
             ResizeTarget::Changes => self.resizing_changes_width,
             ResizeTarget::WorkflowTemplates => self.resizing_workflow_templates_width,
             ResizeTarget::HistoryFiles => self.resizing_history_files_width,
-            ResizeTarget::HistoryTop => self.resizing_history_top_height,
+            ResizeTarget::HistoryInspectorFiles => self.resizing_history_inspector_files_width,
             ResizeTarget::HistoryDetails => self.resizing_history_details_height,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width,
@@ -9364,6 +9458,7 @@ impl RepositoryView {
 
     pub(crate) fn set_main_mode(&mut self, mode: MainMode) {
         self.main_mode = mode;
+        // Navigator 偏好由 tab 内的各模式独立保存，切换模式不重置用户选择。
         self.close_popups();
         if self.main_mode == MainMode::Conflict {
             self.ensure_conflict_views_loaded();
@@ -11603,360 +11698,33 @@ impl RepositoryView {
             })
     }
 
-    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let repo_open = self.repo_path.is_some();
-        let remote_open = !self.loading.remote() && self.current_remote().is_some();
-        let merge_in_progress = self.merge_in_progress();
-        let has_conflicts = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| !snapshot.conflicts.is_empty());
-        let behind_count = self
-            .branch_sync_status
-            .as_ref()
-            .map(|s| s.behind)
-            .unwrap_or(0);
-        let ahead_count = self
-            .branch_sync_status
-            .as_ref()
-            .map(|s| s.ahead)
-            .unwrap_or(0);
-
-        // 自定义标题栏沿用 Pencil 主页面结构：品牌、Git 操作、拖动区、模式切换和窗口控制。
-        hero_toolbar()
-            .flex()
-            .items_center()
-            .h(px(52.0))
-            .pl(px(16.0))
-            .child(self.render_titlebar_brand())
-            // 仓库切换下拉触发器（替代原"打开"按钮和标签页行）。
-            .child(self.render_repo_switcher_button(cx))
-            // Git 操作按钮：刷新/获取/拉取/推送 始终内联；宽屏额外内联 贮藏/子模块；设置始终在末尾。
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .ml(px(8.0))
-                    .child(self.render_toolbar_action_button(
-                        "刷新",
-                        ToolbarIcon::Refresh,
-                        None,
-                        repo_open && !self.busy,
-                        |this, _, _| this.refresh(),
-                        cx,
-                    ))
-                    .child(self.render_toolbar_action_button(
-                        "获取",
-                        ToolbarIcon::Fetch,
-                        None,
-                        repo_open && remote_open && !self.busy,
-                        |this, _, _| this.fetch(),
-                        cx,
-                    ))
-                    .child(self.render_toolbar_action_button(
-                        "拉取",
-                        ToolbarIcon::Pull,
-                        if behind_count > 0 {
-                            Some(format!("↓{}", behind_count))
-                        } else {
-                            None
-                        },
-                        repo_open && remote_open && !self.busy && !merge_in_progress,
-                        |this, _, _| {
-                            this.open_remote_branch_operation(RemoteBranchOperationKind::Pull)
-                        },
-                        cx,
-                    ))
-                    .child(self.render_toolbar_action_button(
-                        "推送",
-                        ToolbarIcon::Push,
-                        if ahead_count > 0 {
-                            Some(format!("↑{}", ahead_count))
-                        } else {
-                            None
-                        },
-                        repo_open && remote_open && !self.busy && !merge_in_progress,
-                        |this, _, _| {
-                            this.open_remote_branch_operation(RemoteBranchOperationKind::Push)
-                        },
-                        cx,
-                    ))
-                    // 贮藏/子模块始终内联显示（取消“更多”按钮后不再按宽度收纳）。
-                    .child(self.render_toolbar_action_button(
-                        "贮藏",
-                        ToolbarIcon::Stash,
-                        None,
-                        repo_open && !self.busy && !merge_in_progress,
-                        |this, _, _| this.open_stash_dialog(),
-                        cx,
-                    ))
-                    .child(self.render_toolbar_action_button(
-                        "子模块",
-                        ToolbarIcon::Submodule,
-                        None,
-                        repo_open && !self.busy,
-                        |this, _, _| this.open_submodule_manager(),
-                        cx,
-                    ))
-                    // 设置按钮始终在内联组末尾（全局入口，不要求 repo_open）。
-                    .child(self.render_toolbar_action_button(
-                        "设置",
-                        ToolbarIcon::Settings,
-                        None,
-                        !self.busy,
-                        |this, _, _| this.open_settings_center(),
-                        cx,
-                    )),
-            )
-            .child(self.render_titlebar_drag_area())
-            // 右侧模式切换与 Pencil 稿一致使用图标和药丸选中态。
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    // GPUI 需要显式宽度才能在主标题栏中为右侧固定区域预留空间。
-                    .w(px(if has_conflicts { 384.0 } else { 288.0 }))
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(
-                        mode_pill(
-                            "mode-worktree".into(),
-                            "工作区",
-                            Some(ToolbarIcon::Worktree),
-                            self.main_mode == MainMode::Worktree,
-                        )
-                        .on_click(cx.listener(
-                            |this, _event, _window, cx| {
-                                this.set_main_mode(MainMode::Worktree);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .when(has_conflicts, |this| {
-                        this.child(
-                            mode_pill(
-                                "mode-conflict".into(),
-                                "冲突处理",
-                                None,
-                                self.main_mode == MainMode::Conflict,
-                            )
-                            .on_click(cx.listener(
-                                |this, _event, _window, cx| {
-                                    this.set_main_mode(MainMode::Conflict);
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                    })
-                    .child(
-                        mode_pill(
-                            "mode-history".into(),
-                            "提交记录",
-                            Some(ToolbarIcon::History),
-                            self.main_mode == MainMode::History,
-                        )
-                        .on_click(cx.listener(
-                            |this, _event, _window, cx| {
-                                this.set_main_mode(MainMode::History);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        mode_pill(
-                            "mode-workflow".into(),
-                            "工作流",
-                            Some(ToolbarIcon::Workflow),
-                            self.main_mode == MainMode::Workflow,
-                        )
-                        .on_click(cx.listener(
-                            |this, _event, _window, cx| {
-                                this.set_main_mode(MainMode::Workflow);
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .mr(px(8.0)),
-            )
-            .child(self.render_window_controls(window))
-    }
-
-    /// 品牌区交给 Windows 原生命中测试处理拖动和双击最大化。
-    fn render_titlebar_brand(&self) -> impl IntoElement {
-        div()
-            .id("titlebar-brand")
-            .flex()
-            .flex_none()
-            .h_full()
-            .items_center()
-            .gap(px(8.0))
-            .cursor(CursorStyle::Arrow)
-            .window_control_area(WindowControlArea::Drag)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .size(px(28.0))
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(ui_theme::RADIUS_XS))
-                    .bg(rgb(ui_theme::PRIMARY))
-                    .text_size(px(15.0))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
-                    .child("K"),
-            )
-            .child(
-                div()
-                    .text_size(px(15.0))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::FOREGROUND))
-                    .child("Khaslana"),
-            )
-    }
-
-    /// 中间弹性空白区使用原生标题栏命中区域，支持拖动、双击和系统菜单。
-    fn render_titlebar_drag_area(&self) -> impl IntoElement {
-        div()
-            .id("titlebar-drag-area")
-            .flex_1()
-            .min_w(px(24.0))
-            .h_full()
-            .window_control_area(WindowControlArea::Drag)
-    }
-
-    /// Windows 窗口控制按钮通过原生命中测试获得最小化、还原和关闭行为。
-    fn render_window_controls(&self, window: &Window) -> impl IntoElement {
-        let maximize_icon = if window.is_maximized() {
-            ToolbarIcon::Restore
-        } else {
-            ToolbarIcon::Maximize
-        };
-        div()
-            .flex()
-            .flex_none()
-            .w(px(132.0))
-            .h_full()
-            .child(self.render_window_control_button(
-                "window-minimize",
-                ToolbarIcon::Minus,
-                false,
-                WindowControlArea::Min,
-            ))
-            .child(self.render_window_control_button(
-                "window-maximize",
-                maximize_icon,
-                false,
-                WindowControlArea::Max,
-            ))
-            .child(self.render_window_control_button(
-                "window-close",
-                ToolbarIcon::Close,
-                true,
-                WindowControlArea::Close,
-            ))
-    }
-
-    fn render_window_control_button(
-        &self,
-        id: &'static str,
-        icon: ToolbarIcon,
-        danger: bool,
-        area: WindowControlArea,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .w(px(44.0))
-            .h_full()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .window_control_area(area)
-            .hover(move |this| {
-                if danger {
-                    this.bg(rgb(ui_theme::COLOR_ERROR))
-                } else {
-                    this.bg(rgb(ui_theme::ACCENT))
-                }
-            })
-            .child(toolbar_icon_with_size(
-                icon,
-                ui_theme::FOREGROUND,
-                12.0,
-                16.0,
-            ))
-    }
-
-    /// 工具栏操作按钮：图标 + 中文标签 + 可选差异数角标
-    fn render_toolbar_action_button(
-        &self,
-        label: &'static str,
-        icon_kind: ToolbarIcon,
-        sync_label: Option<String>,
-        enabled: bool,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let text_color = if enabled {
-            ui_theme::FOREGROUND
-        } else {
-            ui_theme::MUTED_FOREGROUND
-        };
-        div()
-            .id(label)
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(5.0))
-            .px(px(12.0))
-            .py(px(6.0))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .when(enabled, |this| this.cursor_pointer())
-            .when(!enabled, |this| this.cursor_not_allowed())
-            .when(enabled, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::ACCENT)))
-                    .active(|this| this.opacity(0.82))
-            })
-            .when(!enabled, |this| this.opacity(0.5))
-            .text_color(rgb(text_color))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                if enabled {
-                    on_click(this, window, cx);
-                    cx.notify();
-                }
-            }))
-            .child(toolbar_icon(icon_kind, text_color))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(label),
-            )
-            .when_some(sync_label, |this, label| {
-                this.child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(ui_theme::PRIMARY))
-                        .child(label),
-                )
-            })
-    }
-
     /// 仓库切换下拉触发器按钮：显示当前仓库头像 + 名称 + ▾。
     fn render_repo_switcher_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let name = self.display_name();
+        // 按钮内名称截断后，悬浮仍可确认仓库完整路径。
+        let repo_tooltip = self
+            .repo_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| name.clone());
         let enabled = !self.busy;
         let text_color = if enabled {
             ui_theme::FOREGROUND
         } else {
             ui_theme::MUTED_FOREGROUND
         };
+        let keyboard_activate = cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if !this.busy && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                let was_open = this.repo_switcher_menu.is_some();
+                this.close_popups();
+                if !was_open {
+                    this.toggle_repo_switcher(window);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+        });
         div()
             .id("repo-switcher-trigger")
             .relative()
@@ -11968,6 +11736,9 @@ impl RepositoryView {
             .py(px(4.0))
             .ml(px(12.0))
             .rounded(px(ui_theme::RADIUS_XS))
+            .track_focus(&self.repo_switcher_focus)
+            .tab_index(if enabled { 0 } else { -1 })
+            .tab_stop(enabled)
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed())
             .when(enabled, |this| {
@@ -11976,6 +11747,7 @@ impl RepositoryView {
             })
             .when(!enabled, |this| this.opacity(0.5))
             .text_color(rgb(text_color))
+            .on_key_down(keyboard_activate)
             .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                 if this.busy {
                     return;
@@ -11992,10 +11764,13 @@ impl RepositoryView {
             .child(repo_avatar(&name))
             .child(
                 div()
+                    .id("repo-switcher-name")
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .max_w(px(120.0))
+                    .min_w(px(0.0))
                     .truncate()
+                    .tooltip(move |_window, cx| tooltip_text(repo_tooltip.clone(), cx))
                     .child(name),
             )
             .child(
@@ -13246,344 +13021,6 @@ impl RepositoryView {
             .child(label)
     }
 
-    fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let staged_count = self.change_indexes.staged.len();
-        let unstaged_count = self.change_indexes.unstaged.len();
-        let has_staged = staged_count > 0;
-        let has_unstaged = unstaged_count > 0;
-
-        app_panel()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .w(px(self.changes_width))
-            .min_w(px(self.changes_width))
-            .h_full()
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .when_some(self.render_merge_banner(cx), |this, banner| {
-                this.child(banner)
-            })
-            .when_some(self.render_rebase_banner(cx), |this, banner| {
-                this.child(banner)
-            })
-            .child(self.render_conflict_section(cx))
-            .child(self.render_virtual_change_section(
-                "已暂存变更",
-                "staged-change-list",
-                "暂存区加载中...",
-                self.loading.staged(),
-                staged_count,
-                DiffScope::Staged,
-                vec![
-                        // 设计图：minus 图标按钮 22×22，取消暂存全部
-                        self.change_icon_button(
-                            "取消暂存全部",
-                            ToolbarIcon::Minus,
-                            has_staged && !self.busy,
-                            |this, _, _| this.unstage_all(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    ],
-                cx,
-            ))
-            .child(self.render_virtual_change_section(
-                "未暂存变更",
-                "unstaged-change-list",
-                "修改区加载中...",
-                self.loading.unstaged(),
-                unstaged_count,
-                DiffScope::Unstaged,
-                vec![
-                        // 设计图：plus 图标按钮 22×22，暂存全部
-                        self.change_icon_button(
-                            "暂存全部",
-                            ToolbarIcon::Plus,
-                            has_unstaged && !self.busy,
-                            |this, _, _| this.stage_all(),
-                            cx,
-                        )
-                        .into_any_element(),
-                        // 设计图：trash 图标按钮 22×22，丢弃全部（DESTRUCTIVE 色）
-                        self.change_destructive_icon_button(
-                            "丢弃全部",
-                            has_unstaged && !self.busy,
-                            |this, _, _| this.confirm_discard_all(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    ],
-                cx,
-            ))
-    }
-
-    fn render_virtual_change_section(
-        &self,
-        title: &'static str,
-        id: &'static str,
-        loading_text: &'static str,
-        loading: bool,
-        count: usize,
-        scope: DiffScope,
-        actions: Vec<gpui::AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let is_staged = scope == DiffScope::Staged;
-
-        // 设计图：
-        // 未暂存变更标题 + 计数 badge（SECONDARY bg / SECONDARY_FOREGROUND fg）
-        // 已暂存变更标题 + 计数 badge（PRIMARY bg / PRIMARY_FOREGROUND fg）
-        let badge_bg = if is_staged {
-            ui_theme::PRIMARY
-        } else {
-            ui_theme::SECONDARY
-        };
-        let badge_fg = if is_staged {
-            ui_theme::PRIMARY_FOREGROUND
-        } else {
-            ui_theme::SECONDARY_FOREGROUND
-        };
-        let count_badge = if count > 0 {
-            Some(
-                div()
-                    .flex_none()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(ui_theme::RADIUS_PILL))
-                    .bg(rgb(badge_bg))
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(badge_fg))
-                    .child(count.to_string())
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-
-        // 设计图：已暂存标题上下都有 border（分割线），未暂存标题只有下 border
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .when(is_staged, |this| {
-                this.border_t_1().border_color(rgb(ui_theme::BORDER))
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
-                                    .child(title),
-                            )
-                            .when_some(count_badge, |this, badge| this.child(badge)),
-                    )
-                    .child(div().flex().items_center().gap(px(4.0)).children(actions)),
-            )
-            .child({
-                let handle = self.uniform_scroll_handle(id);
-                let list_handle = handle.clone();
-                let scope_for_list = scope.clone();
-                let empty_text = if loading {
-                    loading_text
-                } else if is_staged {
-                    "暂无已暂存变更"
-                } else {
-                    "暂无未暂存变更"
-                };
-                let content = div()
-                    .id(id)
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-                    .child(
-                        // 上万文件时仅为当前可见范围构造行，避免每次重绘创建全部元素。
-                        uniform_list(
-                            id,
-                            count.max(1),
-                            cx.processor(
-                                move |this, range: std::ops::Range<usize>, _window, cx| {
-                                    if count == 0 {
-                                        return range
-                                            .map(|_| placeholder_row(empty_text).into_any_element())
-                                            .collect::<Vec<_>>();
-                                    }
-                                    let indexes = this.change_indexes.for_scope(&scope_for_list);
-                                    range
-                                        .map(|row_index| {
-                                            indexes
-                                                .get(row_index)
-                                                .and_then(|change_index| {
-                                                    this.snapshot.as_ref().and_then(|snapshot| {
-                                                        snapshot.changes.get(*change_index)
-                                                    })
-                                                })
-                                                .cloned()
-                                                .map(|change| {
-                                                    this.change_row(
-                                                        change,
-                                                        scope_for_list.clone(),
-                                                        cx,
-                                                    )
-                                                    .into_any_element()
-                                                })
-                                                .unwrap_or_else(|| {
-                                                    placeholder_row("").into_any_element()
-                                                })
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .track_scroll(&list_handle)
-                        .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .flex_1()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .min_h(px(0.0)),
-                    )
-                    .into_any_element();
-                scrollable_uniform_frame(
-                    id,
-                    ScrollbarMode::Vertical,
-                    content,
-                    handle,
-                    count > 0,
-                    cx,
-                )
-            })
-    }
-
-    fn render_change_section(
-        &self,
-        title: &'static str,
-        id: &'static str,
-        loading_text: &'static str,
-        loading: bool,
-        rows: Vec<gpui::AnyElement>,
-        content_present: bool,
-        count: usize,
-        is_staged: bool,
-        actions: Vec<gpui::AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let rows = if rows.is_empty() && loading {
-            vec![placeholder_row(loading_text).into_any_element()]
-        } else {
-            rows
-        };
-        let badge_bg = if is_staged {
-            ui_theme::PRIMARY
-        } else {
-            ui_theme::SECONDARY
-        };
-        let badge_fg = if is_staged {
-            ui_theme::PRIMARY_FOREGROUND
-        } else {
-            ui_theme::SECONDARY_FOREGROUND
-        };
-        let count_badge = if count > 0 {
-            Some(
-                div()
-                    .flex_none()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(ui_theme::RADIUS_PILL))
-                    .bg(rgb(badge_bg))
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(badge_fg))
-                    .child(count.to_string())
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-
-        // 冲突工作台仍使用自定义行；保留普通滚动容器，避免改变既有交互。
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .when(is_staged, |this| {
-                this.border_t_1().border_color(rgb(ui_theme::BORDER))
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
-                                    .child(title),
-                            )
-                            .when_some(count_badge, |this, badge| this.child(badge)),
-                    )
-                    .child(div().flex().items_center().gap(px(4.0)).children(actions)),
-            )
-            .child({
-                let handle = self.scroll_handle(id);
-                let content = div()
-                    .id(id)
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .gap(px(2.0))
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-                    .overflow_scroll()
-                    .track_scroll(&handle)
-                    .children(rows)
-                    .into_any_element();
-                scrollable_frame_when(
-                    id,
-                    ScrollbarMode::Both,
-                    content,
-                    handle,
-                    content_present,
-                    cx,
-                )
-            })
-    }
-
     pub(crate) fn render_column_splitter(
         &self,
         target: ResizeTarget,
@@ -13591,10 +13028,7 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let entity = cx.entity();
         let active = self.resize_state(target).is_some();
-        let horizontal = matches!(
-            target,
-            ResizeTarget::HistoryTop | ResizeTarget::HistoryDetails
-        );
+        let horizontal = target == ResizeTarget::HistoryDetails;
         // 弹窗或弹层菜单打开期间分割线不响应：不显示拖拽光标、不高亮、不响应鼠标，
         // 避免弹层边缘容差区内的悬停/点击被分割线抢走。
         let interactive = column_splitter_accepts_mouse_events(
@@ -13758,160 +13192,6 @@ impl RepositoryView {
                 .right(px(0.0))
                 .bottom(px(0.0)),
             )
-    }
-
-    fn change_row(
-        &self,
-        change: khaslana::WorktreeChange,
-        scope: DiffScope,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let path = change.path.clone();
-        let selected = self.is_change_selected(&scope, &change.path);
-        let state = match scope {
-            DiffScope::Staged => change.staged.as_ref(),
-            DiffScope::Unstaged => change.unstaged.as_ref(),
-        };
-        let is_staged = scope == DiffScope::Staged;
-
-        // 行内图标按钮：plus（暂存）或 minus（取消暂存）
-        let row_action_icon = if is_staged {
-            ToolbarIcon::Minus
-        } else {
-            ToolbarIcon::Plus
-        };
-        let row_action_label = if is_staged {
-            "取消暂存此文件"
-        } else {
-            "暂存此文件"
-        };
-        let row_action_enabled = !self.busy;
-        let row_action_click: std::sync::Arc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)> =
-            if is_staged {
-                std::sync::Arc::new({
-                    let path = path.clone();
-                    move |this: &mut Self, _window: &mut Window, _cx: &mut Context<Self>| {
-                        this.unstage_paths(vec![path.clone()], "取消暂存");
-                    }
-                })
-            } else {
-                std::sync::Arc::new({
-                    let path = path.clone();
-                    move |this: &mut Self, _window: &mut Window, _cx: &mut Context<Self>| {
-                        this.stage_paths(vec![path.clone()], "暂存");
-                    }
-                })
-            };
-
-        // 设计图：已暂存行 bg ACCENT，未暂存行无背景
-        list_row_surface(
-            format!("change-{}-{}", diff_scope_id(&scope), change.path),
-            selected,
-        )
-        .flex()
-        .flex_none()
-        .w_full()
-        .min_w(px(0.0))
-        .h(px(CHANGE_ROW_HEIGHT))
-        .items_center()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .py(px(8.0))
-        .overflow_hidden()
-        .cursor_pointer()
-        .when(is_staged && !selected, |this| {
-            this.bg(rgb(ui_theme::ACCENT))
-        })
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener({
-                let path = path.clone();
-                let scope = scope.clone();
-                move |this, event: &MouseDownEvent, _window, cx| {
-                    this.select_change_from_mouse(path.clone(), scope.clone(), event);
-                    this.change_context_menu = None;
-                    cx.notify();
-                }
-            }),
-        )
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                this.open_change_context_menu(path.clone(), scope.clone(), event, _window);
-                cx.notify();
-            }),
-        )
-        // 状态徽章：圆角填充底色 + 白色加粗字母（统一 Git 状态色）
-        .child(change_state_badge(state))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::FOREGROUND))
-                .truncate()
-                .child(change.path),
-        )
-        // 设计图：行内图标按钮 20×20
-        .child(self.change_row_icon_button(
-            row_action_label,
-            row_action_icon,
-            ui_theme::MUTED_FOREGROUND,
-            row_action_enabled,
-            {
-                let click = row_action_click;
-                move |this, _window, cx| {
-                    click(this, _window, cx);
-                    cx.notify();
-                }
-            },
-            cx,
-        ))
-    }
-
-    fn render_diff_and_commit(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        app_panel()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .child(self.render_diff(cx))
-            .child(self.render_commit_box(window, cx))
-    }
-
-    fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // 全文视图模式下标题前缀"全文："，提示当前展示整份文件而非仅改动区域
-        let prefix = if self.full_file_view { "全文：" } else { "" };
-        let title = self
-            .diff
-            .as_ref()
-            .map(|diff| {
-                format!(
-                    "{prefix}差异：{} ({})",
-                    diff.path,
-                    diff_scope_label(&diff.scope)
-                )
-            })
-            .unwrap_or_else(|| "差异".to_string());
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .relative()
-            .min_w(px(0.0))
-            .min_h(px(260.0))
-            .child(self.diff_section_header(title, EncodingMenuTarget::Worktree, cx))
-            .child(self.render_virtual_diff(
-                "diff-scroll",
-                self.diff.clone(),
-                self.diff_headers_expanded,
-                DiffHeaderTarget::Worktree,
-                "请选择一个变更文件查看差异".to_string(),
-                cx,
-            ))
-            .child(self.render_encoding_dropdown(EncodingMenuTarget::Worktree, cx))
     }
 
     pub(crate) fn render_virtual_diff(
@@ -14302,120 +13582,6 @@ impl RepositoryView {
             .child(label)
     }
 
-    fn render_commit_box(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_commit = self.repo_path.is_some() && !self.busy;
-        let merge_in_progress = self.merge_in_progress();
-        let conflict_count = self
-            .snapshot
-            .as_ref()
-            .map_or(0, |snapshot| snapshot.conflicts.len());
-        let can_primary_commit = if merge_in_progress {
-            merge_view::merge_can_finish(
-                merge_in_progress,
-                conflict_count,
-                self.busy,
-                &self.commit_message.value,
-            )
-        } else {
-            can_commit
-        };
-        let can_commit_and_push =
-            can_commit && !merge_in_progress && self.current_remote().is_some();
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .border_t_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            // 修补上次提交开关：位于提交信息输入框上方、靠右；
-            // 合并进行中不提供（合并提交用“完成合并”路径）。
-            .when(!merge_in_progress && self.repo_path.is_some(), |this| {
-                this.child(div().flex().justify_end().child(self.toggle_row(
-                    "commit-amend-toggle",
-                    "修补上次提交",
-                    self.amend_mode,
-                    |this, _window, _cx| {
-                        this.amend_mode = !this.amend_mode;
-                        if this.amend_mode {
-                            // 开启时输入框为空则预填 HEAD 的完整提交信息，
-                            // 方便只改信息或补文件。
-                            if this.commit_message.value.trim().is_empty() {
-                                this.prefill_amend_message();
-                            }
-                        } else if let Some(prefill) = this.amend_prefill.take() {
-                            // 关闭时清除由开关预填且未被用户修改的内容；
-                            // 用户已编辑则保留，避免误删输入。
-                            if this.commit_message.value == prefill {
-                                this.commit_message.clear();
-                            }
-                        }
-                    },
-                    cx,
-                )))
-            })
-            .child(self.input(FieldId::CommitMessage, false, window, cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(self.render_ai_commit_button(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(self.primary_button(
-                                // 修补模式下主按钮变为“修补提交”，以当前暂存区重写 HEAD。
-                                if !merge_in_progress && self.amend_mode {
-                                    "修补提交"
-                                } else {
-                                    merge_view::merge_commit_button_label(merge_in_progress)
-                                },
-                                can_primary_commit,
-                                |this, _, _| {
-                                    if this.amend_mode && !this.merge_in_progress() {
-                                        this.amend();
-                                    } else {
-                                        this.commit();
-                                    }
-                                },
-                                cx,
-                            ))
-                            .when(merge_in_progress, |this| {
-                                this.child(self.danger_button(
-                                    "中止合并",
-                                    !self.busy,
-                                    |this, _, _| this.open_abort_merge_confirm_dialog(),
-                                    cx,
-                                ))
-                            })
-                            .when(!merge_in_progress, |this| {
-                                this.child(self.primary_button(
-                                    // 修补模式下变为“修补提交并推送”。
-                                    if self.amend_mode {
-                                        "修补提交并推送"
-                                    } else {
-                                        "提交并推送"
-                                    },
-                                    can_commit_and_push,
-                                    |this, _, _| {
-                                        if this.amend_mode {
-                                            this.amend_and_push();
-                                        } else {
-                                            this.commit_and_push();
-                                        }
-                                    },
-                                    cx,
-                                ))
-                            }),
-                    ),
-            )
-    }
-
     fn render_status(&self) -> impl IntoElement {
         let status_label = if self.busy { "运行中" } else { "就绪" };
         let branch = self
@@ -14427,9 +13593,10 @@ impl RepositoryView {
         let unstaged_count = self.change_indexes.unstaged.len();
         div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(8.0))
-            .h(px(24.0))
+            .h(px(chrome_view::STATUS_BAR_HEIGHT))
             .px(px(16.0))
             .border_t_1()
             .border_color(rgb(ui_theme::BORDER))
@@ -14479,7 +13646,7 @@ impl RepositoryView {
                     div()
                         .max_w(px(360.0))
                         .truncate()
-                        .text_color(rgb(ui_theme::COLOR_ERROR_FOREGROUND))
+                        .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
                         .child(format!("错误：{error}")),
                 )
             })
@@ -17022,6 +16189,19 @@ impl DerefMut for RepositoryView {
 impl Render for RepositoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_events(cx);
+        let shell_policy = self.shell_layout_policy(window);
+        let shell_content_height =
+            chrome_view::shell_content_height(window.viewport_size().height.into());
+        let context_toggle_is_overlay = shell_policy.band == chrome_view::LayoutBand::Narrow;
+        // 窄窗覆盖态不写回停靠偏好；窗口恢复到标准宽度后立即清理，避免继续阻断分割线。
+        if !context_toggle_is_overlay {
+            self.context_navigator_overlay_open = false;
+        }
+        // 对话框/设置中心带自身 overlay；不允许遗留无遮罩菜单或导航覆盖层于其下方。
+        if self.active_dialog.is_some() || self.settings_center.is_some() {
+            self.context_navigator_overlay_open = false;
+        }
+        let context_presentation = self.context_navigator_presentation(window);
 
         app_shell_surface()
             .id("app-root")
@@ -17058,6 +16238,23 @@ impl Render for RepositoryView {
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
                     this.close_repo_switcher();
                     cx.notify();
+                }
+            }))
+            // 顶栏菜单与窄窗 Navigator 是遮挡层，Esc 必须优先关闭并把焦点还给触发器。
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if key == "escape" {
+                    if this.context_navigator_overlay_open {
+                        this.context_navigator_overlay_open = false;
+                        window.focus(&this.context_navigator_toggle_focus);
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if this.repo_switcher_menu.is_some() {
+                        this.close_repo_switcher();
+                        window.focus(&this.repo_switcher_focus);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
                 }
             }))
             // 录制态时在 capture 阶段截获全部按键：stop_propagation 阻止 action dispatch，
@@ -17105,25 +16302,37 @@ impl Render for RepositoryView {
                     cx.stop_propagation();
                 }))
             })
-            .child(self.render_toolbar(window, cx))
+            .child(self.render_chrome_titlebar(window, cx))
             .child(
                 div()
                     .flex()
-                    .flex_1()
+                    .flex_none()
+                    .w_full()
+                    .h(px(shell_content_height))
                     .min_w(px(0.0))
                     .min_h(px(0.0))
-                    .child(self.render_sidebar(window, cx))
-                    .child(self.render_column_splitter(ResizeTarget::Sidebar, cx))
+                    .relative()
+                    // 左侧列：Docked 展开完整导航器（标题 + 模式按钮 + 分组列表）；
+                    // 其余情况（收起偏好/窄窗/专用页面）一律渲染 48px 收起窄条
+                    // （展开箭头 + 模式图标），模式入口在任何页面都常驻。
+                    .child(
+                        if context_presentation == chrome_view::ContextNavigatorPresentation::Docked
+                        {
+                            self.render_context_navigator(window, false, cx)
+                                .into_any_element()
+                        } else {
+                            self.render_navigator_collapsed_strip(context_toggle_is_overlay, cx)
+                                .into_any_element()
+                        },
+                    )
+                    .when(
+                        context_presentation == chrome_view::ContextNavigatorPresentation::Docked,
+                        |this| this.child(self.render_column_splitter(ResizeTarget::Sidebar, cx)),
+                    )
                     .child(match self.main_mode {
-                        MainMode::Worktree => div()
-                            .flex()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .min_h(px(0.0))
-                            .child(self.render_changes(cx))
-                            .child(self.render_column_splitter(ResizeTarget::Changes, cx))
-                            .child(self.render_diff_and_commit(window, cx))
-                            .into_any_element(),
+                        MainMode::Worktree => {
+                            self.render_worktree_view(window, cx).into_any_element()
+                        }
                         MainMode::Conflict => self
                             .render_conflict_workbench(window, cx)
                             .into_any_element(),
@@ -17134,7 +16343,12 @@ impl Render for RepositoryView {
                         MainMode::Stash => self.render_stash_preview_view(cx).into_any_element(),
                         MainMode::Browse => self.render_browse_view(cx).into_any_element(),
                         MainMode::Blame => self.render_blame_view(cx).into_any_element(),
-                    }),
+                    })
+                    // 窄窗 Navigator 覆盖层最后挂载（盖在主体内容之上）。
+                    .when(
+                        context_presentation == chrome_view::ContextNavigatorPresentation::Overlay,
+                        |this| this.child(self.render_context_navigator_overlay(window, cx)),
+                    ),
             )
             .child(self.render_status())
             .child(self.render_branch_context_menu(cx))
@@ -18032,6 +17246,11 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // GPUI 0.3.3 将该值传给原生窗口，确保最小化/最大化/关闭控制区始终可达。
+                    window_min_size: Some(size(
+                        px(chrome_view::MIN_WINDOW_WIDTH),
+                        px(chrome_view::MIN_WINDOW_HEIGHT),
+                    )),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Khaslana".into()),
                         // 隐藏 Windows 原生标题栏，由主工具栏承载拖动和窗口控制。

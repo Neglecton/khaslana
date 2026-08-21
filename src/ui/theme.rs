@@ -191,6 +191,26 @@ theme_tokens! {
     88: SCROLLBAR_TRACK => 0xF5F5F5CC, 0x24262DCC;
     89: SCROLLBAR_THUMB => 0xC5C5CBDD, 0x555863DD;
     90: SCROLLBAR_THUMB_ACTIVE => 0x939399EE, 0x777A86EE;
+
+    // ── Focus Workbench 设计基础 ───────────────────────────
+    // 旧 token 保持不变；以下语义 token 供新壳层和后续 view 逐步迁移。
+    93: SURFACE_CANVAS => 0xF8F9FB, 0x101216;
+    94: SURFACE_BASE => 0xFFFFFF, 0x181A20;
+    95: SURFACE_RAISED => 0xFFFFFF, 0x20232B;
+    96: SURFACE_SUNKEN => 0xF1F3F6, 0x16181D;
+    97: SURFACE_OVERLAY => 0xFFFFFF, 0x242730;
+    98: CONTENT_PRIMARY => 0x20232B, 0xF0F1F4;
+    99: CONTENT_SECONDARY => 0x5E6470, 0xB3B8C3;
+    100: CONTENT_TERTIARY => 0x7E8491, 0x858B96;
+    101: STATE_HOVER => 0xECEFF4, 0x2B2F39;
+    102: STATE_SELECTION => 0xE8E6FB, 0x302D55;
+    // 主色族 token（103 STATE_FOCUS_RING）见下方 accent 声明。
+    104: BORDER_MUTED => 0xE4E7EC, 0x2D313A;
+    105: BORDER_STRONG => 0xB8BEC9, 0x505663;
+    106: RAIL_SURFACE => 0xF4F6F9, 0x15171C;
+    107: TITLEBAR_SURFACE => 0xFFFFFF, 0x181A20;
+    108: SHADOW_ELEVATION_1 => 0x1820331F, 0x00000052;
+    109: SHADOW_ELEVATION_2 => 0x18203333, 0x00000080;
 }
 
 // ── 主色族 token（受 accent 预设动态控制）─────────────────
@@ -203,6 +223,7 @@ pub(crate) const INPUT_BORDER_FOCUSED: u32 = THEME_TOKEN_PREFIX | 48;
 pub(crate) const INPUT_SELECTION: u32 = THEME_TOKEN_PREFIX | 50;
 pub(crate) const REF_HEAD_BG: u32 = THEME_TOKEN_PREFIX | 72;
 pub(crate) const PROGRESS_FILL: u32 = THEME_TOKEN_PREFIX | 87;
+pub(crate) const STATE_FOCUS_RING: u32 = THEME_TOKEN_PREFIX | 103;
 
 /// 一个主题色预设的浅色/深色色对。元组按 (浅色, 深色) 顺序。
 #[derive(Clone, Copy, Debug)]
@@ -367,6 +388,15 @@ pub(crate) fn active_accent() -> &'static AccentPalette {
         .unwrap_or(&ACCENT_PRESETS[0].1)
 }
 
+/// 主题色聚焦环沿用原有浅/深主题的透明度，只把 RGB 换成当前 accent 的聚焦边框色。
+/// 透明度用十进制表达，避免在业务 view 中散落 RGBA 字面颜色。
+const FOCUS_RING_LIGHT_ALPHA: u32 = 85;
+const FOCUS_RING_DARK_ALPHA: u32 = 102;
+
+const fn with_alpha(color: u32, alpha: u32) -> u32 {
+    (color << 8) | alpha
+}
+
 /// 解析主色族 token：按当前激活的 accent 预设取浅/深值。
 /// 非主色族 token 返回 None，交由静态色板处理。
 fn resolve_accent_token(color: u32, variant: ThemeVariant) -> Option<u32> {
@@ -383,6 +413,13 @@ fn resolve_accent_token(color: u32, variant: ThemeVariant) -> Option<u32> {
         INPUT_SELECTION => Some(pick(accent.selection)),
         REF_HEAD_BG => Some(pick(accent.head_bg)),
         PROGRESS_FILL => Some(pick(accent.progress_fill)),
+        STATE_FOCUS_RING => Some(with_alpha(
+            pick(accent.focused_border),
+            match variant {
+                ThemeVariant::Light => FOCUS_RING_LIGHT_ALPHA,
+                ThemeVariant::Dark => FOCUS_RING_DARK_ALPHA,
+            },
+        )),
         _ => None,
     }
 }
@@ -420,9 +457,43 @@ pub(crate) fn rgba(color: u32) -> Rgba {
     gpui_rgba(resolve_color(color))
 }
 
-// ── 圆角常量 ──────────────────────────────────────────────
+// ── Focus Workbench 尺度 token ─────────────────────────────
+// 采用 4px 间距基线；名称表达密度角色，避免业务 view 散落魔法数。
+// 部分 token 为后续页面 owner 预留，仍由设计系统文档和单测约束。
+#[allow(dead_code)]
+pub(crate) const SPACE_1: f32 = 4.0;
+pub(crate) const SPACE_2: f32 = 8.0;
+pub(crate) const SPACE_3: f32 = 12.0;
+pub(crate) const SPACE_4: f32 = 16.0;
+#[allow(dead_code)]
+pub(crate) const SPACE_5: f32 = 20.0;
+pub(crate) const SPACE_6: f32 = 24.0;
+
+pub(crate) const TYPE_META: f32 = 11.0;
+pub(crate) const TYPE_BODY: f32 = 12.0;
+pub(crate) const TYPE_TITLE: f32 = 14.0;
+pub(crate) const TYPE_PAGE_TITLE: f32 = 16.0;
+
+#[allow(dead_code)]
+pub(crate) const CONTROL_HEIGHT_COMPACT: f32 = 28.0;
+pub(crate) const CONTROL_HEIGHT_REGULAR: f32 = 32.0;
+pub(crate) const ROW_HEIGHT_COMPACT: f32 = 28.0;
+pub(crate) const ROW_HEIGHT_REGULAR: f32 = 36.0;
+pub(crate) const TITLEBAR_HEIGHT: f32 = 44.0;
+/// Context Navigator 收起态窄条宽度（只剩展开箭头 + 模式图标）。
+pub(crate) const NAVIGATOR_COLLAPSED_WIDTH: f32 = 48.0;
+
 pub(crate) const RADIUS_XS: f32 = 6.0;
+pub(crate) const RADIUS_SM: f32 = 8.0;
+#[allow(dead_code)]
+pub(crate) const RADIUS_MD: f32 = 10.0;
 pub(crate) const RADIUS_PILL: f32 = 999.0;
+
+/// 动效只用于 hover / active 的瞬态反馈；不引入会干扰桌面操作的装饰性动画。
+#[allow(dead_code)]
+pub(crate) const MOTION_FAST_MS: u32 = 120;
+#[allow(dead_code)]
+pub(crate) const MOTION_STANDARD_MS: u32 = 180;
 
 #[cfg(test)]
 mod tests {
@@ -509,6 +580,15 @@ mod tests {
             resolve_color_for_variant(PROGRESS_FILL, ThemeVariant::Dark),
             0xA78BFA
         );
+        // 聚焦环复用当前 accent 主色，同时保留浅/深主题透明度。
+        assert_eq!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Light),
+            with_alpha(ACCENT_PRESETS[1].1.focused_border.0, FOCUS_RING_LIGHT_ALPHA)
+        );
+        assert_eq!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Dark),
+            with_alpha(ACCENT_PRESETS[1].1.focused_border.1, FOCUS_RING_DARK_ALPHA)
+        );
         // 还原默认，避免污染后续测试
         set_active_accent(0);
     }
@@ -527,12 +607,72 @@ mod tests {
     fn non_accent_tokens_unaffected_by_accent_switch() {
         set_active_accent(0);
         let bg_light = resolve_color_for_variant(BACKGROUND, ThemeVariant::Light);
+        let selection_light = resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Light);
         set_active_accent(2);
         // 非主色族 token 不应受 accent 切换影响
         assert_eq!(
             resolve_color_for_variant(BACKGROUND, ThemeVariant::Light),
             bg_light
         );
+        assert_eq!(
+            resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Light),
+            selection_light
+        );
         set_active_accent(0);
+    }
+
+    #[test]
+    fn focus_ring_follows_accent_without_changing_static_state_tokens() {
+        set_active_accent(0);
+        let indigo_ring_light = resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Light);
+        let indigo_ring_dark = resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Dark);
+        let indigo_hover = resolve_color_for_variant(STATE_HOVER, ThemeVariant::Light);
+        let indigo_selection = resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Dark);
+
+        set_active_accent(4);
+        assert_eq!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Light),
+            with_alpha(ACCENT_PRESETS[4].1.focused_border.0, FOCUS_RING_LIGHT_ALPHA)
+        );
+        assert_eq!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Dark),
+            with_alpha(ACCENT_PRESETS[4].1.focused_border.1, FOCUS_RING_DARK_ALPHA)
+        );
+        assert_ne!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Light),
+            indigo_ring_light
+        );
+        assert_ne!(
+            resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Dark),
+            indigo_ring_dark
+        );
+        // hover/selection 等非 accent 状态 token 保持原语义色。
+        assert_eq!(
+            resolve_color_for_variant(STATE_HOVER, ThemeVariant::Light),
+            indigo_hover
+        );
+        assert_eq!(
+            resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Dark),
+            indigo_selection
+        );
+        set_active_accent(0);
+    }
+
+    #[test]
+    fn focus_workbench_tokens_keep_density_and_theme_layers() {
+        assert_eq!(SPACE_1, 4.0);
+        assert_eq!(SPACE_6, 24.0);
+        assert_eq!(TITLEBAR_HEIGHT, 44.0);
+        assert_eq!(NAVIGATOR_COLLAPSED_WIDTH, 48.0);
+        assert!(CONTROL_HEIGHT_COMPACT < CONTROL_HEIGHT_REGULAR);
+        assert!(ROW_HEIGHT_COMPACT < ROW_HEIGHT_REGULAR);
+        assert_ne!(
+            resolve_color_for_variant(SURFACE_CANVAS, ThemeVariant::Light),
+            resolve_color_for_variant(SURFACE_CANVAS, ThemeVariant::Dark)
+        );
+        assert_ne!(
+            resolve_color_for_variant(STATE_HOVER, ThemeVariant::Light),
+            resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Light)
+        );
     }
 }

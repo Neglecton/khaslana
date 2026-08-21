@@ -74,24 +74,27 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/ai/merge.rs`：AI 冲突合并建议纯函数层：diff3 文本按「上下文行/完整冲突块」原子单元分段（绝不切开冲突块、拼接逐字节恒等、纯上下文段标记透传不送模型，`split_diff3_text`）、分段请求的滑动窗口对话组装（`build_segment_messages`，预算内从新到旧保留历史回合）、响应清洗（`strip_code_fence` 剥代码块围栏，保留尾部换行配合分段拼接）与冲突标记残留检测（`response_contains_conflict_markers`，`=======` 不单判避免误伤正文）。长度阈值常量（整文件 60K / 段 24K / 滑窗 150K 字符，按 ~200K token 上下文与 3-4 字符/token 保守估算）也在此定义。
 - `src/ai/review_agent.rs`：Diff-first Agentic 评审（lib crate）。工具注册表（六个内置工具的中文描述 + 手写 JSON Schema；search_code 带可选 `path_prefix` 目录限定）、预算守卫（`ToolBudget`：轮次 120 / 工具总次数 120 / 单结果 8K / 累计 400K 字符——轮数 ≤ 调用数+1 使轮次线不先于调用线触顶，累计体积按 ~200K token 上下文估算是真正的成本闸门；`limit_reason()` 命名首个触顶限额。强制收尾 = 注入 user 指令（指明限额、要求立即给结论）+ 省略 tools；收尾轮仍吐 tool_calls 时正文非空宽容接受为结论，空正文才报错并指明限额——旧版三线共用一句「超出工具调用限额」文案 + 收尾轮硬报错，造成「没到调用次数上限却报限额错误」的误伤）、初始上下文装配（变更文件清单 + 预算内 diff，总量 ≤30K 全量给、超限逐文件截 4K **且总量二次封顶**——旧版文件数 × 4K 线性膨胀（200 文件 ≈ 800K）会撑爆上下文，预算耗尽后降级为仅清单 + read_diff 引导；记账含每文件头部与截断标注的实际发出字符，总量严格不超预算）、`run_review_agent` 多轮循环（`is_cancelled: &AtomicBool` 在轮次边界检查（重试退避前与循环退出后返回前各再查一次——末轮流式恰在取消后才完成时按取消收尾不落盘），取消返回 `Ok(None)` 不算失败不触发 Done；每轮 `request_agent_stream` 流式：正文/思考链增量经 `AgentEvent::Delta` 实时回传 UI，tool_calls 分片按 index 聚合；**单轮流式请求带自动重试**（不含首次最多再试 3 次，指数退避 1s/2s/4s，退避前复查取消标志）：仅重试瞬态故障（`AgentStreamError::retryable`：网络 IO、408/429/5xx、流读取失败、流中 error 事件、无正文且无工具调用的无效回合），配置类错误（400/404/422 等）直接失败；重试提示走 `AgentEvent::Progress`（UI 侧 Progress 会清空上一轮 live 流式文本，半截思考随之复位，用户看到「响应中断（原因），正在重试第 N/3 次…」）；重试耗尽后错误附「已自动重试 N 次仍失败」；有 tool_calls 时先落 Reasoning/Message 步骤（中间轮非思考链正文以 `AiReviewStep::Message` 入时间线，UI 不折叠直出）再逐个执行回填 tool 消息——**逐个检查额度**，模型一轮批量发起时超限调用不执行、回填「工具预算已用尽（{限额}）」tool 消息（OpenAI 协议要求每个 tool_call_id 配对）；无 tool_calls 则校验正文非空结束；`AgentEvent::{Step,Progress,Delta,Done}` 回调供 UI 映射事件）与工具执行分发（read_lines 钳 400 行窗口 + 1MB 预检、read_diff 复用比较差异、get_file_tree 截 300 条、get_file_history 钳 20 条、get_blame 压缩为行段摘要 + 结果前缀注明「基于当前 HEAD 与工作区，非目标分支版本」、search_code 截 50 命中；工具失败不终止评审，错误文本作为结果回填模型）。system prompt 要求同轮批量发起独立调查、小改动可零调查直接结论、严重问题引用行号证据。`file_diff_to_patch_text`（FileDiff → patch 文本）也在此导出，commit message 生成与 read_diff 共用。流式工具协议（`request_agent_stream` 单次尝试 + `StreamingToolCallAccumulator` 按 index 聚合分片：id/name 首片、arguments 逐片追加；**截断检测**：`finish_reason=length`（触及 max_tokens，文案含上限数值）或 EOF 无 `[DONE]` 时**无论已产出多少正文/工具调用都判不完整**（可重试）——放行会出现两种静默坏结局：「思考一半就停」（半截思考链被当合法轮次）与「结论半句话却显示完成」；流中 `error` 事件同样立即失败；纯函数 `agent_stream_truncation_message`（length / 无 DONE 两路）与 `agent_turn_empty_failure_message`（0 块 / 仅思考两路）分工给出区分文案）与错误分流（`classify_agent_http_error`：408/429/5xx + 网络 IO 标记可重试，其余 4xx 沿用 `agent_request_error` 文案直接失败——HTTP 404/422 → 更换供应商提示、400 双因并提「模型名/参数错误 或 不支持工具调用」，无降级）在 `src/ai/client.rs`。评审输出 token 上限 `REVIEW_MAX_TOKENS = 8192`（reasoning 模型思考与正文共用 max_tokens 预算，4000 会让长思维链中途触顶）。
 - `src/ai/review_store.rs`：评审记录本地持久化。`AiReviewRecord`（repo_path/target/model/耗时/文件数/完整 `AiReviewResult` 含轨迹）JSON 落盘到 `<数据目录>/ai-reviews/<repo哈希8>/<毫秒>.json`（repo 哈希用手写 FNV-1a 保证跨版本稳定，std DefaultHasher 不保证；哈希前先对路径做**小写折叠**——Windows 路径大小写不敏感，`D:\Repo` 与 `d:\repo` 是同一仓库，不折叠会因大小写变化让旧记录「失联」；`list_review_records` 兼容读折叠前的旧键目录，写入只走新键；同毫秒文件名加 `-2` 后缀；按仓库只保留最近 30 条，文件名毫秒前缀字典序即时间序）；`list_review_records` 按文件名倒序只解析最新 `limit` 条（单条记录可达数百 KB，不全量读入），坏 JSON 跳过继续下一条、仅 warn。数据目录经 `storage::active_data_dir()` 解析（与 DB 同一套便携/旧目录激活规则）。选 JSON 文件而非 SQLite：记录可达数百 KB，文件天然隔离、便于备份清理。写入由任务线程在生成完成后执行——UI 分离（切目标/退出浏览）不影响落盘。
-- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、工作区视图、diff、提交框、凭据/远端弹窗、分支浏览模式、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等。
+- `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、diff/提交状态、凭据/远端弹窗、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等；工作区完整布局已拆到 `src/worktree_view.rs`，应用壳层拆到 `src/chrome_view.rs`。
+- `src/chrome_view.rs`：Focus Workbench 应用壳层：44px 自定义 titlebar（常驻命令入口 + 「设置」按钮固定在原生窗口控制区左侧、任何宽度紧邻最小化按钮，点击打开设置中心并聚焦；快捷键 Ctrl+, 等效）、Context Navigator（模式按钮 + 仓库引用分组，无独立 Activity Rail 列）：展开态为「上下文导航」标题行（开关箭头方向即操作语义：展开指左收起指右）+ 模式按钮区（「工作区/冲突处理(条件)/提交记录/工作流」图标+文字**统一按钮** `navigator_expanded_mode_button`，图标与文字同属一个元素、悬停/选中整行同步、点击图标或文字等效）+ 分组列表；收起态是 48px 窄条 `render_navigator_collapsed_strip`（顶部展开箭头 + 模式图标按钮，专用页面仍常驻——模式图标是冲突/贮藏/浏览/追溯页返回主工作台的唯一入口，箭头在专用页面禁用并提示「此页面不显示导航区」）；窄窗以临时覆盖层展开不改写停靠偏好。模式条目两态共用 `navigator_mode_entries`，图标中心恒定 x=24（两态切换零位移）；模式按钮支持 Tab 焦点与 Enter/Space 激活、点击不抢焦点（避免按 Ctrl/Alt 等修饰键时显示键盘导航焦点环）。宽度策略从 `Window::viewport_size()` 读取逻辑像素：titlebar 不设 overflow 收纳，「贮藏」和「子模块」与其他命令在所有宽度常驻内联。Navigator 展开状态为单一值，跨工作区/历史/工作流共享，模式切换不改变展开/收起。
+- `src/worktree_view.rs`：工作区 Review Canvas，把暂存/未暂存虚拟列表、差异画布与提交框组成主任务区；保留部分暂存、编码/二进制/大文件处理、差异缓存和操作完成后的刷新代际守卫。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
 - `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
 - `src/external_merge_view.rs`：外部合并工具设置弹窗，支持启用/禁用 IntelliJ IDEA 外部合并、配置 IDEA 命令路径、检测命令并在检测按钮显示成功/失败状态，以及开启选中冲突文件后自动打开 IDEA。
 - `src/proxy_view.rs`：网络代理设置弹窗，包括模式切换、自定义代理输入、保存和测试代理入口。
 - `src/stash_view.rs`：贮藏完整工作流 UI，包括创建贮藏、查看贮藏文件、加载贮藏 diff 和删除确认。
+- `src/workflow_view.rs`：Runbook Studio 工作流 UI：左侧模板导航、运行配置、步骤时间线与按运行状态展开的控制台；模板目录扫描与 JSON5 解析在短任务池后台执行（`refresh_workflow_templates` 发起、`UiEvent::WorkflowTemplatesLoaded` 回传 `apply_workflow_templates` 应用，切换到工作流页与手动刷新都不在 UI 线程做文件系统 IO）；模板导航使用轻量下标模型 + 单一 `uniform_list`，只能在可视回调中创建行元素，不能把全部模板预构造成 `Vec<AnyElement>`。模板行根节点必须 `w_full`，使选中/悬停底色和命中区域填满虚拟列表槽位；模板行内文本**禁止 `truncate()`/`text_ellipsis`**——uniform_list 每帧以 MinContent 测量第 0 项，行内容塌到 min-content 宽度（约 0），带省略号的 nowrap 文本在该测量轮按坍缩宽度截断后会被 TextLayout 记忆化固化到绘制（模板名永远只显示「…」），须改用 `overflow_hidden + whitespace_nowrap` 硬裁剪（侧边栏不受影响是因为其第 0 项为分组标题行，数据行的 truncate 文本从未被测量）；运行配置的滚动内容节点也必须 `w_full`，为内部百分比宽度输入框建立确定列宽，否则输入外壳会按内容收缩。模板单击加载、外部路径清理陈旧选中态、`WorkflowExecutor`、`TaskKind::Long` 与 per-tab 运行状态保持既有语义。
 - `src/rebase_view.rs`：变基 UI 模块，包括变基 handler（rebase_branch/continue/skip/abort）和变基状态条渲染（继续/跳过/中止按钮）。
 - `src/submodule_view.rs`：子模块弹窗 UI 和按需加载/更新动作，包括远端超前/落后状态展示、同步记录版本、更新全部到远端最新和更新单个子模块到远端最新。
 - `src/ui/`：前端设计系统适配层。`theme.rs` 定义 Khaslana 运行时语义色 token、浅色/深色色板和主题感知的 `rgb` / `rgba` 入口，`components.rs` 封装按钮、toast、tooltip、section header 等项目级 UI helper，`mod.rs` 统一导出。
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
-- `src/sidebar_view.rs`：侧边栏 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单。
+- `src/sidebar_view.rs`：Context Navigator 的仓库上下文 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单；全部分组可折叠（本地分支是唯一默认展开的分组，折叠状态 per-repo 存于 `RepoTabState.sidebar_sections`），各分组展平为轻量索引模型后由单一 `uniform_list` 虚拟渲染，不能改回逐分组嵌套滚动或预建全部 `AnyElement`。分支搜索常见 ASCII 路径使用无分配大小写匹配，非 ASCII 名称回退 Unicode 规范化。
 - `src/shortcuts_view.rs`：快捷键设置页 UI，包括 `format_keystroke`（keystroke → 显示文本）、录制态交互（按下组合键录入，冲突拒绝并提示）和恢复默认。
-- `src/history_view.rs`：提交历史 UI、提交图泳道分配与可调宽度渲染、提交文件列表、历史 diff。
+- `src/history_view.rs`：横向 History Inspector：左侧全高提交导航（提交图泳道与宽度仍可调；导航列宽上限放宽到 `MAX_HISTORY_FILES_WIDTH = 1080`），摘要/ref + 作者/avatar 两层丰富提交项使用 48px 专用行高（不能套用全局常规 36px，否则头像和引用徽标会被裁切），右侧上方提交详情、下方文件列表与历史 diff；详情高度可调，默认高度必须复用 `main.rs` 的 `DEFAULT_HISTORY_DETAILS_HEIGHT`，避免渲染与拖拽状态双写后首拖跳变；检查器内「提交文件 | 差异」分栏同样可拖拽（`ResizeTarget::HistoryInspectorFiles`，默认 260 / 钳制 [200, 720]，双击复位）。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
 - `src/browse_compare_view.rs`：分支比较模式左侧差异文件树 UI，包括把扁平差异文件构造为目录嵌套文件树的 `flatten_compare_files`、默认全展开的 `all_compare_dirs`、文件名级重命名展示、差异文件状态徽标和列表空状态；虚拟化列表行数取展平可见行数 `compare_visible_row_count`（目录节点 + 文件叶子），不能用差异文件数，否则深层目录与文件叶子会因超出行数而不渲染。
-- `src/blame_view.rs`：文件追溯视图 UI 模块（独立 `MainMode::Blame`，头部「关闭」返回工作区，无顶栏药丸）：三列布局（注释栏 | 行号 | 内容），**不用任何分割线**——注释栏整列铺 `DIFF_HEADER_BG` 微灰底形成「注释侧栏 | 代码区」IDE 分区，分组由「仅块首行有注释」传达；注释栏内部按固定宽度分列对齐（哈希 56px 主色等宽 / 作者 72px truncate / 日期 64px 含年份 yyyy-mm-dd / 摘要 flex truncate），栏宽 300px，悬浮注释栏显示完整提交信息（短 oid + 作者 + 精确到秒时间 + 完整摘要，作者/摘要被截断时的兜底查看入口）；行号 48px 右对齐 + 两侧内边距；未提交行整行 `COLOR_WARNING` 打底 + `COLOR_WARNING_FOREGROUND` 文字 + 「未提交」徽标且不做语法高亮，已提交行内容列带语法高亮。`uniform_list` 虚拟渲染（行高 18px、横向 Unconstrained + 最宽行测量缓存），支持双向滚动条与编码切换重载。
+- `src/blame_view.rs`：文件追溯视图 UI 模块（独立 `MainMode::Blame`，头部「关闭」返回工作区，无顶栏药丸）：三列布局（注释栏 | 行号 | 内容），**不用任何分割线**——注释栏整列铺 `SURFACE_SUNKEN` 微灰底形成「注释侧栏 | 代码区」IDE 分区，分组由「仅块首行有注释」传达；注释栏内部按固定宽度分列对齐（哈希 56px 主色等宽 / 作者 72px truncate / 日期 64px 含年份 yyyy-mm-dd / 摘要 flex truncate），栏宽 300px，悬浮注释栏显示完整提交信息（短 oid + 作者 + 精确到秒时间 + 完整摘要，作者/摘要被截断时的兜底查看入口）；行号 48px 右对齐 + 两侧内边距；未提交行整行 `FEEDBACK_WARNING_BG` 打底 + `FEEDBACK_WARNING_TEXT` 文字 + 「未提交」徽标且不做语法高亮，已提交行内容列带语法高亮。`uniform_list` 虚拟渲染（行高 18px、横向 Unconstrained + 最宽行测量缓存），支持双向滚动条与编码切换重载。
 - `src/ui_helpers.rs`：通用 UI 常量、滚动条、列表行、diff 行号、作者头像（`author_avatar`）、仓库头像（`repo_avatar`/`repo_initials`，圆角方形首字母缩写色块）等辅助渲染。
 - `src/tests/`：测试代码目录，存放所有从源文件通过 `#[path]` 属性外移的单元测试模块。目录结构映射源文件结构，例如 `src/tests/git/browse.rs` 对应 `src/git/browse.rs` 的测试、`src/tests/ai/client.rs` 对应 `src/ai/client.rs` 的测试。外移的测试模块通过 `use super::*` 仍可访问源文件的私有项。
 - `src/git/test_support.rs`：Git 测试共享辅助模块，提供 `service()`、`init_repo()`、`configure_user()`、`write_file()`、`write_bytes()`、`assert_file_text()`、`commit_all()`、`path_url()` 等公共 fixture 函数，供 `git`、`workflow` 等模块的测试复用，消除各 `mod tests` 中的重复定义。
@@ -295,6 +298,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 分页加载更多
 - 提交详情区（历史页左列上半部，四象限布局：详情上、文件列表下、差异右侧全高）：展示选中提交的摘要与引用徽章、完整提交信息（多行正文）、完整 SHA（可一键复制）、作者（含邮箱）、提交者（仅与作者不同时显示）、提交时间、父提交关系（双父标注合并提交）；默认与文件列表上下对半分（`history_details_height = None`，双方各占 flex_1），拖拽分割条后固化为绝对高度（`ResizeTarget::HistoryDetails`，对半分基准经 1px 标记 canvas 记录的左列顶部坐标推导），双击分割条复位回对半分；可折叠，内容区带自绘滚动条（`scrollable_frame_when`），无选中提交时不渲染。数据来自 `CommitInfo.message/author_email/committer/committer_email`（`collect_commit_infos` 一次性填充），无额外服务层调用
 - 查看提交文件列表
+- 提交文件列表与差异区域之间的分栏可拖拽（`ResizeTarget::HistoryInspectorFiles`，默认 260px 窄栏、钳制 [200, 720]，双击分割条复位）
 - 查看指定提交文件 diff
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
 - 右键提交可复制 SHA、reset、revert、撤销合并提交、拣选提交到当前分支（合并提交暂禁用）、在此提交上创建标签等
@@ -346,14 +350,14 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 
 ### 5.9 设置中心
 
-- 工具栏「设置」按钮打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）。
+- titlebar 右侧「设置」按钮（原生窗口控制区左侧、紧邻最小化按钮）打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）；快捷键 Ctrl+, 等效。
 - 左侧 7 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置、快捷键。
 - 右侧内容面板渲染对应分类的表单/列表。设置中心只通过右上角「×」（及背景点击、Esc）关闭，各分类页面不再有「关闭/取消」按钮。
 - 保存按钮统一逻辑：只保存当前分类页内容，按 `last_error` 经 `notify_settings_save` 提示成功/失败（失败 toast 带具体错误信息），成功后不关闭页面。基础 save 方法（如 `save_network_proxy_settings`）同时被输入框回车静默自动保存复用，提示逻辑只放在保存按钮闭包里。
 - 外观、更新、快捷键页为即时生效（无保存按钮），凭据管理为列表页（顶部「添加凭据/刷新」），均只靠「×」关闭。
 - 关闭设置中心时清掉可能残留的外部合并「保存并继续」待处理冲突路径（`external_merge_view::clear_pending_external_merge_path`）。
 - 凭据管理的子弹窗（详情/表单/删除确认）经 `active_dialog` 分发，可叠加在设置中心之上；关闭子弹窗后回到设置中心。
-- 原工具栏的 6 个独立设置按钮已移除，统一由设置中心承载。
+- 原工具栏的 6 个独立设置分类按钮已移除，各分类统一由设置中心承载；设置中心通过 titlebar 右侧「设置」按钮或 Ctrl+, 快捷键打开。
 
 ### 5.10 快捷键
 
@@ -421,11 +425,14 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - Git 业务能力优先放在 `GitService`。
 - UI 只负责状态、交互、确认和渲染，避免把复杂 Git 流程直接写进渲染函数。
 - 前端通用视觉逻辑放入 `src/ui/`：颜色、边框、状态色、hover/disabled token 放 `src/ui/theme.rs`；可复用控件和 Yororen/GPUI 桥接 helper 放 `src/ui/components.rs`；view 文件只组合业务布局。
-- 新增或改造 UI 时优先使用 `src/ui/theme.rs` 的语义 token，例如 `SURFACE`、`BORDER`、`TEXT_MUTED`、`ACCENT`、`DANGER`，不要在业务 view 中新增零散十六进制色值。
+- 新增或改造 UI 时优先使用 `src/ui/theme.rs` 的主题感知语义 token：surface 层级、content/border、hover/selection/focus 与 accent；不得在业务 view 新增零散十六进制色值。九种 accent 与既有 Git/diff/反馈 token 必须兼容。
 - 业务 UI 的语义色必须通过 `src/ui/theme.rs` 导出的主题感知 `rgb` / `rgba` 转换，不能直接调用 GPUI 同名函数解析主题 token。
-- 主界面、弹框和输入框外壳应优先复用 `src/ui/components.rs` 的项目级 helper，例如 `app_panel`、`dialog_panel`、`dialog_overlay`、`input_frame`、`segmented_button`、`list_row_surface`、`status_pill`。业务 view 不应重复实现这些通用外壳。
+- 应用壳层固定采用 Focus Workbench：44px titlebar（「设置」按钮固定在原生窗口控制区左侧）、Context Navigator 承载模式按钮与仓库引用分组（无独立 Activity Rail 列；展开=标题+带文字模式按钮+分组列表，收起=48px 窄条箭头+模式图标，任何页面常驻）。Navigator 展开状态为单一共享值（`ContextNavigatorPreferences`），模式切换不得改变展开/收起。壳层必须保留 MainMode 加载副作用、RepoTabState per-tab 状态、窗口原生命中区、仓库切换下拉锚定/关闭、overlay 顺序和 blocker 行为。
+- 宽度策略必须保持为可测试的纯函数，并以 `Window::viewport_size()` 的逻辑像素宽度作为运行时输入；titlebar 不设 overflow 收纳，「贮藏」和「子模块」与其他命令在所有宽度常驻内联，「设置」固定在窗口控制区左侧。Context Navigator 在窄窗以不改写停靠偏好的临时覆盖层展开，不能压坏 titlebar 或窗口控制区。
+- 主界面、弹框和输入框外壳应优先复用 `src/ui/components.rs` 的项目级 helper，例如 `app_panel`、`page_header`、`command_group`、`empty_state`、`dialog_panel`、`dialog_overlay`、`input_frame`、`segmented_button`、`list_row_surface`、`status_pill`。平面列表行默认不应有完整边框或阴影；选中态使用淡背景和指示条。
+- 图标按钮必须有可访问标签 tooltip，禁用态必须能解释不可用原因；文字按钮默认不为 enabled 状态显示 tooltip，只有禁用原因或特殊风险说明才显示提示文字。点击反馈应写入项目级反馈队列，轻量提示放左下角，失败/冲突/凭据等重要提示放右下角。
 - 反馈、toast、错误提示和加载进度必须走 `src/ui/components.rs` 的项目级 helper，例如 `feedback_bubble`、`feedback_stack`、`inline_error_bubble`、`bottom_progress_bar`；操作状态文字只在底部状态栏展示，不再叠加悬浮加载框。业务 view 不应直接使用 Yororen 默认 `notification_host` 或另写零散提示样式。
-- 按钮默认不为 enabled 状态显示 tooltip；只有禁用原因或特殊风险说明才显示提示文字。点击反馈应写入项目级反馈队列，轻量提示放左下角，失败/冲突/凭据等重要提示放右下角。
+- 阴影仅用于菜单、对话框、toast 等明确浮层；不新增装饰性渐变、玻璃态或持续动画。尺寸使用 GPUI 逻辑像素以适配 Windows DPI。
 - 自绘输入框的编辑、IME、选区和光标逻辑保留在 `src/text_input.rs`，但颜色必须来自 `src/ui/theme.rs`，不要在输入框绘制代码里硬编码色值。
 - v4 之后业务 view 禁止新增 `COLOR_*` 引用；`main.rs`、`sidebar_view.rs`、`history_view.rs`、`workflow_view.rs`、`text_input.rs` 和 `src/conflicts/` 应直接使用 `ui::theme` 或 `src/ui/components.rs`。
 - `ui_helpers.rs` 中旧 `COLOR_*` 兼容导出只允许底层 helper 内部过渡使用，不能作为新 UI 代码的导入来源。
@@ -547,7 +554,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 ### P2：提交详情面板
 
-理由：当前提交行信息较紧凑，选中提交后主要看文件和 diff，缺少完整详情。
+理由：History 提交行采用 48px 专用两行布局，仅承载摘要/ref 与作者/avatar；完整提交信息仍需由选中后的详情面板展示。全局常规列表行继续使用 36px。
 
 已完成基础范围（历史页左列上半部四象限布局，见 §5.4）：完整 SHA、父提交（双父标注合并提交）、作者（含邮箱）、提交者（与作者不同时）、时间、完整 message、SHA/提交信息一键复制、高度可拖拽与折叠。实现采用扩展 `CommitInfo`（`message`/`author_email`/`committer`/`committer_email`）而非新增 `CommitDetails`，`collect_commit_infos` 一次填充，无额外 IO。
 

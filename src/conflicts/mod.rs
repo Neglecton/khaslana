@@ -24,6 +24,27 @@ enum ConflictDocumentPane {
     Theirs,
 }
 
+/// 冲突工作台的平面层级：画布、文件 rail、标题栏与代码内容各自使用稳定语义层。
+/// 集中在纯函数中，避免视图重新引入旧 CARD/ACCENT 作为通用容器颜色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConflictWorkbenchSurfaces {
+    canvas: u32,
+    rail: u32,
+    header: u32,
+    content: u32,
+    border: u32,
+}
+
+const fn conflict_workbench_surfaces() -> ConflictWorkbenchSurfaces {
+    ConflictWorkbenchSurfaces {
+        canvas: ui_theme::SURFACE_CANVAS,
+        rail: ui_theme::RAIL_SURFACE,
+        header: ui_theme::TITLEBAR_SURFACE,
+        content: ui_theme::SURFACE_BASE,
+        border: ui_theme::BORDER_MUTED,
+    }
+}
+
 pub(crate) fn conflict_status_message(label: &str, count: usize) -> String {
     if label.starts_with("合并") {
         return format!("合并产生冲突，请在工作区使用 IDEA 或进入“冲突处理”解决（{count} 个文件）");
@@ -416,24 +437,24 @@ fn conflict_line_colors(
     match block.status {
         ConflictBlockStatus::Ignored => {
             if active {
-                (ui_theme::ACCENT, ui_theme::MUTED_FOREGROUND)
+                (ui_theme::STATE_SELECTION, ui_theme::CONTENT_PRIMARY)
             } else {
-                (ui_theme::CARD, ui_theme::MUTED_FOREGROUND)
+                (ui_theme::SURFACE_BASE, ui_theme::CONTENT_SECONDARY)
             }
         }
         ConflictBlockStatus::Resolved(_) => match pane {
             ConflictDocumentPane::Ours | ConflictDocumentPane::Theirs => {
                 if active {
-                    (ui_theme::COLOR_ERROR, ui_theme::COLOR_WARNING_FOREGROUND)
+                    (ui_theme::FEEDBACK_ERROR_BG, ui_theme::FEEDBACK_ERROR_TEXT)
                 } else {
-                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                    (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
                 }
             }
             ConflictDocumentPane::Result => {
                 if active {
-                    (ui_theme::ACCENT, ui_theme::PRIMARY)
+                    (ui_theme::STATE_SELECTION, ui_theme::CONTENT_PRIMARY)
                 } else {
-                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                    (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
                 }
             }
         },
@@ -442,32 +463,38 @@ fn conflict_line_colors(
         ConflictBlockStatus::Merged => match pane {
             ConflictDocumentPane::Ours | ConflictDocumentPane::Theirs => {
                 if active {
-                    (ui_theme::COLOR_ERROR, ui_theme::COLOR_WARNING_FOREGROUND)
+                    (ui_theme::FEEDBACK_ERROR_BG, ui_theme::FEEDBACK_ERROR_TEXT)
                 } else {
-                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                    (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
                 }
             }
             ConflictDocumentPane::Result => {
                 if active {
-                    (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
+                    (
+                        ui_theme::FEEDBACK_SUCCESS_BG,
+                        ui_theme::FEEDBACK_SUCCESS_TEXT,
+                    )
                 } else {
-                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                    (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
                 }
             }
         },
         ConflictBlockStatus::Unresolved => match pane {
             ConflictDocumentPane::Ours | ConflictDocumentPane::Theirs => {
                 if active {
-                    (ui_theme::COLOR_ERROR, ui_theme::COLOR_WARNING_FOREGROUND)
+                    (ui_theme::FEEDBACK_ERROR_BG, ui_theme::FEEDBACK_ERROR_TEXT)
                 } else {
-                    (ui_theme::COLOR_WARNING, ui_theme::FOREGROUND)
+                    (ui_theme::FEEDBACK_WARNING_BG, ui_theme::CONTENT_PRIMARY)
                 }
             }
             ConflictDocumentPane::Result => {
                 if active {
-                    (ui_theme::COLOR_WARNING, ui_theme::COLOR_WARNING_FOREGROUND)
+                    (
+                        ui_theme::FEEDBACK_WARNING_BG,
+                        ui_theme::FEEDBACK_WARNING_TEXT,
+                    )
                 } else {
-                    (ui_theme::CARD, ui_theme::FOREGROUND)
+                    (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
                 }
             }
         },
@@ -499,7 +526,7 @@ impl RepositoryView {
                     Vec::new(),
                     cx,
                 ))
-                .child(div().flex_none().h(px(1.0)).bg(rgb(ui_theme::BORDER)))
+                .child(div().flex_none().h(px(1.0)).bg(rgb(ui_theme::BORDER_MUTED)))
         })
     }
 
@@ -508,8 +535,10 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let surfaces = conflict_workbench_surfaces();
         app_panel()
             .flex()
+            .bg(rgb(surfaces.canvas))
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
@@ -530,6 +559,7 @@ impl RepositoryView {
     }
 
     fn render_conflict_file_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let surfaces = conflict_workbench_surfaces();
         let conflicts = conflict_paths(self.snapshot.as_ref());
         let selected_path = self.conflict_workbench.selected_path.as_deref();
         let file_rows = conflicts
@@ -548,16 +578,18 @@ impl RepositoryView {
             .w(px(self.changes_width))
             .min_w(px(self.changes_width))
             .h_full()
+            .bg(rgb(surfaces.rail))
             .child(
                 div()
                     .flex_none()
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::COLOR_WARNING))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                    .border_color(rgb(surfaces.border))
+                    .bg(rgb(surfaces.rail))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("存在 {} 个冲突文件", conflicts.len())),
             )
             .child(
@@ -623,8 +655,8 @@ impl RepositoryView {
                     .child(
                         div()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .truncate()
                             .child(path),
                     )
@@ -633,10 +665,10 @@ impl RepositoryView {
                             .flex_none()
                             .px_1()
                             .py(px(2.0))
-                            .rounded_sm()
-                            .bg(rgb(ui_theme::ACCENT))
-                            .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::PRIMARY))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                            .text_size(px(ui_theme::TYPE_META))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(badge),
                     ),
             )
@@ -645,8 +677,8 @@ impl RepositoryView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(10.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("未处理 {unresolved}"))
                     .when(dirty, |this| this.child("草稿已修改"))
                     .when(applied, |this| this.child("已应用")),
@@ -654,6 +686,7 @@ impl RepositoryView {
     }
 
     fn render_conflict_detail(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let surfaces = conflict_workbench_surfaces();
         let selected_path = self.conflict_workbench.selected_path.clone();
         let selected_view = selected_path
             .as_ref()
@@ -668,6 +701,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .h_full()
+            .bg(rgb(surfaces.canvas))
             .child(self.render_conflict_header(title, selected_view, cx))
             .child(match selected_view {
                 Some(view) if view.kind == ConflictFileKind::Text => self
@@ -693,6 +727,7 @@ impl RepositoryView {
         view: Option<&ConflictFileView>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let surfaces = conflict_workbench_surfaces();
         let block_count = view.map(|view| view.blocks.len()).unwrap_or_default();
         let selected_block = self
             .conflict_workbench
@@ -724,8 +759,8 @@ impl RepositoryView {
             .px_3()
             .py_3()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(surfaces.border))
+            .bg(rgb(surfaces.header))
             .child(
                 div()
                     .flex()
@@ -735,16 +770,16 @@ impl RepositoryView {
                     .child(
                         div()
                             .min_w(px(0.0))
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::PRIMARY))
+                            .text_size(px(ui_theme::TYPE_TITLE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .truncate()
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_META))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(progress),
                     ),
             )
@@ -769,8 +804,8 @@ impl RepositoryView {
                     .when(unresolved > 0, |this| {
                         this.child(self.conflict_count_badge(
                             format!("未处理 {unresolved}"),
-                            ui_theme::COLOR_WARNING,
-                            ui_theme::COLOR_WARNING_FOREGROUND,
+                            ui_theme::FEEDBACK_WARNING_BG,
+                            ui_theme::FEEDBACK_WARNING_TEXT,
                         ))
                     })
                     .when(ignored > 0, |this| {
@@ -868,10 +903,11 @@ impl RepositoryView {
                         .mt_3()
                         .px_3()
                         .py_2()
-                        .rounded_sm()
-                        .bg(rgb(ui_theme::COLOR_WARNING))
-                        .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                        .border_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(warning),
                 )
             })
@@ -884,6 +920,7 @@ impl RepositoryView {
                     .min_h(px(0.0))
                     .gap_2()
                     .p_3()
+                    .bg(rgb(ui_theme::SURFACE_CANVAS))
                     .child(self.render_conflict_document_pane(
                         "当前版本",
                         "conflict-ours-scroll",
@@ -984,13 +1021,13 @@ impl RepositoryView {
                                     .items_center()
                                     .justify_between()
                                     .border_b_1()
-                                    .border_color(rgb(ui_theme::BORDER))
-                                    .bg(rgb(ui_theme::CARD))
+                                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
                                     .child(
                                         div()
-                                            .text_size(px(12.0))
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(ui_theme::FOREGROUND))
+                                            .text_size(px(ui_theme::TYPE_BODY))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                             .child("Base"),
                                     )
                                     .when_some(block, |this, block| {
@@ -1033,10 +1070,11 @@ impl RepositoryView {
                 div()
                     .px_3()
                     .py_2()
-                    .rounded_sm()
-                    .bg(rgb(ui_theme::COLOR_WARNING))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(
                         view.fallback_reason
                             .clone()
@@ -1155,6 +1193,7 @@ impl RepositoryView {
         actions: Vec<gpui::AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let surfaces = conflict_workbench_surfaces();
         let active_block = view.blocks.get(selected_block);
         let has_actions = !actions.is_empty();
         app_panel()
@@ -1173,13 +1212,13 @@ impl RepositoryView {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(surfaces.border))
+                    .bg(rgb(surfaces.header))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(title),
                     )
                     .when_some(active_block, |this, block| {
@@ -1198,7 +1237,8 @@ impl RepositoryView {
                         .px_3()
                         .py_2()
                         .border_b_1()
-                        .border_color(rgb(ui_theme::BORDER))
+                        .border_color(rgb(surfaces.border))
+                        .bg(rgb(surfaces.content))
                         .children(actions),
                 )
             })
@@ -1259,8 +1299,8 @@ impl RepositoryView {
             .overflow_y_scroll()
             .p_3()
             .font_family("Consolas, monospace")
-            .text_size(px(12.0))
-            .bg(rgb(ui_theme::CARD))
+            .text_size(px(ui_theme::TYPE_BODY))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     scroll_id,
@@ -1273,7 +1313,7 @@ impl RepositoryView {
                                 let active = owner == Some(selected_block);
                                 let (bg, fg) = block
                                     .map(|block| conflict_line_colors(pane, block, active))
-                                    .unwrap_or((ui_theme::CARD, ui_theme::FOREGROUND));
+                                    .unwrap_or((ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY));
                                 let line = model_for_list.line_text(line_index);
                                 // 块状态背景保留，语法色做前景
                                 let spans = syntax
@@ -1285,7 +1325,6 @@ impl RepositoryView {
                                 div()
                                     .min_h(px(18.0))
                                     .px_1()
-                                    .rounded_sm()
                                     .bg(rgb(bg))
                                     .text_color(rgb(fg))
                                     .child(if line.is_empty() {
@@ -1337,8 +1376,8 @@ impl RepositoryView {
             .overflow_y_scroll()
             .p_3()
             .font_family("Consolas, monospace")
-            .text_size(px(12.0))
-            .bg(rgb(ui_theme::CARD))
+            .text_size(px(ui_theme::TYPE_BODY))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     scroll_id,
@@ -1349,7 +1388,7 @@ impl RepositoryView {
                                 let line = model_for_list.line_text(line_index);
                                 div()
                                     .min_h(px(18.0))
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child(if line.is_empty() {
                                         " ".to_string()
                                     } else {
@@ -1403,18 +1442,18 @@ impl RepositoryView {
             ConflictBlockStatus::Resolved(_) => ("已处理", ui_theme::ACCENT, ui_theme::PRIMARY),
             ConflictBlockStatus::Merged => (
                 "已合并",
-                ui_theme::COLOR_SUCCESS,
-                ui_theme::COLOR_SUCCESS_FOREGROUND,
+                ui_theme::FEEDBACK_SUCCESS_BG,
+                ui_theme::FEEDBACK_SUCCESS_TEXT,
             ),
             ConflictBlockStatus::Unresolved if has_manual_edits => (
                 "手工修改",
-                ui_theme::COLOR_WARNING,
-                ui_theme::COLOR_WARNING_FOREGROUND,
+                ui_theme::FEEDBACK_WARNING_BG,
+                ui_theme::FEEDBACK_WARNING_TEXT,
             ),
             ConflictBlockStatus::Unresolved => (
                 "未处理",
-                ui_theme::COLOR_WARNING,
-                ui_theme::COLOR_WARNING_FOREGROUND,
+                ui_theme::FEEDBACK_WARNING_BG,
+                ui_theme::FEEDBACK_WARNING_TEXT,
             ),
         };
         div()
@@ -1493,10 +1532,11 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::COLOR_WARNING))
-            .text_size(px(12.0))
-            .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+            .text_size(px(ui_theme::TYPE_BODY))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
             .child(format!("存在 {count} 个冲突文件"))
     }
 
@@ -1514,10 +1554,10 @@ impl RepositoryView {
             .gap_1()
             .px_2()
             .py_2()
-            .rounded_sm()
+            .rounded(px(ui_theme::RADIUS_XS))
             .border_1()
-            .border_color(rgb(ui_theme::COLOR_WARNING))
-            .bg(rgb(ui_theme::COLOR_WARNING))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 div()
                     .flex()
@@ -1525,7 +1565,7 @@ impl RepositoryView {
                     .gap_1()
                     .min_w(px(0.0))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::COLOR_WARNING)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -1540,17 +1580,17 @@ impl RepositoryView {
                         div()
                             .flex_none()
                             .w(px(24.0))
-                            .text_size(px(11.0))
+                            .text_size(px(ui_theme::TYPE_META))
                             .font_family("monospace")
-                            .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("!"),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .truncate()
                             .child(path),
                     ),

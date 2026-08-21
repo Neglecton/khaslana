@@ -75,69 +75,88 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .when_some(pending_path, |this, path| {
                 this.child(
                     div()
                         .px_3()
                         .py_2()
-                        .rounded_sm()
+                        .rounded(px(ui_theme::RADIUS_XS))
                         .border_1()
-                        .border_color(rgb(ui_theme::COLOR_WARNING))
-                        .bg(rgb(ui_theme::COLOR_WARNING))
+                        .border_color(rgb(ui_theme::BORDER_STRONG))
+                        .bg(rgb(ui_theme::SURFACE_SUNKEN))
                         .text_size(px(12.0))
                         .line_height(px(18.0))
-                        .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                         .child(format!(
                             "尚未找到可用的 IntelliJ IDEA。配置完成后将继续解决：{path}"
                         )),
                 )
             })
-            .child(self.toggle_row(
-                "external-merge-enabled",
-                "启用 IntelliJ IDEA 外部合并",
-                self.external_merge_enabled_form,
-                |this, _, _| {
-                    this.set_external_merge_enabled_form_with_detection(
-                        !this.external_merge_enabled_form,
-                    );
-                },
-                cx,
-            ))
-            .child(self.toggle_row(
-                "external-merge-auto-open",
-                "选中冲突文件时自动打开 IDEA",
-                self.external_merge_auto_open_form,
-                |this, _, _| {
-                    this.set_external_merge_auto_open_form_with_detection(
-                        !this.external_merge_auto_open_form,
-                    );
-                },
-                cx,
-            ))
-            .child(self.input(FieldId::ExternalMergeIntellijPath, false, window, cx))
-            .child(self.button(
-                "选择 IDEA 程序",
-                !self.busy,
-                |this, _, _| this.browse_external_merge_executable(),
-                cx,
-            ))
             .child(
                 div()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("路径可留空。留空时会依次检测 KHASLANA_IDEA_PATH、PATH 中的 idea64 / idea，以及常见 JetBrains 安装目录。开启或保存时会立即验证；未找到工具时不会静默结束，而是保留当前操作并提示配置。"),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(self.toggle_row(
+                        "external-merge-enabled",
+                        "启用 IntelliJ IDEA 外部合并",
+                        self.external_merge_enabled_form,
+                        |this, _, _| {
+                            this.set_external_merge_enabled_form_with_detection(
+                                !this.external_merge_enabled_form,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.toggle_row(
+                        "external-merge-auto-open",
+                        "选中冲突文件时自动打开 IDEA",
+                        self.external_merge_auto_open_form,
+                        |this, _, _| {
+                            this.set_external_merge_auto_open_form_with_detection(
+                                !this.external_merge_auto_open_form,
+                            );
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("IDEA 程序"),
+                    )
+                    .child(self.input(FieldId::ExternalMergeIntellijPath, false, window, cx))
+                    .child(self.button(
+                        "选择 IDEA 程序",
+                        !self.busy,
+                        |this, _, _| this.browse_external_merge_executable(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("路径可留空。留空时会依次检测 KHASLANA_IDEA_PATH、PATH 中的 idea64 / idea，以及常见 JetBrains 安装目录。开启或保存时会立即验证；未找到工具时不会静默结束，而是保留当前操作并提示配置。"),
+                    ),
             )
             .when(self.last_error.is_some(), |this| {
                 this.child(
                     div()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .text_size(px(12.0))
                         .text_color(rgb(ui_theme::DESTRUCTIVE))
                         .child(self.last_error.clone().unwrap_or_default()),

@@ -1,15 +1,18 @@
+use std::sync::Arc;
+
 use crate::ui::theme::rgb;
 use gpui::{
-    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px,
+    ClickEvent, Context, IntoElement, KeyDownEvent, ListSizingBehavior, MouseButton,
+    MouseDownEvent, Window, div, prelude::*, px, uniform_list,
 };
 use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
     BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, REMOTE_MENU_HEIGHT,
     REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT, STASH_MENU_WIDTH,
-    SidebarSection, StashContextMenu, TAG_MENU_HEIGHT, TAG_MENU_WIDTH, TagContextMenu,
-    clamped_menu_position, context_menu_item, context_menu_item_with_context, menu_separator,
-    nav_list, placeholder_row,
+    ScrollbarMode, SidebarSection, SidebarSectionState, StashContextMenu, TAG_MENU_HEIGHT,
+    TAG_MENU_WIDTH, TagContextMenu, clamped_menu_position, context_menu_item,
+    context_menu_item_with_context, menu_separator, placeholder_row, scrollable_uniform_frame,
     ui::{
         components::{glass_menu, sync_badge, tooltip_text},
         icons::{ToolbarIcon, toolbar_icon, toolbar_icon_rotated},
@@ -17,31 +20,37 @@ use crate::{
     },
 };
 
-fn filter_sidebar_branches(
-    branches: &[BranchInfo],
-    kind: BranchKind,
-    query: &str,
-) -> Vec<BranchInfo> {
-    branches
-        .iter()
-        .filter(|branch| branch.kind == kind)
-        .filter(|branch| sidebar_branch_matches_query(branch, query))
-        .cloned()
-        .collect()
+#[cfg(test)]
+fn sidebar_branch_matches_query(branch: &BranchInfo, query: &str) -> bool {
+    sidebar_branch_matches_normalized_query(branch, &query.trim().to_lowercase())
 }
 
-fn sidebar_branch_matches_query(branch: &BranchInfo, query: &str) -> bool {
-    let query = query.trim();
+/// Git 引用名通常为 ASCII；常见路径用字节窗口做无分配匹配，只有非 ASCII
+/// 名称才回退到 Unicode 小写化，避免大分支列表每次过滤产生逐项临时 String。
+fn sidebar_text_contains_normalized_query(value: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if value.is_ascii() && query.is_ascii() {
+        value
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
+    } else {
+        value.to_lowercase().contains(query)
+    }
+}
+
+fn sidebar_branch_matches_normalized_query(branch: &BranchInfo, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
 
-    let query = query.to_lowercase();
-    branch.name.to_lowercase().contains(&query)
+    sidebar_text_contains_normalized_query(&branch.name, query)
         || branch
             .upstream
             .as_deref()
-            .is_some_and(|upstream| upstream.to_lowercase().contains(&query))
+            .is_some_and(|upstream| sidebar_text_contains_normalized_query(upstream, query))
 }
 
 /// 从 upstream 全名中去掉 refs/remotes/ 前缀，返回简短显示名。
@@ -55,6 +64,18 @@ fn strip_remote_prefix(upstream: &str) -> String {
 
 const SIDEBAR_LOCAL_BRANCH_CREATE_ID: &str = "sidebar-local-branch-create";
 const SIDEBAR_TAG_CREATE_ID: &str = "sidebar-tag-create";
+// uniform_list 要求各模型项等高；搜索框保持 28px 最小高度，并把上下内边距
+// 收紧到各 4px，使筛选输入框完整落入 36px 高密度导航槽位。
+const SIDEBAR_BRANCH_FILTER_INPUT_MIN_HEIGHT: f32 = 28.0;
+const SIDEBAR_BRANCH_FILTER_VERTICAL_PADDING: f32 = 4.0;
+const SIDEBAR_NAV_ITEM_HEIGHT: f32 =
+    SIDEBAR_BRANCH_FILTER_INPUT_MIN_HEIGHT + SIDEBAR_BRANCH_FILTER_VERTICAL_PADDING * 2.0;
+
+/// Context Navigator 的行背景、悬停和命中区域统一占满虚拟列表槽位宽度，
+/// 不随分支名、远端名等内容长度收缩。
+fn sidebar_full_width_row() -> gpui::Div {
+    div().w_full()
+}
 
 fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
     // 图标按钮不显示文字，必须用分组专属 id，避免本地/远端搜索入口点击命中冲突。
@@ -65,10 +86,174 @@ fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
     }
 }
 
+/// 统一导航器只按声明顺序排列 section；折叠只影响本 section 的自然高度。
+fn sidebar_section_is_visible(section: SidebarSection, has_stashes: bool) -> bool {
+    !matches!(section, SidebarSection::Stashes) || has_stashes
+}
+
+/// 单一滚动区中的分组只在可见且展开时产生行内容，避免恢复旧的嵌套滚动高度。
+fn sidebar_section_should_render_rows(
+    section: SidebarSection,
+    state: SidebarSectionState,
+    has_stashes: bool,
+) -> bool {
+    sidebar_section_is_visible(section, has_stashes) && state.is_expanded(section)
+}
+
+fn sidebar_remote_manage_enabled(repo_available: bool, busy: bool) -> bool {
+    repo_available && !busy
+}
+
+fn sidebar_remote_manage_disabled_reason(repo_available: bool, busy: bool) -> Option<&'static str> {
+    if sidebar_remote_manage_enabled(repo_available, busy) {
+        None
+    } else if busy {
+        Some("当前操作进行中，请稍候")
+    } else {
+        Some("请先打开仓库")
+    }
+}
+
+/// 统一导航器的轻量可见项。这里故意只保存快照数组下标和静态分组信息，不能保存
+/// `AnyElement`：`uniform_list` 会在可视范围内才把该模型转换成实际行元素。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarNavItem {
+    SectionHeader(SidebarSection),
+    BranchFilter(SidebarSection),
+    Branch(usize),
+    Remote(usize),
+    Tag(usize),
+    Stash(usize),
+    EmptyLocalBranches,
+    EmptyRemoteBranches,
+    LoadingRemotes,
+    LoadingRemoteBranches,
+}
+
+fn append_sidebar_branch_items(
+    items: &mut Vec<SidebarNavItem>,
+    branches: &[BranchInfo],
+    sections: SidebarSectionState,
+    has_stashes: bool,
+    section: SidebarSection,
+    kind: BranchKind,
+    search_open: bool,
+    query: &str,
+) {
+    items.push(SidebarNavItem::SectionHeader(section));
+    if !sidebar_section_should_render_rows(section, sections, has_stashes) {
+        return;
+    }
+    if search_open {
+        items.push(SidebarNavItem::BranchFilter(section));
+    }
+    let start_len = items.len();
+    let normalized_query = query.trim().to_lowercase();
+    items.extend(
+        branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| branch.kind == kind)
+            .filter(|(_, branch)| {
+                sidebar_branch_matches_normalized_query(branch, &normalized_query)
+            })
+            .map(|(index, _)| SidebarNavItem::Branch(index)),
+    );
+    if start_len == items.len() && !query.trim().is_empty() {
+        items.push(match section {
+            SidebarSection::LocalBranches => SidebarNavItem::EmptyLocalBranches,
+            SidebarSection::RemoteBranches => SidebarNavItem::EmptyRemoteBranches,
+            _ => unreachable!("only branch sections use branch filters"),
+        });
+    }
+}
+
+/// 将所有导航分组扁平化成单一列表的可见项索引。
+///
+/// 搜索阶段只产生匹配分支的下标，不复制 `BranchInfo`，更不会创建 UI 元素；渲染阶段
+/// 由虚拟列表回调按当前可视 range 读取对应快照项。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sidebar_navigation_items(
+    branches: &[BranchInfo],
+    remote_count: usize,
+    tag_count: usize,
+    stash_count: usize,
+    sections: SidebarSectionState,
+    local_search_open: bool,
+    local_query: &str,
+    remote_branch_search_open: bool,
+    remote_branch_query: &str,
+    remote_loading: bool,
+) -> Vec<SidebarNavItem> {
+    let has_stashes = stash_count > 0;
+    let mut items = Vec::with_capacity(branches.len() + remote_count + tag_count + stash_count + 7);
+    append_sidebar_branch_items(
+        &mut items,
+        branches,
+        sections,
+        has_stashes,
+        SidebarSection::LocalBranches,
+        BranchKind::Local,
+        local_search_open,
+        local_query,
+    );
+
+    items.push(SidebarNavItem::SectionHeader(SidebarSection::Remotes));
+    if sidebar_section_should_render_rows(SidebarSection::Remotes, sections, has_stashes) {
+        if remote_loading {
+            items.push(SidebarNavItem::LoadingRemotes);
+        } else {
+            items.extend((0..remote_count).map(SidebarNavItem::Remote));
+        }
+    }
+
+    if remote_loading
+        && branches
+            .iter()
+            .all(|branch| branch.kind != BranchKind::Remote)
+    {
+        items.push(SidebarNavItem::SectionHeader(
+            SidebarSection::RemoteBranches,
+        ));
+        if sidebar_section_should_render_rows(SidebarSection::RemoteBranches, sections, has_stashes)
+        {
+            if remote_branch_search_open {
+                items.push(SidebarNavItem::BranchFilter(SidebarSection::RemoteBranches));
+            }
+            items.push(SidebarNavItem::LoadingRemoteBranches);
+        }
+    } else {
+        append_sidebar_branch_items(
+            &mut items,
+            branches,
+            sections,
+            has_stashes,
+            SidebarSection::RemoteBranches,
+            BranchKind::Remote,
+            remote_branch_search_open,
+            remote_branch_query,
+        );
+    }
+
+    items.push(SidebarNavItem::SectionHeader(SidebarSection::Tags));
+    if sidebar_section_should_render_rows(SidebarSection::Tags, sections, has_stashes) {
+        items.extend((0..tag_count).map(SidebarNavItem::Tag));
+    }
+
+    if has_stashes {
+        items.push(SidebarNavItem::SectionHeader(SidebarSection::Stashes));
+        if sidebar_section_should_render_rows(SidebarSection::Stashes, sections, true) {
+            items.extend((0..stash_count).map(SidebarNavItem::Stash));
+        }
+    }
+
+    items
+}
+
 impl RepositoryView {
     pub(crate) fn render_sidebar(
         &self,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let snapshot = self.snapshot.as_ref();
@@ -87,286 +272,183 @@ impl RepositoryView {
         } else {
             ""
         };
-        let local_placeholder = if local_search.is_empty() {
-            None
-        } else {
-            Some("没有匹配的本地分支")
-        };
-        let remote_branch_placeholder = if self.loading.remote() {
-            Some("远端分支加载中...")
-        } else if remote_branch_search.is_empty() {
-            None
-        } else {
-            Some("没有匹配的远端分支")
-        };
-        let local_rows = filter_sidebar_branches(branches, BranchKind::Local, local_search)
-            .into_iter()
-            .map(|branch| self.branch_row(branch, cx).into_any_element())
-            .collect::<Vec<_>>();
-        let remote_branch_rows =
-            filter_sidebar_branches(branches, BranchKind::Remote, remote_branch_search)
-                .into_iter()
-                .map(|branch| self.branch_row(branch, cx).into_any_element())
-                .collect::<Vec<_>>();
-        let remote_rows = snapshot
-            .map(|snapshot| snapshot.remotes.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|remote| self.remote_row(remote, cx).into_any_element())
-            .collect::<Vec<_>>();
-        let tag_rows = snapshot
-            .map(|snapshot| snapshot.tags.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tag| self.tag_row(tag, cx).into_any_element())
-            .collect::<Vec<_>>();
-        let stash_rows = snapshot
-            .map(|snapshot| snapshot.stashes.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|stash| self.stash_row(stash, cx).into_any_element())
-            .collect::<Vec<_>>();
-        let local_branch_filter = if self.sidebar_local_branch_search_open {
-            Some(
-                self.sidebar_branch_search_input(FieldId::SidebarLocalBranchSearch, window, cx)
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-        let remote_branch_filter = if self.sidebar_remote_branch_search_open {
-            Some(
-                self.sidebar_branch_search_input(FieldId::SidebarRemoteBranchSearch, window, cx)
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-        let local_branch_action = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(self.sidebar_create_branch_button(cx))
-            .child(self.sidebar_branch_search_button(
-                SidebarSection::LocalBranches,
-                self.sidebar_local_branch_search_open,
-                cx,
-            ))
-            .into_any_element();
-        let remote_branch_action = self.sidebar_branch_search_button(
-            SidebarSection::RemoteBranches,
+        let (remote_count, tag_count, stash_count) = snapshot
+            .map(|snapshot| {
+                (
+                    snapshot.remotes.len(),
+                    snapshot.tags.len(),
+                    snapshot.stashes.len(),
+                )
+            })
+            .unwrap_or_default();
+        let items = Arc::new(sidebar_navigation_items(
+            branches,
+            remote_count,
+            tag_count,
+            stash_count,
+            self.sidebar_sections,
+            self.sidebar_local_branch_search_open,
+            local_search,
             self.sidebar_remote_branch_search_open,
-            cx,
-        );
-
-        // 设计图：远端区域右侧「管理」药丸按钮
-        // cornerRadius $--radius-pill, stroke $--sidebar-border, padding [2,8]
-        let manage_pill = {
-            let enabled = self.repo_path.is_some() && !self.busy;
-            div()
-                .id("sidebar-remote-manage")
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .px(px(8.0))
-                .py(px(2.0))
-                .rounded(px(ui_theme::RADIUS_PILL))
-                .border_1()
-                .border_color(rgb(ui_theme::SIDEBAR_BORDER))
-                .bg(rgb(ui_theme::SIDEBAR))
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::NORMAL)
-                .text_color(rgb(ui_theme::SIDEBAR_FOREGROUND))
-                .when(enabled, |this| {
-                    this.cursor_pointer()
-                        .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
-                })
-                .when(!enabled, |this| this.opacity(0.62))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.open_remote_manager();
-                    cx.notify();
-                }))
-                .child("管理")
-                .into_any_element()
-        };
-
-        // 标签区域右侧：创建入口（无标签时也保留）+ 计数 badge
-        let tag_count = tag_rows.len();
-        let tag_action = Some(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_1()
-                .child(self.sidebar_header_icon_button(
-                    SIDEBAR_TAG_CREATE_ID,
-                    ToolbarIcon::Plus,
-                    false,
-                    self.repo_path.is_some() && !self.busy,
-                    |this, _, _| this.open_tag_form_dialog(None, String::new()),
-                    cx,
-                ))
-                .when(tag_count > 0, |this| {
-                    this.child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .child(tag_count.to_string()),
-                    )
-                })
-                .into_any_element(),
-        );
-
-        // 设计图：贮藏区域右侧计数 badge
-        let stash_count = stash_rows.len();
-        let stash_action = if stash_count > 0 {
-            Some(
-                div()
-                    .flex_none()
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(stash_count.to_string())
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
-
-        // 设计图：分割线 — 1px $--sidebar-border, 左右 padding 16px
-        let sidebar_divider = || {
-            div()
-                .flex_none()
-                .px(px(16.0))
-                .py(px(8.0))
-                .child(div().w_full().h(px(1.0)).bg(rgb(ui_theme::SIDEBAR_BORDER)))
-        };
-
-        let mut sidebar = div()
-            .relative()
-            .overflow_hidden()
+            remote_branch_search,
+            self.loading.remote(),
+        ));
+        // `uniform_list` 使用自己的句柄；保留原 ID 使现有切换仓库后的定位语义仍落在
+        // 这个唯一导航滚动区。模型仅保留索引，20,000 条远端分支不会预建 20,000 行。
+        let scroll_id = "local-branch-list";
+        let legacy_handle = self.scroll_handle(scroll_id);
+        let scroll_handle = self.uniform_scroll_handle(scroll_id);
+        // 复用旧句柄的底层滚动状态，保留切换仓库和滚动条已有的句柄语义。
+        scroll_handle.0.borrow_mut().base_handle = legacy_handle;
+        let list_handle = scroll_handle.clone();
+        let item_count = items.len().max(1);
+        let items_for_rows = Arc::clone(&items);
+        let content = div()
+            .id(scroll_id)
             .flex()
-            .flex_none()
             .flex_col()
-            .w(px(self.sidebar_width))
-            .min_w(px(self.sidebar_width))
-            .h_full()
-            // 扁平纯色背景，与工具栏保持一致。
-            .bg(rgb(ui_theme::SIDEBAR))
-            .pt(px(12.0))
-            .child(self.render_nav_section(
-                "本地分支",
-                "local-branch-list",
-                SidebarSection::LocalBranches,
-                local_rows,
-                local_placeholder,
-                local_branch_filter,
-                3.0,
-                Some(local_branch_action),
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .pt(px(8.0))
+            .pb(px(12.0))
+            .child(
+                uniform_list(
+                    scroll_id,
+                    item_count,
+                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                        range
+                            .map(|index| {
+                                items_for_rows
+                                    .get(index)
+                                    .copied()
+                                    .map(|item| {
+                                        this.render_sidebar_navigation_item(item, window, cx)
+                                    })
+                                    .unwrap_or_else(|| placeholder_row("").into_any_element())
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&list_handle)
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .flex_1()
+                .min_h(px(0.0)),
+            );
+
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            // 复用 Context Navigator 的稳定焦点句柄；Tab 到此区域后，R/B/T/S
+            // 折叠对应分组，M 打开“远端·管理”。不在 render 中分配临时句柄。
+            .track_focus(&self.context_navigator_focus)
+            .tab_index(0)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.modifiers.control
+                    || event.keystroke.modifiers.alt
+                    || event.keystroke.modifiers.platform
+                {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "r" => this.toggle_sidebar_section(SidebarSection::Remotes),
+                    "b" => this.toggle_sidebar_section(SidebarSection::RemoteBranches),
+                    "t" => this.toggle_sidebar_section(SidebarSection::Tags),
+                    "s" if this
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| !snapshot.stashes.is_empty()) =>
+                    {
+                        this.toggle_sidebar_section(SidebarSection::Stashes)
+                    }
+                    "m" if this.repo_path.is_some() && !this.busy => this.open_remote_manager(),
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .overflow_hidden()
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .child(scrollable_uniform_frame(
+                scroll_id,
+                ScrollbarMode::Vertical,
+                content.into_any_element(),
+                scroll_handle,
+                !items.is_empty(),
                 cx,
             ))
-            .child(sidebar_divider())
-            .child(self.render_nav_section(
-                "远端",
-                "remote-list",
-                SidebarSection::Remotes,
-                remote_rows,
-                self.loading.remote().then_some("远端加载中..."),
-                None,
-                2.0,
-                Some(manage_pill),
-                cx,
-            ))
-            .child(sidebar_divider())
-            .child(self.render_nav_section(
-                "远端分支",
-                "remote-branch-list",
-                SidebarSection::RemoteBranches,
-                remote_branch_rows,
-                remote_branch_placeholder,
-                remote_branch_filter,
-                3.0,
-                Some(remote_branch_action),
-                cx,
-            ));
-
-        // 标签区始终渲染：无标签时区头的“+”按钮是创建入口。
-        {
-            sidebar = sidebar
-                .child(sidebar_divider())
-                .child(self.render_nav_section(
-                    "标签",
-                    "tag-list",
-                    SidebarSection::Tags,
-                    tag_rows,
-                    None,
-                    None,
-                    2.0,
-                    tag_action,
-                    cx,
-                ));
-        }
-        if !stash_rows.is_empty() {
-            sidebar = sidebar
-                .child(sidebar_divider())
-                .child(self.render_nav_section(
-                    "贮藏",
-                    "stash-list",
-                    SidebarSection::Stashes,
-                    stash_rows,
-                    None,
-                    None,
-                    2.0,
-                    stash_action,
-                    cx,
-                ));
-        }
-
-        sidebar
     }
 
-    fn render_nav_section(
+    /// 只为 `uniform_list` 当前请求的可见 range 创建实际元素。
+    fn render_sidebar_navigation_item(
         &self,
-        title: &'static str,
-        id: &'static str,
-        section: SidebarSection,
-        rows: Vec<gpui::AnyElement>,
-        placeholder: Option<&'static str>,
-        filter: Option<gpui::AnyElement>,
-        weight: f32,
-        action: Option<gpui::AnyElement>,
+        item: SidebarNavItem,
+        window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let expanded = self.sidebar_sections.is_expanded(section);
-        let header = self.nav_section_header(title, section, expanded, action, cx);
-        let rows = if rows.is_empty() {
-            placeholder
-                .map(|text| placeholder_row(text).into_any_element())
-                .into_iter()
-                .collect::<Vec<_>>()
-        } else {
-            rows
+    ) -> gpui::AnyElement {
+        let element = match item {
+            SidebarNavItem::SectionHeader(section) => {
+                self.nav_section_header(section, cx).into_any_element()
+            }
+            SidebarNavItem::BranchFilter(SidebarSection::LocalBranches) => self
+                .sidebar_branch_search_input(FieldId::SidebarLocalBranchSearch, window, cx)
+                .into_any_element(),
+            SidebarNavItem::BranchFilter(SidebarSection::RemoteBranches) => self
+                .sidebar_branch_search_input(FieldId::SidebarRemoteBranchSearch, window, cx)
+                .into_any_element(),
+            SidebarNavItem::BranchFilter(_) => placeholder_row("").into_any_element(),
+            SidebarNavItem::Branch(index) => self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.branches.get(index))
+                .cloned()
+                .map(|branch| self.branch_row(branch, cx).into_any_element())
+                .unwrap_or_else(|| placeholder_row("").into_any_element()),
+            SidebarNavItem::Remote(index) => self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.remotes.get(index))
+                .cloned()
+                .map(|remote| self.remote_row(remote, cx).into_any_element())
+                .unwrap_or_else(|| placeholder_row("").into_any_element()),
+            SidebarNavItem::Tag(index) => self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.tags.get(index))
+                .cloned()
+                .map(|tag| self.tag_row(tag, cx).into_any_element())
+                .unwrap_or_else(|| placeholder_row("").into_any_element()),
+            SidebarNavItem::Stash(index) => self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.stashes.get(index))
+                .cloned()
+                .map(|stash| self.stash_row(stash, cx).into_any_element())
+                .unwrap_or_else(|| placeholder_row("").into_any_element()),
+            SidebarNavItem::EmptyLocalBranches => {
+                placeholder_row("没有匹配的本地分支").into_any_element()
+            }
+            SidebarNavItem::EmptyRemoteBranches => {
+                placeholder_row("没有匹配的远端分支").into_any_element()
+            }
+            SidebarNavItem::LoadingRemotes => placeholder_row("远端加载中...").into_any_element(),
+            SidebarNavItem::LoadingRemoteBranches => {
+                placeholder_row("远端分支加载中...").into_any_element()
+            }
         };
+        // uniform_list 以第一个 item 测量全表高度，所有导航元素必须共享固定槽位。
         div()
             .flex()
-            .flex_col()
-            .when(expanded, |this| this.flex_1().min_h(px(96.0)))
-            .when(!expanded, |this| this.flex_none())
-            // 设计图：区域间用分割线隔开，不用 border-top
-            // 分割线由 render_sidebar 中的 sidebar_divider() 单独渲染
-            .when(expanded, |this| {
-                let mut this = this;
-                this.style().flex_grow = Some(weight);
-                this
-            })
-            .child(header)
-            .when_some(filter.filter(|_| expanded), |this, filter| {
-                this.child(filter)
-            })
-            .when(expanded, |this| this.child(nav_list(self, id, rows, cx)))
+            .flex_none()
+            .w_full()
+            .h(px(SIDEBAR_NAV_ITEM_HEIGHT))
+            .min_h(px(SIDEBAR_NAV_ITEM_HEIGHT))
+            .child(element)
+            .into_any_element()
     }
 
     fn sidebar_branch_search_input(
@@ -375,13 +457,13 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
+        sidebar_full_width_row()
             .flex_none()
             .px_2()
-            .py_2()
+            .py_1()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::SIDEBAR))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             // 复用统一输入框，确保侧边栏搜索也支持现有 IME、选区和光标逻辑。
             .child(self.input(field, true, window, cx))
     }
@@ -434,8 +516,10 @@ impl RepositoryView {
         } else if active {
             ui_theme::PRIMARY
         } else {
-            ui_theme::SIDEBAR_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         };
+        let on_click = Arc::new(on_click);
+        let on_key_click = Arc::clone(&on_click);
         div()
             .id(id)
             .flex_none()
@@ -445,19 +529,28 @@ impl RepositoryView {
             .items_center()
             .justify_center()
             .bg(rgb(if active {
-                ui_theme::ACCENT
+                ui_theme::STATE_HOVER
             } else {
-                ui_theme::SIDEBAR
+                ui_theme::SURFACE_BASE
             }))
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                    .tab_index(0)
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    on_key_click(this, window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if enabled {
                     on_click(this, window, cx);
+                    cx.stop_propagation();
                     cx.notify();
                 }
             }))
@@ -498,118 +591,214 @@ impl RepositoryView {
 
     fn nav_section_header(
         &self,
-        title: &'static str,
         section: SidebarSection,
-        expanded: bool,
-        action: Option<gpui::AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // 设计图：区域标题 Funnel Sans 风格
-        // fontSize 11, fontWeight 600, letterSpacing 0.5, $--sidebar-foreground 色
-        let is_collapsible = matches!(
-            section,
-            SidebarSection::Remotes
-                | SidebarSection::Tags
-                | SidebarSection::Stashes
-                | SidebarSection::RemoteBranches
-        );
-
+        // 全部分组可折叠；本地分支是唯一默认展开的分组（SidebarSectionState::default）。
+        let (title, is_collapsible) = match section {
+            SidebarSection::LocalBranches => ("本地分支", true),
+            SidebarSection::Remotes => ("远端", true),
+            SidebarSection::RemoteBranches => ("远端分支", true),
+            SidebarSection::Tags => ("标签", true),
+            SidebarSection::Stashes => ("贮藏", true),
+        };
+        let expanded = self.sidebar_sections.is_expanded(section);
+        let enabled = self.repo_path.is_some() && !self.busy;
         let title_el = div()
             .min_w(px(0.0))
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(ui_theme::SIDEBAR_FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
             .truncate()
             .child(title);
+        let action = self.sidebar_section_action(section, enabled, cx);
 
-        // 折叠区域折叠状态：chevron-right + 标题 + action(计数badge/管理药丸)
-        if is_collapsible && !expanded {
-            let chevron = div()
-                .id(format!("sidebar-section-toggle-{title}"))
-                .flex_none()
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.toggle_sidebar_section(section);
-                    cx.notify();
-                }))
-                .child(toolbar_icon(
-                    ToolbarIcon::ChevronRight,
-                    ui_theme::SIDEBAR_FOREGROUND,
-                ))
-                .into_any_element();
+        let toggle = if is_collapsible {
+            let icon = if expanded {
+                toolbar_icon_rotated(ToolbarIcon::ChevronRight, ui_theme::CONTENT_SECONDARY, 90.0)
+                    .into_any_element()
+            } else {
+                toolbar_icon(ToolbarIcon::ChevronRight, ui_theme::CONTENT_SECONDARY)
+                    .into_any_element()
+            };
+            // 使用 Context Navigator 已有的稳定焦点句柄，并在侧边栏容器的键盘路径中
+            // 提供 Enter/Space 以及快捷键；不在 render 期间创建临时 FocusHandle。
+            Some(
+                div()
+                    .id(format!("sidebar-section-toggle-{title}"))
+                    .flex_none()
+                    .child(icon)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
 
-            return div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(16.0))
-                .py(px(8.0))
-                .child(chevron)
-                .child(title_el)
-                .when_some(action, |this, action| this.child(action));
-        }
-
-        // 可折叠区域展开状态：chevron-down + 标题 + 右侧操作按钮
-        if is_collapsible && expanded {
-            let chevron = div()
-                .id(format!("sidebar-section-toggle-{title}"))
-                .flex_none()
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.toggle_sidebar_section(section);
-                    cx.notify();
-                }))
-                .child(toolbar_icon_rotated(
-                    ToolbarIcon::ChevronRight,
-                    ui_theme::SIDEBAR_FOREGROUND,
-                    90.0,
-                ))
-                .into_any_element();
-
-            let actions = div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .when_some(action, |this, action| this.child(action));
-
-            return div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(16.0))
-                .py(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .min_w(px(0.0))
-                        .child(chevron)
-                        .child(title_el),
-                )
-                .child(actions);
-        }
-
-        // 非折叠区域（本地分支）：标题 + 右侧操作按钮（space_between 布局）
-        let actions = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .when_some(action, |this, action| this.child(action));
-
-        div()
+        sidebar_full_width_row()
+            .id(format!("sidebar-section-header-{title}"))
             .flex_none()
             .flex()
             .items_center()
             .justify_between()
+            .gap(px(6.0))
             .px(px(16.0))
             .py(px(8.0))
-            .child(title_el)
-            .child(actions)
+            .when(is_collapsible, |this| {
+                this.cursor_pointer()
+                    .tab_index(0)
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_sidebar_section(section);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.toggle_sidebar_section(section);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_w(px(0.0))
+                    .when_some(toggle, |this, toggle| this.child(toggle))
+                    .child(title_el),
+            )
+            .when_some(action, |this, action| this.child(action))
+    }
+
+    fn sidebar_section_action(
+        &self,
+        section: SidebarSection,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        match section {
+            SidebarSection::LocalBranches => Some(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(self.sidebar_create_branch_button(cx))
+                    .child(self.sidebar_branch_search_button(
+                        section,
+                        self.sidebar_local_branch_search_open,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ),
+            SidebarSection::Remotes => {
+                let enabled = sidebar_remote_manage_enabled(self.repo_path.is_some(), self.busy);
+                let disabled_reason =
+                    sidebar_remote_manage_disabled_reason(self.repo_path.is_some(), self.busy);
+                Some(
+                    div()
+                        .id("sidebar-remote-manage")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded(px(ui_theme::RADIUS_PILL))
+                        .border_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .bg(rgb(ui_theme::SURFACE_BASE))
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(rgb(if enabled {
+                            ui_theme::CONTENT_SECONDARY
+                        } else {
+                            ui_theme::CONTENT_TERTIARY
+                        }))
+                        .when(enabled, |this| {
+                            this.cursor_pointer()
+                                .tab_index(0)
+                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                        })
+                        .when(!enabled, |this| {
+                            this.cursor_not_allowed()
+                                .opacity(0.62)
+                                .tab_index(-1)
+                                .tab_stop(false)
+                        })
+                        .when_some(disabled_reason, |this, reason| {
+                            this.tooltip(move |_window, cx| tooltip_text(reason, cx))
+                        })
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                            if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.open_remote_manager();
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            if enabled {
+                                this.open_remote_manager();
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }))
+                        .child("管理")
+                        .into_any_element(),
+                )
+            }
+            SidebarSection::RemoteBranches => Some(self.sidebar_branch_search_button(
+                section,
+                self.sidebar_remote_branch_search_open,
+                cx,
+            )),
+            SidebarSection::Tags => {
+                let tag_count = self
+                    .snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.tags.len());
+                Some(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .child(self.sidebar_header_icon_button(
+                            SIDEBAR_TAG_CREATE_ID,
+                            ToolbarIcon::Plus,
+                            false,
+                            enabled,
+                            |this, _, _| this.open_tag_form_dialog(None, String::new()),
+                            cx,
+                        ))
+                        .when(tag_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child(tag_count.to_string()),
+                            )
+                        })
+                        .into_any_element(),
+                )
+            }
+            SidebarSection::Stashes => self.snapshot.as_ref().and_then(|snapshot| {
+                let count = snapshot.stashes.len();
+                (count > 0).then(|| {
+                    div()
+                        .flex_none()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child(count.to_string())
+                        .into_any_element()
+                })
+            }),
+        }
     }
 
     fn remote_row(&self, remote: RemoteInfo, cx: &mut Context<Self>) -> impl IntoElement {
@@ -621,11 +810,12 @@ impl RepositoryView {
         let name_color = if selected {
             ui_theme::PRIMARY
         } else {
-            ui_theme::SIDEBAR_ACCENT_FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         };
 
-        div()
+        sidebar_full_width_row()
             .id(format!("remote-{}", remote.name))
+            .relative()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -633,22 +823,25 @@ impl RepositoryView {
             .pl(px(24.0))
             .py(px(4.0))
             .bg(if selected {
-                rgb(ui_theme::SIDEBAR_ACCENT)
+                rgb(ui_theme::PRIMARY_SUBTLE)
             } else {
-                rgb(ui_theme::SIDEBAR)
+                rgb(ui_theme::SURFACE_BASE)
+            })
+            .when(selected, |this| {
+                this.border_l_2().border_color(rgb(ui_theme::PRIMARY))
             })
             .hover(move |this| {
                 if selected {
-                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
+                    this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
                 } else {
-                    this.bg(rgb(ui_theme::ACCENT))
+                    this.bg(rgb(ui_theme::STATE_HOVER))
                 }
             })
             .cursor_pointer()
             // globe icon 14px, $--sidebar-foreground 色
             .child(toolbar_icon(
                 ToolbarIcon::Globe,
-                ui_theme::SIDEBAR_FOREGROUND,
+                ui_theme::CONTENT_SECONDARY,
             ))
             .child(
                 div()
@@ -721,7 +914,7 @@ impl RepositoryView {
         let right_click_name = tag.name.clone();
 
         // 设计图：与分支行一致的样式，$--sidebar-accent-foreground 色
-        div()
+        sidebar_full_width_row()
             .id(format!("tag-{}", tag.name))
             .flex()
             .items_center()
@@ -729,8 +922,8 @@ impl RepositoryView {
             .px(px(16.0))
             .pl(px(24.0))
             .py(px(4.0))
-            .bg(rgb(ui_theme::SIDEBAR))
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .cursor_pointer()
             .child(
                 div()
@@ -738,7 +931,7 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(rgb(ui_theme::SIDEBAR_ACCENT_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .truncate()
                     .child(name),
             )
@@ -768,7 +961,7 @@ impl RepositoryView {
         let label = format!("stash@{{{}}} {}", stash.index, stash.message);
 
         // 设计图：与分支行一致的样式
-        div()
+        sidebar_full_width_row()
             .id(format!("stash-{}", stash.index))
             .flex()
             .items_center()
@@ -776,8 +969,8 @@ impl RepositoryView {
             .px(px(16.0))
             .pl(px(24.0))
             .py(px(4.0))
-            .bg(rgb(ui_theme::SIDEBAR))
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .cursor_pointer()
             .child(
                 div()
@@ -785,7 +978,7 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(rgb(ui_theme::SIDEBAR_ACCENT_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .truncate()
                     .child(label),
             )
@@ -827,11 +1020,11 @@ impl RepositoryView {
         // 非活跃分支：bg 透明, 左侧空 24px, 名称 normal weight $--sidebar-accent-foreground
         // 远端分支：名称 $--muted-foreground
         let row_bg = if is_current {
-            ui_theme::SIDEBAR_ACCENT
+            ui_theme::PRIMARY_SUBTLE
         } else if selected {
-            ui_theme::SIDEBAR_ACCENT
+            ui_theme::PRIMARY_SUBTLE
         } else {
-            ui_theme::SIDEBAR
+            ui_theme::SURFACE_BASE
         };
 
         let leading = if is_current {
@@ -850,9 +1043,9 @@ impl RepositoryView {
 
         // 分支名颜色：选中不再变蓝，仅当前分支用深色加粗
         let name_color = if is_current {
-            ui_theme::SIDEBAR_PRIMARY_FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         } else if is_local {
-            ui_theme::SIDEBAR_ACCENT_FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         } else {
             ui_theme::MUTED_FOREGROUND
         };
@@ -872,7 +1065,7 @@ impl RepositoryView {
             .child(branch.name.clone());
 
         // upstream 改为 hover tooltip，不再内联显示，避免遮挡分支名
-        let row = div()
+        let row = sidebar_full_width_row()
             .id(format!("branch-{}", branch.name))
             .flex()
             .items_center()
@@ -881,11 +1074,14 @@ impl RepositoryView {
             .py(px(2.0))
             .pl(px(22.0))
             .bg(rgb(row_bg))
+            .when(selected, |this| {
+                this.border_l_2().border_color(rgb(ui_theme::PRIMARY))
+            })
             .hover(move |this| {
                 if is_current {
-                    this.bg(rgb(ui_theme::SIDEBAR_ACCENT))
+                    this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
                 } else {
-                    this.bg(rgb(ui_theme::ACCENT))
+                    this.bg(rgb(ui_theme::STATE_HOVER))
                 }
             })
             .cursor_pointer()

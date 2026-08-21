@@ -169,3 +169,28 @@ fn compare_visible_row_count_empty_is_one() {
     // 空列表返回 1，供占位行渲染。
     assert_eq!(compare_visible_row_count(&[], &expanded), 1);
 }
+
+#[test]
+fn compare_tree_render_snapshot_keeps_row_count_and_indices_stable() {
+    let mut files = vec![
+        file("src/lib.rs", ChangeState::Modified),
+        file("README.md", ChangeState::Added),
+    ];
+    let expanded = HashSet::new();
+    let rows_snapshot = std::sync::Arc::new(flatten_compare_files(&files, &expanded));
+    let row_count = rows_snapshot.len().max(1);
+
+    files.clear();
+
+    assert_eq!(row_count, rows_snapshot.len());
+    assert_eq!(rows_snapshot[0].path, "src");
+    assert_eq!(rows_snapshot[1].path, "src/lib.rs");
+    assert_eq!(rows_snapshot[2].path, "README.md");
+}
+
+#[test]
+fn compare_tree_indent_uses_focus_workbench_spacing_scale() {
+    assert_eq!(compare_tree_indent(0), 0.0);
+    assert_eq!(compare_tree_indent(1), ui_theme::SPACE_3);
+    assert_eq!(compare_tree_indent(2), ui_theme::SPACE_3 * 2.0);
+}

@@ -12,6 +12,27 @@ pub(crate) enum OperationBlocker {
     Modal,
 }
 
+/// 操作阻断层的视觉角色：仅该真正 overlay 保留 elevation 阴影。
+/// 与状态机分离，确保视觉迁移不改变 blocker 延迟或操作分类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OperationBlockerOverlayVisual {
+    scrim: u32,
+    surface: u32,
+    border: u32,
+    title: u32,
+    detail: u32,
+}
+
+const fn operation_blocker_overlay_visual() -> OperationBlockerOverlayVisual {
+    OperationBlockerOverlayVisual {
+        scrim: ui_theme::DIALOG_OVERLAY,
+        surface: ui_theme::SURFACE_OVERLAY,
+        border: ui_theme::BORDER_STRONG,
+        title: ui_theme::CONTENT_PRIMARY,
+        detail: ui_theme::CONTENT_SECONDARY,
+    }
+}
+
 impl OperationBlocker {
     pub(crate) fn blocks_interaction(self) -> bool {
         matches!(self, Self::Modal)
@@ -44,6 +65,7 @@ pub(crate) fn wrap_operation_message(message: &str) -> String {
 }
 
 pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) -> Div {
+    let visual = operation_blocker_overlay_visual();
     let message = wrap_operation_message(&message.into());
     let offset = ((phase % 7) as f32 - 2.0) * 42.0;
     div()
@@ -55,7 +77,7 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(ui_theme::DIALOG_OVERLAY))
+        .bg(rgba(visual.scrim))
         .cursor(CursorStyle::Arrow)
         .occlude()
         .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
@@ -68,10 +90,11 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
             div()
                 .w(px(520.0))
                 .p_4()
-                .rounded_sm()
+                .rounded(px(ui_theme::RADIUS_SM))
                 .border_1()
-                .border_color(rgb(ui_theme::BORDER))
-                .bg(rgb(ui_theme::CARD))
+                .border_color(rgb(visual.border))
+                .bg(rgb(visual.surface))
+                // 阴影仅用于覆盖内容与底层工作区分层。
                 .shadow_lg()
                 .flex()
                 .flex_col()
@@ -81,9 +104,9 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
                         .flex()
                         .items_start()
                         .gap_2()
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_TITLE))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(visual.title))
                         .child(
                             div()
                                 .flex_none()
@@ -102,9 +125,9 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(ui_theme::TYPE_BODY))
                         .line_height(px(18.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(visual.detail))
                         .child("请等待当前操作完成，期间不能进行其它操作。"),
                 )
                 .child(

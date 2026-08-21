@@ -119,6 +119,34 @@ fn flatten_browse_tree_nested_expansion() {
 }
 
 #[test]
+fn browse_tree_render_snapshot_keeps_row_count_and_indices_stable() {
+    let mut entries_by_dir = HashMap::new();
+    let (root_key, root_entries) = make_entries(
+        "",
+        &[
+            ("src", BrowseEntryKind::Directory),
+            ("README.md", BrowseEntryKind::File),
+        ],
+    );
+    entries_by_dir.insert(root_key, root_entries);
+    let (src_key, src_entries) = make_entries("src", &[("lib.rs", BrowseEntryKind::File)]);
+    entries_by_dir.insert(src_key, src_entries);
+
+    let mut expanded = HashSet::new();
+    expanded.insert(PathBuf::from("src"));
+    let rows_snapshot = std::sync::Arc::new(flatten_browse_tree(&entries_by_dir, &expanded));
+    let row_count = rows_snapshot.len().max(1);
+
+    entries_by_dir.get_mut(&PathBuf::new()).unwrap().clear();
+    expanded.clear();
+
+    assert_eq!(row_count, rows_snapshot.len());
+    assert_eq!(rows_snapshot[0].entry.path, "src");
+    assert_eq!(rows_snapshot[1].entry.path, "src/lib.rs");
+    assert_eq!(rows_snapshot[2].entry.path, "README.md");
+}
+
+#[test]
 fn flatten_browse_tree_collapsed_not_loaded() {
     let mut entries_by_dir = HashMap::new();
     let (root_key, root_entries) = make_entries("", &[("src", BrowseEntryKind::Directory)]);
@@ -128,4 +156,31 @@ fn flatten_browse_tree_collapsed_not_loaded() {
     let rows = flatten_browse_tree(&entries_by_dir, &HashSet::new());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].entry.name, "src");
+}
+
+#[test]
+fn browse_canvas_mode_label_keeps_compare_content_distinct_from_diff() {
+    assert_eq!(
+        browse_canvas_mode_label(false, BrowseViewMode::Content),
+        "文件内容"
+    );
+    assert_eq!(
+        browse_canvas_mode_label(true, BrowseViewMode::Content),
+        "目标分支全文"
+    );
+    assert_eq!(
+        browse_canvas_mode_label(false, BrowseViewMode::Diff),
+        "与当前分支差异"
+    );
+    assert_eq!(
+        browse_canvas_mode_label(true, BrowseViewMode::Diff),
+        "与当前分支差异"
+    );
+}
+
+#[test]
+fn browse_tree_indent_uses_focus_workbench_spacing_scale() {
+    assert_eq!(browse_tree_indent(0), 0.0);
+    assert_eq!(browse_tree_indent(1), ui_theme::SPACE_3);
+    assert_eq!(browse_tree_indent(3), ui_theme::SPACE_3 * 3.0);
 }

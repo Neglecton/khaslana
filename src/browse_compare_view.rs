@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use gpui::{
     Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, div, prelude::*, px,
@@ -16,11 +17,11 @@ use khaslana::{BrowseCompareFile, ChangeState};
 use crate::ui::theme::rgb;
 use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
-    ui::theme as ui_theme,
-    ui_helpers::{
-        ScrollbarMode, change_state_badge, placeholder_row, scrollable_uniform_frame,
-        section_header,
+    ui::{
+        components::{command_group, empty_state, list_row_surface, page_header},
+        theme as ui_theme,
     },
+    ui_helpers::{ScrollbarMode, change_state_badge, placeholder_row, scrollable_uniform_frame},
 };
 
 /// 分支比较文件树中的一个可见行，目录和文件共用。
@@ -43,6 +44,11 @@ pub(crate) enum CompareTreeRowKind {
         status: ChangeState,
         old_path: Option<String>,
     },
+}
+
+/// 比较树和浏览树共享 Focus Workbench 的紧凑层级节奏。
+pub(crate) const fn compare_tree_indent(depth: usize) -> f32 {
+    ui_theme::SPACE_3 * depth as f32
 }
 
 /// 收集所有差异文件路径涉及的中间目录（git 风格相对路径）。
@@ -99,15 +105,16 @@ pub(crate) fn flatten_compare_files(
 /// `uniform_list` 的行数必须用此值，而不能用差异文件数：展平后每个中间目录都会
 /// 额外占一行，行数通常大于文件数。若误用文件数，深层目录和文件叶子会因超出
 /// 虚拟化列表行数而根本不渲染，表现为文件树“显示不全”。空列表返回 1，供占位行渲染。
+fn visible_row_count_from_snapshot(rows: &[CompareTreeRow]) -> usize {
+    rows.len().max(1)
+}
+
+#[allow(dead_code)]
 pub(crate) fn compare_visible_row_count(
     files: &[BrowseCompareFile],
     expanded: &HashSet<String>,
 ) -> usize {
-    if files.is_empty() {
-        1
-    } else {
-        flatten_compare_files(files, expanded).len().max(1)
-    }
+    visible_row_count_from_snapshot(&flatten_compare_files(files, expanded))
 }
 
 fn flatten_dir(
@@ -229,18 +236,17 @@ impl RepositoryView {
         let file_count = self.browse.compare_files.len();
         let has_target = self.browse.target.is_some();
         let content_present = file_count > 0;
-        // 展开集合：空表示默认全部展开；须与 uniform_list 回调内的计算保持一致，
-        // 否则行数与可见行不匹配会出现空行或截断。
-        let expanded_for_count = if self.browse.compare_expanded.is_empty() {
-            all_compare_dirs(&self.browse.compare_files)
-        } else {
-            self.browse.compare_expanded.clone()
-        };
+        // 同一帧的行数和可见项必须共享快照，避免处理器在滚动期间重复构造目录树。
+        let rows_snapshot = Arc::new(flatten_compare_files(
+            &self.browse.compare_files,
+            &self.browse.compare_expanded,
+        ));
         // 行数用展平后的可见行数（目录节点 + 文件叶子），不能用差异文件数 file_count。
-        let compare_row_count =
-            compare_visible_row_count(&self.browse.compare_files, &expanded_for_count);
+        let compare_row_count = visible_row_count_from_snapshot(&rows_snapshot);
+        let files_present = !self.browse.compare_files.is_empty();
         let handle = self.uniform_scroll_handle("browse-compare-scroll");
         let list_handle = handle.clone();
+        let rows_snapshot_for_processor = Arc::clone(&rows_snapshot);
 
         let content = div()
             .id("browse-compare-list")
@@ -250,39 +256,36 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             // 右侧留出与滚动条（8px 厚 + 2px 边距）等宽的内边距，避免行白框右端被滚动条压住。
-            .pl_2()
-            .py_2()
-            .pr(px(10.0))
-            .bg(rgb(ui_theme::CARD))
+            .pl(px(ui_theme::SPACE_2))
+            .py(px(ui_theme::SPACE_2))
+            .pr(px(ui_theme::SPACE_3))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     "browse-compare-list",
                     compare_row_count,
                     cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                        if this.browse.compare_files.is_empty() {
+                        if !files_present {
                             return range
                                 .map(|_| {
-                                    placeholder_row(if !has_target {
-                                        "正在解析引用..."
-                                    } else if this.browse.compare_loading {
-                                        "正在加载分支差异..."
-                                    } else {
-                                        "该分支与当前分支没有差异"
-                                    })
+                                    empty_state(
+                                        "差异文件",
+                                        if !has_target {
+                                            "正在解析引用..."
+                                        } else if this.browse.compare_loading {
+                                            "正在加载分支差异..."
+                                        } else {
+                                            "该分支与当前分支没有差异"
+                                        },
+                                    )
                                     .into_any_element()
                                 })
                                 .collect::<Vec<_>>();
                         }
-                        // 展开集合：空表示默认全部展开。
-                        let expanded = if this.browse.compare_expanded.is_empty() {
-                            all_compare_dirs(&this.browse.compare_files)
-                        } else {
-                            this.browse.compare_expanded.clone()
-                        };
-                        let rows = flatten_compare_files(&this.browse.compare_files, &expanded);
                         range
-                            .map(move |index| {
-                                rows.get(index)
+                            .map(|index| {
+                                rows_snapshot_for_processor
+                                    .get(index)
                                     .cloned()
                                     .map(|row| {
                                         this.browse_compare_tree_row(row, cx).into_any_element()
@@ -308,44 +311,61 @@ impl RepositoryView {
             .min_w(px(self.browse_tree_width))
             .min_h(px(0.0))
             .h_full()
+            .border_r_1()
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .child(page_header("分支比较", Some("目标分支领先当前分支的变更")))
             .child(
                 div()
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
+                    .gap(px(ui_theme::SPACE_2))
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_2))
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap(px(ui_theme::SPACE_1))
                             .min_w(px(0.0))
                             .child(
                                 div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
                                     .child(format!("比较：{target_display}")),
                             )
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(10.0))
+                                    .text_size(px(ui_theme::TYPE_META))
                                     .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),
                     )
-                    .child(self.button("关闭", !self.busy, |this, _, _| this.close_browse(), cx)),
+                    .child(command_group().child(self.button(
+                        "关闭",
+                        !self.busy,
+                        |this, _, _| this.close_browse(),
+                        cx,
+                    ))),
             )
-            .child(section_header(format!("差异文件 · {file_count}")))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_2))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child(format!("差异文件 · {file_count}")),
+            )
             .child(scrollable_uniform_frame(
                 "browse-compare-scroll",
                 ScrollbarMode::Vertical,
@@ -362,30 +382,25 @@ impl RepositoryView {
         row: CompareTreeRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let indent = px(12.0 * row.depth as f32);
+        let indent = px(compare_tree_indent(row.depth));
         let path_for_click = row.path.clone();
 
         match row.kind {
             CompareTreeRowKind::Directory { expanded } => {
                 let caret = if expanded { "▼" } else { "▶" };
                 let icon = if expanded { "📂" } else { "📁" };
-                div()
-                    .id(format!("browse-compare-dir:{}", row.path))
+                list_row_surface(format!("browse-compare-dir:{}", row.path), false)
                     .flex()
                     .flex_none()
                     .w_full()
                     .min_w(px(0.0))
                     .items_center()
-                    .gap_1()
+                    .gap(px(ui_theme::SPACE_1))
                     .h(px(CHANGE_ROW_HEIGHT))
                     .pl(indent)
-                    .pr(px(8.0))
-                    .py_1()
-                    .rounded_sm()
+                    .pr(px(ui_theme::SPACE_2))
                     .cursor_pointer()
                     .overflow_hidden()
-                    .bg(rgb(ui_theme::CARD))
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
@@ -397,8 +412,8 @@ impl RepositoryView {
                         div()
                             .flex_none()
                             .w(px(14.0))
-                            .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_META))
+                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                             .child(caret),
                     )
                     .child(
@@ -412,8 +427,8 @@ impl RepositoryView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .truncate()
                             .child(row.name),
                     )
@@ -434,31 +449,16 @@ impl RepositoryView {
                     status,
                 };
 
-                div()
-                    .id(format!("browse-compare-file:{}", row.path))
+                list_row_surface(format!("browse-compare-file:{}", row.path), selected)
                     .flex()
                     .flex_none()
                     .w_full()
                     .min_w(px(0.0))
                     .items_center()
-                    .gap_2()
+                    .gap(px(ui_theme::SPACE_2))
                     .h(px(CHANGE_ROW_HEIGHT))
                     .pl(indent)
-                    .pr(px(8.0))
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(if selected {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
-                    })
-                    .bg(if selected {
-                        rgb(ui_theme::ACCENT)
-                    } else {
-                        rgb(ui_theme::CARD)
-                    })
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .pr(px(ui_theme::SPACE_2))
                     .cursor_pointer()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -479,8 +479,8 @@ impl RepositoryView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .truncate()
                             .child(display),
                     )

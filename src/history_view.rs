@@ -6,24 +6,58 @@ use gpui::{
 use khaslana::{CommitFileChange, CommitInfo, CommitRefInfo, CommitRefKind};
 
 use crate::{
-    CHANGE_ROW_HEIGHT, DiffHeaderTarget, EncodingMenuTarget, RepositoryView, ResizeTarget,
-    ScrollbarMode, author_avatar, change_state_badge, column_splitter_accepts_mouse_events,
-    column_splitter_should_clear_resize, commit_time_label, history_scope_button, placeholder_row,
-    scrollable_frame_when, scrollable_uniform_frame, section_header, section_header_action,
+    CHANGE_ROW_HEIGHT, DEFAULT_HISTORY_DETAILS_HEIGHT, DiffHeaderTarget, EncodingMenuTarget,
+    RepositoryView, ResizeTarget, ScrollbarMode, author_avatar, change_state_badge,
+    column_splitter_accepts_mouse_events, column_splitter_should_clear_resize, commit_time_label,
+    history_scope_button, placeholder_row, scrollable_frame_when, scrollable_uniform_frame,
+    section_header, section_header_action,
     ui::{
-        components::{metric_badge, tooltip_text},
+        components::{list_row_surface, metric_badge, tooltip_text},
         theme as ui_theme,
     },
 };
 
-// 提交记录图形单元覆盖完整行高，保证相邻行的轨道连续；列宽由 history_graph_width 状态提供，可拖拽调整。
-const HISTORY_GRAPH_ROW_HEIGHT: f32 = 36.0;
+// History 提交项含摘要/ref 与作者/avatar 两层信息，使用专用 48px 行高；
+// 图形单元覆盖完整行高，保证相邻行轨道连续，列宽仍由 history_graph_width 状态提供。
+const HISTORY_COMMIT_ROW_HEIGHT: f32 = 48.0;
 // 提交行只直接展示少量引用，剩余引用通过 +n 的悬浮提示查看，避免挤压提交摘要。
 const MAX_COMMIT_REF_LABELS: usize = 3;
 const GRAPH_LANE_START: f32 = 12.0;
 const GRAPH_LANE_SPACING: f32 = 14.0;
 // 图形列右侧的拖拽分割条宽度，行内流式排布，自动与图形列对齐。
 const GRAPH_SPLITTER_WIDTH: f32 = 6.0;
+// 检查器下部的文件导航保持窄而稳定，差异视图始终取得剩余空间。
+const HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT: f32 = 32.0;
+
+/// History Inspector 的纯布局策略。提交导航与检查器内「提交文件 | 差异」分栏
+/// 均为可拖拽宽度（分别由 `HistoryFiles` / `HistoryInspectorFiles` 分割条驱动）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HistoryInspectorLayout {
+    navigator_width: f32,
+    details_height: f32,
+    file_list_width: f32,
+}
+
+fn history_inspector_layout(
+    navigator_width: f32,
+    inspector_files_width: f32,
+    details_height: Option<f32>,
+    details_collapsed: bool,
+) -> HistoryInspectorLayout {
+    HistoryInspectorLayout {
+        navigator_width,
+        details_height: if details_collapsed {
+            HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT
+        } else {
+            details_height.unwrap_or(DEFAULT_HISTORY_DETAILS_HEIGHT)
+        },
+        file_list_width: inspector_files_width.clamp(
+            crate::MIN_HISTORY_INSPECTOR_FILES_WIDTH,
+            crate::MAX_HISTORY_INSPECTOR_FILES_WIDTH,
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CommitGraphRow {
     lane: usize,
@@ -34,60 +68,71 @@ pub(crate) struct CommitGraphRow {
 
 impl RepositoryView {
     pub(crate) fn render_history_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_selection = self.history_selected_commit.is_some();
+        let layout = history_inspector_layout(
+            self.history_files_width,
+            self.history_inspector_files_width,
+            self.history_details_height,
+            self.history_details_collapsed,
+        );
+
+        // Focus Workbench 的 History Inspector：提交导航全高固定在左，右侧检查器
+        // 将提交概览与文件/差异拆成稳定的两层，避免原先上下三区互相挤压。
         div()
             .flex()
-            .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
             .bg(rgb(ui_theme::CARD))
-            .child(self.render_commit_history(cx))
-            .child(self.render_column_splitter(ResizeTarget::HistoryTop, cx))
+            .child(self.render_commit_history(layout.navigator_width, cx))
+            .child(self.render_column_splitter(ResizeTarget::HistoryFiles, cx))
             .child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
                     .min_h(px(0.0))
-                    // 左列（与提交文件列表同宽）：上半为提交详情（默认与文件列表
-                    // 对半分，可拖拽改绝对高度），下半为文件列表；无选中提交时
-                    // 详情区整体不渲染，左列仅剩文件列表。
+                    // 透明标记记录检查器顶端；保留 HistoryDetails 的默认对半分
+                    // 推导和现有拖拽状态模型，不改异步或选择状态。
+                    .child({
+                        let top_hint = self.history_details_top_hint.clone();
+                        gpui::canvas(
+                            |_, _, _| (),
+                            move |bounds, _, _, _| {
+                                top_hint.set(f32::from(bounds.origin.y));
+                            },
+                        )
+                        .w_full()
+                        .h(px(1.0))
+                    })
+                    .child(self.render_commit_details(layout.details_height, cx))
+                    .when(!self.history_details_collapsed, |this| {
+                        this.child(self.render_column_splitter(ResizeTarget::HistoryDetails, cx))
+                    })
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .flex_none()
-                            .w(px(self.history_files_width))
-                            .min_w(px(self.history_files_width))
+                            .flex_1()
+                            .min_w(px(0.0))
                             .min_h(px(0.0))
-                            // 1px 透明标记：每帧记录左列顶部窗口坐标，供对半分
-                            // 模式下拖拽起始时推导详情区实际高度（见
-                            // start_resize_column）。
-                            .child({
-                                let top_hint = self.history_details_top_hint.clone();
-                                gpui::canvas(
-                                    |_, _, _| (),
-                                    move |bounds, _, _, _| {
-                                        top_hint.set(f32::from(bounds.origin.y));
-                                    },
-                                )
-                                .w_full()
-                                .h(px(1.0))
-                            })
-                            .when(has_selection, |this| {
-                                this.child(self.render_commit_details(cx)).child(
-                                    self.render_column_splitter(ResizeTarget::HistoryDetails, cx),
-                                )
-                            })
-                            .child(self.render_commit_files(cx)),
-                    )
-                    .child(self.render_column_splitter(ResizeTarget::HistoryFiles, cx))
-                    .child(self.render_history_diff(cx)),
+                            .child(self.render_commit_files(layout.file_list_width, cx))
+                            // 检查器内「提交文件 | 差异」分栏同样可拖拽（双击复位默认窄栏）。
+                            .child(
+                                self.render_column_splitter(
+                                    ResizeTarget::HistoryInspectorFiles,
+                                    cx,
+                                ),
+                            )
+                            .child(self.render_history_diff(cx)),
+                    ),
             )
     }
 
-    fn render_commit_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commit_history(
+        &self,
+        navigator_width: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let row_count = if self.history_commits.is_empty() {
             1
         } else if self.history_refreshing {
@@ -140,7 +185,7 @@ impl RepositoryView {
                                         .flex_none()
                                         .w_full()
                                         .min_w(px(0.0))
-                                        .h(px(HISTORY_GRAPH_ROW_HEIGHT))
+                                        .h(px(HISTORY_COMMIT_ROW_HEIGHT))
                                         .items_center()
                                         .py_1()
                                         .child(this.button(
@@ -181,10 +226,10 @@ impl RepositoryView {
             .flex()
             .flex_col()
             .flex_none()
-            .min_w(px(0.0))
-            .h(px(self.history_top_height))
-            .min_h(px(180.0))
-            .w_full()
+            .w(px(navigator_width))
+            .min_w(px(navigator_width))
+            .h_full()
+            .min_h(px(0.0))
             .child(section_header_action(
                 format!("提交记录（{}）", self.history_scope.label()),
                 Some(
@@ -375,9 +420,9 @@ impl RepositoryView {
             .as_ref()
             .is_some_and(|status| status.unpushed_oids.iter().any(|oid| oid == &commit.oid));
 
-        div()
-            .id(format!("commit-{row_short_oid}"))
-            .relative()
+        // 提交导航使用统一的平面列表面：选中态由淡主色背景与 2px 指示条表达，
+        // 不再为每一行绘制卡片边框。
+        list_row_surface(format!("commit-{row_short_oid}"), selected)
             .flex()
             .flex_none()
             .w_full()
@@ -385,25 +430,8 @@ impl RepositoryView {
             .items_center()
             .gap_1()
             .pr_2()
-            .h(px(HISTORY_GRAPH_ROW_HEIGHT))
-            .rounded_sm()
+            .h(px(HISTORY_COMMIT_ROW_HEIGHT))
             .cursor_pointer()
-            .bg(if selected {
-                rgb(ui_theme::ACCENT)
-            } else if unpushed {
-                rgb(ui_theme::COLOR_WARNING)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else if unpushed {
-                rgb(ui_theme::COLOR_WARNING)
-            } else {
-                rgb(ui_theme::BORDER)
-            })
-            .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .when(unpushed, |this| {
                 this.child(
                     div()
@@ -414,7 +442,7 @@ impl RepositoryView {
                         .flex_none()
                         .w(px(3.0))
                         .rounded_sm()
-                        .bg(rgb(ui_theme::COLOR_WARNING)),
+                        .bg(rgb(ui_theme::FEEDBACK_WARNING_BORDER)),
                 )
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -441,111 +469,99 @@ impl RepositoryView {
                 this.child(render_commit_graph_cell(graph, self.history_graph_width))
                     .child(self.render_history_graph_splitter(cx))
             })
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(68.0))
-                    .px_1()
-                    .py(px(2.0))
-                    .rounded_sm()
-                    .bg(rgb(ui_theme::ACCENT))
-                    .font_family("Consolas, monospace")
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::PRIMARY))
-                    .text_align(gpui::TextAlign::Center)
-                    .child(row_short_oid.clone()),
-            )
+            // 主信息优先放在第一行；作者、时间与短 SHA 降为第二行。48px 专用行高
+            // 为头像与 ref 徽标保留完整边界，同时保持窄导航栏中的信息层级。
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
+                    .gap(px(1.0))
                     .child(
                         div()
-                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(if selected {
-                                rgb(ui_theme::FOREGROUND)
-                            } else {
-                                rgb(ui_theme::FOREGROUND)
-                            })
-                            .truncate()
-                            .child(commit.summary),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .truncate()
+                                    .child(commit.summary),
+                            )
+                            .children(ref_labels)
+                            .when(hidden_ref_count > 0, |this| {
+                                this.child(commit_ref_overflow_label(&row_short_oid, hidden_refs))
+                            }),
                     )
-                    .children(ref_labels)
-                    .when(hidden_ref_count > 0, |this| {
-                        this.child(commit_ref_overflow_label(&row_short_oid, hidden_refs))
-                    })
-                    .when(unpushed, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .px_1()
-                                .py(px(1.0))
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(ui_theme::COLOR_WARNING))
-                                .bg(rgb(ui_theme::COLOR_WARNING))
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
-                                .child("未推送"),
-                        )
-                    }),
-            )
-            .child(author_avatar(&author))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(100.0))
-                    .text_size(px(11.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    })
-                    .truncate()
-                    .child(author),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(128.0))
-                    .text_size(px(11.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    })
-                    .child(time),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(16.0))
-                    .text_color(if selected {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
-                    })
-                    .child(">"),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .min_w(px(0.0))
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(author_avatar(&author))
+                            .child(div().max_w(px(76.0)).truncate().child(author))
+                            .child(div().flex_none().child(time))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family("Consolas, monospace")
+                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .child(row_short_oid.clone()),
+                            )
+                            .when(unpushed, |this| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(rgb(ui_theme::FEEDBACK_WARNING_BG))
+                                        .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
+                                        .child("未推送"),
+                                )
+                            }),
+                    ),
             )
     }
 
-    /// 提交详情区（历史页左列上半部）：展示选中提交的完整提交信息、
-    /// 作者/提交者、时间、完整 SHA 与父提交关系；可折叠，高度可拖拽。
-    fn render_commit_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 检查器顶部的提交概览与详情。完整信息留在可滚动区域，保证文件和差异始终可见。
+    fn render_commit_details(
+        &self,
+        details_height: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(commit) = self
             .history_selected_commit
             .as_deref()
             .and_then(|oid| self.history_commits.iter().find(|info| info.oid == oid))
             .cloned()
         else {
-            return section_header("提交详情").into_any_element();
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(details_height))
+                .min_h(px(HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT))
+                .child(section_header("提交详情"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child("选择一个提交以检查详情、文件与差异"),
+                )
+                .into_any_element();
         };
 
         let collapsed = self.history_details_collapsed;
@@ -575,6 +591,7 @@ impl RepositoryView {
                 .flex()
                 .flex_col()
                 .flex_none()
+                .h(px(details_height))
                 .child(header)
                 .into_any_element();
         }
@@ -690,29 +707,24 @@ impl RepositoryView {
             cx,
         );
 
-        match self.history_details_height {
-            // 手动拖拽过的绝对高度。
-            Some(height) => div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .h(px(height))
-                .child(header)
-                .child(content)
-                .into_any_element(),
-            // 默认：与文件列表上下对半分（双方各占 flex_1）。
-            None => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .child(header)
-                .child(content)
-                .into_any_element(),
-        }
+        // 保留 HistoryDetails 的既有绝对高度/双击复位语义；默认高度由 Inspector
+        // 策略提供，避免右侧详情区随窗口无限扩张。
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h(px(details_height))
+            .min_h(px(HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT))
+            .child(header)
+            .child(content)
+            .into_any_element()
     }
 
-    fn render_commit_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commit_files(
+        &self,
+        file_list_width: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let row_count = self.history_files.len().max(1);
         let content_present = !self.history_files.is_empty();
         let handle = self.uniform_scroll_handle("commit-file-list");
@@ -763,10 +775,12 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            // 位于左列 flex_col 中（上方为提交详情区）：占余高；宽度由父容器约束。
-            .flex_1()
-            .min_w(px(0.0))
+            .flex_none()
+            .w(px(file_list_width))
+            .min_w(px(file_list_width))
             .min_h(px(0.0))
+            .border_r_1()
+            .border_color(rgb(ui_theme::BORDER))
             .child(section_header("提交文件"))
             .child(scrollable_uniform_frame(
                 "commit-file-list",
@@ -800,19 +814,13 @@ impl RepositoryView {
             .h(px(CHANGE_ROW_HEIGHT))
             .px_2()
             .py_1()
-            .rounded_sm()
             .cursor_pointer()
             .overflow_hidden()
+            // 文件导航采用平面选中态，不再为每行绘制卡片边框。
             .bg(if selected {
                 rgb(ui_theme::ACCENT)
             } else {
                 rgb(ui_theme::CARD)
-            })
-            .border_1()
-            .border_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::BORDER)
             })
             .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -991,7 +999,7 @@ fn render_commit_graph_cell(graph: CommitGraphRow, width: f32) -> impl IntoEleme
                 move |bounds, graph, window, _cx| {
                     let top_y = bounds.origin.y;
                     let bottom_y = bounds.origin.y + bounds.size.height;
-                    let center_y = bounds.origin.y + px(HISTORY_GRAPH_ROW_HEIGHT / 2.0);
+                    let center_y = bounds.origin.y + bounds.size.height / 2.0;
                     let current_lane = graph.lane.min(visible_max);
                     let current_x = bounds.origin.x + px(graph_x(current_lane));
 
@@ -1047,8 +1055,11 @@ fn render_commit_graph_cell(graph: CommitGraphRow, width: f32) -> impl IntoEleme
             this.child(
                 div()
                     .absolute()
+                    .top(px(0.0))
                     .right(px(4.0))
-                    .top(px(15.0))
+                    .bottom(px(0.0))
+                    .flex()
+                    .items_center()
                     .text_size(px(10.0))
                     .font_family("Consolas, monospace")
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
@@ -1310,125 +1321,5 @@ fn commit_ref_kind_label(kind: &CommitRefKind) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_commit(oid: &str, parents: &[&str]) -> CommitInfo {
-        CommitInfo {
-            oid: oid.to_string(),
-            short_oid: oid.to_string(),
-            summary: oid.to_string(),
-            message: oid.to_string(),
-            author: "测试作者".to_string(),
-            author_email: Some("test@example.invalid".to_string()),
-            committer: "测试作者".to_string(),
-            committer_email: Some("test@example.invalid".to_string()),
-            time: 0,
-            parents: parents.iter().map(|parent| (*parent).to_string()).collect(),
-            refs: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn unmerged_branch_tips_do_not_connect_from_top() {
-        let commits = vec![
-            test_commit("feature-tip", &["base"]),
-            test_commit("main-tip", &["base"]),
-            test_commit("base", &[]),
-        ];
-
-        let rows = commit_graph_rows(&commits);
-
-        assert!(!rows[0].connected_from_top);
-        assert!(!rows[1].connected_from_top);
-        assert!(rows[2].connected_from_top);
-    }
-
-    // 分叉的两个分支 tip 汇合到同一父提交时，后到的 tip 并入父提交已有泳道，
-    // 自身泳道释放——否则父提交行之后会残留幽灵竖线贯穿到列表末尾。
-    #[test]
-    fn fork_rejoining_parent_releases_lane() {
-        let commits = vec![
-            test_commit("main-tip", &["base"]),
-            test_commit("feature-tip", &["base"]),
-            test_commit("base", &["root"]),
-            test_commit("root", &[]),
-        ];
-
-        let rows = commit_graph_rows(&commits);
-
-        // feature-tip 行并入 base 所在泳道 0，自身泳道在行内仍可见（画圆点）。
-        assert!(rows[1].lanes.contains(&1));
-        assert_eq!(rows[1].connectors, vec![0]);
-        // base 行及之后：幽灵泳道不应残留。
-        assert_eq!(rows[2].lanes, vec![0]);
-        assert_eq!(rows[3].lanes, vec![0]);
-    }
-
-    // 合并提交的第二父提交尚未分页加载时，其泳道不应被剪掉：引入行画斜线但不画悬空顶部竖线，
-    // 下一行该泳道作为贯穿竖线接续，保证线条连续。
-    #[test]
-    fn unloaded_parent_lane_stays_continuous() {
-        let commits = vec![
-            test_commit("merge", &["base", "missing"]),
-            test_commit("base", &[]),
-        ];
-
-        let rows = commit_graph_rows(&commits);
-
-        assert!(rows[0].connectors.contains(&1));
-        assert!(!rows[0].lanes.contains(&1));
-        assert!(rows[1].lanes.contains(&1));
-    }
-
-    // 可见泳道上限随列宽增长，过窄时回退到 0。
-    #[test]
-    fn graph_max_lane_scales_with_width() {
-        assert_eq!(graph_max_lane(20.0), 0);
-        assert_eq!(graph_max_lane(64.0), 3);
-        assert_eq!(graph_max_lane(96.0), 5);
-        assert_eq!(graph_max_lane(480.0), 32);
-    }
-
-    // 提交者与作者相同时不产生展示文本（避免详情区噪音）。
-    #[test]
-    fn committer_note_only_when_differs_from_author() {
-        let mut commit = test_commit("abcd1234", &[]);
-        commit.committer = "测试作者".to_string();
-        assert_eq!(committer_note(&commit), None);
-
-        commit.committer = "变基机器人".to_string();
-        commit.committer_email = Some("bot@example.invalid".to_string());
-        assert_eq!(
-            committer_note(&commit),
-            Some("变基机器人 <bot@example.invalid>".to_string())
-        );
-    }
-
-    #[test]
-    fn parents_note_covers_root_merge_and_octopus() {
-        assert_eq!(parents_note(&[]), "根提交（无父提交）");
-        assert_eq!(
-            parents_note(&["aaaabbbbccccddddeeeeffff00001111".to_string()]),
-            "父提交 aaaabbbb"
-        );
-        assert_eq!(
-            parents_note(&[
-                "aaaabbbbccccddddeeeeffff00001111".to_string(),
-                "11112222333344445555666677778888".to_string()
-            ]),
-            "父提交 aaaabbbb / 11112222（合并提交）"
-        );
-        let octopus = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(parents_note(&octopus), "父提交 3 个（章鱼合并）");
-    }
-
-    #[test]
-    fn author_label_includes_email_when_present() {
-        let mut commit = test_commit("abcd1234", &[]);
-        assert_eq!(author_label(&commit), "测试作者 <test@example.invalid>");
-
-        commit.author_email = None;
-        assert_eq!(author_label(&commit), "测试作者");
-    }
-}
+#[path = "tests/history_view.rs"]
+mod tests;

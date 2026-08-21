@@ -1,5 +1,19 @@
 use super::*;
-use khaslana::{ConflictBlockStatus, ConflictDraftStatus};
+use khaslana::{ConflictBlockResolution, ConflictBlockStatus, ConflictDraftStatus};
+
+#[test]
+fn conflict_workbench_uses_flat_semantic_surface_roles() {
+    assert_eq!(
+        conflict_workbench_surfaces(),
+        ConflictWorkbenchSurfaces {
+            canvas: ui_theme::SURFACE_CANVAS,
+            rail: ui_theme::RAIL_SURFACE,
+            header: ui_theme::TITLEBAR_SURFACE,
+            content: ui_theme::SURFACE_BASE,
+            border: ui_theme::BORDER_MUTED,
+        }
+    );
+}
 
 #[test]
 fn conflict_paths_follow_snapshot_conflict_order() {
@@ -125,21 +139,64 @@ fn conflict_line_colors_merged_uses_success_highlight_in_result_pane() {
     // 结果区：选中绿色高亮（区别于未处理的黄色），非选中恢复普通行。
     assert_eq!(
         conflict_line_colors(ConflictDocumentPane::Result, &block, true),
-        (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
+        (
+            ui_theme::FEEDBACK_SUCCESS_BG,
+            ui_theme::FEEDBACK_SUCCESS_TEXT
+        )
     );
     assert_eq!(
         conflict_line_colors(ConflictDocumentPane::Result, &block, false),
-        (ui_theme::CARD, ui_theme::FOREGROUND)
+        (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
     );
     // 两侧栏与 Resolved 分支一致：非选中普通行、选中红色提示。
     assert_eq!(
         conflict_line_colors(ConflictDocumentPane::Ours, &block, false),
-        (ui_theme::CARD, ui_theme::FOREGROUND)
+        (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
     );
     assert_eq!(
         conflict_line_colors(ConflictDocumentPane::Theirs, &block, true),
-        (ui_theme::COLOR_ERROR, ui_theme::COLOR_WARNING_FOREGROUND)
+        (ui_theme::FEEDBACK_ERROR_BG, ui_theme::FEEDBACK_ERROR_TEXT)
     );
+}
+
+#[test]
+fn conflict_error_background_always_uses_error_text_in_active_side_panes() {
+    for status in [
+        ConflictBlockStatus::Unresolved,
+        ConflictBlockStatus::Resolved(ConflictBlockResolution::Ours),
+        ConflictBlockStatus::Merged,
+    ] {
+        let block = ConflictBlock {
+            base: None,
+            ours: "ours\n".into(),
+            theirs: "theirs\n".into(),
+            start: 0,
+            end: 5,
+            ours_start: 0,
+            ours_end: 5,
+            theirs_start: 0,
+            theirs_end: 6,
+            status,
+            has_manual_edits: false,
+        };
+        for pane in [ConflictDocumentPane::Ours, ConflictDocumentPane::Theirs] {
+            assert_eq!(
+                conflict_line_colors(pane, &block, true),
+                (ui_theme::FEEDBACK_ERROR_BG, ui_theme::FEEDBACK_ERROR_TEXT),
+                "active side pane must pair error background with error text for {status:?}"
+            );
+            let inactive_colors = if matches!(status, ConflictBlockStatus::Unresolved) {
+                (ui_theme::FEEDBACK_WARNING_BG, ui_theme::CONTENT_PRIMARY)
+            } else {
+                (ui_theme::SURFACE_BASE, ui_theme::CONTENT_PRIMARY)
+            };
+            assert_eq!(
+                conflict_line_colors(pane, &block, false),
+                inactive_colors,
+                "inactive side pane must preserve its existing neutral/warning treatment for {status:?}"
+            );
+        }
+    }
 }
 
 #[test]

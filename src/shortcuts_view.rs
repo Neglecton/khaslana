@@ -4,7 +4,7 @@ use std::ops::DerefMut;
 
 use gpui::{Context, IntoElement, KeyDownEvent, div, prelude::*, px};
 
-use crate::ui::theme::rgb;
+use crate::ui::{components::tooltip_text, theme::rgb};
 use crate::{RepositoryView, ShortcutAction, ui::theme as ui_theme};
 
 /// 把 GPUI keystroke 字符串格式化为用户可读的显示文本。
@@ -70,6 +70,23 @@ pub(crate) fn keystroke_to_string(event: &KeyDownEvent) -> String {
     parts.join("-")
 }
 
+fn shortcut_row_is_recording(recording: Option<ShortcutAction>, action: ShortcutAction) -> bool {
+    recording == Some(action)
+}
+
+/// 快捷键设置按钮只在录制期间禁用“恢复默认”，避免录入中的状态被旁路修改。
+fn shortcut_reset_enabled(recording: Option<ShortcutAction>) -> bool {
+    recording.is_none()
+}
+
+fn shortcut_button_key_activates(key: &str) -> bool {
+    matches!(key, "enter" | "space")
+}
+
+fn shortcut_reset_disabled_reason(recording: Option<ShortcutAction>) -> Option<&'static str> {
+    (!shortcut_reset_enabled(recording)).then_some("请先结束快捷键录制")
+}
+
 impl RepositoryView {
     /// 快捷键设置页 body。
     pub(crate) fn render_shortcuts_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -78,35 +95,58 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            // 说明文字
+            .gap_4()
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("点击「重新绑定」后按下组合键录入；按 Esc 取消录制。点「恢复默认」复位单条快捷键。"),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("应用快捷键"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("点击「重新绑定」后按下组合键录入；按 Esc 取消录制。点「恢复默认」复位单条快捷键。"),
+                    ),
             )
-            // 动作列表
-            .children(ShortcutAction::ALL.iter().map(|action| {
-                let action_val = *action;
-                let is_recording = recording == Some(action_val);
-                let keystroke = action_val.keystroke(&self.shortcut_bindings).to_string();
-                let display = format_keystroke(&keystroke);
-                let is_default = action_val.default_keystroke() == keystroke.as_str();
-
+            // 动作列表以轻量分隔组织，避免每条快捷键形成独立卡片。
+            .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .py(px(4.0))
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .children(ShortcutAction::ALL.iter().map(|action| {
+                        let action_val = *action;
+                        let is_recording = shortcut_row_is_recording(recording, action_val);
+                        let keystroke = action_val.keystroke(&self.shortcut_bindings).to_string();
+                        let display = format_keystroke(&keystroke);
+                        let is_default = action_val.default_keystroke() == keystroke.as_str();
+                        let reset_enabled = shortcut_reset_enabled(recording);
+                        let reset_disabled_reason = shortcut_reset_disabled_reason(recording);
+
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
+                            .when(is_recording, |this| this.bg(rgb(ui_theme::STATE_SELECTION)))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(action_val.label()),
                     )
                     .child(
@@ -116,9 +156,9 @@ impl RepositoryView {
                             .text_size(px(11.0))
                             .font_family("Consolas, monospace")
                             .text_color(rgb(if is_recording {
-                                ui_theme::FOREGROUND
+                                ui_theme::CONTENT_PRIMARY
                             } else {
-                                ui_theme::MUTED_FOREGROUND
+                                ui_theme::CONTENT_SECONDARY
                             }))
                             .text_align(gpui::TextAlign::Center)
                             .child(if is_recording {
@@ -143,13 +183,36 @@ impl RepositoryView {
                                     .px_3()
                                     .py_1()
                                     .border_1()
-                                    .border_color(rgb(ui_theme::BORDER))
+                                    .border_color(rgb(ui_theme::BORDER_MUTED))
                                     .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::ACCENT))
+                                    .bg(rgb(ui_theme::SURFACE_RAISED))
                                     .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .tab_index(0)
+                                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                                        if shortcut_button_key_activates(event.keystroke.key.as_str()) {
+                                            if this.recording_shortcut == Some(action_val) {
+                                                this.recording_shortcut = None;
+                                                crate::register_all_key_bindings(
+                                                    &mut cx.deref_mut(),
+                                                    &this.shortcut_bindings,
+                                                    false,
+                                                );
+                                            } else {
+                                                this.recording_shortcut = Some(action_val);
+                                                window.focus(&this.settings_center_focus);
+                                                crate::register_all_key_bindings(
+                                                    &mut cx.deref_mut(),
+                                                    &this.shortcut_bindings,
+                                                    true,
+                                                );
+                                            }
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    }))
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         if this.recording_shortcut == Some(action_val) {
                                             // 取消录制，恢复正常绑定。
@@ -185,75 +248,69 @@ impl RepositoryView {
                                         .px_3()
                                         .py_1()
                                         .border_1()
-                                        .border_color(rgb(ui_theme::BORDER))
+                                        .border_color(rgb(ui_theme::BORDER_MUTED))
                                         .rounded(px(ui_theme::RADIUS_XS))
-                                        .bg(rgb(ui_theme::ACCENT))
+                                        .bg(rgb(ui_theme::SURFACE_RAISED))
                                         .text_size(px(12.0))
-                                        .text_color(rgb(ui_theme::FOREGROUND))
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                        .text_color(rgb(if reset_enabled {
+                                            ui_theme::CONTENT_PRIMARY
+                                        } else {
+                                            ui_theme::CONTENT_TERTIARY
+                                        }))
+                                        .when(reset_enabled, |this| {
+                                            this.cursor_pointer()
+                                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                                        })
+                                        .when(!reset_enabled, |this| {
+                                            this.cursor_not_allowed().opacity(0.62)
+                                        })
+                                        .tab_index(if reset_enabled { 0 } else { -1 })
+                                        .tab_stop(reset_enabled)
+                                        .when_some(reset_disabled_reason, |this, reason| {
+                                            this.tooltip(move |_window, cx| tooltip_text(reason, cx))
+                                        })
+                                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                                            if reset_enabled
+                                                && shortcut_button_key_activates(event.keystroke.key.as_str())
+                                            {
+                                                this.shortcut_bindings.bindings.insert(
+                                                    action_val.action_id().to_string(),
+                                                    action_val.default_keystroke().to_string(),
+                                                );
+                                                this.save_shortcut_bindings();
+                                                crate::register_all_key_bindings(
+                                                    &mut cx.deref_mut(),
+                                                    &this.shortcut_bindings,
+                                                    false,
+                                                );
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            }
+                                        }))
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.shortcut_bindings.bindings.insert(
-                                                action_val.action_id().to_string(),
-                                                action_val.default_keystroke().to_string(),
-                                            );
-                                            this.save_shortcut_bindings();
-                                            crate::register_all_key_bindings(
-                                                &mut cx.deref_mut(),
-                                                &this.shortcut_bindings,
-                                                false,
-                                            );
-                                            cx.notify();
+                                            if reset_enabled {
+                                                this.shortcut_bindings.bindings.insert(
+                                                    action_val.action_id().to_string(),
+                                                    action_val.default_keystroke().to_string(),
+                                                );
+                                                this.save_shortcut_bindings();
+                                                crate::register_all_key_bindings(
+                                                    &mut cx.deref_mut(),
+                                                    &this.shortcut_bindings,
+                                                    false,
+                                                );
+                                                cx.notify();
+                                            }
                                         }))
                                         .child("恢复默认"),
                                 )
                             }),
                     )
-                    .into_any_element()
-            }))
+                            .into_any_element()
+                    })))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_keystroke_ctrl_shift_combo() {
-        assert_eq!(format_keystroke("ctrl-shift-f"), "Ctrl+Shift+F");
-        assert_eq!(format_keystroke("ctrl-shift-l"), "Ctrl+Shift+L");
-    }
-
-    #[test]
-    fn format_keystroke_single_key() {
-        assert_eq!(format_keystroke("f5"), "F5");
-    }
-
-    #[test]
-    fn format_keystroke_ctrl_comma() {
-        assert_eq!(format_keystroke("ctrl-,"), "Ctrl+,");
-    }
-
-    #[test]
-    fn format_keystroke_ctrl_number() {
-        assert_eq!(format_keystroke("ctrl-1"), "Ctrl+1");
-    }
-
-    #[test]
-    fn find_conflict_detects_other_action() {
-        // 默认绑定中 refresh=f5, fetch=ctrl-shift-f。
-        let bindings = crate::default_shortcut_bindings();
-        // 给 refresh 绑定 ctrl-shift-f（fetch 的默认）应冲突到 fetch。
-        let conflict =
-            crate::find_shortcut_conflict(&bindings, ShortcutAction::Refresh, "ctrl-shift-f");
-        assert_eq!(conflict, Some(ShortcutAction::Fetch));
-    }
-
-    #[test]
-    fn find_conflict_no_self_conflict() {
-        let bindings = crate::default_shortcut_bindings();
-        // 一个动作的当前绑定不与自己冲突。
-        let conflict = crate::find_shortcut_conflict(&bindings, ShortcutAction::Refresh, "f5");
-        assert_eq!(conflict, None);
-    }
-}
+#[path = "tests/shortcuts_view.rs"]
+mod tests;
