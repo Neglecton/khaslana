@@ -193,10 +193,11 @@ fn credential_records_round_trip() {
 #[test]
 fn update_preferences_default() {
     let (_temp, storage) = temp_storage();
-    // 空表返回默认值。
+    // 空表返回默认值：自动检查开、未跳过、只走正式版渠道。
     let prefs = storage.load_update_preferences().unwrap();
     assert!(prefs.auto_check);
     assert_eq!(prefs.skipped_version, None);
+    assert!(!prefs.include_beta);
 }
 
 #[test]
@@ -204,7 +205,8 @@ fn update_preferences_round_trip() {
     let (_temp, storage) = temp_storage();
     let prefs = UpdatePreferences {
         auto_check: false,
-        skipped_version: Some("0.1.0".into()),
+        skipped_version: Some("1.1.0-beta.1".into()),
+        include_beta: true,
     };
     storage.save_update_preferences(&prefs).unwrap();
     let loaded = storage.load_update_preferences().unwrap();
@@ -220,9 +222,45 @@ fn update_preferences_auto_check_toggle() {
     let prefs = UpdatePreferences {
         auto_check: false,
         skipped_version: None,
+        include_beta: false,
     };
     storage.save_update_preferences(&prefs).unwrap();
     assert!(!storage.load_update_preferences().unwrap().auto_check);
+}
+
+// 旧库的 update_preferences 没有 include_beta 列：打开时幂等补列，
+// 已有行保持原值且 include_beta 默认 0（不改变旧用户的正式版渠道行为）。
+#[test]
+fn update_preferences_include_beta_column_added_to_legacy_database() {
+    let (temp, storage) = temp_storage();
+    {
+        let conn = storage.lock_conn().unwrap();
+        conn.execute("DROP TABLE update_preferences", []).unwrap();
+        conn.execute(
+            "CREATE TABLE update_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                auto_check INTEGER NOT NULL,
+                skipped_version TEXT,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO update_preferences (id, auto_check, skipped_version, updated_at)
+             VALUES (1, 0, '0.9.0', 1)",
+            [],
+        )
+        .unwrap();
+    }
+    drop(storage);
+
+    // 重新打开同一库文件触发 ensure_update_include_beta_column 迁移。
+    let storage = AppStorage::open(temp.path().join("app.sqlite3")).unwrap();
+    let prefs = storage.load_update_preferences().unwrap();
+    assert!(!prefs.auto_check);
+    assert_eq!(prefs.skipped_version.as_deref(), Some("0.9.0"));
+    assert!(!prefs.include_beta);
 }
 
 #[test]

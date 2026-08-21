@@ -404,6 +404,30 @@ fn layout_preference_clamp_ranges_cover_defaults() {
     );
 }
 
+// 设置中心分类完整性：「关于」页承载版本号与版本说明，标签不得与其他分类重复。
+#[test]
+fn settings_categories_include_about_with_unique_labels() {
+    let categories = [
+        (SettingsCategory::Credentials, "凭据管理"),
+        (SettingsCategory::Proxy, "网络代理"),
+        (SettingsCategory::Ai, "AI 设置"),
+        (SettingsCategory::ExternalMerge, "合并工具"),
+        (SettingsCategory::Theme, "外观"),
+        (SettingsCategory::Update, "更新设置"),
+        (SettingsCategory::Shortcuts, "快捷键"),
+        (SettingsCategory::About, "关于"),
+    ];
+    let mut labels: Vec<&str> = categories.iter().map(|(_, label)| *label).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), categories.len(), "设置分类标签必须唯一");
+    assert!(
+        categories
+            .iter()
+            .any(|(category, _)| matches!(category, SettingsCategory::About))
+    );
+}
+
 #[test]
 fn stale_submodule_requests_do_not_match_current_state() {
     let mut state = SubmoduleDialogState::default();

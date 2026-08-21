@@ -547,6 +547,8 @@ pub(crate) enum SettingsCategory {
     Theme,
     Update,
     Shortcuts,
+    /// 「关于」页：无设置项，展示当前版本号、发布渠道与版本说明。
+    About,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6467,7 +6469,10 @@ impl RepositoryView {
             SettingsCategory::ExternalMerge => {
                 self.reset_external_merge_form_from_settings();
             }
-            SettingsCategory::Theme | SettingsCategory::Update | SettingsCategory::Shortcuts => {}
+            SettingsCategory::Theme
+            | SettingsCategory::Update
+            | SettingsCategory::Shortcuts
+            | SettingsCategory::About => {}
         }
     }
 
@@ -6612,7 +6617,7 @@ impl RepositoryView {
         let preferences = self.update_preferences.clone();
         let proxy_settings = self.proxy_settings.clone();
         self.tasks.spawn(TaskKind::Long, move || {
-            let sources = update::default_manifest_sources();
+            let sources = update::manifest_sources_for(&preferences);
             match update::check_for_update(&sources, &preferences, &proxy_settings) {
                 Ok(UpdateCheckResult::UpdateAvailable { manifest, asset }) => {
                     send_ui_event(
@@ -12364,6 +12369,7 @@ impl RepositoryView {
             (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
             (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
             (SettingsCategory::Shortcuts, ToolbarIcon::Keyboard, "快捷键"),
+            (SettingsCategory::About, ToolbarIcon::Info, "关于"),
         ];
 
         // 右侧内容面板根据当前分类渲染对应 body。
@@ -12385,6 +12391,7 @@ impl RepositoryView {
                 .into_any_element(),
             SettingsCategory::Update => self.render_update_settings_dialog(cx).into_any_element(),
             SettingsCategory::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
+            SettingsCategory::About => self.render_about_settings(cx).into_any_element(),
         };
         // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
         let settings_content_handle = self.scroll_handle("settings-center-content");
@@ -14896,7 +14903,27 @@ impl RepositoryView {
 
     fn render_update_settings_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let auto_check = self.update_preferences.auto_check;
+        let include_beta = self.update_preferences.include_beta;
         let skipped = self.update_preferences.skipped_version.clone();
+        // 新版本卡片数据：版本号 / 发布时间 / 版本说明 / 包大小。
+        let available_update_display = self.available_update.as_ref().map(|manifest| {
+            let size = manifest
+                .platforms
+                .get("windows-x86_64")
+                .map(|asset| format_byte_size(asset.size))
+                .unwrap_or_default();
+            let notes = if manifest.notes.trim().is_empty() {
+                "（此版本未附版本说明）".to_string()
+            } else {
+                manifest.notes.clone()
+            };
+            (
+                manifest.version.clone(),
+                manifest.published_at.clone(),
+                notes,
+                size,
+            )
+        });
         // 仅当存在可迁移的旧库时，在更新设置中常驻「迁移到便携目录」入口；
         // dismiss 标记只抑制启动时的自动弹窗，不影响此处手动入口。
         let migration_available = self.portable_migration_available();
@@ -14966,6 +14993,123 @@ impl RepositoryView {
                             .child("自动检查更新"),
                     ),
             )
+            // 测试版（Beta）更新渠道：勾选后检测/安装所有版本（含预发布），
+            // 未勾选只走正式版清单（与旧版本行为一致）。切换后下次检查生效。
+            .child(
+                div()
+                    .id("include_beta_updates")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.update_preferences.include_beta =
+                            !this.update_preferences.include_beta;
+                        this.save_update_preferences();
+                        cx.notify();
+                    }))
+                    .child(toggle_box(include_beta))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child("接收测试版（Beta）更新"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child("勾选后同时检测并安装测试版；测试版可能不稳定"),
+                            ),
+                    ),
+            )
+            // 检测到新版本：页内常驻展示版本信息 + 版本说明 + 立即更新入口。
+            .when_some(available_update_display, |container, update| {
+                let (update_version, update_published_at, update_notes, update_size) = update;
+                container.child(
+                    div()
+                        .id("available-update-card")
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p(px(ui_theme::SPACE_3))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .border_1()
+                        .border_color(rgb(ui_theme::PRIMARY))
+                        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .text_size(px(12.0))
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(ui_theme::PRIMARY))
+                                        .child(format!("发现新版本 v{update_version}")),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .child(format!("发布于 {update_published_at}"))
+                                        .child(format!("包大小 {update_size}")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("available-update-notes")
+                                .max_h(px(180.0))
+                                .overflow_y_scroll()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(ui_theme::FOREGROUND))
+                                // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
+                                .children(
+                                    update_notes
+                                        .lines()
+                                        .map(|line| div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(self.primary_button(
+                                    "立即更新",
+                                    !self.update_downloading,
+                                    |this, _window, cx| {
+                                        this.start_update_download();
+                                        cx.notify();
+                                    },
+                                    cx,
+                                ))
+                                .when(self.update_downloading, |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                            .child(
+                                                self.update_download_progress
+                                                    .clone()
+                                                    .unwrap_or_else(|| "准备下载...".into()),
+                                            ),
+                                    )
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -15055,6 +15199,95 @@ impl RepositoryView {
             )
     }
 
+    /// 「关于」页：无设置项，展示当前版本号、发布渠道与版本说明
+    /// （版本说明由发版流水线经 KHASLANA_RELEASE_NOTES 编译期嵌入；本地
+    /// 开发构建或未配置时显示占位文案）。
+    fn render_about_settings(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let version = env!("CARGO_PKG_VERSION");
+        let channel = update::current_channel();
+        let notes = update::current_release_notes();
+        let notes_display = if notes.trim().is_empty() {
+            "（此版本未附版本说明）".to_string()
+        } else {
+            notes.to_string()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(ui_theme::TYPE_PAGE_TITLE))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child(format!("Khaslana v{version}")),
+                    )
+                    .child(
+                        // 渠道徽标：按版本号预发布段推断（正式版 / 测试版）。
+                        div()
+                            .id("about-channel-badge")
+                            .flex_none()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(ui_theme::RADIUS_PILL))
+                            .bg(rgb(if channel == "测试版" {
+                                ui_theme::FEEDBACK_WARNING_BG
+                            } else {
+                                ui_theme::PRIMARY_SUBTLE
+                            }))
+                            .text_size(px(10.0))
+                            .text_color(rgb(if channel == "测试版" {
+                                ui_theme::FEEDBACK_WARNING_TEXT
+                            } else {
+                                ui_theme::PRIMARY
+                            }))
+                            .child(channel),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("版本说明"),
+                    )
+                    .child(
+                        div()
+                            .id("about-release-notes")
+                            .max_h(px(280.0))
+                            .overflow_y_scroll()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
+                            .children(notes_display.lines().map(|line| {
+                                div().child(if line.is_empty() {
+                                    " ".to_string()
+                                } else {
+                                    line.to_string()
+                                })
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("更新渠道与自动检查可在「更新设置」中配置"),
+            )
+    }
+
     fn render_new_version_dialog(
         &self,
         version: &str,
@@ -15074,12 +15307,22 @@ impl RepositoryView {
                     .child(format!("发布于 {published_at}")),
             )
             .child(
+                // 版本说明：多行可滚动（内容多时可翻看，不再 120px 硬截断）。
                 div()
+                    .id("new-version-notes")
+                    .max_h(px(180.0))
+                    .overflow_y_scroll()
                     .text_size(px(12.0))
+                    .line_height(px(18.0))
                     .text_color(rgb(ui_theme::FOREGROUND))
-                    .max_h(px(120.0))
-                    .overflow_hidden()
-                    .child(notes.to_string()),
+                    // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
+                    .children(notes.lines().map(|line| {
+                        div().child(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        })
+                    })),
             )
             .child(
                 div()

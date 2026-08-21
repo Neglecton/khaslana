@@ -31,6 +31,7 @@ pub(crate) enum ToolbarIcon {
     Update,
     Settings,
     Keyboard,
+    Info,
 }
 
 impl ToolbarIcon {
@@ -63,6 +64,7 @@ impl ToolbarIcon {
             Self::Update => "icons/update.svg",
             Self::Settings => "icons/settings.svg",
             Self::Keyboard => "icons/keyboard.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }

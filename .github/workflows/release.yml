@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags:
+      # 正式版 v1.0.11；测试版 v1.1.0-beta.1（tag 含 "-" 即测试版渠道）
       - "v*"
 
 permissions:
@@ -22,12 +23,31 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: 导出版本说明（编译期嵌入「关于」页 + 更新清单）
+        # RELEASE_NOTES.md = 本次发版的版本说明（中文，可多行）。
+        # 经 GITHUB_ENV 注入后，cargo build 的 rustc 在编译期读到，
+        # 由 update::current_release_notes()（option_env!）嵌入二进制。
+        shell: bash
+        run: |
+          {
+            echo 'KHASLANA_RELEASE_NOTES<<KHASLANA_NOTES_EOF'
+            cat RELEASE_NOTES.md 2>/dev/null || echo ""
+            echo 'KHASLANA_NOTES_EOF'
+          } >> "$GITHUB_ENV"
+
       - name: Build
         # release-perf：fat LTO + codegen-units=1（见 Cargo.toml [profile.release-perf]），
         # 发布产物走极致优化；自定义 profile 的产物目录是 target/release-perf/。
         run: cargo build --profile release-perf --bin khaslana --bin khaslana_updater
+        env:
+          KHASLANA_RELEASE_NOTES: ${{ env.KHASLANA_RELEASE_NOTES }}
 
       - name: Package
+        # 渠道规则：tag 版本含预发布段（如 v1.1.0-beta.1）= 测试版，只写
+        # khaslana-update-beta.json（测试版用户读）；正式版同时写
+        # khaslana-update.json（旧客户端与未勾选测试版的新客户端读，永远
+        # 只指向正式版）与 khaslana-update-beta.json（让测试版用户升级）。
+        # 清单 JSON 用 python 组装：heredoc 无法安全转义多行/引号的版本说明。
         shell: bash
         env:
           VERSION_TAG: ${{ github.ref_name }}
@@ -46,23 +66,11 @@ jobs:
           sha256sum "${ZIP}.zip" > "${ZIP}.zip.sha256"
           SHA=$(cut -d' ' -f1 "${ZIP}.zip.sha256")
           SIZE=$(wc -c < "${ZIP}.zip")
-          cat > khaslana-update.json <<EOFJ
-          {
-            "schema": 1,
-            "channel": "stable",
-            "version": "${VERSION}",
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "notes": "Release ${VERSION_TAG}",
-            "platforms": {
-              "windows-x86_64": {
-                "archive_url": "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/releases/v${VERSION}/${ZIP}.zip",
-                "fallback_archive_url": "https://github.com/FuturePrayer/khaslana/releases/download/${VERSION_TAG}/${ZIP}.zip",
-                "sha256": "${SHA}",
-                "size": ${SIZE}
-              }
-            }
-          }
-          EOFJ
+          if [[ "$VERSION" == *-* ]]; then CHANNEL="beta"; else CHANNEL="stable"; fi
+          export MANIFEST_VERSION="$VERSION" MANIFEST_CHANNEL="$CHANNEL" \
+                 MANIFEST_TAG="$VERSION_TAG" MANIFEST_SHA="$SHA" MANIFEST_SIZE="$SIZE" \
+                 MANIFEST_ZIP="$ZIP" MANIFEST_NOTES="$KHASLANA_RELEASE_NOTES"
+          python ../.github/workflows/make_manifests.py
           cd ..
 
       - name: Build installer
@@ -87,16 +95,21 @@ jobs:
           "$hash  $(Split-Path $setup -Leaf)" | Out-File -Encoding ascii "$setup.sha256"
 
       - name: GitHub Release
+        # 测试版标记 prerelease：GitHub releases/latest/download 天然只解析最新
+        # 非预发布版——旧客户端的正式清单兜底源永远不会被测试版发布污染。
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/*.zip
             dist/*.zip.sha256
             dist/*setup*.exe
             dist/*setup*.exe.sha256
-            dist/khaslana-update.json
+            dist/khaslana-update*.json
 
       - name: Publish to CNB
+        # 测试版只推 khaslana-update-beta.json 到根目录（不触碰正式清单）；
+        # 正式版推两份清单。产物目录按完整版本号（含预发布段）分版本存放。
         shell: bash
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
@@ -105,13 +118,17 @@ jobs:
           VERSION="${VERSION_TAG#v}"
           ZIP="khaslana-v${VERSION}-windows-x86_64.zip"
           SETUP="khaslana-setup-v${VERSION}-windows-x86_64.exe"
+          if [[ "$VERSION" == *-* ]]; then CHANNEL="beta"; else CHANNEL="stable"; fi
           git clone "https://cnb:${CNB_TOKEN}@cnb.cool/suhoan/khaslana-release.git" cnb-release
           mkdir -p "cnb-release/releases/v${VERSION}"
           cp "dist/${ZIP}" "cnb-release/releases/v${VERSION}/${ZIP}"
           cp "dist/${ZIP}.sha256" "cnb-release/releases/v${VERSION}/${ZIP}.sha256"
           cp "dist/${SETUP}" "cnb-release/releases/v${VERSION}/${SETUP}"
           cp "dist/${SETUP}.sha256" "cnb-release/releases/v${VERSION}/${SETUP}.sha256"
-          cp "dist/khaslana-update.json" "cnb-release/khaslana-update.json"
+          if [[ "$CHANNEL" == "stable" ]]; then
+            cp "dist/khaslana-update.json" "cnb-release/khaslana-update.json"
+          fi
+          cp "dist/khaslana-update-beta.json" "cnb-release/khaslana-update-beta.json"
           cd cnb-release
           git config user.name "github-actions"
           git config user.email "actions@github.com"

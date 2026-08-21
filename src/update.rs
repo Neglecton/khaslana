@@ -69,7 +69,23 @@ pub fn current_version() -> Version {
         .unwrap_or(Version::new(0, 0, 0))
 }
 
-/// 默认 manifest 下载源列表，CNB 优先，GitHub 兜底。
+/// 当前版本的发布渠道标识（按 semver 预发布段推断，供「关于」页显示）。
+pub fn current_channel() -> &'static str {
+    if current_version().pre.is_empty() {
+        "正式版"
+    } else {
+        "测试版"
+    }
+}
+
+/// 当前版本的版本说明（发版流水线经 `KHASLANA_RELEASE_NOTES` 环境变量在编译期
+/// 注入；本地开发构建或未配置时为空，由 UI 显示占位文案）。
+pub fn current_release_notes() -> &'static str {
+    option_env!("KHASLANA_RELEASE_NOTES").unwrap_or("")
+}
+
+/// 正式版清单下载源：CNB 优先，GitHub 兜底。
+/// 该文件永远指向最新**正式版**——旧版本客户端只读它，内容不得混入测试版。
 pub fn default_manifest_sources() -> Vec<String> {
     vec![
         "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/khaslana-update.json"
@@ -77,6 +93,30 @@ pub fn default_manifest_sources() -> Vec<String> {
         "https://github.com/FuturePrayer/khaslana/releases/latest/download/khaslana-update.json"
             .to_string(),
     ]
+}
+
+/// 测试版清单下载源：仅 CNB（GitHub 无固定的「最新预发布」下载 URL）。
+/// 该文件指向最新**任意版本**（正式或测试版）：正式版发版时同步更新它，
+/// 测试版用户因此始终能前进到最新正式版。
+pub fn beta_manifest_sources() -> Vec<String> {
+    vec![
+        "https://cnb.cool/suhoan/khaslana-release/-/git/raw/master/khaslana-update-beta.json"
+            .to_string(),
+    ]
+}
+
+/// 按更新偏好组合清单下载源（逐源尝试，首个成功即止）：
+/// - 未勾选测试版：与旧客户端完全一致（CNB 正式清单 → GitHub 兜底）；
+/// - 勾选测试版：先取测试版清单（CNB），失败（404/网络）自然滑落到正式清单，
+///   测试版用户不失联。
+pub fn manifest_sources_for(preferences: &crate::storage::UpdatePreferences) -> Vec<String> {
+    if preferences.include_beta {
+        let mut sources = beta_manifest_sources();
+        sources.extend(default_manifest_sources());
+        sources
+    } else {
+        default_manifest_sources()
+    }
 }
 
 /// 检查是否有可用更新。
@@ -89,7 +129,28 @@ pub fn check_for_update(
     proxy_settings: &NetworkProxySettings,
 ) -> Result<UpdateCheckResult> {
     let manifest = fetch_manifest(sources, proxy_settings)?;
+    evaluate_manifest(
+        &manifest,
+        &current_version(),
+        preferences.skipped_version.as_deref(),
+        preferences.include_beta,
+    )
+}
 
+/// 对已取得的清单做版本评估（纯函数，供单测）。
+///
+/// - 正式模式（`include_beta=false`）下若清单版本带预发布段（如 `1.1.0-beta.1`），
+///   视为 UpToDate——防御误配置把测试版写入正式清单推给未勾选用户（含旧客户端
+///   行为对齐：旧客户端无此防御，正式清单由发布流水线保证只写正式版）；
+/// - 预发布语义复用 semver 排序：`1.1.0-beta.1 < 1.1.0`，测试版用户在正式版
+///   发布后会被自然引导升级；
+/// - `skipped_version` 对任意渠道版本号按精确相等生效。
+pub fn evaluate_manifest(
+    manifest: &UpdateManifest,
+    current: &Version,
+    skipped_version: Option<&str>,
+    include_beta: bool,
+) -> Result<UpdateCheckResult> {
     // 清单格式校验
     if manifest.schema != 1 {
         return Err(GitError::Message(format!(
@@ -109,14 +170,17 @@ pub fn check_for_update(
         .version
         .parse()
         .map_err(|err| GitError::Message(format!("更新清单版本号格式错误：{err}")))?;
-    let current = current_version();
 
-    if remote_version <= current {
+    if !include_beta && !remote_version.pre.is_empty() {
+        return Ok(UpdateCheckResult::UpToDate);
+    }
+
+    if &remote_version <= current {
         return Ok(UpdateCheckResult::UpToDate);
     }
 
     // 跳过版本检查
-    if let Some(ref skipped) = preferences.skipped_version {
+    if let Some(skipped) = skipped_version {
         let skipped: Version = skipped
             .parse()
             .map_err(|err| GitError::Message(format!("已跳过版本号格式错误：{err}")))?;
@@ -125,7 +189,10 @@ pub fn check_for_update(
         }
     }
 
-    Ok(UpdateCheckResult::UpdateAvailable { manifest, asset })
+    Ok(UpdateCheckResult::UpdateAvailable {
+        manifest: manifest.clone(),
+        asset,
+    })
 }
 
 /// 下载更新 zip 到配置目录下的 `updates/downloads/`。

@@ -220,6 +220,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 仓库远端到凭据策略的绑定。
 - 全局网络代理设置，只保存模式和代理 URL，不拆分存储代理密文。
 - 外部合并工具设置，包括是否启用 IntelliJ IDEA、是否选中冲突文件后自动打开以及可选 IDEA 命令路径。
+- 更新偏好（`update_preferences` 表）：自动检查开关、已跳过版本、测试版渠道开关 `include_beta`（默认 0；旧库经幂等迁移 `ensure_update_include_beta_column` 补列）。
 - 全局主题偏好，支持跟随系统、浅色和深色。
 - 快捷键绑定（`shortcut_bindings` 表，单行 JSON payload，action_id → keystroke 映射）。
 - 布局偏好（`layout_preferences` 表，单行 JSON payload）：Context Navigator 展开状态与全部分割线位置（侧边栏/变更列/工作流模板列/历史导航列/检查器文件列/泳道列/浏览树列的宽度、历史详情高度与折叠态），全局单份、跨仓库共享、重启恢复；全字段 `#[serde(default)]` 旧 payload 兼容，加载时按 MIN/MAX 常量钳制。保存时机为离散用户动作（拖拽结束 `finish_resize_column`/双击复位 `reset_resize_target`/导航器开合/详情卡折叠）后 UI 线程同步写（与主题/快捷键保存同模式；单行 <200B 本地写无感知，同步保序且改完即关应用不丢最后一次修改）。
@@ -362,10 +363,11 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 ### 5.9 设置中心
 
 - titlebar 右侧「设置」按钮（原生窗口控制区左侧、紧邻最小化按钮）打开设置中心弹窗（独立 `settings_center: Option<SettingsCategory>` 状态，不占 `active_dialog`）；快捷键 Ctrl+, 等效。
-- 左侧 7 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置、快捷键。
+- 左侧 8 分类导航：凭据管理、网络代理、AI 设置、合并工具、外观、更新设置、快捷键、关于。
 - 右侧内容面板渲染对应分类的表单/列表。设置中心只通过右上角「×」关闭（Ctrl+, 快捷键保留 toggle 语义）；点击遮罩背景、遮罩上方的通知气泡（含气泡关闭按钮）都**不**关闭设置中心——遮罩自身 `occlude()` 挡住下层 UI 的点击，通知气泡层级在设置中心之上、保持可交互。各分类页面不再有「关闭/取消」按钮。
 - 保存按钮统一逻辑：只保存当前分类页内容，按 `last_error` 经 `notify_settings_save` 提示成功/失败（失败 toast 带具体错误信息），成功后不关闭页面。基础 save 方法（如 `save_network_proxy_settings`）同时被输入框回车静默自动保存复用，提示逻辑只放在保存按钮闭包里。
-- 外观、更新、快捷键页为即时生效（无保存按钮），凭据管理为列表页（顶部「添加凭据/刷新」），均只靠「×」关闭。
+- 外观、更新、快捷键页为即时生效（无保存按钮），凭据管理为列表页（顶部「添加凭据/刷新」），均只靠「×」关闭。「关于」页无设置项：展示当前版本号、发布渠道徽标（按 semver 预发布段推断 正式版/测试版）与版本说明（`update::current_release_notes()`，发版流水线经 `KHASLANA_RELEASE_NOTES` 环境变量编译期嵌入，本地构建为空时显示占位）。
+- 更新设置页：自动检查开关、「接收测试版（Beta）更新」开关（`update_preferences.include_beta`，默认关——勾选后 `manifest_sources_for` 先取 CNB 根 `khaslana-update-beta.json` 再滑落正式清单）、已跳过版本、检测到新版本时页内常驻「发现新版本」卡片（版本/发布时间/包大小/版本说明滚动区 + 立即更新）；新版本弹窗的版本说明为多行可滚动。
 - 关闭设置中心时清掉可能残留的外部合并「保存并继续」待处理冲突路径（`external_merge_view::clear_pending_external_merge_path`）。
 - 凭据管理的子弹窗（详情/表单/删除确认）经 `active_dialog` 分发，可叠加在设置中心之上；关闭子弹窗后回到设置中心。
 - 原工具栏的 6 个独立设置分类按钮已移除，各分类统一由设置中心承载；设置中心通过 titlebar 右侧「设置」按钮或 Ctrl+, 快捷键打开。
@@ -406,7 +408,7 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 每次实现完计划后必须执行 `cargo build --release`，并修复所有出现的错误和警告（无论相关代码是不是本次写的）。只有 release 构建零错误零警告才算实现完成。
 
-正式发布使用 `release-perf` profile（fat LTO + codegen-units=1，见 Cargo.toml；产物在 `target/release-perf/`），GitHub 发布工作流 `.github/workflows/release.yml` 按 tag 触发并用该 profile 构建打包。发版产物（双渠道同步上传：GitHub Releases + CNB `khaslana-release` 仓库）：便携 zip（`khaslana-v*-windows-x86_64.zip`）、**Inno Setup 7 安装器**（`khaslana-setup-v*-windows-x86_64.exe`，脚本 `installer/khaslana.iss`：用户级安装免管理员，默认目录 `%LOCALAPPDATA%\Programs\Khaslana` 与应用内「移动到安全目录」一致，卸载不删运行期 `data\`；CI 从官方 GitHub Release 下载 `innosetup-7.1.0-x64.exe` 静默安装后经 `C:\Program Files\Inno Setup 7\ISCC.exe` 编译，升 Inno 版本时改 URL；架构标识用 `x64compatible`——Inno 7 中 `x64` 已弃用）、两者各自的 `.sha256` 与 `khaslana-update.json`（更新清单只引用 zip——自更新走 zip 原位替换，安装器仅首次安装用）。安装器本地构建：**`cargo setup` 一键完成**（`.cargo/config.toml` 的 alias → `src/bin/khaslana_packager.rs`，纯 std：release-perf 构建 -> 组装 `dist/package/` -> 探测 ISCC（Inno 7 优先）编译，版本取编译期 `CARGO_PKG_VERSION`）；或按 CI 相同步骤手动执行（Git Bash 下调 ISCC 需 `MSYS_NO_PATHCONV=1` 防止 `/D` 被转成路径，打包器 bin 无此问题）。发布工作流不复用打包器（显式分步执行，产物内容一致）。发版流程：改 `Cargo.toml` version 与 `src/tests/update.rs` 的版本断言 -> 提交 -> 打 `v*` tag 推送。
+正式发布使用 `release-perf` profile（fat LTO + codegen-units=1，见 Cargo.toml；产物在 `target/release-perf/`），GitHub 发布工作流 `.github/workflows/release.yml` 按 tag 触发并用该 profile 构建打包。**双更新渠道（严格向前兼容）**：`khaslana-update.json`（CNB 根 + GitHub releases/latest/download）永远只指向最新**正式版**——旧客户端与未勾选测试版的新客户端都只读它；`khaslana-update-beta.json`（仅 CNB 根）指向最新**任意版本**，只有勾选「接收测试版」的新客户端读取。渠道由 tag 推断：`v1.0.11` = 正式版（写两份清单，beta 用户随之升级），`v1.1.0-beta.1` = 测试版（**只写 beta 清单**、GitHub Release 标记 prerelease——latest/download 天然不解析预发布，旧客户端兜底源不被污染）。清单 JSON 由 `.github/workflows/make_manifests.py` 组装（多行版本说明需安全转义，不能用 heredoc）。**版本说明**：仓库根 `RELEASE_NOTES.md` = 本次发版的说明，工作流经 `KHASLANA_RELEASE_NOTES` 环境变量在编译期嵌入二进制（`update::current_release_notes()`，「关于」页展示）并写入清单 `notes` 字段（新版本弹窗/更新设置页展示；旧客户端本就展示该字段）。客户端版本评估见 `update::evaluate_manifest`（正式模式忽略带预发布段的清单版本，防误配置）。发版产物（双渠道同步上传：GitHub Releases + CNB `khaslana-release` 仓库）：便携 zip（`khaslana-v*-windows-x86_64.zip`）、**Inno Setup 7 安装器**（`khaslana-setup-v*-windows-x86_64.exe`，脚本 `installer/khaslana.iss`：用户级安装免管理员，默认目录 `%LOCALAPPDATA%\Programs\Khaslana` 与应用内「移动到安全目录」一致，卸载不删运行期 `data\`；CI 从官方 GitHub Release 下载 `innosetup-7.1.0-x64.exe` 静默安装后经 `C:\Program Files\Inno Setup 7\ISCC.exe` 编译，升 Inno 版本时改 URL；架构标识用 `x64compatible`——Inno 7 中 `x64` 已弃用）、两者各自的 `.sha256` 与更新清单。安装器本地构建：**`cargo setup` 一键完成**（`.cargo/config.toml` 的 alias → `src/bin/khaslana_packager.rs`，纯 std：release-perf 构建 -> 组装 `dist/package/` -> 探测 ISCC（Inno 7 优先）编译，版本取编译期 `CARGO_PKG_VERSION`）；或按 CI 相同步骤手动执行（Git Bash 下调 ISCC 需 `MSYS_NO_PATHCONV=1` 防止 `/D` 被转成路径，打包器 bin 无此问题）。发布工作流不复用打包器（显式分步执行，产物内容一致）。发版流程：改 `Cargo.toml` version（测试版写全如 `1.1.0-beta.1`）与 `src/tests/update.rs` 的版本断言 -> 更新 `RELEASE_NOTES.md` -> 提交 -> 打 tag 推送（`v1.0.11` 正式 / `v1.1.0-beta.1` 测试）。
 
 ## 7. 测试现状
 

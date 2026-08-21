@@ -17,7 +17,7 @@ use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// 旧数据目录（`%APPDATA%\Khaslana`）下出现该标记文件，表示数据已迁移到便携目录；
 /// 启动解析路径时强制走便携路径，即使旧库文件仍在。
@@ -104,6 +104,9 @@ pub struct UpdatePreferences {
     pub auto_check: bool,
     /// 已跳过的版本号；新版本高于此值时重新提示。
     pub skipped_version: Option<String>,
+    /// 是否接收测试版（Beta）更新：勾选后检测/安装所有版本（含预发布），
+    /// 未勾选只走正式版渠道（默认 false，与旧版本行为一致）。
+    pub include_beta: bool,
 }
 
 impl Default for UpdatePreferences {
@@ -111,6 +114,7 @@ impl Default for UpdatePreferences {
         Self {
             auto_check: true,
             skipped_version: None,
+            include_beta: false,
         }
     }
 }
@@ -879,6 +883,7 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             auto_check INTEGER NOT NULL,
             skipped_version TEXT,
+            include_beta INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
 
@@ -918,6 +923,7 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     // 幂等迁移：旧版数据库的 theme_preferences 没有 accent 列，补上。
     // CREATE TABLE IF NOT EXISTS 对已存在的表不会加列，需显式 ALTER。
     ensure_theme_accent_column(&conn)?;
+    ensure_update_include_beta_column(&conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -938,6 +944,26 @@ fn ensure_theme_accent_column(conn: &Connection) -> Result<()> {
     if !has_accent {
         conn.execute(
             "ALTER TABLE theme_preferences ADD COLUMN accent INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+/// 检查 update_preferences 是否有 include_beta 列（测试版更新渠道开关），
+/// 旧库没有则补加（幂等，默认 0 = 只走正式版渠道）。
+fn ensure_update_include_beta_column(conn: &Connection) -> Result<()> {
+    let has_column = conn
+        .prepare("PRAGMA table_info(update_preferences)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .filter_map(|col| col.ok())
+        .any(|col| col == "include_beta");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE update_preferences ADD COLUMN include_beta INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .map_err(storage_error)?;
@@ -1165,12 +1191,13 @@ fn save_proxy_settings_tx(tx: &Transaction<'_>, settings: &NetworkProxySettings)
 
 fn load_update_preferences_from_conn(conn: &Connection) -> Result<UpdatePreferences> {
     conn.query_row(
-        "SELECT auto_check, skipped_version FROM update_preferences WHERE id = 1",
+        "SELECT auto_check, skipped_version, include_beta FROM update_preferences WHERE id = 1",
         [],
         |row| {
             Ok(UpdatePreferences {
                 auto_check: row.get::<_, bool>(0)?,
                 skipped_version: row.get::<_, Option<String>>(1)?,
+                include_beta: row.get::<_, bool>(2)?,
             })
         },
     )
@@ -1182,11 +1209,12 @@ fn load_update_preferences_from_conn(conn: &Connection) -> Result<UpdatePreferen
 fn save_update_preferences_tx(tx: &Transaction<'_>, preferences: &UpdatePreferences) -> Result<()> {
     tx.execute(
         "INSERT OR REPLACE INTO update_preferences
-         (id, auto_check, skipped_version, updated_at)
-         VALUES (1, ?1, ?2, ?3)",
+         (id, auto_check, skipped_version, include_beta, updated_at)
+         VALUES (1, ?1, ?2, ?3, ?4)",
         params![
             if preferences.auto_check { 1 } else { 0 },
             preferences.skipped_version,
+            if preferences.include_beta { 1 } else { 0 },
             now_seconds()
         ],
     )

@@ -6,10 +6,11 @@ use crate::storage::UpdatePreferences;
 #[test]
 fn current_version_is_valid_semver() {
     let v = current_version();
-    // 当前 Cargo.toml version = "1.0.10"
-    assert_eq!(v.major, 1);
+    // 当前 Cargo.toml version = "2.0.0-beta.1"（发版时同步更新本断言）
+    assert_eq!(v.major, 2);
     assert_eq!(v.minor, 0);
-    assert_eq!(v.patch, 10);
+    assert_eq!(v.patch, 0);
+    assert_eq!(v.pre.to_string(), "beta.1");
 }
 
 #[test]
@@ -19,6 +20,39 @@ fn default_sources_cnb_before_github() {
     assert!(sources[0].contains("/-/git/raw/"));
     assert!(!sources[0].contains("/-/raw/"));
     assert!(sources[1].contains("github.com"));
+    // 正式清单的 GitHub 兜底必须走 releases/latest（旧客户端同源，
+    // latest 天然只解析非 prerelease 版本，不会被测试版污染）。
+    assert!(sources[1].contains("releases/latest/download"));
+}
+
+// 测试版清单：仅 CNB 源；勾选测试版后的源组合 = beta 源在前、正式源兜底。
+#[test]
+fn beta_sources_and_mode_composition() {
+    let beta = beta_manifest_sources();
+    assert_eq!(beta.len(), 1);
+    assert!(beta[0].contains("khaslana-update-beta.json"));
+    assert!(beta[0].contains("cnb.cool"));
+
+    let stable_prefs = UpdatePreferences {
+        auto_check: true,
+        skipped_version: None,
+        include_beta: false,
+    };
+    assert_eq!(
+        manifest_sources_for(&stable_prefs),
+        default_manifest_sources(),
+        "未勾选测试版必须与旧客户端逐源一致"
+    );
+
+    let beta_prefs = UpdatePreferences {
+        auto_check: true,
+        skipped_version: None,
+        include_beta: true,
+    };
+    let sources = manifest_sources_for(&beta_prefs);
+    assert_eq!(sources.len(), 3);
+    assert!(sources[0].contains("khaslana-update-beta.json"));
+    assert_eq!(&sources[1..], default_manifest_sources().as_slice());
 }
 
 // ── 清单解析与版本比较 ─────────────────────────────────────────────────────
@@ -93,48 +127,103 @@ fn missing_platform_returns_error() {
 #[test]
 fn version_comparison_lower_is_update() {
     // remote 0.2.0 > current 0.1.0 → UpdateAvailable
-    let remote: Version = "0.2.0".parse().unwrap();
-    let current: Version = "0.1.0".parse().unwrap();
-    assert!(remote > current);
+    let manifest = sample_manifest(1, "0.2.0");
+    let result = evaluate_manifest(&manifest, &"0.1.0".parse().unwrap(), None, false).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpdateAvailable { .. }));
 }
 
 #[test]
 fn version_comparison_equal_is_up_to_date() {
-    let remote: Version = "0.1.0".parse().unwrap();
-    let current: Version = "0.1.0".parse().unwrap();
-    assert!(remote <= current);
+    let manifest = sample_manifest(1, "0.1.0");
+    let result = evaluate_manifest(&manifest, &"0.1.0".parse().unwrap(), None, false).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpToDate));
 }
 
 #[test]
 fn version_comparison_higher_is_up_to_date() {
     // 如果 manifest 版本低于当前版本（比如回退发布），不提示
-    let remote: Version = "0.0.9".parse().unwrap();
-    let current: Version = "0.1.0".parse().unwrap();
-    assert!(remote <= current);
+    let manifest = sample_manifest(1, "0.0.9");
+    let result = evaluate_manifest(&manifest, &"0.1.0".parse().unwrap(), None, false).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpToDate));
+}
+
+// 正式模式（未勾选测试版）忽略带预发布段的清单版本——防御误配置把测试版
+// 写入正式清单推给未勾选用户；勾选测试版后正常接受。
+#[test]
+fn stable_mode_ignores_prerelease_manifest() {
+    let manifest = sample_manifest(1, "1.1.0-beta.1");
+    let current: Version = "1.0.10".parse().unwrap();
+
+    let stable = evaluate_manifest(&manifest, &current, None, false).unwrap();
+    assert!(matches!(stable, UpdateCheckResult::UpToDate));
+
+    let beta = evaluate_manifest(&manifest, &current, None, true).unwrap();
+    assert!(matches!(beta, UpdateCheckResult::UpdateAvailable { .. }));
+}
+
+// 预发布语义复用 semver 排序：beta.1 < beta.2 < 正式版，测试版用户在正式版
+// 发布后被自然引导升级（不会停在 beta）。
+#[test]
+fn prerelease_orders_below_stable_release() {
+    let current: Version = "1.1.0-beta.1".parse().unwrap();
+
+    // 同版本 beta.2 > beta.1 → 提示。
+    let newer_beta = sample_manifest(1, "1.1.0-beta.2");
+    let result = evaluate_manifest(&newer_beta, &current, None, true).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpdateAvailable { .. }));
+
+    // 正式版 1.1.0 > beta.1 → 提示（测试版用户升正式版）。
+    let stable = sample_manifest(1, "1.1.0");
+    let result = evaluate_manifest(&stable, &current, None, true).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpdateAvailable { .. }));
+
+    // 清单版本不高于当前（旧 beta）→ UpToDate，不会降级。
+    let older = sample_manifest(1, "1.1.0-beta.1");
+    let result = evaluate_manifest(&older, &current, None, true).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpToDate));
 }
 
 #[test]
 fn skipped_version_suppresses_prompt() {
-    let prefs = UpdatePreferences {
-        auto_check: true,
-        skipped_version: Some("0.2.0".to_string()),
-    };
     let manifest = sample_manifest(1, "0.2.0");
-    let remote: Version = manifest.version.parse().unwrap();
-    let skipped: Version = prefs.skipped_version.unwrap().parse().unwrap();
-    assert_eq!(remote, skipped);
+    let result =
+        evaluate_manifest(&manifest, &"0.1.0".parse().unwrap(), Some("0.2.0"), false).unwrap();
+    assert!(matches!(result, UpdateCheckResult::SkippedVersion));
 }
 
 #[test]
 fn skipped_version_older_than_manifest_reprompts() {
-    let prefs = UpdatePreferences {
-        auto_check: true,
-        skipped_version: Some("0.1.0".to_string()),
-    };
     let manifest = sample_manifest(1, "0.2.0");
-    let remote: Version = manifest.version.parse().unwrap();
-    let skipped: Version = prefs.skipped_version.unwrap().parse().unwrap();
-    assert!(remote > skipped);
+    let result =
+        evaluate_manifest(&manifest, &"0.1.0".parse().unwrap(), Some("0.1.0"), false).unwrap();
+    assert!(matches!(result, UpdateCheckResult::UpdateAvailable { .. }));
+}
+
+// 跳过对测试版本号同样按精确相等生效。
+#[test]
+fn skipped_version_applies_to_prerelease() {
+    let manifest = sample_manifest(1, "1.1.0-beta.1");
+    let result = evaluate_manifest(
+        &manifest,
+        &"1.0.10".parse().unwrap(),
+        Some("1.1.0-beta.1"),
+        true,
+    )
+    .unwrap();
+    assert!(matches!(result, UpdateCheckResult::SkippedVersion));
+}
+
+// 渠道标识按 semver 预发布段推断（供「关于」页使用）。
+#[test]
+fn current_channel_matches_version_shape() {
+    // 渠道标识与版本号形态自洽：无预发布段 = 正式版，有 = 测试版
+    //（本断言与具体版本无关，发版无需更新）。
+    let expected = if current_version().pre.is_empty() {
+        "正式版"
+    } else {
+        "测试版"
+    };
+    assert_eq!(current_channel(), expected);
 }
 
 // ── SHA-256 校验 ──────────────────────────────────────────────────────────
