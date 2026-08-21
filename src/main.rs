@@ -1445,8 +1445,6 @@ struct RepoTabState {
     pub(crate) diff_line_selection: BTreeSet<usize>,
     diff_line_selection_anchor: Option<usize>,
     pub(crate) main_mode: MainMode,
-    /// Context Navigator 的用户偏好按模式独立保存，属于仓库 tab；切换模式不覆盖手动选择。
-    pub(crate) context_navigator_preferences: ContextNavigatorPreferences,
     pub(crate) workflow_state: WorkflowState,
     pub(crate) history_commits: Vec<CommitInfo>,
     pub(crate) history_has_more: bool,
@@ -1513,7 +1511,6 @@ impl RepoTabState {
             diff_line_selection: BTreeSet::new(),
             diff_line_selection_anchor: None,
             main_mode: MainMode::Worktree,
-            context_navigator_preferences: ContextNavigatorPreferences::default(),
             workflow_state: WorkflowState::default(),
             history_commits: Vec::new(),
             history_has_more: false,
@@ -1736,8 +1733,9 @@ pub(crate) enum MainMode {
     CommitGraph,
 }
 
-/// Context Navigator 偏好：单一展开状态跨工作区/历史/工作流共享，
-/// 切换主模式不改变展开/收起，避免用户在每个页面重复开合。
+/// Context Navigator 偏好：单一展开状态跨工作区/历史/工作流/图谱与**所有仓库**
+/// 共享（存于 RepositoryView，非 per-tab），切换模式或切换仓库都不改变展开/收起，
+/// 并经 layout_preferences 持久化、重启恢复。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ContextNavigatorPreferences {
     visible: bool,
@@ -2770,6 +2768,8 @@ pub(crate) struct RepositoryView {
     repo_switcher_menu: Option<RepoSwitcherMenu>,
     /// 窄窗口下 Context Navigator 的临时覆盖态，不改写宽屏停靠偏好。
     context_navigator_overlay_open: bool,
+    /// Context Navigator 展开偏好（全局单值，跨模式/跨仓库共享，经布局偏好持久化）。
+    context_navigator_preferences: ContextNavigatorPreferences,
     /// 壳层控件的稳定焦点句柄，不能在 render 中临时创建。
     chrome_refresh_focus: FocusHandle,
     chrome_fetch_focus: FocusHandle,
@@ -2910,6 +2910,18 @@ pub(crate) struct RepositoryView {
     pub(crate) staging_dir_for_install: Option<PathBuf>,
 }
 
+/// 主模式继承判定（纯函数）：切换/打开/克隆仓库时，仅主模式
+/// （工作区/提交记录/工作流/图谱）跟随切换带过去，保持「当前区域」不变；
+/// 专用模式（Conflict/Stash/Browse/Blame）绑定 per-repo 状态，不继承。
+fn inheritable_main_mode(previous: Option<MainMode>) -> Option<MainMode> {
+    match previous {
+        mode @ Some(
+            MainMode::Worktree | MainMode::History | MainMode::Workflow | MainMode::CommitGraph,
+        ) => mode,
+        _ => None,
+    }
+}
+
 impl RepositoryView {
     fn new(cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::unbounded();
@@ -2922,6 +2934,7 @@ impl RepositoryView {
         let external_merge_settings = Self::load_external_merge_settings(&storage);
         let theme_mode = Self::load_theme_mode(&storage);
         let theme_accent = Self::load_theme_accent(&storage);
+        let layout_preferences = Self::load_layout_preferences(&storage);
         let proxy_custom = proxy_settings.custom.normalized();
         #[cfg(windows)]
         let (tray, tray_error) = match tray::TrayController::new() {
@@ -2963,16 +2976,51 @@ impl RepositoryView {
                 tab
             },
             restoring_session: false,
-            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            changes_width: DEFAULT_CHANGES_WIDTH,
-            workflow_templates_width: DEFAULT_WORKFLOW_TEMPLATES_WIDTH,
-            history_files_width: DEFAULT_HISTORY_FILES_WIDTH,
-            history_inspector_files_width: DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH,
-            history_details_height: None,
-            history_details_collapsed: false,
+            // 布局偏好：启动时从 layout_preferences 恢复（空库回默认常量），
+            // 宽度按 MIN/MAX 钳制——防手改 DB 或常量演进导致越界布局。
+            context_navigator_preferences: ContextNavigatorPreferences {
+                visible: layout_preferences.navigator_visible.unwrap_or(true),
+            },
+            sidebar_width: layout_preferences
+                .sidebar_width
+                .map(|width| width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH))
+                .unwrap_or(DEFAULT_SIDEBAR_WIDTH),
+            changes_width: layout_preferences
+                .changes_width
+                .map(|width| width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH))
+                .unwrap_or(DEFAULT_CHANGES_WIDTH),
+            workflow_templates_width: layout_preferences
+                .workflow_templates_width
+                .map(|width| {
+                    width.clamp(MIN_WORKFLOW_TEMPLATES_WIDTH, MAX_WORKFLOW_TEMPLATES_WIDTH)
+                })
+                .unwrap_or(DEFAULT_WORKFLOW_TEMPLATES_WIDTH),
+            history_files_width: layout_preferences
+                .history_files_width
+                .map(|width| width.clamp(MIN_HISTORY_FILES_WIDTH, MAX_HISTORY_FILES_WIDTH))
+                .unwrap_or(DEFAULT_HISTORY_FILES_WIDTH),
+            history_inspector_files_width: layout_preferences
+                .history_inspector_files_width
+                .map(|width| {
+                    width.clamp(
+                        MIN_HISTORY_INSPECTOR_FILES_WIDTH,
+                        MAX_HISTORY_INSPECTOR_FILES_WIDTH,
+                    )
+                })
+                .unwrap_or(DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH),
+            history_details_height: layout_preferences
+                .history_details_height
+                .map(|height| height.clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT)),
+            history_details_collapsed: layout_preferences.history_details_collapsed,
             history_details_top_hint: Arc::new(Cell::new(0.0)),
-            browse_tree_width: DEFAULT_BROWSE_TREE_WIDTH,
-            history_graph_width: DEFAULT_HISTORY_GRAPH_WIDTH,
+            browse_tree_width: layout_preferences
+                .browse_tree_width
+                .map(|width| width.clamp(MIN_BROWSE_TREE_WIDTH, MAX_BROWSE_TREE_WIDTH))
+                .unwrap_or(DEFAULT_BROWSE_TREE_WIDTH),
+            history_graph_width: layout_preferences
+                .history_graph_width
+                .map(|width| width.clamp(MIN_HISTORY_GRAPH_WIDTH, MAX_HISTORY_GRAPH_WIDTH))
+                .unwrap_or(DEFAULT_HISTORY_GRAPH_WIDTH),
             resizing_sidebar_width: None,
             resizing_changes_width: None,
             resizing_workflow_templates_width: None,
@@ -3353,6 +3401,9 @@ impl RepositoryView {
     }
 
     fn ensure_tab_for_path(&mut self, path: PathBuf) -> RepoTabId {
+        // 记录切换前的主模式：打开/切换仓库保持「当前区域」不变
+        //（主模式跟随；专用页面绑定 per-repo 状态不继承）。
+        let previous_mode = self.current_tab_main_mode();
         let key = normalize_repo_path(&path);
         let existing_id = self
             .tabs
@@ -3364,6 +3415,7 @@ impl RepositoryView {
                 tab.last_active_at = now_epoch_secs();
             }
             self.active_tab = Some(id);
+            self.inherit_main_mode(previous_mode);
             self.save_session();
             return id;
         }
@@ -3372,6 +3424,7 @@ impl RepositoryView {
         self.next_tab_id = self.next_tab_id.wrapping_add(1).max(1);
         self.tabs.push(RepoTabState::new(id, Some(path)));
         self.active_tab = Some(id);
+        self.inherit_main_mode(previous_mode);
         self.save_session();
         id
     }
@@ -3380,6 +3433,7 @@ impl RepositoryView {
         if self.active_tab == Some(tab_id) || self.tab(tab_id).is_none() {
             return;
         }
+        let previous_mode = self.current_tab_main_mode();
         if self.active_dialog == Some(DialogState::SubmoduleManager) {
             self.close_dialog();
         }
@@ -3398,13 +3452,30 @@ impl RepositoryView {
                 let _ = self.storage.upsert_recent_repo(&path);
             }
         }
-        // 切换仓库后默认打开提交记录
-        self.main_mode = MainMode::History;
+        // 切换仓库保持当前区域：主模式（工作区/提交记录/工作流/图谱）跟随切换
+        // 带过去；专用页面（追溯/浏览/冲突等）不继承，落回目标 tab 自身模式。
+        self.inherit_main_mode(previous_mode);
         self.ensure_history_loaded();
         self.sync_conflict_mode_with_snapshot();
         self.save_session();
         // 切换仓库后自动本地刷新
         self.refresh();
+    }
+
+    /// 当前激活 tab 的主模式（无激活 tab 时 None）。
+    fn current_tab_main_mode(&self) -> Option<MainMode> {
+        self.active_tab
+            .and_then(|id| self.tab(id))
+            .map(|tab| tab.main_mode)
+    }
+
+    /// 主模式继承：切换/打开/克隆仓库时把切换前所在的主页面写到新激活的 tab。
+    /// 专用模式（Conflict/Stash/Browse/Blame）绑定 per-repo 状态，不继承。
+    /// 必须在 `active_tab` 已指向目标 tab 之后调用（经 Deref 写入该 tab）。
+    fn inherit_main_mode(&mut self, previous: Option<MainMode>) {
+        if let Some(mode) = inheritable_main_mode(previous) {
+            self.main_mode = mode;
+        }
     }
 
     fn close_tab(&mut self, tab_id: RepoTabId) {
@@ -3563,6 +3634,37 @@ impl RepositoryView {
     fn save_shortcut_bindings(&self) {
         if let Err(err) = self.storage.save_shortcut_bindings(&self.shortcut_bindings) {
             tracing::warn!("shortcut bindings write skipped: {err}");
+        }
+    }
+
+    /// 加载布局偏好；存储为空或出错时回退全部默认值。
+    fn load_layout_preferences(storage: &khaslana::AppStorage) -> khaslana::LayoutPreferences {
+        storage
+            .load_layout_preferences()
+            .inspect_err(|err| tracing::warn!("layout preferences load skipped: {err}"))
+            .unwrap_or_default()
+    }
+
+    /// 保存布局偏好（导航器展开 + 全部分割线位置）。
+    ///
+    /// 仅在离散用户动作后调用（拖拽结束/双击复位/导航器开合/详情卡折叠），
+    /// UI 线程同步写：单行 <200B 的本地 SQLite 写无感知卡顿，同步保证操作
+    /// 顺序落库且「改完即关应用」不丢最后一次修改（与主题/快捷键保存同模式）。
+    pub(crate) fn save_layout_preferences(&self) {
+        let preferences = khaslana::LayoutPreferences {
+            navigator_visible: Some(self.context_navigator_preferences.visible),
+            sidebar_width: Some(self.sidebar_width),
+            changes_width: Some(self.changes_width),
+            workflow_templates_width: Some(self.workflow_templates_width),
+            history_files_width: Some(self.history_files_width),
+            history_inspector_files_width: Some(self.history_inspector_files_width),
+            history_graph_width: Some(self.history_graph_width),
+            browse_tree_width: Some(self.browse_tree_width),
+            history_details_height: self.history_details_height,
+            history_details_collapsed: self.history_details_collapsed,
+        };
+        if let Err(err) = self.storage.save_layout_preferences(&preferences) {
+            tracing::warn!("layout preferences write skipped: {err}");
         }
     }
 
@@ -7726,7 +7828,9 @@ impl RepositoryView {
             .iter()
             .find(|tab| tab.path_key().as_deref() == Some(key.as_str()))
         {
+            let previous_mode = self.current_tab_main_mode();
             self.active_tab = Some(tab.id);
+            self.inherit_main_mode(previous_mode);
             self.last_error = Some("该仓库已经打开".into());
             self.save_session();
             return;
@@ -9494,6 +9598,8 @@ impl RepositoryView {
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
         }
+        // 拖拽结束：布局已定型，同步落库（重启恢复）。
+        self.save_layout_preferences();
     }
 
     fn reset_resize_target(&mut self, target: ResizeTarget) {
@@ -9513,6 +9619,8 @@ impl RepositoryView {
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
             ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
         }
+        // finish_resize_column 已保存一次；复位改写了默认值后再保存最终状态。
+        self.save_layout_preferences();
     }
 
     fn column_width(&self, target: ResizeTarget) -> f32 {

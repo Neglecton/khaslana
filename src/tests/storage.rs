@@ -17,6 +17,51 @@ fn session_state_round_trip() {
     assert_eq!(storage.load_session_state().unwrap(), Some(state));
 }
 
+// 布局偏好：空库返回默认（全 None → UI 层使用内置默认常量）；save→load 恒等；
+// 旧 payload 缺字段经 serde(default) 回默认而不报错。
+#[test]
+fn layout_preferences_default_and_round_trip() {
+    let (_temp, storage) = temp_storage();
+    assert_eq!(
+        storage.load_layout_preferences().unwrap(),
+        LayoutPreferences::default()
+    );
+
+    let preferences = LayoutPreferences {
+        navigator_visible: Some(false),
+        sidebar_width: Some(320.0),
+        changes_width: Some(410.0),
+        workflow_templates_width: Some(500.0),
+        history_files_width: Some(760.0),
+        history_inspector_files_width: Some(300.0),
+        history_graph_width: Some(140.0),
+        browse_tree_width: Some(420.0),
+        history_details_height: Some(310.0),
+        history_details_collapsed: true,
+    };
+    storage.save_layout_preferences(&preferences).unwrap();
+    assert_eq!(storage.load_layout_preferences().unwrap(), preferences);
+}
+
+#[test]
+fn layout_preferences_tolerates_partial_legacy_payload() {
+    let (_temp, storage) = temp_storage();
+    // 模拟旧版本只存了部分字段的 payload：缺失字段回默认，不报错。
+    let conn = storage.lock_conn().unwrap();
+    conn.execute(
+        "INSERT INTO layout_preferences (id, payload, updated_at) VALUES (1, ?1, 0)",
+        params![r#"{"sidebar_width":300.0}"#],
+    )
+    .unwrap();
+    drop(conn);
+
+    let loaded = storage.load_layout_preferences().unwrap();
+    assert_eq!(loaded.sidebar_width, Some(300.0));
+    assert_eq!(loaded.navigator_visible, None);
+    assert_eq!(loaded.history_details_height, None);
+    assert!(!loaded.history_details_collapsed);
+}
+
 #[test]
 fn proxy_settings_round_trip() {
     let (_temp, storage) = temp_storage();

@@ -17,7 +17,7 @@ use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// 旧数据目录（`%APPDATA%\Khaslana`）下出现该标记文件，表示数据已迁移到便携目录；
 /// 启动解析路径时强制走便携路径，即使旧库文件仍在。
@@ -59,6 +59,36 @@ pub struct DiffEncodingPreferences {
 pub struct ShortcutBindings {
     #[serde(default)]
     pub bindings: BTreeMap<String, String>,
+}
+
+/// 布局偏好：Context Navigator 展开状态与全部分割线位置（全局单份，
+/// 跨仓库共享）。所有字段 `#[serde(default)]`——旧 payload / 空库自动回
+/// 默认（None = 使用 UI 层内置默认常量），后续增删字段不需要迁移。
+/// 数值入库前不做钳制，UI 层加载时按 MIN/MAX 常量 clamp（防手改 DB 越界）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LayoutPreferences {
+    /// None = 默认展开。
+    #[serde(default)]
+    pub navigator_visible: Option<bool>,
+    #[serde(default)]
+    pub sidebar_width: Option<f32>,
+    #[serde(default)]
+    pub changes_width: Option<f32>,
+    #[serde(default)]
+    pub workflow_templates_width: Option<f32>,
+    #[serde(default)]
+    pub history_files_width: Option<f32>,
+    #[serde(default)]
+    pub history_inspector_files_width: Option<f32>,
+    #[serde(default)]
+    pub history_graph_width: Option<f32>,
+    #[serde(default)]
+    pub browse_tree_width: Option<f32>,
+    /// None = 从未手动拖拽（详情区按对半分推导）。
+    #[serde(default)]
+    pub history_details_height: Option<f32>,
+    #[serde(default)]
+    pub history_details_collapsed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -275,6 +305,21 @@ impl AppStorage {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction().map_err(storage_error)?;
         save_shortcut_bindings_tx(&tx, bindings)?;
+        tx.commit().map_err(storage_error)
+    }
+
+    /// 读取布局偏好（导航器展开 + 分割线位置）；表为空时返回默认（全 None，
+    /// 由 UI 层使用内置默认常量）。
+    pub fn load_layout_preferences(&self) -> Result<LayoutPreferences> {
+        let conn = self.lock_conn()?;
+        load_layout_preferences_from_conn(&conn)
+    }
+
+    /// 保存布局偏好（整体覆盖）。
+    pub fn save_layout_preferences(&self, preferences: &LayoutPreferences) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_layout_preferences_tx(&tx, preferences)?;
         tx.commit().map_err(storage_error)
     }
 
@@ -857,6 +902,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS layout_preferences (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS recent_repositories (
             path TEXT PRIMARY KEY,
             last_opened_at INTEGER NOT NULL
@@ -1295,6 +1346,38 @@ fn save_shortcut_bindings_tx(tx: &Transaction<'_>, bindings: &ShortcutBindings) 
         .map_err(|err| GitError::Message(format!("快捷键配置序列化失败：{err}")))?;
     tx.execute(
         "INSERT OR REPLACE INTO shortcut_bindings (id, payload, updated_at) VALUES (1, ?1, ?2)",
+        params![payload, now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_layout_preferences_from_conn(conn: &Connection) -> Result<LayoutPreferences> {
+    // 布局偏好整体存为 JSON payload（单行单份），后续增删字段不需要迁移。
+    conn.query_row(
+        "SELECT payload FROM layout_preferences WHERE id = 1",
+        [],
+        |row| {
+            let payload: String = row.get(0)?;
+            serde_json::from_str::<LayoutPreferences>(&payload).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(format!("布局偏好解析失败：{err}"))),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|preferences| preferences.unwrap_or_default())
+}
+
+fn save_layout_preferences_tx(tx: &Transaction<'_>, preferences: &LayoutPreferences) -> Result<()> {
+    let payload = serde_json::to_string(preferences)
+        .map_err(|err| GitError::Message(format!("布局偏好序列化失败：{err}")))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO layout_preferences (id, payload, updated_at) VALUES (1, ?1, ?2)",
         params![payload, now_seconds()],
     )
     .map_err(storage_error)?;

@@ -24,14 +24,14 @@ pub use git::{
 };
 pub use proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 pub use storage::{
-    AppStorage, DiffEncodingPreferences, ExeLocationRisk, ExeRelocationOutcome, MigrationOutcome,
-    RemoteCredentialBinding, RemoteCredentialBindings, SessionState, ShortcutBindings, ThemeMode,
-    UpdatePreferences, apply_pending_exe_relocation, apply_pending_portable_migration,
-    classify_exe_location, current_exe_location_risk, default_database_path,
-    exe_relocation_pending_marker, exe_relocation_target_dir, fixed_database_dir,
-    fixed_database_path, legacy_database_dir, legacy_database_path, portable_database_dir,
-    portable_database_path, portable_migrated_marker, portable_pending_marker,
-    record_last_data_home, request_exe_relocation,
+    AppStorage, DiffEncodingPreferences, ExeLocationRisk, ExeRelocationOutcome, LayoutPreferences,
+    MigrationOutcome, RemoteCredentialBinding, RemoteCredentialBindings, SessionState,
+    ShortcutBindings, ThemeMode, UpdatePreferences, apply_pending_exe_relocation,
+    apply_pending_portable_migration, classify_exe_location, current_exe_location_risk,
+    default_database_path, exe_relocation_pending_marker, exe_relocation_target_dir,
+    fixed_database_dir, fixed_database_path, legacy_database_dir, legacy_database_path,
+    portable_database_dir, portable_database_path, portable_migrated_marker,
+    portable_pending_marker, record_last_data_home, request_exe_relocation,
 };
 pub use types::*;
 pub use workflow::{

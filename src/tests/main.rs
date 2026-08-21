@@ -347,6 +347,63 @@ fn commit_graph_state_survives_mode_round_trip() {
     assert!(tab.commit_graph.details_collapsed);
 }
 
+// 切换/打开/克隆仓库保持当前区域：主模式跟随切换带到目标 tab；
+// 专用模式（绑定 per-repo 状态）不继承，落回目标 tab 自身模式（新 tab 即默认工作区）。
+#[test]
+fn inheritable_main_mode_carries_primary_modes_only() {
+    // 主模式继承。
+    for mode in [
+        MainMode::Worktree,
+        MainMode::History,
+        MainMode::Workflow,
+        MainMode::CommitGraph,
+    ] {
+        assert_eq!(inheritable_main_mode(Some(mode)), Some(mode));
+    }
+
+    // 专用模式不继承。
+    for mode in [
+        MainMode::Conflict,
+        MainMode::Stash,
+        MainMode::Browse,
+        MainMode::Blame,
+    ] {
+        assert_eq!(inheritable_main_mode(Some(mode)), None);
+    }
+
+    // 无前序 tab（首启/会话恢复首个仓库）：不继承。
+    assert_eq!(inheritable_main_mode(None), None);
+}
+
+// 布局偏好恢复的钳制不变量：每个默认常量必须落在自己的 MIN/MAX 区间内，
+// 否则启动恢复时 clamp 会把默认值挤歪（布局跳变）。
+#[test]
+fn layout_preference_clamp_ranges_cover_defaults() {
+    assert!(
+        (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(&DEFAULT_SIDEBAR_WIDTH)
+            && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(&DEFAULT_CHANGES_WIDTH)
+    );
+    assert!(
+        (MIN_HISTORY_FILES_WIDTH..=MAX_HISTORY_FILES_WIDTH).contains(&DEFAULT_HISTORY_FILES_WIDTH)
+    );
+    assert!(
+        (MIN_HISTORY_INSPECTOR_FILES_WIDTH..=MAX_HISTORY_INSPECTOR_FILES_WIDTH)
+            .contains(&DEFAULT_HISTORY_INSPECTOR_FILES_WIDTH)
+    );
+    assert!(
+        (MIN_WORKFLOW_TEMPLATES_WIDTH..=MAX_WORKFLOW_TEMPLATES_WIDTH)
+            .contains(&DEFAULT_WORKFLOW_TEMPLATES_WIDTH)
+    );
+    assert!((MIN_BROWSE_TREE_WIDTH..=MAX_BROWSE_TREE_WIDTH).contains(&DEFAULT_BROWSE_TREE_WIDTH));
+    assert!(
+        (MIN_HISTORY_GRAPH_WIDTH..=MAX_HISTORY_GRAPH_WIDTH).contains(&DEFAULT_HISTORY_GRAPH_WIDTH)
+    );
+    assert!(
+        (MIN_HISTORY_DETAILS_HEIGHT..=MAX_HISTORY_DETAILS_HEIGHT)
+            .contains(&DEFAULT_HISTORY_DETAILS_HEIGHT)
+    );
+}
+
 #[test]
 fn stale_submodule_requests_do_not_match_current_state() {
     let mut state = SubmoduleDialogState::default();

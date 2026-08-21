@@ -367,6 +367,8 @@ impl RepositoryView {
                     false,
                     |this| {
                         this.history_details_collapsed = !this.history_details_collapsed;
+                        // 折叠状态是持久偏好，切换后立即落库（重启恢复）。
+                        this.save_layout_preferences();
                     },
                     cx,
                 )

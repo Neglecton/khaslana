@@ -510,6 +510,8 @@ impl RepositoryView {
                 } else {
                     let mode = this.main_mode;
                     this.context_navigator_preferences.toggle(mode);
+                    // 展开/收起是持久偏好，切换后立即落库（重启恢复）。
+                    this.save_layout_preferences();
                 }
             },
             cx,
