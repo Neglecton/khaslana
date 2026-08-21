@@ -31,9 +31,10 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 ## 核心任务画布
 
 - **Review Canvas（工作区）**：页头只表达当前分支与工作区语境；左侧暂存/未暂存变更使用虚拟列表，右侧差异画布取得剩余空间，提交框保持完整 Git 行为。部分暂存、编码、二进制、超大文件和差异缓存守卫不因视觉重排而降级。
-- **History Inspector（提交记录）**：提交导航全高固定在左侧；每条提交使用专用 48px 两行布局，第一行显示摘要/ref，第二行显示作者/avatar，完整容纳头像与引用徽标，不得套用全局常规 36px 行。右侧上方是可调高度的提交详情，下方为文件导航与占满余量的历史差异。默认详情高度必须与拖拽状态复用同一常量，避免首次拖拽跳变。
+- **History Inspector（提交记录）**：提交导航全高固定在左侧；导航行不画泳道（拓扑整体移入提交图谱页），行内引用标签最多 1 个（HEAD/首个本地分支优先，其余「+n」悬浮查看）；每条提交使用专用 48px 两行布局，第一行显示摘要/ref，第二行显示作者/avatar，完整容纳头像与引用徽标，不得套用全局常规 36px 行。右侧上方是可调高度的提交详情，下方为文件导航与占满余量的历史差异。默认详情高度必须与拖拽状态复用同一常量，避免首次拖拽跳变。
+- **Commit Graph（提交图谱）**：拓扑专注型专用页——全高泳道列表（分支动向高亮：谱系外行泳道线降透明度 + 内容降不透明度；淡化合并提交开关；搜索过滤激活时泳道自动隐藏）+ 底部可折叠轻量详情卡；与主历史页共享提交列表与选中状态，「在提交记录页查看」跳转后经「图谱」按钮无损返回（高亮/开关/搜索词/滚动位置保留）。与 History 提交行共用 48px 两行结构与 `commit_row_content` 构建器。
 - **Runbook Studio（工作流）**：模板导航、运行配置、步骤时间线和按需展开的控制台构成稳定工作台。模板导航与 Context Navigator 一样采用轻量索引模型和单一 `uniform_list`，只在可视 range 内创建元素。
-- **专业次级视图**：Browse/Compare、Stash、Blame 与 Conflict 保留各自领域布局、虚拟化、编码和异步代际守卫，但统一使用同一 surface/content/border/feedback token 与平面列表语言。
+- **专业次级视图**：Browse/Compare、Stash、Blame、Commit Graph 与 Conflict 保留各自领域布局、虚拟化、编码和异步代际守卫，但统一使用同一 surface/content/border/feedback token 与平面列表语言。
 
 任何可能达到成千上万项的导航或变更列表都不得在 render 中预构造 `Vec<AnyElement>`；应先生成轻量索引/行模型，再由 `uniform_list` 可视回调读取当前快照。滚动容器保持单一、有界，不能用逐分组嵌套滚动替代。
 
@@ -47,7 +48,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 - **状态与层级**：Git、diff、反馈 token 保持兼容；`SHADOW_ELEVATION_1/2` 仅用于浮层和对话框。
 - **间距**：4px 基线，`SPACE_1..SPACE_6`（4/8/12/16/20/24）。
 - **排版**：`TYPE_META` 11px、`TYPE_BODY` 12px、`TYPE_TITLE` 14px、`TYPE_PAGE_TITLE` 16px。中文正文优先清晰而非压缩字距。
-- **密度**：紧凑控件 28px、常规控件 32px；全局紧凑行 28px、全局常规行 36px。History 提交导航中的每条提交固定使用专用 48px 两行布局（第一行摘要/ref，第二行作者/avatar）；该例外不改变其他列表的 36px 常规行规范。
+- **密度**：紧凑控件 28px、常规控件 32px；全局紧凑行 28px、全局常规行 36px。History 提交导航与提交图谱页的每条提交固定使用专用 48px 两行布局（第一行摘要/ref，第二行作者/avatar）；该例外不改变其他列表的 36px 常规行规范。
 - **圆角 / 动效**：圆角以 6/8/10px 为主；只允许 120/180ms 的 hover/active 瞬态反馈，不加入持续装饰动画。
 
 ## 组件原语
@@ -56,7 +57,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - `list_row_surface`：默认无完整边框、无阴影；选中态为淡强调色背景与左侧 2px 指示条。
 - `icon_button`：无状态的图标按钮视觉底座，统一尺寸、悬停、禁用原因 tooltip 和标签 tooltip；它不创建临时 `FocusHandle`。
-- `focusable_icon_button`：供壳层等持有稳定 `FocusHandle` 的控件使用，提供 Tab 导航、Enter/Space 激活及 `focus_visible` 焦点环。不能把它降级为 render 中临时创建焦点句柄的 stateless helper。
+- `focusable_icon_button`：供壳层等持有稳定 `FocusHandle` 的控件使用，提供 Tab 导航与 Enter/Space 激活。按用户要求已**全局移除键盘焦点可视环**（`focus_visible`）：按 Ctrl/Alt/空格/Tab 等修饰键不再让控件出现额外边框或背景突变；键盘 Tab 顺序与激活行为保持不变。不能把它降级为 render 中临时创建焦点句柄的 stateless helper。
 - `page_header`、`command_group`、`empty_state`：页面级标题、命令排列和空状态的基础结构。
 - 现有 `button`、`input_frame`、`dialog_*`、反馈 API 保持兼容。自定义文本输入继续只由 `src/text_input.rs` 管理编辑、IME、选区与光标逻辑。
 
@@ -66,7 +67,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - 默认页面、列表、行和导航使用平面 surface；阴影只用于菜单、对话框、toast 和遮罩上方的明确浮层。
 - 不新增装饰性渐变、玻璃态或多层卡片边框。
-- 焦点必须能通过 `STATE_FOCUS_RING` / Yororen `border.focus` 识别；壳层图标控件已用稳定 `FocusHandle` 接入 Tab、Enter/Space 与 `focus_visible`。后续页面若采用无状态图标 helper，必须由持有状态的 focusable wrapper 提供同等能力，不能虚称 helper 自带键盘焦点。
+- 键盘焦点不设可视化焦点环（全局移除 `focus_visible`，避免修饰键触发样式突变）；Tab 导航、Enter/Space 激活与稳定 `FocusHandle` 保留。后续新控件同样不得添加 `focus_visible` 样式。
 - 禁用控件保留可解释 tooltip；普通可点击按钮不强制 tooltip，图标-only 控件提供标签。
 - 保持键盘快捷键和原有点击目标；Context Navigator 的模式按钮只是增加入口，不能移除原业务操作。
 

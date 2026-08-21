@@ -6,6 +6,7 @@ mod blame_view;
 mod browse_compare_view;
 mod browse_view;
 mod chrome_view;
+mod commit_graph_view;
 mod conflicts;
 mod diff_view;
 mod external_merge_view;
@@ -380,6 +381,7 @@ enum FieldId {
     RemoteBranchName,
     RemoteBranchSearch,
     RepoSwitcherSearch,
+    CommitGraphSearch,
     SidebarLocalBranchSearch,
     SidebarRemoteBranchSearch,
     ProxyHttpUrl,
@@ -453,6 +455,11 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     }),
     (FieldId::RepoSwitcherSearch, |view: &RepositoryView| {
         &view.repo_switcher_search
+    }),
+    // 图谱页搜索词全局共享（与仓库切换下拉搜索同一模式），跨模式/跨 tab 保留；
+    // 未注册时 focused_field 找不到字段，输入框会静默丢弃全部键盘/IME 输入。
+    (FieldId::CommitGraphSearch, |view: &RepositoryView| {
+        &view.commit_graph_search
     }),
     (
         FieldId::SidebarLocalBranchSearch,
@@ -1275,6 +1282,40 @@ impl BlameState {
     }
 }
 
+/// 一次分支谱系追踪结果：高亮 OID 集合 + 是否截断。
+/// 参数一致性由 `trace_seq` 代际守卫保证（分支/模式变化必先递增并清空旧集合）。
+#[derive(Clone, Debug)]
+pub(crate) struct CommitTrace {
+    pub oids: Arc<HashSet<String>>,
+    pub truncated: bool,
+}
+
+/// 提交图谱页的 per-repository 状态。
+///
+/// 切换模式（含经「在提交记录页查看」跳去主历史页再返回）**不重置**：
+/// 高亮分支、开关、详情卡折叠与滚动位置全部保留（跳转无损往返的关键）；
+/// 仅随 tab 销毁自然释放。搜索词在 RepositoryView 上全局共享（见
+/// `commit_graph_search`），同样跨模式保留。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommitGraphState {
+    /// 高亮追踪的本地分支名；None = 未启用高亮。
+    pub highlight_branch: Option<String>,
+    /// 高亮模式：true = 仅领先 HEAD 的提交（增量动向），false = 分支全谱系。
+    pub highlight_ahead_only: bool,
+    /// 淡化合并提交开关（未启用高亮时生效；高亮激活时谱系外一律淡化）。
+    pub dim_merges: bool,
+    /// 分支高亮下拉菜单展开状态。
+    pub branch_menu_open: bool,
+    /// 已加载的高亮 OID 集（计算中为 None，避免全表闪烁淡化）。
+    pub trace: Option<CommitTrace>,
+    /// 谱系请求代际：参数变化即递增，旧一代晚到的结果丢弃。
+    pub trace_seq: u64,
+    /// 谱系后台计算中（工具行提示）。
+    pub trace_loading: bool,
+    /// 详情卡折叠状态。
+    pub details_collapsed: bool,
+}
+
 /// AI 评审历史弹窗状态（None = 关闭）。
 pub(crate) struct AiReviewHistoryState {
     /// 后台加载记录中。
@@ -1422,8 +1463,10 @@ struct RepoTabState {
     pub(crate) history_refs_cache: Option<HistoryRefsCache>,
     /// 提交列表请求序号：每次发起加载递增，用于丢弃旧一代请求晚到的结果
     pub(crate) history_load_seq: u64,
-    pub(crate) history_graph_rows: Vec<history_view::CommitGraphRow>,
+    pub(crate) history_graph_rows: Vec<commit_graph_view::CommitGraphRow>,
     pub(crate) stash_preview: StashPreviewState,
+    // 提交图谱页状态（模式切换不重置，跨页跳转无损保留）
+    pub(crate) commit_graph: CommitGraphState,
     pub(crate) branch_sync_status: Option<BranchSyncStatus>,
     pub(crate) branch_sync_loading: bool,
     pub(crate) branch_sync_request_id: u64,
@@ -1483,6 +1526,7 @@ impl RepoTabState {
             history_load_seq: 0,
             history_graph_rows: Vec::new(),
             stash_preview: StashPreviewState::default(),
+            commit_graph: CommitGraphState::default(),
             branch_sync_status: None,
             branch_sync_loading: false,
             branch_sync_request_id: 0,
@@ -1682,6 +1726,9 @@ pub(crate) enum MainMode {
     Stash,
     Browse,
     Blame,
+    /// 提交图谱页（专用模式）：拓扑专注型，主历史页「图谱」按钮进入，
+    /// 关闭/跳转返回 History。切换模式不重置图谱状态（无损往返）。
+    CommitGraph,
 }
 
 /// Context Navigator 偏好：单一展开状态跨工作区/历史/工作流共享，
@@ -1701,7 +1748,11 @@ impl ContextNavigatorPreferences {
     pub(crate) const fn is_visible(self, mode: MainMode) -> bool {
         match mode {
             MainMode::Worktree | MainMode::History | MainMode::Workflow => self.visible,
-            MainMode::Conflict | MainMode::Stash | MainMode::Browse | MainMode::Blame => false,
+            MainMode::Conflict
+            | MainMode::Stash
+            | MainMode::Browse
+            | MainMode::Blame
+            | MainMode::CommitGraph => false,
         }
     }
 
@@ -1710,7 +1761,11 @@ impl ContextNavigatorPreferences {
             MainMode::Worktree | MainMode::History | MainMode::Workflow => {
                 self.visible = !self.visible
             }
-            MainMode::Conflict | MainMode::Stash | MainMode::Browse | MainMode::Blame => {}
+            MainMode::Conflict
+            | MainMode::Stash
+            | MainMode::Browse
+            | MainMode::Blame
+            | MainMode::CommitGraph => {}
         }
     }
 }
@@ -1903,6 +1958,23 @@ pub(crate) enum UiEvent {
         tab_id: RepoTabId,
         error: String,
         load_id: u64,
+    },
+    // 提交图谱页：分支谱系高亮集合计算完成（seq 代际守卫，参数变化即作废旧结果）
+    CommitTraceLoaded {
+        tab_id: RepoTabId,
+        branch: String,
+        ahead_only: bool,
+        oids: Vec<String>,
+        truncated: bool,
+        load_id: u64,
+        seq: u64,
+    },
+    // 提交图谱页：分支谱系计算失败
+    CommitTraceLoadFailed {
+        tab_id: RepoTabId,
+        error: String,
+        load_id: u64,
+        seq: u64,
     },
     BranchSyncStatusLoaded {
         tab_id: RepoTabId,
@@ -2687,6 +2759,9 @@ pub(crate) struct RepositoryView {
     pub(crate) commit_context_menu: Option<CommitContextMenu>,
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
+    /// 图谱页分支高亮下拉菜单：根层捕获点击关闭后的「同次点击不再打开」标记
+    ///（与 encoding_menu_closed_by_capture 同一套防重开模式）。
+    commit_graph_branch_menu_closed_by_capture: bool,
     repo_switcher_menu: Option<RepoSwitcherMenu>,
     /// 窄窗口下 Context Navigator 的临时覆盖态，不改写宽屏停靠偏好。
     context_navigator_overlay_open: bool,
@@ -2716,6 +2791,9 @@ pub(crate) struct RepositoryView {
     repo_switcher_recent: Vec<(PathBuf, i64)>,
     /// 仓库切换下拉顶部的搜索框，输入即过滤打开/最近项目列表。
     repo_switcher_search: TextFieldState,
+    /// 提交图谱页的谱系搜索框（按摘要/作者/短 SHA 过滤已加载提交）。
+    /// 全局共享一份搜索词，跨模式跳转与 tab 切换均保留。
+    commit_graph_search: TextFieldState,
     /// 搜索框是否展开：默认只显示「搜索仓库」按钮，点击后替换为输入框 + 小叉。
     repo_switcher_search_open: bool,
     /// 键盘导航高亮的仓库行（打开区在前、最近区在后的扁平索引）；文本变化时复位。
@@ -2928,6 +3006,7 @@ impl RepositoryView {
             commit_context_menu: None,
             encoding_menu_target: None,
             encoding_menu_closed_by_capture: None,
+            commit_graph_branch_menu_closed_by_capture: false,
             repo_switcher_menu: None,
             context_navigator_overlay_open: false,
             chrome_refresh_focus: cx.focus_handle(),
@@ -2947,6 +3026,7 @@ impl RepositoryView {
             repo_switcher_anchor: None,
             repo_switcher_recent: Vec::new(),
             repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
+            commit_graph_search: TextFieldState::new(cx, "搜索提交/作者/SHA"),
             repo_switcher_search_open: false,
             repo_switcher_highlight: None,
             save_credential: false,
@@ -4335,7 +4415,7 @@ impl RepositoryView {
                             // 过滤模式下隐藏提交图形列：过滤后中间提交缺失，
                             // 泳道线会断裂，跳过泳道计算并让行渲染不画图形。
                             this.history_graph_rows = if this.history_file_filter.is_none() {
-                                history_view::commit_graph_rows(&this.history_commits)
+                                commit_graph_view::commit_graph_rows(&this.history_commits)
                             } else {
                                 Vec::new()
                             };
@@ -4500,6 +4580,51 @@ impl RepositoryView {
                         this.last_error = Some(error);
                         // 全文视图过大时自动回退到紧凑差异
                         this.revert_full_file_if_too_large_error();
+                    }
+                });
+            }
+            UiEvent::CommitTraceLoaded {
+                tab_id,
+                branch,
+                ahead_only,
+                oids,
+                truncated,
+                load_id,
+                seq,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    // 仅最新代际（seq 匹配）应用：参数（分支/模式）变化必先递增 seq，
+                    // 旧一代晚到的结果直接丢弃；仓库重载（load_id 失配）同样作废。
+                    if seq != this.commit_graph.trace_seq || load_id != this.repository_load_id {
+                        return;
+                    }
+                    this.commit_graph.trace_loading = false;
+                    this.commit_graph.trace = Some(CommitTrace {
+                        oids: Arc::new(oids.into_iter().collect()),
+                        truncated,
+                    });
+                    let mode_label = if ahead_only {
+                        "仅领先 HEAD"
+                    } else {
+                        "全谱系"
+                    };
+                    this.status = format!("已高亮分支 {branch}（{mode_label}）");
+                });
+            }
+            UiEvent::CommitTraceLoadFailed {
+                tab_id,
+                error,
+                load_id,
+                seq,
+            } => {
+                self.with_tab_context(tab_id, |this| {
+                    if seq != this.commit_graph.trace_seq {
+                        return;
+                    }
+                    this.commit_graph.trace_loading = false;
+                    if load_id == this.repository_load_id {
+                        this.status = "分支谱系计算失败".to_string();
+                        this.last_error = Some(error);
                     }
                 });
             }
@@ -6052,6 +6177,7 @@ impl RepositoryView {
             FieldId::RemoteBranchName => &mut self.remote_branch_name,
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
+            FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
             FieldId::SidebarRemoteBranchSearch => &mut self.sidebar_remote_branch_search,
             FieldId::ProxyHttpUrl => &mut self.proxy_http_url,
@@ -6129,6 +6255,8 @@ impl RepositoryView {
         self.commit_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
+        self.commit_graph_branch_menu_closed_by_capture = false;
+        self.active_tab_state_mut().commit_graph.branch_menu_open = false;
         self.context_navigator_overlay_open = false;
         self.close_repo_switcher();
     }
@@ -6181,6 +6309,7 @@ impl RepositoryView {
             || self.credential_context_menu.is_some()
             || self.tag_context_menu.is_some()
             || self.stash_context_menu.is_some()
+            || self.commit_graph.branch_menu_open
             || self.commit_context_menu.is_some()
             || self.encoding_menu_target.is_some()
     }
@@ -8953,6 +9082,7 @@ impl RepositoryView {
         self.stash_context_menu = None;
         self.commit_context_menu = None;
         self.active_dialog = None;
+        self.commit_graph.branch_menu_open = false;
         self.encoding_menu_target = if self.encoding_menu_target == Some(target) {
             None
         } else {
@@ -9474,7 +9604,7 @@ impl RepositoryView {
         if self.main_mode == MainMode::Workflow {
             self.refresh_workflow_templates();
         }
-        if self.main_mode == MainMode::History {
+        if self.main_mode == MainMode::History || self.main_mode == MainMode::CommitGraph {
             self.ensure_history_loaded();
         }
     }
@@ -9505,6 +9635,124 @@ impl RepositoryView {
 
     pub(crate) fn cache_diff(&self, key: DiffCacheKey, diff: Arc<FileDiff>) {
         self.diff_cache.borrow_mut().put(key, diff);
+    }
+
+    // ===== 提交图谱页 =====
+
+    /// 从主历史页「图谱」按钮进入图谱页。不重置任何图谱状态：
+    /// 高亮分支、开关、搜索词与滚动位置跨跳转无损保留。
+    pub(crate) fn open_commit_graph(&mut self) {
+        self.set_main_mode(MainMode::CommitGraph);
+    }
+
+    /// 关闭图谱页返回主历史页。「在提交记录页查看」跳转复用同一出口：
+    /// 选中提交与已预加载的文件/差异在四象限直接就位。
+    pub(crate) fn close_commit_graph(&mut self) {
+        self.set_main_mode(MainMode::History);
+        self.status = "已返回提交记录页".to_string();
+    }
+
+    /// 图谱页分支高亮下拉的展开/收起（与编码菜单同一套防重开模式）。
+    fn toggle_commit_graph_branch_menu(&mut self) {
+        if self.commit_graph_branch_menu_closed_by_capture {
+            self.commit_graph_branch_menu_closed_by_capture = false;
+            self.commit_graph.branch_menu_open = false;
+            return;
+        }
+        // 互斥关闭其余弹层菜单
+        self.branch_context_menu = None;
+        self.remote_context_menu = None;
+        self.change_context_menu = None;
+        self.tag_context_menu = None;
+        self.stash_context_menu = None;
+        self.commit_context_menu = None;
+        self.encoding_menu_target = None;
+        self.active_dialog = None;
+        self.commit_graph.branch_menu_open = !self.commit_graph.branch_menu_open;
+    }
+
+    /// 设置/清除分支动向高亮；Some 时后台计算谱系 OID 集合。
+    pub(crate) fn set_commit_graph_highlight(&mut self, branch: Option<String>) {
+        self.close_popups();
+        self.commit_graph.highlight_branch = branch.clone();
+        self.commit_graph.trace = None;
+        match branch {
+            Some(branch) => {
+                self.status = format!("正在计算分支谱系：{branch}");
+                self.refresh_commit_graph_trace();
+            }
+            None => {
+                self.commit_graph.trace_loading = false;
+                self.status = "已关闭分支高亮".to_string();
+            }
+        }
+    }
+
+    /// 切换「仅领先 HEAD」模式：重新计算谱系集合（全谱系 ↔ 增量动向）。
+    fn toggle_commit_graph_ahead_only(&mut self) {
+        if self.commit_graph.highlight_branch.is_none() {
+            return;
+        }
+        self.commit_graph.highlight_ahead_only = !self.commit_graph.highlight_ahead_only;
+        self.refresh_commit_graph_trace();
+    }
+
+    /// 切换「淡化合并提交」：纯渲染开关，无需后台计算。
+    fn toggle_commit_graph_dim_merges(&mut self) {
+        self.commit_graph.dim_merges = !self.commit_graph.dim_merges;
+    }
+
+    /// 后台计算当前高亮分支的谱系 OID 集合（Short 任务池，纯本地 revwalk）。
+    fn refresh_commit_graph_trace(&mut self) {
+        let Some(branch) = self.commit_graph.highlight_branch.clone() else {
+            return;
+        };
+        let Some(tab_id) = self.active_tab_id() else {
+            return;
+        };
+        let Some(repo_path) = self.repo_path.clone() else {
+            return;
+        };
+        let service = self.service_for_tab(tab_id);
+        let tx = self.tx.clone();
+        let ahead_only = self.commit_graph.highlight_ahead_only;
+        let load_id = self.repository_load_id;
+        self.commit_graph.trace_seq += 1;
+        let seq = self.commit_graph.trace_seq;
+        self.commit_graph.trace = None;
+        self.commit_graph.trace_loading = true;
+
+        self.tasks.spawn(TaskKind::Short, move || {
+            let result = (|| -> khaslana::Result<UiEvent> {
+                let repo = Repository::open(repo_path)?;
+                let (oids, truncated) = service.branch_commit_oids(&repo, &branch, ahead_only)?;
+                Ok(UiEvent::CommitTraceLoaded {
+                    tab_id,
+                    branch,
+                    ahead_only,
+                    oids,
+                    truncated,
+                    load_id,
+                    seq,
+                })
+            })();
+            match result {
+                Ok(event) => {
+                    send_ui_event(&tx, event);
+                }
+                Err(err) => {
+                    send_ui_event(
+                        &tx,
+                        UiEvent::CommitTraceLoadFailed {
+                            tab_id,
+                            error: err.to_string(),
+                            load_id,
+                            seq,
+                        },
+                    );
+                }
+            }
+        });
     }
 
     // ===== 分支浏览模式 =====
@@ -10337,14 +10585,15 @@ impl RepositoryView {
     fn reload_history_after_change(&mut self) {
         if self.repo_path.is_some()
             && !self.history_loading.commits
-            && (self.main_mode == MainMode::History || !self.history_commits.is_empty())
+            && (matches!(self.main_mode, MainMode::History | MainMode::CommitGraph)
+                || !self.history_commits.is_empty())
         {
             self.load_history_page(false);
         }
     }
 
     fn ensure_history_loaded(&mut self) {
-        if self.main_mode == MainMode::History
+        if matches!(self.main_mode, MainMode::History | MainMode::CommitGraph)
             && self.repo_path.is_some()
             // 列表为空时首载；被标记陈旧（操作后未在后台刷新）时重新拉取
             && (self.history_commits.is_empty() || self.history_refreshing)
@@ -10394,6 +10643,13 @@ impl RepositoryView {
             "正在加载提交记录".to_string()
         };
         self.last_error = None;
+
+        // 图谱页高亮激活时随全量历史刷新同步重算谱系：提交/拉取/切换分支等
+        // 操作可能移动分支 tip，旧 OID 集合会静默失真。append 分页不改 tip，
+        // 无需重算。
+        if !append && self.commit_graph.highlight_branch.is_some() {
+            self.refresh_commit_graph_trace();
+        }
 
         self.tasks.spawn(TaskKind::Short, move || {
             let started = Instant::now();
@@ -16211,6 +16467,7 @@ impl Render for RepositoryView {
             .text_color(rgb(ui_theme::FOREGROUND))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 this.encoding_menu_closed_by_capture = None;
+                this.commit_graph_branch_menu_closed_by_capture = false;
                 if this.mouse_down_inside_context_menu(event) {
                     return;
                 }
@@ -16224,8 +16481,10 @@ impl Render for RepositoryView {
                     || this.commit_context_menu.is_some()
                     || this.encoding_menu_target.is_some()
                     || this.repo_switcher_menu.is_some()
+                    || this.commit_graph.branch_menu_open
                 {
                     let closed_encoding_menu = this.encoding_menu_target;
+                    let closed_branch_menu = this.commit_graph.branch_menu_open;
                     this.branch_context_menu = None;
                     this.remote_context_menu = None;
                     this.change_context_menu = None;
@@ -16236,6 +16495,8 @@ impl Render for RepositoryView {
                     this.commit_context_menu = None;
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
+                    this.commit_graph.branch_menu_open = false;
+                    this.commit_graph_branch_menu_closed_by_capture = closed_branch_menu;
                     this.close_repo_switcher();
                     cx.notify();
                 }
@@ -16343,6 +16604,9 @@ impl Render for RepositoryView {
                         MainMode::Stash => self.render_stash_preview_view(cx).into_any_element(),
                         MainMode::Browse => self.render_browse_view(cx).into_any_element(),
                         MainMode::Blame => self.render_blame_view(cx).into_any_element(),
+                        MainMode::CommitGraph => {
+                            self.render_commit_graph_view(window, cx).into_any_element()
+                        }
                     })
                     // 窄窗 Navigator 覆盖层最后挂载（盖在主体内容之上）。
                     .when(

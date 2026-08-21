@@ -11,7 +11,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - 本地/远端分支、标签、贮藏、远端管理
 - 暂存、取消暂存、丢弃变更、提交、修补提交（amend）、拣选提交（cherry-pick）
 - fetch、pull、push、merge、checkout；普通合并采用 IDEA 风格闭环，冲突后可完成或中止
-- 提交历史、提交文件列表、历史 diff、提交图
+- 提交历史、提交文件列表、历史 diff、提交图谱页（泳道拓扑 + 分支动向高亮 + 搜索）
 - 文件历史（历史页按路径过滤，只显示改动过该文件的提交）与文件追溯（blame，UI 术语统一为「追溯」：逐行归属标注的独立视图，支持工作区未提交行标注与编码切换）
 - commit reset / revert / 撤销合并提交
 - HTTPS 与 SSH 凭据管理、远端凭据绑定
@@ -65,6 +65,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/syntax.rs`：语法高亮纯函数层（lib crate）。`highlight(path, lines, dark)` 把已解码文本行映射为「行内 utf8 字节区间 + RGB」span 序列（`SyntaxSpans`，与源行严格索引对齐、相邻同色合并）；`highlight_diff_lines` 为 FileDiff 全文行做同样映射（文件头/hunk 头/EOFNL 行产空 vec）。语言检测按扩展名 → 文件名 token 兜底；守卫 >1MB 或 >20K 行返回 None（渲染侧回退纯文本）；深浅主题二选一内置主题（浅 InspiredGitHub / 深 base16-ocean.dark），`SyntaxSet`/`Theme` 经 OnceLock 全局一次初始化（首次约百毫秒，全部调用点在后台线程）。UI 侧接入模式：各视图内容落位后经 `schedule_syntax_highlight`（`SyntaxSlot` 槽位枚举）后台补算，`SyntaxHighlighted` 事件按 (Arc 地址, 行数) 身份守卫回填；冲突工作台走 `ConflictSyntaxHighlighted`（ours/theirs 只读一次、draft 随按块接受/AI 生成重算，seq 防乱序）；主题深浅切换经 `invalidate_and_refresh_syntax_highlights` 清空并从现存 Arc 补算（不做 git 重载）。渲染用 gpui `StyledText::with_highlights`（`syntax_styled_text` helper），宽度测量与既有 String 子元素同路径，横向滚动机制零改动。
 - `src/markdown_view.rs`：Markdown 渲染模块（bin crate）。纯解析层 `parse_markdown_blocks` 把 Markdown 文本映射为块/行/行内 span 数据结构（`MdBlock`/`MdLine`/`MdInlineSpan`，可单测），渲染层 `render_markdown` 复用 `StyledText::with_highlights` 做行内样式（加粗/斜体/删除线/行内代码 chip：TILE 底 + PRIMARY 字）；列表扁平化为带 muted 前缀与缩进的行，引用块递归，代码块 TILE 底等宽逐行。链接/图片仅保留文字，表格/脚注不启用；流式半截输入（未闭合围栏/加粗）由解析器在 EOF 自动收尾。当前用于 AI 评审面板的正文渲染。
 - `src/git/blame.rs`：文件历史与文件追溯 Git 服务。`file_history` 按路径过滤提交（libgit2 revwalk 不支持 pathspec，全量迭代 + 逐提交 first-parent tree-diff 单 pathspec 判断，分页作用于过滤后 OID 流；单 pathspec tree-diff 有剪枝，超大仓库后续再下沉缓存）；`blame_file` 基于 HEAD 计算 blame（守卫：HEAD 无该路径报中文错误、blob 超 `FULL_FILE_MAX_BYTES` 报过大、8KB NUL 嗅探报二进制），工作区文件存在且非二进制时经 `blame_buffer` 纳入未提交改动（差异行零 OID → `commit: None`）；`git_blame_buffer` 对 blob 与 buffer 做裸字节 diff、不经 core.autocrlf/gitattributes 过滤（libgit2-sys 未暴露过滤器 API），Windows 常见「工作区 CRLF、blob LF」会被判成整文件新增（全行零 OID → 全行「未提交」），故先经 `align_line_endings_to_blob` 把工作区字节按 blob 换行风格对齐：与 HEAD 一致（含换行差异）直接用 blob blame、有真实改动才进 buffer 路径、工作区被清空返回空视图（git_blame_buffer 断言 buffer 非空）。hunk 的作者/时间/摘要直接取 libgit2 填充的 final 签名与 summary，不逐提交查库。v1 不追踪 rename/copy，也不支持对任意提交版本 blame（`BlameOptions::newest_commit` 留作后续）。
+- `src/git/commit_trace.rs`：分支谱系追踪 Git 服务（`branch_commit_oids`，提交图谱页的「分支动向高亮」数据源）。从本地分支 tip 出发 revwalk 收集可达提交 OID：`ahead_only = false` 为分支全谱系（含祖先，高亮出主干路径）、`true` 为 push(tip)/hide(HEAD) 的增量动向（沿用 `branch_sync_status` 的 push/hide 模式；HEAD 不可解析时退化为全谱系不报错）；上限 `COMMIT_TRACE_OID_LIMIT = 2000` 并返回截断标记（UI 据此提示「已高亮前 N 个提交」）；分支不存在报中文错误。纯本地查询走 Short 任务池。
 - `src/credentials.rs`：凭据存储、匹配、Keyring 读写、凭据测试、旧存储兼容迁移和单元测试。
 - `src/ssh_credentials.rs`：本机 SSH 身份发现和凭据表单辅助，包括扫描 `~/.ssh` 私钥、解析 SSH config 的 `IdentityFile`、检测 SSH Agent 已加载身份和一键填入表单。
 - `src/oauth.rs`：OAuth 快速登录服务层（GitHub Device Flow + Gitee 授权码流）。GitHub 走设备流（设备码请求、令牌轮询含 `authorization_pending`/`slow_down`/取消/过期、用令牌换取登录名；轮询 Agent 关闭 `http_status_as_error`，因 GitHub 待定/过期返回 400 且详情在响应体里）；Gitee 走授权码流（`gitee_run_code_flow`：本地 `127.0.0.1:17890` 回调服务器用 `std::net` 手写、循环读齐请求头、校验 Host 为本机回调地址、state 用 OS CSPRNG 128 位随机 → 收 code → POST 给 broker 换 token → 取登录名，登录名请求的 token 走 `Authorization` 头而非 URL query）。纯同步 `ureq 3`，复用全局代理设置，不引入异步运行时。令牌作为 `GitCredential::UserPass` 的 secret 复用现有 Keyring 存储与 git2 认证路径，无需改动凭据数据模型。客户端不含 Gitee `client_secret`（公开分发会泄露），token 交换由部署在边缘平台的 broker 代办（见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker) 的 `edge-functions/gitee.js`）。
@@ -75,7 +76,7 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/ai/review_agent.rs`：Diff-first Agentic 评审（lib crate）。工具注册表（六个内置工具的中文描述 + 手写 JSON Schema；search_code 带可选 `path_prefix` 目录限定）、预算守卫（`ToolBudget`：轮次 120 / 工具总次数 120 / 单结果 8K / 累计 400K 字符——轮数 ≤ 调用数+1 使轮次线不先于调用线触顶，累计体积按 ~200K token 上下文估算是真正的成本闸门；`limit_reason()` 命名首个触顶限额。强制收尾 = 注入 user 指令（指明限额、要求立即给结论）+ 省略 tools；收尾轮仍吐 tool_calls 时正文非空宽容接受为结论，空正文才报错并指明限额——旧版三线共用一句「超出工具调用限额」文案 + 收尾轮硬报错，造成「没到调用次数上限却报限额错误」的误伤）、初始上下文装配（变更文件清单 + 预算内 diff，总量 ≤30K 全量给、超限逐文件截 4K **且总量二次封顶**——旧版文件数 × 4K 线性膨胀（200 文件 ≈ 800K）会撑爆上下文，预算耗尽后降级为仅清单 + read_diff 引导；记账含每文件头部与截断标注的实际发出字符，总量严格不超预算）、`run_review_agent` 多轮循环（`is_cancelled: &AtomicBool` 在轮次边界检查（重试退避前与循环退出后返回前各再查一次——末轮流式恰在取消后才完成时按取消收尾不落盘），取消返回 `Ok(None)` 不算失败不触发 Done；每轮 `request_agent_stream` 流式：正文/思考链增量经 `AgentEvent::Delta` 实时回传 UI，tool_calls 分片按 index 聚合；**单轮流式请求带自动重试**（不含首次最多再试 3 次，指数退避 1s/2s/4s，退避前复查取消标志）：仅重试瞬态故障（`AgentStreamError::retryable`：网络 IO、408/429/5xx、流读取失败、流中 error 事件、无正文且无工具调用的无效回合），配置类错误（400/404/422 等）直接失败；重试提示走 `AgentEvent::Progress`（UI 侧 Progress 会清空上一轮 live 流式文本，半截思考随之复位，用户看到「响应中断（原因），正在重试第 N/3 次…」）；重试耗尽后错误附「已自动重试 N 次仍失败」；有 tool_calls 时先落 Reasoning/Message 步骤（中间轮非思考链正文以 `AiReviewStep::Message` 入时间线，UI 不折叠直出）再逐个执行回填 tool 消息——**逐个检查额度**，模型一轮批量发起时超限调用不执行、回填「工具预算已用尽（{限额}）」tool 消息（OpenAI 协议要求每个 tool_call_id 配对）；无 tool_calls 则校验正文非空结束；`AgentEvent::{Step,Progress,Delta,Done}` 回调供 UI 映射事件）与工具执行分发（read_lines 钳 400 行窗口 + 1MB 预检、read_diff 复用比较差异、get_file_tree 截 300 条、get_file_history 钳 20 条、get_blame 压缩为行段摘要 + 结果前缀注明「基于当前 HEAD 与工作区，非目标分支版本」、search_code 截 50 命中；工具失败不终止评审，错误文本作为结果回填模型）。system prompt 要求同轮批量发起独立调查、小改动可零调查直接结论、严重问题引用行号证据。`file_diff_to_patch_text`（FileDiff → patch 文本）也在此导出，commit message 生成与 read_diff 共用。流式工具协议（`request_agent_stream` 单次尝试 + `StreamingToolCallAccumulator` 按 index 聚合分片：id/name 首片、arguments 逐片追加；**截断检测**：`finish_reason=length`（触及 max_tokens，文案含上限数值）或 EOF 无 `[DONE]` 时**无论已产出多少正文/工具调用都判不完整**（可重试）——放行会出现两种静默坏结局：「思考一半就停」（半截思考链被当合法轮次）与「结论半句话却显示完成」；流中 `error` 事件同样立即失败；纯函数 `agent_stream_truncation_message`（length / 无 DONE 两路）与 `agent_turn_empty_failure_message`（0 块 / 仅思考两路）分工给出区分文案）与错误分流（`classify_agent_http_error`：408/429/5xx + 网络 IO 标记可重试，其余 4xx 沿用 `agent_request_error` 文案直接失败——HTTP 404/422 → 更换供应商提示、400 双因并提「模型名/参数错误 或 不支持工具调用」，无降级）在 `src/ai/client.rs`。评审输出 token 上限 `REVIEW_MAX_TOKENS = 8192`（reasoning 模型思考与正文共用 max_tokens 预算，4000 会让长思维链中途触顶）。
 - `src/ai/review_store.rs`：评审记录本地持久化。`AiReviewRecord`（repo_path/target/model/耗时/文件数/完整 `AiReviewResult` 含轨迹）JSON 落盘到 `<数据目录>/ai-reviews/<repo哈希8>/<毫秒>.json`（repo 哈希用手写 FNV-1a 保证跨版本稳定，std DefaultHasher 不保证；哈希前先对路径做**小写折叠**——Windows 路径大小写不敏感，`D:\Repo` 与 `d:\repo` 是同一仓库，不折叠会因大小写变化让旧记录「失联」；`list_review_records` 兼容读折叠前的旧键目录，写入只走新键；同毫秒文件名加 `-2` 后缀；按仓库只保留最近 30 条，文件名毫秒前缀字典序即时间序）；`list_review_records` 按文件名倒序只解析最新 `limit` 条（单条记录可达数百 KB，不全量读入），坏 JSON 跳过继续下一条、仅 warn。数据目录经 `storage::active_data_dir()` 解析（与 DB 同一套便携/旧目录激活规则）。选 JSON 文件而非 SQLite：记录可达数百 KB，文件天然隔离、便于备份清理。写入由任务线程在生成完成后执行——UI 分离（切目标/退出浏览）不影响落盘。
 - `src/main.rs`：应用入口与主要 UI 状态机。包含 `RepositoryView`、多仓库并存状态（仓库切换下拉替代标签页行）、设置中心（独立 `settings_center` 状态，与 `active_dialog` 解耦，凭据子弹窗可叠加）、对话框、文本输入、事件泵、异步 Git 任务、diff/提交状态、凭据/远端弹窗、快捷键动作定义与分发（`ShortcutAction` 枚举 + `actions!` 宏 + `register_all_key_bindings`）等；工作区完整布局已拆到 `src/worktree_view.rs`，应用壳层拆到 `src/chrome_view.rs`。
-- `src/chrome_view.rs`：Focus Workbench 应用壳层：44px 自定义 titlebar（常驻命令入口 + 「设置」按钮固定在原生窗口控制区左侧、任何宽度紧邻最小化按钮，点击打开设置中心并聚焦；快捷键 Ctrl+, 等效）、Context Navigator（模式按钮 + 仓库引用分组，无独立 Activity Rail 列）：展开态为「上下文导航」标题行（开关箭头方向即操作语义：展开指左收起指右）+ 模式按钮区（「工作区/冲突处理(条件)/提交记录/工作流」图标+文字**统一按钮** `navigator_expanded_mode_button`，图标与文字同属一个元素、悬停/选中整行同步、点击图标或文字等效）+ 分组列表；收起态是 48px 窄条 `render_navigator_collapsed_strip`（顶部展开箭头 + 模式图标按钮，专用页面仍常驻——模式图标是冲突/贮藏/浏览/追溯页返回主工作台的唯一入口，箭头在专用页面禁用并提示「此页面不显示导航区」）；窄窗以临时覆盖层展开不改写停靠偏好。模式条目两态共用 `navigator_mode_entries`，图标中心恒定 x=24（两态切换零位移）；模式按钮支持 Tab 焦点与 Enter/Space 激活、点击不抢焦点（避免按 Ctrl/Alt 等修饰键时显示键盘导航焦点环）。宽度策略从 `Window::viewport_size()` 读取逻辑像素：titlebar 不设 overflow 收纳，「贮藏」和「子模块」与其他命令在所有宽度常驻内联。Navigator 展开状态为单一值，跨工作区/历史/工作流共享，模式切换不改变展开/收起。
+- `src/chrome_view.rs`：Focus Workbench 应用壳层：44px 自定义 titlebar（常驻命令入口 + 「设置」按钮固定在原生窗口控制区左侧、任何宽度紧邻最小化按钮，点击打开设置中心并聚焦；快捷键 Ctrl+, 等效）、Context Navigator（模式按钮 + 仓库引用分组，无独立 Activity Rail 列）：展开态为「上下文导航」标题行（开关箭头方向即操作语义：展开指左收起指右）+ 模式按钮区（「工作区/冲突处理(条件)/提交记录/工作流」图标+文字**统一按钮** `navigator_expanded_mode_button`，图标与文字同属一个元素、悬停/选中整行同步、点击图标或文字等效）+ 分组列表；收起态是 48px 窄条 `render_navigator_collapsed_strip`（顶部展开箭头 + 模式图标按钮，专用页面仍常驻——模式图标是冲突/贮藏/浏览/追溯/图谱页返回主工作台的唯一入口，箭头在专用页面禁用并提示「此页面不显示导航区」）；窄窗以临时覆盖层展开不改写停靠偏好。模式条目两态共用 `navigator_mode_entries`，图标中心恒定 x=24（两态切换零位移）；模式按钮支持 Tab 焦点与 Enter/Space 激活、点击不抢焦点（避免按 Ctrl/Alt 等修饰键时显示键盘导航焦点环）。宽度策略从 `Window::viewport_size()` 读取逻辑像素：titlebar 不设 overflow 收纳，「贮藏」和「子模块」与其他命令在所有宽度常驻内联。Navigator 展开状态为单一值，跨工作区/历史/工作流共享，模式切换不改变展开/收起。
 - `src/worktree_view.rs`：工作区 Review Canvas，把暂存/未暂存虚拟列表、差异画布与提交框组成主任务区；保留部分暂存、编码/二进制/大文件处理、差异缓存和操作完成后的刷新代际守卫。
 - `src/conflicts/`：冲突解决相关 UI、交互动作和轻量状态 helper，作为 `main.rs` 的子模块实现 `RepositoryView` 的冲突区域。
 - `src/external_merge.rs`：外部合并工具适配，目前用于检测并调用 IntelliJ IDEA 命令行 merge，负责外部合并设置类型、命令解析、从 Git index 三方内容写临时文件、等待外部工具完成并读取合并结果。
@@ -89,7 +90,8 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `src/theme_view.rs`：应用外观设置 UI 和运行时主题切换逻辑，支持跟随系统、浅色和深色、主题色更换，并同步更新 Yororen 全局主题（含聚焦边框跟随主题色）。
 - `src/sidebar_view.rs`：Context Navigator 的仓库上下文 UI，包括本地分支、远端、远端分支、标签、贮藏和相关右键菜单；全部分组可折叠（本地分支是唯一默认展开的分组，折叠状态 per-repo 存于 `RepoTabState.sidebar_sections`），各分组展平为轻量索引模型后由单一 `uniform_list` 虚拟渲染，不能改回逐分组嵌套滚动或预建全部 `AnyElement`。分支搜索常见 ASCII 路径使用无分配大小写匹配，非 ASCII 名称回退 Unicode 规范化。
 - `src/shortcuts_view.rs`：快捷键设置页 UI，包括 `format_keystroke`（keystroke → 显示文本）、录制态交互（按下组合键录入，冲突拒绝并提示）和恢复默认。
-- `src/history_view.rs`：横向 History Inspector：左侧全高提交导航（提交图泳道与宽度仍可调；导航列宽上限放宽到 `MAX_HISTORY_FILES_WIDTH = 1080`），摘要/ref + 作者/avatar 两层丰富提交项使用 48px 专用行高（不能套用全局常规 36px，否则头像和引用徽标会被裁切），右侧上方提交详情、下方文件列表与历史 diff；详情高度可调，默认高度必须复用 `main.rs` 的 `DEFAULT_HISTORY_DETAILS_HEIGHT`，避免渲染与拖拽状态双写后首拖跳变；检查器内「提交文件 | 差异」分栏同样可拖拽（`ResizeTarget::HistoryInspectorFiles`，默认 260 / 钳制 [200, 720]，双击复位）。
+- `src/history_view.rs`：横向 History Inspector：左侧全高提交导航（**不画泳道**——拓扑展示整体移入提交图谱页；行内引用标签最多 1 个 `MAX_COMMIT_REF_LABELS = 1`，HEAD/首个本地分支优先，其余收进「+n」徽标悬浮查看，避免窄导航列里标签挤压摘要；标题栏「图谱」按钮进入提交图谱页；导航列宽上限 `MAX_HISTORY_FILES_WIDTH = 1080`），摘要/ref + 作者/avatar 两层丰富提交项使用 48px 专用行高（不能套用全局常规 36px，否则头像和引用徽标会被裁切；两行内容由 `commit_row_content` 纯函数构建，与图谱页共用），右侧上方提交详情、下方文件列表与历史 diff；详情高度可调，默认高度必须复用 `main.rs` 的 `DEFAULT_HISTORY_DETAILS_HEIGHT`，避免渲染与拖拽状态双写后首拖跳变；检查器内「提交文件 | 差异」分栏同样可拖拽（`ResizeTarget::HistoryInspectorFiles`，默认 260 / 钳制 [200, 720]，双击复位）。
+- `src/commit_graph_view.rs`：提交图谱页 UI 模块（独立 `MainMode::CommitGraph` 专用模式，主历史页「图谱」按钮进入，「关闭」/「在提交记录页查看」返回 History）。拓扑专注型布局：页头 + 工具行（scope 切换、分支高亮下拉 `glass_menu`、仅领先 HEAD / 淡化合并提交开关、搜索框 `FieldId::CommitGraphSearch`）+ 全高泳道列表（泳道算法 `commit_graph_rows` 与画布渲染自 history_view.rs 迁入，`CommitGraphRow` 不按加载窗口剪枝；行内标签上限 `GRAPH_REF_LABEL_CAP = 3`；泳道列宽仍由 `ResizeTarget::HistoryGraph`（64–480）驱动，行内分割条与窗口级拖拽覆盖层都挂在本页）+ 底部可折叠轻量详情卡（完整 message/作者/父提交/全量引用标签 + 「在提交记录页查看」跳转，不复制四象限检查器）。**跳转无损往返**：`CommitGraphState` per-tab 存于 `RepoTabState`，模式切换不重置（高亮分支/开关/滚动位置保留；搜索词在 `RepositoryView.commit_graph_search` 全局共享），返回图谱页的唯一入口是主历史页「图谱」按钮。分支动向高亮：`graph_row_dimmed` 纯函数判定——高亮激活时谱系外行淡化（泳道线 35% alpha + 内容 opacity 0.55，谱系内合并提交不淡化），未激活时按开关淡化多父提交；搜索（`filter_graph_commits`，摘要/作者/短 SHA 子串大小写不敏感，只过滤已加载页）或文件过滤激活时隐藏泳道列（断线规避，同主历史页策略）。谱系集合由 `git/commit_trace.rs` 后台计算，`CommitTraceLoaded` 携带 `trace_seq` 代际（参数变化必递增并清空旧集合）+ `load_id` 双守卫；全量历史刷新（`load_history_page(append=false)`）时若高亮激活自动重算谱系，防止操作移动分支 tip 后 OID 集合静默失真。分支下拉菜单走根层 `capture_any_mouse_down` 关闭 + `commit_graph_branch_menu_closed_by_capture` 防重开（与编码菜单同一套模式），并计入 `any_popup_menu_open`。
 - `src/diff_view.rs`：差异区域全文/紧凑视图切换模块，包括切换按钮渲染、扇出重新加载和文件过大自动回退。
 - `src/operation_blocker_view.rs`：高风险后台操作的交互遮罩层 UI 和轻量状态 helper，用于切换、合并、变基、提交、回滚、子模块更新和工作流等操作期间阻断普通交互。
 - `src/browse_view.rs`：分支浏览模式 UI 模块，包括文件树展平函数 `flatten_browse_tree`、文件树浏览器渲染、只读内容视图和差异视图。
@@ -176,7 +178,7 @@ UI 线程通过 `async-channel` 接收后台线程发回的 `UiEvent`。重型 G
 
 提交历史自动刷新策略（不需要人工点击刷新）：
 
-- 会创建/移动提交或 HEAD 的操作（提交、提交并推送、合并、变基、reset、revert、uncommit，见 `operation_affects_commit_history` 消息名单）完成后，经 `OperationFinished` 调用 `reload_history_after_change`：正在查看历史页或已有历史列表时无论当前视图都立即后台重载；历史列表为空且不在历史页时不预加载，等进入历史页再拉。
+- 会创建/移动提交或 HEAD 的操作（提交、提交并推送、合并、变基、reset、revert、uncommit，见 `operation_affects_commit_history` 消息名单）完成后，经 `OperationFinished` 调用 `reload_history_after_change`：正在查看历史页/图谱页或已有历史列表时无论当前视图都立即后台重载；历史列表为空且不在两页时不预加载，等进入历史页再拉。
 - 引用类操作（切换分支、拉取、推送、分支增删改等，见 `operation_requires_repository_refresh`）走完整仓库重载，由 `RepositoryFastLoaded` 统一调用 `reload_history_after_change` 刷新历史。
 - `ensure_history_loaded` 在进入历史页时若历史被标记陈旧（`history_refreshing`）也会重新拉取，兜底失败重试与跨标签页陈旧；刷新期间旧列表保持可见（stale-while-revalidate）。
 - 刷新期间选中提交的文件列表与差异也保留展示（按 commit oid 不可变，与提交列表同一套 stale-while-revalidate 策略）：`refresh_history` 不清空 `history_files`/`history_selected_file`/`history_diff`；`HistoryCommitsLoaded` 全量替换时选中仍在新列表则保留三区展示（文件为空时经 `select_history_commit` 自愈重载，非空幂等跳过），选中被新列表丢弃才连同清空——避免出现"详情显示选中提交、文件/差异永远空占位"的不一致。
@@ -287,14 +289,13 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 标签管理：创建（附注/轻量，目标默认 HEAD 或历史页右键指定提交）、删除本地标签、推送到指定远端、删除远端标签（确认弹窗）；标签区常驻显示，空标签时区头“+”仍可创建
 - stash 列表、创建、apply、pop、drop、文件列表和 diff 预览
 
-### 5.4 历史
+### 5.4 历史与提交图谱
 
-- 当前分支 / 所有分支提交历史
-- 拓扑排序提交图
-- 提交图列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位），可见泳道数随列宽动态计算，超出以省略号提示
-- 提交图泳道不按加载窗口剪枝，保证线条跨行连续、跨页加载时上方布局不抖动
+主历史页（History Inspector，负责「解剖单个提交」）：
+
+- 当前分支 / 所有分支提交历史；导航行**不含泳道**（拓扑在提交图谱页），行内引用标签最多 1 个（HEAD/首个本地分支优先，其余「+n」悬浮查看）；标题栏「图谱」按钮进入提交图谱页
 - 提交引用标签，包括本地分支、远端分支、tag、HEAD
-- 切换分支、提交、合并、变基、拉取、推送等操作完成后自动后台刷新提交记录和引用标签（含 HEAD），无需人工刷新
+- 切换分支、提交、合并、变基、拉取、推送等操作完成后自动后台刷新提交记录和引用标签（含 HEAD），无需人工刷新（正在查看历史页/图谱页或已有历史列表时都会立即重载）
 - 分页加载更多
 - 提交详情区（历史页左列上半部，四象限布局：详情上、文件列表下、差异右侧全高）：展示选中提交的摘要与引用徽章、完整提交信息（多行正文）、完整 SHA（可一键复制）、作者（含邮箱）、提交者（仅与作者不同时显示）、提交时间、父提交关系（双父标注合并提交）；默认与文件列表上下对半分（`history_details_height = None`，双方各占 flex_1），拖拽分割条后固化为绝对高度（`ResizeTarget::HistoryDetails`，对半分基准经 1px 标记 canvas 记录的左列顶部坐标推导），双击分割条复位回对半分；可折叠，内容区带自绘滚动条（`scrollable_frame_when`），无选中提交时不渲染。数据来自 `CommitInfo.message/author_email/committer/committer_email`（`collect_commit_infos` 一次性填充），无额外服务层调用
 - 查看提交文件列表
@@ -302,7 +303,15 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 查看指定提交文件 diff
 - 提交文件列表右键可复制绝对路径或打开文件所在目录
 - 右键提交可复制 SHA、reset、revert、撤销合并提交、拣选提交到当前分支（合并提交暂禁用）、在此提交上创建标签等
-- 文件历史（路径过滤）：工作区变更（已暂存/未暂存两分支）与历史页提交文件右键「查看文件历史」，只显示改动过该文件的提交；过滤状态 `RepoTabState.history_file_filter`，`clear_history` 不清过滤器（用户意图，切 scope/切分支/刷新均保留，仅显式点标题栏过滤 chip 的 × 清除，per-tab 生命周期随 tab 销毁）；`HistoryCommitsLoaded` 携带 `path_filter`，应用守卫扩为 scope + path_filter 双比较（`RepoTabState::history_commits_event_matches`），防切换过滤后旧请求覆盖新数据；过滤模式下隐藏提交图形列与列宽分割条（过滤后中间提交缺失，泳道线会断裂）、标题栏显示「文件：<basename>」chip（hover 完整路径）；`HistoryFilesLoaded` 自动选中首个文件时若 filter 激活且列表含该路径则优先选它（diff 立即可见）
+- 文件历史（路径过滤）：工作区变更（已暂存/未暂存两分支）与历史页提交文件右键「查看文件历史」，只显示改动过该文件的提交；过滤状态 `RepoTabState.history_file_filter`，`clear_history` 不清过滤器（用户意图，切 scope/切分支/刷新均保留，仅显式点标题栏过滤 chip 的 × 清除，per-tab 生命周期随 tab 销毁）；`HistoryCommitsLoaded` 携带 `path_filter`，应用守卫扩为 scope + path_filter 双比较（`RepoTabState::history_commits_event_matches`），防切换过滤后旧请求覆盖新数据；过滤模式下隐藏泳道列（过滤后中间提交缺失，泳道线会断裂）、标题栏显示「文件：<basename>」chip（hover 完整路径）；`HistoryFilesLoaded` 自动选中首个文件时若 filter 激活且列表含该路径则优先选它（diff 立即可见）
+
+提交图谱页（`MainMode::CommitGraph` 专用模式，负责「看提交之间的关系」）：
+
+- 全高泳道列表：拓扑排序提交图、泳道列宽可拖拽调整（`ResizeTarget::HistoryGraph`，双击分割条复位）、可见泳道数随列宽动态计算超出以省略号提示、泳道不按加载窗口剪枝（线条跨行连续、跨页稳定）；行内引用标签上限 3 个 + 「+n」悬浮
+- 分支动向高亮：下拉选择本地分支后后台计算谱系 OID 集（全谱系 / 仅领先 HEAD 两档），谱系内提交保持正常、谱系外行淡化（泳道线降透明度 + 行内容降不透明度），一眼看出该分支的动向；谱系上限 2000 个提交（截断时提示）；高亮激活时全量历史刷新自动重算谱系
+- 淡化合并提交开关：未启用高亮时把多父提交的点与连线淡化，拓扑更清爽
+- 提交搜索过滤：按摘要/作者/短 SHA 子串（大小写不敏感）过滤已加载提交，可配合「加载更多」扩大范围；搜索或文件过滤激活时泳道自动隐藏（断线规避）
+- 与主历史页共享同一份提交列表/scope/分页/选中提交：点击图谱行选中提交并自动预加载文件/差异，底部轻量详情卡（完整 message/作者/父提交/全量引用标签/复制 SHA）提供「在提交记录页查看」跳转——跳回后四象限直接就位，再点主历史页「图谱」按钮**无损返回**（高亮、开关、搜索词、滚动位置完整保留）
 - 文件追溯（blame，UI 术语统一为「追溯」）：工作区变更两分支右键、历史页提交文件右键「追溯此文件」与工作区 diff 标题栏「追溯」按钮（规格复用「全文/编码」工具按钮，仅工作区且非二进制显示）进入独立 `MainMode::Blame` 视图；基于 HEAD + 工作区未提交改动（历史页入口对 HEAD 版本追溯），三列布局（注释栏/行号/内容，无分割线、注释栏微灰底侧栏 + 块首行固定宽度分列对齐），未提交行整行警告色打底 + 「未提交」徽标与已提交行区分，已提交行内容列带语法高亮（未提交行保持警告前景色纯色），支持双向滚动与编码切换重载；检出分支/标签时因 HEAD 变化自动关闭回工作区
 
 ### 5.5 分支浏览
@@ -406,6 +415,8 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 - `src/tests/main.rs`：会话 JSON、路径去重、编码偏好、远端凭据绑定、克隆路径推断、文本输入状态、diff 渲染模型、分支浏览状态切换与缓存清理等。
 - `src/tests/git/browse.rs`：分支浏览引用解析（本地/远端分支、标签）、文件树遍历、文件内容读取（编码检测与二进制判定）、与 HEAD 差异，以及子模块条目识别等基于 `tempfile` 的仓库级单测。
 - `src/tests/git/blame.rs`：文件历史路径过滤（只返回触及该文件的提交、分页基于过滤后流、CurrentBranch/AllRefs 两 scope、未触及路径空结果）与文件追溯（行号内容对齐、多 hunk 分组、工作区改动行 `commit: None`、HEAD 无路径与二进制守卫）的仓库级单测。
+- `src/tests/git/commit_trace.rs`：分支谱系追踪仓库级单测——全谱系含祖先且不含其它分支独有提交、仅领先 HEAD 排除 HEAD 可达集、分支不存在中文报错、小仓库不截断（上限常量 2000 断言）。
+- `src/tests/commit_graph_view.rs`：提交图谱页单测——泳道算法（分支尖端不连顶部竖线、分叉汇合释放泳道、未分页父提交泳道连续、可见泳道上限随列宽缩放）、淡化判定纯函数 `graph_row_dimmed`（高亮激活/未激活 × 合并提交组合）、搜索过滤 `filter_graph_commits`（摘要/作者/短 SHA 子串大小写不敏感、空查询全量）、行高与标签上限常量断言；另有 `src/tests/main.rs` 的图谱页模式往返状态保留测试。
 - `src/tests/syntax.rs`：语法高亮纯函数单测——span 拼接与原行字节恒等（含中文）、相邻同色合并且无零长度、扩展名/文件名检测（.rs/.py/.md 命中、未知扩展与 Makefile/GNUmakefile 兜底）、深浅主题产出不同颜色、体积/行数守卫返回 None、空文件与空行安全、diff 全文行索引对齐且文件头/hunk 头/EOFNL 行产空 vec。
 - 普通合并测试覆盖快进、无冲突结果暂存、显式完成后的双父提交、冲突状态恢复、冲突后完成、确认中止、脏工作区拒绝和重新打开仓库后继续合并。
 - `src/tests/browse_view.rs`：文件树展平纯函数 `flatten_browse_tree`（展开/折叠/嵌套）单测。
@@ -540,10 +551,11 @@ Windows MSVC target 通过 `.cargo/config.toml` 启用静态 CRT 链接，发布
 
 理由：历史页已有分页和图形渲染，但仓库稍大时缺少定位能力。
 
-建议范围：
+已落地（图谱页 v1，2026-08）：按提交信息/作者/短 SHA 子串搜索已加载提交（`filter_graph_commits`，配合「加载更多」扩大范围）。
 
-- 按提交信息搜索。
-- 按作者过滤。
+建议后续范围：
+
+- 搜索下沉到 `GitService`，在 revwalk 过程中过滤并分页（当前只过滤已加载页）。
 - 按分支 / tag / remote ref 过滤。
 - 快捷清除过滤。
 

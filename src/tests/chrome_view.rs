@@ -67,6 +67,8 @@ fn context_navigator_rejects_specialized_modes() {
     assert!(!context_navigator_supported_mode(MainMode::Stash));
     assert!(!context_navigator_supported_mode(MainMode::Browse));
     assert!(!context_navigator_supported_mode(MainMode::Blame));
+    // 提交图谱页同为专用模式：Navigator 隐藏（收起窄条），模式图标仍是返回入口。
+    assert!(!context_navigator_supported_mode(MainMode::CommitGraph));
     assert_eq!(
         context_navigator_presentation(shell_layout_policy(1119.0), MainMode::Conflict, true, true),
         ContextNavigatorPresentation::Hidden

@@ -16,66 +16,8 @@ fn test_commit(oid: &str, parents: &[&str]) -> CommitInfo {
     }
 }
 
-#[test]
-fn unmerged_branch_tips_do_not_connect_from_top() {
-    let commits = vec![
-        test_commit("feature-tip", &["base"]),
-        test_commit("main-tip", &["base"]),
-        test_commit("base", &[]),
-    ];
-
-    let rows = commit_graph_rows(&commits);
-
-    assert!(!rows[0].connected_from_top);
-    assert!(!rows[1].connected_from_top);
-    assert!(rows[2].connected_from_top);
-}
-
-// 分叉的两个分支 tip 汇合到同一父提交时，后到的 tip 并入父提交已有泳道，
-// 自身泳道释放——否则父提交行之后会残留幽灵竖线贯穿到列表末尾。
-#[test]
-fn fork_rejoining_parent_releases_lane() {
-    let commits = vec![
-        test_commit("main-tip", &["base"]),
-        test_commit("feature-tip", &["base"]),
-        test_commit("base", &["root"]),
-        test_commit("root", &[]),
-    ];
-
-    let rows = commit_graph_rows(&commits);
-
-    // feature-tip 行并入 base 所在泳道 0，自身泳道在行内仍可见（画圆点）。
-    assert!(rows[1].lanes.contains(&1));
-    assert_eq!(rows[1].connectors, vec![0]);
-    // base 行及之后：幽灵泳道不应残留。
-    assert_eq!(rows[2].lanes, vec![0]);
-    assert_eq!(rows[3].lanes, vec![0]);
-}
-
-// 合并提交的第二父提交尚未分页加载时，其泳道不应被剪掉：引入行画斜线但不画悬空顶部竖线，
-// 下一行该泳道作为贯穿竖线接续，保证线条连续。
-#[test]
-fn unloaded_parent_lane_stays_continuous() {
-    let commits = vec![
-        test_commit("merge", &["base", "missing"]),
-        test_commit("base", &[]),
-    ];
-
-    let rows = commit_graph_rows(&commits);
-
-    assert!(rows[0].connectors.contains(&1));
-    assert!(!rows[0].lanes.contains(&1));
-    assert!(rows[1].lanes.contains(&1));
-}
-
-// 可见泳道上限随列宽增长，过窄时回退到 0。
-#[test]
-fn graph_max_lane_scales_with_width() {
-    assert_eq!(graph_max_lane(20.0), 0);
-    assert_eq!(graph_max_lane(64.0), 3);
-    assert_eq!(graph_max_lane(96.0), 5);
-    assert_eq!(graph_max_lane(480.0), 32);
-}
+// 泳道算法测试（commit_graph_rows / graph_max_lane 等）已随实现迁移到
+// src/tests/commit_graph_view.rs。
 
 // 提交者与作者相同时不产生展示文本（避免详情区噪音）。
 #[test]
@@ -123,6 +65,14 @@ fn author_label_includes_email_when_present() {
 fn history_commit_rows_fit_two_line_metadata_and_badges() {
     assert_eq!(HISTORY_COMMIT_ROW_HEIGHT, 48.0);
     assert!(HISTORY_COMMIT_ROW_HEIGHT > ui_theme::ROW_HEIGHT_REGULAR);
+}
+
+// 主历史页导航列较窄：行内引用标签上限收紧到 1（HEAD/首个本地分支优先），
+// 其余收进「+n」徽标；完整标签展示交给图谱页（上限 3）与详情卡（全量）。
+#[test]
+fn main_history_rows_cap_inline_ref_labels_to_one() {
+    assert_eq!(MAX_COMMIT_REF_LABELS, 1);
+    assert_eq!(crate::commit_graph_view::GRAPH_REF_LABEL_CAP, 3);
 }
 
 #[test]

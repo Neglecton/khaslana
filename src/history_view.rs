@@ -1,31 +1,26 @@
 use crate::ui::theme::rgb;
 use gpui::{
-    Context, CursorStyle, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, div, point, prelude::*, px, uniform_list,
+    Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, div, prelude::*, px,
+    uniform_list,
 };
 use khaslana::{CommitFileChange, CommitInfo, CommitRefInfo, CommitRefKind};
 
 use crate::{
     CHANGE_ROW_HEIGHT, DEFAULT_HISTORY_DETAILS_HEIGHT, DiffHeaderTarget, EncodingMenuTarget,
     RepositoryView, ResizeTarget, ScrollbarMode, author_avatar, change_state_badge,
-    column_splitter_accepts_mouse_events, column_splitter_should_clear_resize, commit_time_label,
-    history_scope_button, placeholder_row, scrollable_frame_when, scrollable_uniform_frame,
-    section_header, section_header_action,
+    commit_time_label, history_scope_button, placeholder_row, scrollable_frame_when,
+    scrollable_uniform_frame, section_header, section_header_action,
     ui::{
         components::{list_row_surface, metric_badge, tooltip_text},
         theme as ui_theme,
     },
 };
 
-// History 提交项含摘要/ref 与作者/avatar 两层信息，使用专用 48px 行高；
-// 图形单元覆盖完整行高，保证相邻行轨道连续，列宽仍由 history_graph_width 状态提供。
+// History 提交项含摘要/ref 与作者/avatar 两层信息，使用专用 48px 行高。
 const HISTORY_COMMIT_ROW_HEIGHT: f32 = 48.0;
-// 提交行只直接展示少量引用，剩余引用通过 +n 的悬浮提示查看，避免挤压提交摘要。
-const MAX_COMMIT_REF_LABELS: usize = 3;
-const GRAPH_LANE_START: f32 = 12.0;
-const GRAPH_LANE_SPACING: f32 = 14.0;
-// 图形列右侧的拖拽分割条宽度，行内流式排布，自动与图形列对齐。
-const GRAPH_SPLITTER_WIDTH: f32 = 6.0;
+// 主历史页导航列较窄：行内最多展示 1 个引用标签（HEAD/首个本地分支优先），
+// 其余收进「+n」徽标悬浮查看，避免标签挤压提交摘要；完整拓扑在图谱页查看。
+const MAX_COMMIT_REF_LABELS: usize = 1;
 // 检查器下部的文件导航保持窄而稳定，差异视图始终取得剩余空间。
 const HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT: f32 = 32.0;
 
@@ -56,14 +51,6 @@ fn history_inspector_layout(
             crate::MAX_HISTORY_INSPECTOR_FILES_WIDTH,
         ),
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct CommitGraphRow {
-    lane: usize,
-    lanes: Vec<usize>,
-    connectors: Vec<usize>,
-    connected_from_top: bool,
 }
 
 impl RepositoryView {
@@ -144,11 +131,6 @@ impl RepositoryView {
         let content_present = !self.history_commits.is_empty();
         let handle = self.uniform_scroll_handle("commit-history-list");
         let list_handle = handle.clone();
-        // 拖拽提交图列宽时挂载窗口级鼠标事件承载层；无命中区，不拦截列表点击。
-        // 过滤模式下图形列隐藏，无需承载层。
-        let graph_resize_overlay = (self.resize_state(ResizeTarget::HistoryGraph).is_some()
-            && self.history_file_filter.is_none())
-        .then(|| self.history_graph_resize_overlay(cx).into_any_element());
         let content = div()
             .id("commit-history-list")
             .relative()
@@ -203,12 +185,7 @@ impl RepositoryView {
                                 let Some(commit) = this.history_commits.get(index).cloned() else {
                                     return placeholder_row("").into_any_element();
                                 };
-                                let graph = this
-                                    .history_graph_rows
-                                    .get(index)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                this.commit_row(commit, graph, cx).into_any_element()
+                                this.commit_row(commit, cx).into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -237,6 +214,14 @@ impl RepositoryView {
                         .flex()
                         .items_center()
                         .gap_1()
+                        // 「图谱」入口：跳转到提交图谱页（泳道拓扑、分支动向高亮、搜索）；
+                        // 也是从提交记录页返回图谱页（跳转后状态无损保留）的通道。
+                        .child(history_scope_button(
+                            "图谱",
+                            false,
+                            |this| this.open_commit_graph(),
+                            cx,
+                        ))
                         .child(history_scope_button(
                             "当前分支",
                             self.history_scope == khaslana::HistoryScope::CurrentBranch,
@@ -266,162 +251,23 @@ impl RepositoryView {
                 content_present,
                 cx,
             ))
-            .children(graph_resize_overlay)
     }
 
-    /// 提交图列右侧的行内拖拽分割条：流式排布自动与图形列对齐，吞掉点击避免误选提交。
-    fn render_history_graph_splitter(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.resize_state(ResizeTarget::HistoryGraph).is_some();
-        // 弹窗或弹层菜单打开时不显示拖拽光标、不响应，与列分割线行为一致
-        let interactive = column_splitter_accepts_mouse_events(
-            self.active_dialog.is_some(),
-            self.any_popup_menu_open(),
-        );
-        div()
-            .flex_none()
-            .relative()
-            .w(px(GRAPH_SPLITTER_WIDTH))
-            .h_full()
-            .when(interactive, |this| this.cursor(CursorStyle::ResizeColumn))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    // 阻止冒泡到提交行的 on_click，避免拖拽分割条时误选中提交。
-                    cx.stop_propagation();
-                    if !column_splitter_accepts_mouse_events(
-                        this.active_dialog.is_some(),
-                        this.any_popup_menu_open(),
-                    ) {
-                        this.finish_resize_column(ResizeTarget::HistoryGraph);
-                        cx.notify();
-                        return;
-                    }
-                    if event.click_count >= 2 {
-                        this.reset_resize_target(ResizeTarget::HistoryGraph);
-                    } else {
-                        this.start_resize_column(ResizeTarget::HistoryGraph, event);
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(2.0))
-                    .top(px(0.0))
-                    .bottom(px(0.0))
-                    .w(px(1.0))
-                    .bg(if active {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
-                    }),
-            )
-    }
-
-    /// 拖拽提交图列宽期间的窗口级鼠标事件承载层：无命中区，不拦截列表点击。
-    fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        gpui::canvas(
-            |_, _, _| (),
-            move |_, _, window, _cx| {
-                window.on_mouse_event({
-                    let entity = entity.clone();
-                    move |event: &MouseMoveEvent, _, _, cx| {
-                        let (resizing, active_dialog, popup_open) = {
-                            let view = entity.read(cx);
-                            (
-                                view.resize_state(ResizeTarget::HistoryGraph).is_some(),
-                                view.active_dialog.is_some(),
-                                view.any_popup_menu_open(),
-                            )
-                        };
-                        if column_splitter_should_clear_resize(
-                            active_dialog || popup_open,
-                            resizing,
-                        ) {
-                            entity.update(cx, |this, cx| {
-                                this.finish_resize_column(ResizeTarget::HistoryGraph);
-                                cx.notify();
-                            });
-                            return;
-                        }
-                        if !resizing
-                            || !event.dragging()
-                            || !column_splitter_accepts_mouse_events(active_dialog, popup_open)
-                        {
-                            return;
-                        }
-                        entity.update(cx, |this, cx| {
-                            this.update_resize_column(ResizeTarget::HistoryGraph, event);
-                            cx.notify();
-                        });
-                    }
-                });
-                window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
-                    let (resizing, active_dialog, popup_open) = {
-                        let view = entity.read(cx);
-                        (
-                            view.resize_state(ResizeTarget::HistoryGraph).is_some(),
-                            view.active_dialog.is_some(),
-                            view.any_popup_menu_open(),
-                        )
-                    };
-                    if !resizing {
-                        return;
-                    }
-                    if !column_splitter_accepts_mouse_events(active_dialog, popup_open)
-                        && !column_splitter_should_clear_resize(
-                            active_dialog || popup_open,
-                            resizing,
-                        )
-                    {
-                        return;
-                    }
-                    entity.update(cx, |this, cx| {
-                        this.finish_resize_column(ResizeTarget::HistoryGraph);
-                        cx.notify();
-                    });
-                });
-            },
-        )
-        .absolute()
-        .top(px(0.0))
-        .left(px(0.0))
-        .right(px(0.0))
-        .bottom(px(0.0))
-    }
-
-    fn commit_row(
-        &self,
-        commit: CommitInfo,
-        graph: CommitGraphRow,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn commit_row(&self, commit: CommitInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.history_selected_commit.as_deref() == Some(commit.oid.as_str());
         let oid = commit.oid.clone();
         let right_click_oid = commit.oid.clone();
         let right_click_short_oid = commit.short_oid.clone();
         let right_click_summary = commit.summary.clone();
         let right_click_parent_count = commit.parents.len();
-        let author = commit.author.clone();
-        let time = commit_time_label(commit.time);
         let row_short_oid = commit.short_oid.clone();
-        let ref_labels = commit_ref_labels(&commit.refs, &row_short_oid);
-        let hidden_refs = commit
-            .refs
-            .iter()
-            .skip(MAX_COMMIT_REF_LABELS)
-            .cloned()
-            .collect::<Vec<_>>();
-        let hidden_ref_count = hidden_refs.len();
         let unpushed = self
             .branch_sync_status
             .as_ref()
             .is_some_and(|status| status.unpushed_oids.iter().any(|oid| oid == &commit.oid));
 
         // 提交导航使用统一的平面列表面：选中态由淡主色背景与 2px 指示条表达，
-        // 不再为每一行绘制卡片边框。
+        // 不再为每一行绘制卡片边框。主历史页不画泳道（完整拓扑在图谱页）。
         list_row_surface(format!("commit-{row_short_oid}"), selected)
             .flex()
             .flex_none()
@@ -429,6 +275,9 @@ impl RepositoryView {
             .min_w(px(0.0))
             .items_center()
             .gap_1()
+            // 左内边距与选中指示条（左缘 2px）及未推送竖条错开；泳道移除后
+            // 文字不再有泳道格子垫底，必须显式留出这段距离。
+            .pl(px(ui_theme::SPACE_3))
             .pr_2()
             .h(px(HISTORY_COMMIT_ROW_HEIGHT))
             .cursor_pointer()
@@ -463,73 +312,12 @@ impl RepositoryView {
                     cx.notify();
                 }),
             )
-            // 过滤模式下隐藏提交图形列（含列宽分割条）：过滤后中间提交缺失，
-            // 泳道线会断裂，隐藏最干净。
-            .when(self.history_file_filter.is_none(), |this| {
-                this.child(render_commit_graph_cell(graph, self.history_graph_width))
-                    .child(self.render_history_graph_splitter(cx))
-            })
-            // 主信息优先放在第一行；作者、时间与短 SHA 降为第二行。48px 专用行高
-            // 为头像与 ref 徽标保留完整边界，同时保持窄导航栏中的信息层级。
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
-                                    .truncate()
-                                    .child(commit.summary),
-                            )
-                            .children(ref_labels)
-                            .when(hidden_ref_count > 0, |this| {
-                                this.child(commit_ref_overflow_label(&row_short_oid, hidden_refs))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .min_w(px(0.0))
-                            .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .child(author_avatar(&author))
-                            .child(div().max_w(px(76.0)).truncate().child(author))
-                            .child(div().flex_none().child(time))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::PRIMARY))
-                                    .child(row_short_oid.clone()),
-                            )
-                            .when(unpushed, |this| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .bg(rgb(ui_theme::FEEDBACK_WARNING_BG))
-                                        .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
-                                        .child("未推送"),
-                                )
-                            }),
-                    ),
-            )
+            .child(commit_row_content(
+                &commit,
+                MAX_COMMIT_REF_LABELS,
+                unpushed,
+                false,
+            ))
     }
 
     /// 检查器顶部的提交概览与详情。完整信息留在可滚动区域，保证文件和差异始终可见。
@@ -686,7 +474,11 @@ impl RepositoryView {
                             .text_color(rgb(ui_theme::FOREGROUND))
                             .child(commit.summary.clone()),
                     )
-                    .children(commit_ref_labels(&commit.refs, &commit.short_oid)),
+                    .children(commit_ref_labels(
+                        &commit.refs,
+                        &commit.short_oid,
+                        crate::commit_graph_view::GRAPH_REF_LABEL_CAP,
+                    )),
             )
             .children(body_text.map(|text| {
                 div()
@@ -881,256 +673,93 @@ impl RepositoryView {
     }
 }
 
-pub(crate) fn commit_graph_rows(commits: &[CommitInfo]) -> Vec<CommitGraphRow> {
-    // 不再按“已加载窗口”剪枝泳道：revwalk 为完整父提交遍历，未分页到的父提交最终必被加载，
-    // 剪枝只会让合并第二父等泳道在引入行悬空、并在跨页加载时改变上方行的泳道分配，造成断线与抖动。
-    // 保留泳道后，每行状态仅依赖该行及之前的提交，线条跨行连续且跨页前缀稳定。
-    let mut lanes = Vec::<Option<String>>::new();
-    let mut rows = Vec::with_capacity(commits.len());
-
-    for commit in commits {
-        let existing_lane = lanes
-            .iter()
-            .position(|oid| oid.as_deref() == Some(commit.oid.as_str()));
-        let connected_from_top = existing_lane.is_some();
-        let lane = existing_lane.unwrap_or_else(|| {
-            if let Some(index) = lanes.iter().position(Option::is_none) {
-                lanes[index] = Some(commit.oid.clone());
-                index
-            } else {
-                lanes.push(Some(commit.oid.clone()));
-                lanes.len() - 1
-            }
-        });
-        let lanes_before = active_lane_indices(&lanes, lane);
-        let mut connectors = Vec::new();
-
-        if let Some(first_parent) = commit.parents.first() {
-            // 分叉汇合：first parent 已占据其它泳道时，当前泳道并入该泳道并
-            // 释放。若无条件写入当前泳道，parent 会同时占据两条泳道——父提交
-            // 行只清理第一条匹配，另一条成为幽灵泳道，贯穿竖线画到列表末尾。
-            if let Some(existing) = lanes
-                .iter()
-                .position(|oid| oid.as_deref() == Some(first_parent.as_str()))
-            {
-                connectors.push(existing);
-                lanes[lane] = None;
-            } else {
-                lanes[lane] = Some(first_parent.clone());
-                connectors.push(lane);
-            }
-        } else {
-            lanes[lane] = None;
-        }
-
-        for parent in commit.parents.iter().skip(1) {
-            let parent_lane = lanes
-                .iter()
-                .position(|oid| oid.as_deref() == Some(parent.as_str()))
-                .unwrap_or_else(|| {
-                    if let Some(index) = lanes.iter().position(Option::is_none) {
-                        lanes[index] = Some(parent.clone());
-                        index
-                    } else {
-                        lanes.push(Some(parent.clone()));
-                        lanes.len() - 1
-                    }
-                });
-            connectors.push(parent_lane);
-        }
-
-        connectors.sort_unstable();
-        connectors.dedup();
-        rows.push(CommitGraphRow {
-            lane,
-            lanes: lanes_before,
-            connectors,
-            connected_from_top,
-        });
-    }
-
-    rows
-}
-
-fn active_lane_indices(lanes: &[Option<String>], current_lane: usize) -> Vec<usize> {
-    let mut indices = lanes
+/// 提交行两行内容（摘要 + 引用标签 / 作者 + 时间 + 短 SHA + 未推送徽标）。
+/// 主历史页与图谱页共用；差异由调用方决定：行内引用标签数量上限
+/// （主页面 1 个、图谱页 3 个）与淡化透明度（图谱页高亮谱系外的行）。
+pub(crate) fn commit_row_content(
+    commit: &CommitInfo,
+    badge_cap: usize,
+    unpushed: bool,
+    dimmed: bool,
+) -> impl IntoElement {
+    let row_short_oid = commit.short_oid.clone();
+    let ref_labels = commit_ref_labels(&commit.refs, &row_short_oid, badge_cap);
+    let hidden_refs = commit
+        .refs
         .iter()
-        .enumerate()
-        .filter_map(|(index, oid)| oid.as_ref().map(|_| index))
+        .skip(badge_cap)
+        .cloned()
         .collect::<Vec<_>>();
-    if !indices.contains(&current_lane) {
-        indices.push(current_lane);
-    }
-    indices.sort_unstable();
-    indices.dedup();
-    indices
-}
-
-// 由图形列宽推算最右可绘制泳道索引：为圆点半径与右侧分割条预留空间，避免圆点被分割条遮挡。
-fn graph_max_lane(width: f32) -> usize {
-    let usable = width - GRAPH_LANE_START - 9.0;
-    if usable < 0.0 {
-        0
-    } else {
-        (usable / GRAPH_LANE_SPACING).floor() as usize
-    }
-}
-
-fn render_commit_graph_cell(graph: CommitGraphRow, width: f32) -> impl IntoElement {
-    // 可见泳道上限随列宽动态变化；超出可见范围的轨道不绘制，并以省略号提示。
-    let visible_max = graph_max_lane(width);
-    let overflow = graph
-        .lanes
-        .iter()
-        .chain(graph.connectors.iter())
-        .copied()
-        .chain(std::iter::once(graph.lane))
-        .any(|lane| lane > visible_max);
+    let hidden_ref_count = hidden_refs.len();
+    let author = commit.author.clone();
+    let time = commit_time_label(commit.time);
 
     div()
-        .relative()
-        .flex_none()
-        .w(px(width))
-        .h_full()
-        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .gap(px(1.0))
+        .when(dimmed, |this| this.opacity(0.55))
         .child(
-            gpui::canvas(
-                |_, _, _| graph,
-                move |bounds, graph, window, _cx| {
-                    let top_y = bounds.origin.y;
-                    let bottom_y = bounds.origin.y + bounds.size.height;
-                    let center_y = bounds.origin.y + bounds.size.height / 2.0;
-                    let current_lane = graph.lane.min(visible_max);
-                    let current_x = bounds.origin.x + px(graph_x(current_lane));
-
-                    // 当前提交的轨道分段绘制，分支尖端的圆点上方不再出现悬空线段。
-                    for lane in graph
-                        .lanes
-                        .iter()
-                        .copied()
-                        .filter(|lane| *lane <= visible_max && *lane != current_lane)
-                    {
-                        let x = bounds.origin.x + px(graph_x(lane));
-                        paint_graph_line(window, x, top_y, x, bottom_y, graph_color(lane));
-                    }
-
-                    if graph.connected_from_top {
-                        paint_graph_line(
-                            window,
-                            current_x,
-                            top_y,
-                            current_x,
-                            center_y,
-                            graph_color(current_lane),
-                        );
-                    }
-
-                    for target in graph
-                        .connectors
-                        .iter()
-                        .copied()
-                        .filter(|lane| *lane <= visible_max)
-                    {
-                        let target_x = bounds.origin.x + px(graph_x(target));
-                        paint_graph_line(
-                            window,
-                            current_x,
-                            center_y,
-                            target_x,
-                            bottom_y,
-                            graph_color(target),
-                        );
-                    }
-
-                    paint_graph_dot(window, current_x, center_y, graph_color(current_lane));
-                },
-            )
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0)),
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .truncate()
+                        .child(commit.summary.clone()),
+                )
+                .children(ref_labels)
+                .when(hidden_ref_count > 0, |this| {
+                    this.child(commit_ref_overflow_label(&row_short_oid, hidden_refs))
+                }),
         )
-        .when(overflow, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .right(px(4.0))
-                    .bottom(px(0.0))
-                    .flex()
-                    .items_center()
-                    .text_size(px(10.0))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("..."),
-            )
-        })
-}
-
-fn graph_x(lane: usize) -> f32 {
-    GRAPH_LANE_START + GRAPH_LANE_SPACING * lane as f32
-}
-
-fn graph_color(lane: usize) -> u32 {
-    ui_theme::HISTORY_GRAPH_COLORS[lane % ui_theme::HISTORY_GRAPH_COLORS.len()]
-}
-
-fn paint_graph_line(
-    window: &mut gpui::Window,
-    x1: gpui::Pixels,
-    y1: gpui::Pixels,
-    x2: gpui::Pixels,
-    y2: gpui::Pixels,
-    color: u32,
-) {
-    let mut builder = PathBuilder::stroke(px(2.0));
-    builder.move_to(point(x1, y1));
-    builder.line_to(point(x2, y2));
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, rgb(color));
-    }
-}
-
-fn paint_graph_dot(window: &mut gpui::Window, x: gpui::Pixels, y: gpui::Pixels, color: u32) {
-    let outer = px(5.0);
-    let inner = px(4.0);
-    paint_graph_circle(window, x, y, outer, ui_theme::CARD);
-    paint_graph_circle(window, x, y, inner, color);
-}
-
-fn paint_graph_circle(
-    window: &mut gpui::Window,
-    x: gpui::Pixels,
-    y: gpui::Pixels,
-    radius: gpui::Pixels,
-    color: u32,
-) {
-    let mut builder = PathBuilder::fill();
-    builder.move_to(point(x - radius, y));
-    builder.arc_to(
-        point(radius, radius),
-        px(0.0),
-        false,
-        true,
-        point(x + radius, y),
-    );
-    builder.arc_to(
-        point(radius, radius),
-        px(0.0),
-        false,
-        true,
-        point(x - radius, y),
-    );
-    builder.close();
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, rgb(color));
-    }
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w(px(0.0))
+                .text_size(px(10.0))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child(author_avatar(&author))
+                .child(div().max_w(px(76.0)).truncate().child(author))
+                .child(div().flex_none().child(time))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family("Consolas, monospace")
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .child(row_short_oid.clone()),
+                )
+                .when(unpushed, |this| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(rgb(ui_theme::FEEDBACK_WARNING_BG))
+                            .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
+                            .child("未推送"),
+                    )
+                }),
+        )
 }
 
 /// 历史页文件路径过滤 chip：显示「文件：<basename>」+ ×，点击清除过滤；
 /// 样式复用 history_scope_button（选中态配色），悬浮提示完整路径。
-fn history_file_filter_chip(path: &str, cx: &mut Context<RepositoryView>) -> impl IntoElement {
+pub(crate) fn history_file_filter_chip(
+    path: &str,
+    cx: &mut Context<RepositoryView>,
+) -> impl IntoElement {
     let label = format!("文件：{}", file_filter_label(path));
     let tooltip = path.to_string();
     div()
@@ -1170,8 +799,8 @@ fn file_filter_label(path: &str) -> String {
     }
 }
 
-/// 作者展示文本：`名 <邮箱>`，无邮箱时仅名称。
-fn author_label(commit: &CommitInfo) -> String {
+/// 作者展示文本：`名 <邮箱>`，无邮箱时仅名称。主历史页详情区与图谱页详情卡共用。
+pub(crate) fn author_label(commit: &CommitInfo) -> String {
     match &commit.author_email {
         Some(email) => format!("{} <{}>", commit.author, email),
         None => commit.author.clone(),
@@ -1179,7 +808,7 @@ fn author_label(commit: &CommitInfo) -> String {
 }
 
 /// 提交者展示文本：仅当提交者与作者不同（rebase/cherry-pick 等）才有展示价值。
-fn committer_note(commit: &CommitInfo) -> Option<String> {
+pub(crate) fn committer_note(commit: &CommitInfo) -> Option<String> {
     (commit.committer != commit.author).then(|| match &commit.committer_email {
         Some(email) => format!("{} <{}>", commit.committer, email),
         None => commit.committer.clone(),
@@ -1187,7 +816,7 @@ fn committer_note(commit: &CommitInfo) -> Option<String> {
 }
 
 /// 父提交展示文本：根提交、普通提交、合并提交（双父）、章鱼合并（>2 父）。
-fn parents_note(parents: &[String]) -> String {
+pub(crate) fn parents_note(parents: &[String]) -> String {
     let short = |oid: &str| oid.chars().take(8).collect::<String>();
     match parents.len() {
         0 => "根提交（无父提交）".to_string(),
@@ -1201,9 +830,13 @@ fn parents_note(parents: &[String]) -> String {
     }
 }
 
-fn commit_ref_labels(refs: &[CommitRefInfo], row_short_oid: &str) -> Vec<gpui::AnyElement> {
+pub(crate) fn commit_ref_labels(
+    refs: &[CommitRefInfo],
+    row_short_oid: &str,
+    cap: usize,
+) -> Vec<gpui::AnyElement> {
     refs.iter()
-        .take(MAX_COMMIT_REF_LABELS)
+        .take(cap)
         .cloned()
         .enumerate()
         .map(|(index, reference)| {
@@ -1212,7 +845,8 @@ fn commit_ref_labels(refs: &[CommitRefInfo], row_short_oid: &str) -> Vec<gpui::A
         .collect()
 }
 
-fn commit_ref_label(
+/// 单个引用标签徽标（图谱页详情卡全量展示时也复用）。
+pub(crate) fn commit_ref_label(
     row_short_oid: &str,
     index: usize,
     reference: CommitRefInfo,

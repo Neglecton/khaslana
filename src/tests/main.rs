@@ -315,6 +315,36 @@ fn context_navigator_preferences_are_shared_across_modes() {
     assert!(preferences.is_visible(MainMode::Worktree));
     assert!(preferences.is_visible(MainMode::History));
     assert!(preferences.is_visible(MainMode::Workflow));
+
+    // 提交图谱页同为专用模式：不承载 Navigator、不改共享展开状态。
+    assert!(!preferences.is_visible(MainMode::CommitGraph));
+    preferences.toggle(MainMode::CommitGraph);
+    assert!(preferences.is_visible(MainMode::History));
+}
+
+// 图谱页跳转无损往返：主历史页 ↔ 图谱页只切换 main_mode，
+// 高亮分支、开关与详情卡折叠状态必须完整保留（close_commit_graph 不重置）。
+#[test]
+fn commit_graph_state_survives_mode_round_trip() {
+    let mut tab = RepoTabState::new(RepoTabId(0), None);
+    tab.commit_graph.highlight_branch = Some("feature".to_string());
+    tab.commit_graph.highlight_ahead_only = true;
+    tab.commit_graph.dim_merges = true;
+    tab.commit_graph.details_collapsed = true;
+    tab.main_mode = MainMode::History;
+
+    // 模拟「打开图谱页 → 跳回提交记录页 → 再返回图谱页」。
+    tab.main_mode = MainMode::CommitGraph;
+    tab.main_mode = MainMode::History;
+    tab.main_mode = MainMode::CommitGraph;
+
+    assert_eq!(
+        tab.commit_graph.highlight_branch.as_deref(),
+        Some("feature")
+    );
+    assert!(tab.commit_graph.highlight_ahead_only);
+    assert!(tab.commit_graph.dim_merges);
+    assert!(tab.commit_graph.details_collapsed);
 }
 
 #[test]
