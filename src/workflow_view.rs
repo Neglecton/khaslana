@@ -9,8 +9,7 @@ use chrono::{DateTime, Local};
 use directories::BaseDirs;
 use git2::Repository;
 use gpui::{
-    ClickEvent, Context, IntoElement, KeyDownEvent, ListSizingBehavior, Window, div, prelude::*,
-    px, uniform_list,
+    ClickEvent, Context, IntoElement, ListSizingBehavior, Window, div, prelude::*, px, uniform_list,
 };
 use khaslana::{
     WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
@@ -159,11 +158,6 @@ pub(crate) fn workflow_console_state(busy: bool, log_count: usize) -> WorkflowCo
 /// 模板行的标准点击直接加载；忙碌期间不重复启动加载。
 pub(crate) fn workflow_template_click_loads(standard_click: bool, busy: bool) -> bool {
     standard_click && !busy
-}
-
-/// 虚拟模板行只在 Enter/Space 时激活，避免为每个模板持有 FocusHandle。
-pub(crate) fn workflow_template_key_activates(key: &str, busy: bool) -> bool {
-    !busy && matches!(key, "enter" | "space")
 }
 
 /// 模板仅在当前工作流确实来自该路径时显示选中，外部文件不会误高亮旧模板。
@@ -648,8 +642,6 @@ impl RepositoryView {
                                     .min_h(px(24.0))
                                     .px_2()
                                     .rounded(px(ui_theme::RADIUS_XS))
-                                    .tab_index(if enabled { 0 } else { -1 })
-                                    .tab_stop(enabled)
                                     .text_size(px(11.0))
                                     .text_color(if enabled {
                                         rgb(ui_theme::CONTENT_SECONDARY)
@@ -665,18 +657,6 @@ impl RepositoryView {
                                             tooltip_text(WORKFLOW_REFRESH_DISABLED_REASON, cx)
                                         })
                                     })
-                                    .on_key_down(cx.listener(
-                                        move |this, event: &KeyDownEvent, _window, cx| {
-                                            if workflow_template_key_activates(
-                                                event.keystroke.key.as_str(),
-                                                !enabled,
-                                            ) {
-                                                this.refresh_workflow_templates();
-                                                cx.stop_propagation();
-                                                cx.notify();
-                                            }
-                                        },
-                                    ))
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         if enabled {
                                             this.refresh_workflow_templates();
@@ -781,7 +761,6 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let click_path = template.path.clone();
-        let key_path = template.path.clone();
         let enabled = !self.busy;
         let has_error = template.error.is_some();
         let selected = workflow_template_selection_matches(
@@ -809,17 +788,8 @@ impl RepositoryView {
         .justify_center()
         .px(px(ui_theme::SPACE_2))
         .py(px(ui_theme::SPACE_2))
-        .tab_index(if enabled { 0 } else { -1 })
-        .tab_stop(enabled)
         .when(enabled, |this| this.cursor_pointer())
         .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
-        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-            if workflow_template_key_activates(event.keystroke.key.as_str(), this.busy) {
-                this.load_workflow_file(key_path.clone(), cx);
-                cx.stop_propagation();
-                cx.notify();
-            }
-        }))
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             // 单击就是标准加载入口；双击保留幂等行为，但不再承担唯一加载职责。
             if workflow_template_click_loads(event.standard_click(), this.busy) {

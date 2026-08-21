@@ -2,10 +2,7 @@
 // 其中部分控件为预留的公共 API，可能暂未被业务 view 调用，属于有意保留。
 #![allow(dead_code)]
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use crate::ui::theme::{rgb, rgba};
 use crate::{
@@ -13,8 +10,8 @@ use crate::{
     ui::{icons::ToolbarIcon, icons::toolbar_icon, theme},
 };
 use gpui::{
-    App, ClickEvent, Context, CursorStyle, Div, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, Render, Stateful, Window, div, prelude::*, px,
+    App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Render, Stateful, Window,
+    div, prelude::*, px,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,7 +328,7 @@ pub(crate) fn empty_state(title: &'static str, detail: &'static str) -> Div {
 }
 
 /// 通用图标按钮视觉底座。调用方追加 `on_click`；禁用态自动保留原因提示。
-/// 此无状态 helper 不持有 FocusHandle，需键盘可达的壳层控件应改用 `focusable_icon_button`。
+/// 纯鼠标交互：按钮不持有 FocusHandle、不参与键盘导航/激活（键盘白名单见 AGENTS.md §8）。
 pub(crate) fn icon_button(
     id: String,
     icon_kind: ToolbarIcon,
@@ -373,11 +370,7 @@ pub(crate) fn icon_button(
         ))
 }
 
-fn icon_button_key_activates(key: &str) -> bool {
-    matches!(key, "enter" | "space")
-}
-
-fn focusable_icon_button_disabled_reason(label: &'static str) -> &'static str {
+fn icon_command_button_disabled_reason(label: &'static str) -> &'static str {
     match label {
         "更多命令" => "当前操作进行中，暂不可展开更多命令",
         "设置" => "当前操作进行中，暂不可打开设置",
@@ -386,25 +379,23 @@ fn focusable_icon_button_disabled_reason(label: &'static str) -> &'static str {
     }
 }
 
-/// 带稳定焦点句柄的图标按钮。调用方在其 state 中持有 `FocusHandle`，因而能提供
-/// Tab 导航、Enter/Space 激活和仅键盘导航时显示的 focus-visible 环。
-pub(crate) fn focusable_icon_button(
+/// 纯鼠标图标命令按钮：**不可聚焦、不参与键盘激活**。gpui-ce 会对「有焦点 +
+/// 有 on_click」的元素在 Enter/Space 松开时合成点击，且鼠标按下会自动聚焦
+/// 可聚焦元素——因此按钮一律不带 track_focus/tab_index，键盘只保留应用级
+/// 快捷键与文本框内的编辑/提交行为（见 AGENTS.md §8 键盘白名单）。
+pub(crate) fn icon_command_button(
     id: String,
     icon_kind: ToolbarIcon,
     label: &'static str,
     enabled: bool,
-    focus: &FocusHandle,
     on_activate: impl Fn(&mut RepositoryView, &mut Window, &mut Context<RepositoryView>) + 'static,
     cx: &mut Context<RepositoryView>,
 ) -> Stateful<Div> {
     let tooltip = if enabled {
         label
     } else {
-        focusable_icon_button_disabled_reason(label)
+        icon_command_button_disabled_reason(label)
     };
-    let on_activate = Arc::new(on_activate);
-    let keyboard_activate = Arc::clone(&on_activate);
-    let focus_for_click = focus.clone();
     div()
         .id(id)
         .flex_none()
@@ -413,9 +404,6 @@ pub(crate) fn focusable_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .track_focus(focus)
-        .tab_index(if enabled { 0 } else { -1 })
-        .tab_stop(enabled)
         .text_color(rgb(if enabled {
             theme::CONTENT_SECONDARY
         } else {
@@ -428,16 +416,8 @@ pub(crate) fn focusable_icon_button(
         })
         .when(!enabled, |this| this.cursor_not_allowed().opacity(0.55))
         .tooltip(move |_window, cx| tooltip_text(tooltip, cx))
-        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-            if enabled && icon_button_key_activates(event.keystroke.key.as_str()) {
-                keyboard_activate(this, window, cx);
-                cx.stop_propagation();
-                cx.notify();
-            }
-        }))
         .on_click(cx.listener(move |this, _event, window, cx| {
             if enabled {
-                window.focus(&focus_for_click);
                 on_activate(this, window, cx);
                 cx.notify();
             }

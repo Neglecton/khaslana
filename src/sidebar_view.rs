@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::ui::theme::rgb;
 use gpui::{
-    ClickEvent, Context, IntoElement, KeyDownEvent, ListSizingBehavior, MouseButton,
-    MouseDownEvent, Window, div, prelude::*, px, uniform_list,
+    ClickEvent, Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, Window, div,
+    prelude::*, px, uniform_list,
 };
 use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
@@ -344,34 +344,8 @@ impl RepositoryView {
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            // 复用 Context Navigator 的稳定焦点句柄；Tab 到此区域后，R/B/T/S
-            // 折叠对应分组，M 打开“远端·管理”。不在 render 中分配临时句柄。
-            .track_focus(&self.context_navigator_focus)
-            .tab_index(0)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.modifiers.control
-                    || event.keystroke.modifiers.alt
-                    || event.keystroke.modifiers.platform
-                {
-                    return;
-                }
-                match event.keystroke.key.as_str() {
-                    "r" => this.toggle_sidebar_section(SidebarSection::Remotes),
-                    "b" => this.toggle_sidebar_section(SidebarSection::RemoteBranches),
-                    "t" => this.toggle_sidebar_section(SidebarSection::Tags),
-                    "s" if this
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| !snapshot.stashes.is_empty()) =>
-                    {
-                        this.toggle_sidebar_section(SidebarSection::Stashes)
-                    }
-                    "m" if this.repo_path.is_some() && !this.busy => this.open_remote_manager(),
-                    _ => return,
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
+            // 纯鼠标区域：不再承载 R/B/T/S/M 字母快捷键与键盘焦点
+            //（键盘白名单见 AGENTS.md §8；分组折叠均由鼠标点击完成）。
             .overflow_hidden()
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(scrollable_uniform_frame(
@@ -520,7 +494,6 @@ impl RepositoryView {
             ui_theme::CONTENT_SECONDARY
         };
         let on_click = Arc::new(on_click);
-        let on_key_click = Arc::clone(&on_click);
         div()
             .id(id)
             .flex_none()
@@ -536,18 +509,10 @@ impl RepositoryView {
             }))
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .tab_index(0)
                     .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    on_key_click(this, window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if enabled {
                     on_click(this, window, cx);
@@ -646,15 +611,7 @@ impl RepositoryView {
             .py(px(8.0))
             .when(is_collapsible, |this| {
                 this.cursor_pointer()
-                    .tab_index(0)
                     .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.toggle_sidebar_section(section);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.toggle_sidebar_section(section);
                         cx.stop_propagation();
@@ -720,26 +677,12 @@ impl RepositoryView {
                         }))
                         .when(enabled, |this| {
                             this.cursor_pointer()
-                                .tab_index(0)
                                 .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                         })
-                        .when(!enabled, |this| {
-                            this.cursor_not_allowed()
-                                .opacity(0.62)
-                                .tab_index(-1)
-                                .tab_stop(false)
-                        })
+                        .when(!enabled, |this| this.cursor_not_allowed().opacity(0.62))
                         .when_some(disabled_reason, |this, reason| {
                             this.tooltip(move |_window, cx| tooltip_text(reason, cx))
                         })
-                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                            if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                            {
-                                this.open_remote_manager();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                        }))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             if enabled {
                                 this.open_remote_manager();

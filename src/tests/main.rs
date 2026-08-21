@@ -1334,19 +1334,8 @@ fn repo_switcher_filter_ranks_name_matches_before_path_matches() {
     assert_eq!(filtered.open[2].path_key, "khaslana");
 }
 
-#[test]
-fn repo_switcher_highlight_wraps_and_handles_empty_list() {
-    // 空列表恒 None
-    assert_eq!(next_repo_switcher_highlight(0, None, 1), None);
-    assert_eq!(next_repo_switcher_highlight(0, Some(0), 1), None);
-    // 无高亮：↓ 取第一项，↑ 取最后一项
-    assert_eq!(next_repo_switcher_highlight(3, None, 1), Some(0));
-    assert_eq!(next_repo_switcher_highlight(3, None, -1), Some(2));
-    // 有高亮：循环环绕
-    assert_eq!(next_repo_switcher_highlight(3, Some(0), -1), Some(2));
-    assert_eq!(next_repo_switcher_highlight(3, Some(2), 1), Some(0));
-    assert_eq!(next_repo_switcher_highlight(3, Some(1), 1), Some(2));
-}
+// 仓库切换下拉的键盘导航（↑↓ 高亮 / Enter 确认 / Esc 关闭）已按键盘白名单
+// 整体移除：下拉仅支持鼠标点击与搜索框文本过滤。
 
 #[test]
 fn stage_operations_refresh_worktree_diff() {

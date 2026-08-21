@@ -137,8 +137,6 @@ actions!(
     ]
 );
 
-actions!(browse_content, [BrowseContentCopy, BrowseContentSelectAll,]);
-
 // 应用级快捷键动作：每个对应一个可配置快捷键的功能入口。
 // bind_keys 把按键映射到这些 action，on_action 在根元素上监听并分发到 RepositoryView 方法。
 // 命名加 Shortcut 前缀，避免与 ShortcutAction 枚举变体及其它类型冲突。
@@ -2770,26 +2768,7 @@ pub(crate) struct RepositoryView {
     context_navigator_overlay_open: bool,
     /// Context Navigator 展开偏好（全局单值，跨模式/跨仓库共享，经布局偏好持久化）。
     context_navigator_preferences: ContextNavigatorPreferences,
-    /// 壳层控件的稳定焦点句柄，不能在 render 中临时创建。
-    chrome_refresh_focus: FocusHandle,
-    chrome_fetch_focus: FocusHandle,
-    chrome_pull_focus: FocusHandle,
-    chrome_push_focus: FocusHandle,
-    chrome_stash_focus: FocusHandle,
-    chrome_submodule_focus: FocusHandle,
-    /// titlebar「设置」按钮（窗口控制区左侧）的焦点句柄。
-    chrome_settings_focus: FocusHandle,
-    /// Context Navigator 模式按钮的焦点句柄（收起窄条与展开态共用）。
-    nav_worktree_focus: FocusHandle,
-    nav_conflict_focus: FocusHandle,
-    nav_history_focus: FocusHandle,
-    nav_workflow_focus: FocusHandle,
-    /// Navigator 面板本体的稳定焦点句柄。
-    context_navigator_focus: FocusHandle,
-    /// 窄窗 Navigator 切换按钮的稳定焦点句柄，覆盖层关闭后返回此处。
-    context_navigator_toggle_focus: FocusHandle,
-    /// 仓库切换器触发器的稳定焦点句柄，菜单打开时保留作为 Escape 返回目标。
-    repo_switcher_focus: FocusHandle,
+    // 壳层按钮均为纯鼠标交互，不再持有焦点句柄（键盘白名单见 AGENTS.md §8）。
     /// 仓库切换下拉触发器按钮的窗口坐标矩形，paint 时记录，供菜单锚定与点击外部关闭。
     repo_switcher_anchor: Option<RepoSwitcherAnchor>,
     /// 仓库切换下拉展开时缓存的最近仓库列表（toggle 时同步加载，渲染时纯读）。
@@ -2803,15 +2782,12 @@ pub(crate) struct RepositoryView {
     commit_graph_branch_search: TextFieldState,
     /// 搜索框是否展开：默认只显示「搜索仓库」按钮，点击后替换为输入框 + 小叉。
     repo_switcher_search_open: bool,
-    /// 键盘导航高亮的仓库行（打开区在前、最近区在后的扁平索引）；文本变化时复位。
-    repo_switcher_highlight: Option<usize>,
     save_credential: bool,
     credential_scope: CredentialScope,
     credential_form_mode: CredentialFormMode,
     credential_use_ssh_agent: bool,
     pub(crate) ssh_credential_discovery: SshCredentialDiscoveryState,
     oauth_login_flow: OAuthLoginFlowState,
-    browse_content_focus: FocusHandle,
     clone_url: TextFieldState,
     clone_path: TextFieldState,
     clone_recursive_submodules: bool,
@@ -3064,34 +3040,18 @@ impl RepositoryView {
             commit_graph_branch_menu_closed_by_capture: false,
             repo_switcher_menu: None,
             context_navigator_overlay_open: false,
-            chrome_refresh_focus: cx.focus_handle(),
-            chrome_fetch_focus: cx.focus_handle(),
-            chrome_pull_focus: cx.focus_handle(),
-            chrome_push_focus: cx.focus_handle(),
-            chrome_stash_focus: cx.focus_handle(),
-            chrome_submodule_focus: cx.focus_handle(),
-            chrome_settings_focus: cx.focus_handle(),
-            nav_worktree_focus: cx.focus_handle(),
-            nav_conflict_focus: cx.focus_handle(),
-            nav_history_focus: cx.focus_handle(),
-            nav_workflow_focus: cx.focus_handle(),
-            context_navigator_focus: cx.focus_handle(),
-            context_navigator_toggle_focus: cx.focus_handle(),
-            repo_switcher_focus: cx.focus_handle(),
             repo_switcher_anchor: None,
             repo_switcher_recent: Vec::new(),
             repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
             commit_graph_search: TextFieldState::new(cx, "搜索提交/作者/SHA"),
             commit_graph_branch_search: TextFieldState::new(cx, "搜索分支"),
             repo_switcher_search_open: false,
-            repo_switcher_highlight: None,
             save_credential: false,
             credential_scope: CredentialScope::RemoteUrl,
             credential_form_mode: CredentialFormMode::Https,
             credential_use_ssh_agent: false,
             ssh_credential_discovery: SshCredentialDiscoveryState::default(),
             oauth_login_flow: OAuthLoginFlowState::default(),
-            browse_content_focus: cx.focus_handle(),
             clone_url: TextFieldState::new(cx, "远程仓库 URL"),
             clone_path: TextFieldState::new(cx, "克隆到父文件夹"),
             clone_recursive_submodules: default_clone_recursive_submodules(),
@@ -5926,8 +5886,6 @@ impl RepositoryView {
             }
         } else if matches!(field, FieldId::RemoteBranchSearch) {
             self.remote_branch_operation.branch_dropdown_open = false;
-        } else if matches!(field, FieldId::RepoSwitcherSearch) {
-            self.confirm_repo_switcher_highlight();
         } else if matches!(
             field,
             FieldId::ProxyHttpUrl | FieldId::ProxyHttpsUrl | FieldId::ProxySocks5Url
@@ -5966,10 +5924,6 @@ impl RepositoryView {
     fn notify_text_field_changed(&mut self, field: FieldId) {
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
-        }
-        // 仓库切换搜索词变化即重新过滤列表，键盘高亮复位（输入/退格/粘贴/剪切都会走到这里）
-        if matches!(field, FieldId::RepoSwitcherSearch) {
-            self.repo_switcher_highlight = None;
         }
     }
 
@@ -6026,12 +5980,6 @@ impl RepositoryView {
 
     fn text_up(&mut self, _: &TextUp, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(field) = self.focused_text_field(window, cx) {
-            // 仓库切换下拉搜索框：↑↓ 用作列表键盘导航（单行框无竖向光标移动）
-            if matches!(field, FieldId::RepoSwitcherSearch) {
-                self.move_repo_switcher_highlight(-1);
-                cx.notify();
-                return;
-            }
             if Self::is_multiline_field(field) {
                 self.field_mut(field).move_vertical(-1, false);
                 cx.notify();
@@ -6041,46 +5989,10 @@ impl RepositoryView {
 
     fn text_down(&mut self, _: &TextDown, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(field) = self.focused_text_field(window, cx) {
-            if matches!(field, FieldId::RepoSwitcherSearch) {
-                self.move_repo_switcher_highlight(1);
-                cx.notify();
-                return;
-            }
             if Self::is_multiline_field(field) {
                 self.field_mut(field).move_vertical(1, false);
                 cx.notify();
             }
-        }
-    }
-
-    /// 移动仓库切换下拉的键盘高亮（在过滤后的打开+最近扁平列表上环绕）。
-    fn move_repo_switcher_highlight(&mut self, delta: i32) {
-        let sections = self.repo_switcher_filtered_sections();
-        let len = sections.open.len() + sections.recent.len();
-        self.repo_switcher_highlight =
-            next_repo_switcher_highlight(len, self.repo_switcher_highlight, delta);
-    }
-
-    /// 回车确认仓库切换下拉的高亮项：有高亮取高亮项，否则取第一项；
-    /// 已打开项切换标签页，最近项打开仓库。
-    fn confirm_repo_switcher_highlight(&mut self) {
-        if self.repo_switcher_menu.is_none() {
-            return;
-        }
-        let sections = self.repo_switcher_filtered_sections();
-        let mut visible = sections.open.into_iter().chain(sections.recent);
-        let repo = match self.repo_switcher_highlight {
-            Some(index) => visible.nth(index),
-            None => visible.next(),
-        };
-        let Some(repo) = repo else {
-            return;
-        };
-        self.close_repo_switcher();
-        if let Some(tab_id) = repo.tab_id {
-            self.activate_tab(tab_id);
-        } else {
-            self.open_repo(PathBuf::from(&repo.full_path));
         }
     }
 
@@ -6226,24 +6138,6 @@ impl RepositoryView {
                 cx.notify();
             }
         }
-    }
-
-    fn on_browse_content_copy(
-        &mut self,
-        _: &BrowseContentCopy,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.browse_content_copy(cx);
-    }
-
-    fn on_browse_content_select_all(
-        &mut self,
-        _: &BrowseContentSelectAll,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.browse_content_select_all(cx);
     }
 
     fn focused_field(&self, window: &Window, _cx: &App) -> Option<FieldId> {
@@ -6396,17 +6290,15 @@ impl RepositoryView {
             })
             .unwrap_or((MENU_VIEWPORT_MARGIN, MENU_VIEWPORT_MARGIN));
         self.repo_switcher_menu = Some(RepoSwitcherMenu { x, y });
-        // 搜索默认收起为「搜索仓库」按钮；清掉上一次的搜索词与键盘高亮。
+        // 搜索默认收起为「搜索仓库」按钮；清掉上一次的搜索词。
         self.repo_switcher_search_open = false;
         self.repo_switcher_search.clear();
-        self.repo_switcher_highlight = None;
     }
 
     pub(crate) fn close_repo_switcher(&mut self) {
         self.repo_switcher_menu = None;
         self.repo_switcher_search_open = false;
         self.repo_switcher_search.clear();
-        self.repo_switcher_highlight = None;
     }
 
     /// 是否有任一弹出菜单（仓库切换下拉、各类右键菜单、编码菜单）或窄窗导航覆盖层打开。
@@ -10611,52 +10503,6 @@ impl RepositoryView {
         self.browse.sel_end = None;
     }
 
-    /// Ctrl+C：把选中的行用 `\n` 拼接写入剪贴板。
-    pub(crate) fn browse_content_copy(&mut self, cx: &mut Context<Self>) {
-        let (Some(start), Some(end)) = (self.browse.sel_start, self.browse.sel_end) else {
-            return;
-        };
-        let Some(content) = self.browse.content.as_ref() else {
-            return;
-        };
-        if content.is_binary {
-            return;
-        }
-        let (lo, hi) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-        let lines: Vec<&str> = content
-            .lines
-            .get(lo..=hi)
-            .map(|slice| slice.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        if lines.is_empty() {
-            return;
-        }
-        let text = lines.join("\n");
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.notify_success(
-            "已复制 {count} 行".replace("{count}", &lines.len().to_string()),
-            cx,
-        );
-    }
-
-    /// Ctrl+A：全选。
-    pub(crate) fn browse_content_select_all(&mut self, cx: &mut Context<Self>) {
-        let line_count = match self.browse.content.as_ref() {
-            Some(content) if !content.is_binary => content.lines.len(),
-            _ => return,
-        };
-        if line_count == 0 {
-            return;
-        }
-        self.browse.sel_start = Some(0);
-        self.browse.sel_end = Some(line_count - 1);
-        cx.notify();
-    }
-
     /// 编码切换时重新加载当前浏览文件。
     pub(crate) fn reload_browse_on_encoding_change(&mut self) {
         if self.main_mode != MainMode::Browse {
@@ -11772,15 +11618,9 @@ impl RepositoryView {
                 cx.stop_propagation();
                 return;
             }
+            // 单行框 Enter 提交所在表单（用户确认保留的文本框内行为）。
             if event.keystroke.key.as_str() == "enter" {
                 this.submit_focused_field(id);
-                cx.stop_propagation();
-            }
-            // 仓库切换下拉搜索框：Esc 直接关闭下拉
-            if event.keystroke.key.as_str() == "escape" && matches!(id, FieldId::RepoSwitcherSearch)
-            {
-                this.close_repo_switcher();
-                cx.notify();
                 cx.stop_propagation();
             }
         }))
@@ -12095,17 +11935,6 @@ impl RepositoryView {
         } else {
             ui_theme::MUTED_FOREGROUND
         };
-        let keyboard_activate = cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            if !this.busy && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                let was_open = this.repo_switcher_menu.is_some();
-                this.close_popups();
-                if !was_open {
-                    this.toggle_repo_switcher(window);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-        });
         div()
             .id("repo-switcher-trigger")
             .relative()
@@ -12117,9 +11946,7 @@ impl RepositoryView {
             .py(px(4.0))
             .ml(px(12.0))
             .rounded(px(ui_theme::RADIUS_XS))
-            .track_focus(&self.repo_switcher_focus)
-            .tab_index(if enabled { 0 } else { -1 })
-            .tab_stop(enabled)
+            // 纯鼠标触发器：不可聚焦、无键盘激活（键盘白名单见 AGENTS.md §8）。
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed())
             .when(enabled, |this| {
@@ -12128,7 +11955,6 @@ impl RepositoryView {
             })
             .when(!enabled, |this| this.opacity(0.5))
             .text_color(rgb(text_color))
-            .on_key_down(keyboard_activate)
             .on_click(cx.listener(|this, _event: &ClickEvent, window, cx| {
                 if this.busy {
                     return;
@@ -12240,9 +12066,6 @@ impl RepositoryView {
 
         let query_active = !self.repo_switcher_search.value.trim().is_empty();
         let sections = self.repo_switcher_filtered_sections();
-        // 键盘高亮的扁平索引：打开区在前、最近区在后
-        let highlight = self.repo_switcher_highlight;
-        let recent_start = sections.open.len();
 
         // 下拉内容区的滚动句柄，内容超出最大高度时滚动并绘制滚动条。
         let switcher_handle = self.scroll_handle("repo-switcher-scroll");
@@ -12319,7 +12142,6 @@ impl RepositoryView {
                                     // 收起输入框，恢复「搜索仓库」按钮并取消过滤
                                     this.repo_switcher_search_open = false;
                                     this.repo_switcher_search.clear();
-                                    this.repo_switcher_highlight = None;
                                     cx.notify();
                                 }))
                                 .child("✕"),
@@ -12329,21 +12151,17 @@ impl RepositoryView {
             // ── 打开项目区 ──
             .when(!sections.open.is_empty(), |this| {
                 this.child(self.repo_switcher_section_header("打开项目"))
-                    .children(sections.open.iter().enumerate().map(|(index, repo)| {
-                        self.repo_switcher_repo_item(repo.clone(), highlight == Some(index), cx)
+                    .children(sections.open.iter().map(|repo| {
+                        self.repo_switcher_repo_item(repo.clone(), cx)
                             .into_any_element()
                     }))
             })
             // ── 最近项目区 ──
             .when(!sections.recent.is_empty(), |this| {
                 this.child(self.repo_switcher_section_header("最近的项目"))
-                    .children(sections.recent.iter().enumerate().map(|(index, repo)| {
-                        self.repo_switcher_repo_item(
-                            repo.clone(),
-                            highlight == Some(recent_start + index),
-                            cx,
-                        )
-                        .into_any_element()
+                    .children(sections.recent.iter().map(|repo| {
+                        self.repo_switcher_repo_item(repo.clone(), cx)
+                            .into_any_element()
                     }))
             })
             // ── 搜索无结果占位 ──
@@ -12424,11 +12242,10 @@ impl RepositoryView {
     }
 
     /// 下拉仓库行：头像 + 名称 + 完整路径；已打开项 hover 显示关闭按钮；
-    /// 键盘导航高亮行使用与 hover 相同的背景常亮（活动仓库仍用选中色优先）。
+    /// 活动仓库使用选中色优先。
     fn repo_switcher_repo_item(
         &self,
         repo: RepoSwitcherRepo,
-        highlighted: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let path_for_click = repo.full_path.clone();
@@ -12446,9 +12263,6 @@ impl RepositoryView {
             .py_2()
             .cursor_pointer()
             .when(is_active, |this| this.bg(rgb(ui_theme::ACCENT)))
-            .when(!is_active && highlighted, |this| {
-                this.bg(rgb(ui_theme::SECONDARY))
-            })
             .when(!is_active, |this| {
                 this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
             })
@@ -16610,23 +16424,6 @@ impl Render for RepositoryView {
                     cx.notify();
                 }
             }))
-            // 顶栏菜单与窄窗 Navigator 是遮挡层，Esc 必须优先关闭并把焦点还给触发器。
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if key == "escape" {
-                    if this.context_navigator_overlay_open {
-                        this.context_navigator_overlay_open = false;
-                        window.focus(&this.context_navigator_toggle_focus);
-                        cx.notify();
-                        cx.stop_propagation();
-                    } else if this.repo_switcher_menu.is_some() {
-                        this.close_repo_switcher();
-                        window.focus(&this.repo_switcher_focus);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                }
-            }))
             // 录制态时在 capture 阶段截获全部按键：stop_propagation 阻止 action dispatch，
             // 使快捷键录制逻辑能在按键到达 action listener 之前处理；
             // capture 从根向下传播，不依赖焦点路径。
@@ -17335,28 +17132,6 @@ pub(crate) fn filter_repo_switcher_sections(
     }
 }
 
-/// 键盘导航的高亮索引移动：列表为空 → None；无高亮时 ↓ 取第一项、↑ 取最后一项；
-/// 有高亮时循环环绕。
-pub(crate) fn next_repo_switcher_highlight(
-    len: usize,
-    current: Option<usize>,
-    delta: i32,
-) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    let next = match (current, delta.signum()) {
-        (None, d) if d > 0 => 0,
-        (None, _) => len - 1,
-        (Some(index), d) => {
-            let moved = index as i64 + d as i64;
-            let len = len as i64;
-            (moved.rem_euclid(len)) as usize
-        }
-    };
-    Some(next)
-}
-
 #[cfg(test)]
 #[path = "tests/main.rs"]
 mod app_tests;
@@ -17392,10 +17167,6 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_sho
         KeyBinding::new("ctrl-c", TextCopy, Some("TextInput")),
         KeyBinding::new("ctrl-v", TextPaste, Some("TextInput")),
         KeyBinding::new("ctrl-x", TextCut, Some("TextInput")),
-        KeyBinding::new("cmd-c", BrowseContentCopy, Some("BrowseContent")),
-        KeyBinding::new("cmd-a", BrowseContentSelectAll, Some("BrowseContent")),
-        KeyBinding::new("ctrl-c", BrowseContentCopy, Some("BrowseContent")),
-        KeyBinding::new("ctrl-a", BrowseContentSelectAll, Some("BrowseContent")),
     ]);
     // 应用级快捷键：全局生效（无 context 谓词）。
     if !skip_shortcuts {

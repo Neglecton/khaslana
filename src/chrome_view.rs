@@ -5,17 +5,15 @@
 //! 宽度，再交给纯函数决定壳层的信息密度；窗口创建时另有 `WindowOptions::window_min_size`
 //! 保护原生控制区。
 
-use std::sync::Arc;
-
 use gpui::{
-    Context, CursorStyle, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Stateful, Window,
-    WindowControlArea, div, prelude::*, px,
+    Context, CursorStyle, IntoElement, MouseButton, Stateful, Window, WindowControlArea, div,
+    prelude::*, px,
 };
 
 use crate::{
     MainMode, RemoteBranchOperationKind, RepositoryView, WINDOW_CONTROLS_WIDTH,
     ui::{
-        components::{command_group, focusable_icon_button, tooltip_text},
+        components::{command_group, icon_command_button, tooltip_text},
         icons::{ToolbarIcon, toolbar_icon, toolbar_icon_with_size},
         theme::{self, rgb},
     },
@@ -228,7 +226,6 @@ impl RepositoryView {
                         ToolbarIcon::Refresh,
                         None,
                         repo_open && !self.busy,
-                        &self.chrome_refresh_focus,
                         |this, _window, _cx| this.refresh(),
                         cx,
                     ))
@@ -237,7 +234,6 @@ impl RepositoryView {
                         ToolbarIcon::Fetch,
                         None,
                         repo_open && remote_open && !self.busy,
-                        &self.chrome_fetch_focus,
                         |this, _window, _cx| this.fetch(),
                         cx,
                     ))
@@ -246,7 +242,6 @@ impl RepositoryView {
                         ToolbarIcon::Pull,
                         (behind_count > 0).then(|| format!("↓{behind_count}")),
                         repo_open && remote_open && !self.busy && !merge_in_progress,
-                        &self.chrome_pull_focus,
                         |this, _window, _cx| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Pull)
                         },
@@ -257,7 +252,6 @@ impl RepositoryView {
                         ToolbarIcon::Push,
                         (ahead_count > 0).then(|| format!("↑{ahead_count}")),
                         repo_open && remote_open && !self.busy && !merge_in_progress,
-                        &self.chrome_push_focus,
                         |this, _window, _cx| {
                             this.open_remote_branch_operation(RemoteBranchOperationKind::Push)
                         },
@@ -269,7 +263,6 @@ impl RepositoryView {
                         ToolbarIcon::Stash,
                         None,
                         repo_open && !self.busy && !merge_in_progress,
-                        &self.chrome_stash_focus,
                         |this, _window, _cx| this.open_stash_dialog(),
                         cx,
                     ))
@@ -278,7 +271,6 @@ impl RepositoryView {
                         ToolbarIcon::Submodule,
                         None,
                         repo_open && !self.busy,
-                        &self.chrome_submodule_focus,
                         |this, _window, _cx| this.open_submodule_manager(),
                         cx,
                     )),
@@ -306,7 +298,6 @@ impl RepositoryView {
                     ToolbarIcon::Settings,
                     None,
                     true,
-                    &self.chrome_settings_focus,
                     |this, window, _cx| {
                         this.open_settings_center();
                         window.focus(&this.settings_center_focus);
@@ -359,16 +350,6 @@ impl RepositoryView {
             MainMode::Workflow,
         ));
         entries
-    }
-
-    /// 模式按钮的稳定焦点句柄（收起窄条与展开态共用，保证 Tab 顺序稳定）。
-    fn navigator_mode_focus_handle(&self, id: &str) -> FocusHandle {
-        match id {
-            "nav-worktree" => self.nav_worktree_focus.clone(),
-            "nav-conflict" => self.nav_conflict_focus.clone(),
-            "nav-history" => self.nav_history_focus.clone(),
-            _ => self.nav_workflow_focus.clone(),
-        }
     }
 
     /// Context Navigator 收起态窄条：全高 48px 竖条，顶部展开箭头 + 下方模式图标
@@ -490,7 +471,7 @@ impl RepositoryView {
         } else {
             ToolbarIcon::ChevronRight
         };
-        focusable_icon_button(
+        icon_command_button(
             "context-navigator-toggle".into(),
             toggle_icon,
             if visible {
@@ -499,14 +480,9 @@ impl RepositoryView {
                 "展开上下文导航"
             },
             enabled,
-            &self.context_navigator_toggle_focus,
-            move |this, window, _cx| {
+            move |this, _window, _cx| {
                 if overlay {
-                    let opening = !this.context_navigator_overlay_open;
-                    this.context_navigator_overlay_open = opening;
-                    if opening {
-                        window.focus(&this.context_navigator_focus);
-                    }
+                    this.context_navigator_overlay_open = !this.context_navigator_overlay_open;
                 } else {
                     let mode = this.main_mode;
                     this.context_navigator_preferences.toggle(mode);
@@ -588,9 +564,8 @@ impl RepositoryView {
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event, window, cx| {
+                cx.listener(|this, _event, _window, cx| {
                     this.context_navigator_overlay_open = false;
-                    window.focus(&this.context_navigator_toggle_focus);
                     cx.notify();
                 }),
             )
@@ -719,13 +694,9 @@ impl RepositoryView {
         icon_kind: ToolbarIcon,
         sync_label: Option<String>,
         enabled: bool,
-        focus: &FocusHandle,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
-        let on_click = Arc::new(on_click);
-        let keyboard_click = Arc::clone(&on_click);
-        let focus_for_click = focus.clone();
         let disabled_reason = if enabled {
             None
         } else {
@@ -746,9 +717,8 @@ impl RepositoryView {
             .min_h(px(theme::CONTROL_HEIGHT_REGULAR))
             .px(px(theme::SPACE_2))
             .rounded(px(theme::RADIUS_XS))
-            .track_focus(focus)
-            .tab_index(if enabled { 0 } else { -1 })
-            .tab_stop(enabled)
+            // 纯鼠标命令按钮：不可聚焦、无键盘激活（键盘白名单见 AGENTS.md §8；
+            // gpui-ce 会对聚焦元素在 Enter/Space 松开时合成点击，须杜绝焦点）。
             .text_color(rgb(if enabled {
                 theme::CONTENT_PRIMARY
             } else {
@@ -764,16 +734,8 @@ impl RepositoryView {
             .when_some(disabled_reason, |this, reason| {
                 this.tooltip(move |_window, cx| crate::ui::components::tooltip_text(reason, cx))
             })
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    keyboard_click(this, window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if enabled {
-                    window.focus(&focus_for_click);
                     on_click(this, window, cx);
                     cx.notify();
                 }
@@ -798,7 +760,7 @@ impl RepositoryView {
             })
     }
 
-    /// 收起窄条的模式图标按钮：32px 方块，支持 Tab 焦点与 Enter/Space 激活。
+    /// 收起窄条的模式图标按钮：32px 方块，纯鼠标交互（不可聚焦、无键盘激活）。
     fn navigator_mode_button(
         &self,
         id: &'static str,
@@ -807,7 +769,6 @@ impl RepositoryView {
         mode: MainMode,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
-        let focus = self.navigator_mode_focus_handle(id);
         div()
             .id(id)
             .relative()
@@ -819,8 +780,6 @@ impl RepositoryView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .track_focus(&focus)
-            .tab_index(0)
             .bg(if active {
                 rgb(theme::PRIMARY_SUBTLE)
             } else {
@@ -832,16 +791,7 @@ impl RepositoryView {
                 theme::CONTENT_SECONDARY
             }))
             .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.set_main_mode(mode);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                // 点击不抢焦点：抢焦点后按 Ctrl/Alt 等修饰键会让图标显示键盘
-                // 导航焦点环，视觉上像图标样式突变；Tab 键盘导航不受影响。
                 this.set_main_mode(mode);
                 cx.notify();
             }))

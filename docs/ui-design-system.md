@@ -57,7 +57,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - `list_row_surface`：默认无完整边框、无阴影；选中态为淡强调色背景与左侧 2px 指示条。
 - `icon_button`：无状态的图标按钮视觉底座，统一尺寸、悬停、禁用原因 tooltip 和标签 tooltip；它不创建临时 `FocusHandle`。
-- `focusable_icon_button`：供壳层等持有稳定 `FocusHandle` 的控件使用，提供 Tab 导航与 Enter/Space 激活。按用户要求已**全局移除键盘焦点可视环**（`focus_visible`）：按 Ctrl/Alt/空格/Tab 等修饰键不再让控件出现额外边框或背景突变；键盘 Tab 顺序与激活行为保持不变。不能把它降级为 render 中临时创建焦点句柄的 stateless helper。
+- `icon_command_button`：壳层图标命令按钮（原 `focusable_icon_button`），**纯鼠标交互**——不可聚焦、无 Enter/Space 激活（gpui-ce 会对聚焦元素在 Enter/Space 松开时合成点击且鼠标按下自动聚焦，剥夺可聚焦性是唯一根治手段；键盘白名单见 AGENTS.md §8）。已全局移除键盘焦点可视环（`focus_visible`）：按 Ctrl/Alt/空格/Tab 等修饰键不再让控件出现额外边框或背景突变。不能在 render 中临时创建焦点句柄。
 - `page_header`、`command_group`、`empty_state`：页面级标题、命令排列和空状态的基础结构。
 - 现有 `button`、`input_frame`、`dialog_*`、反馈 API 保持兼容。自定义文本输入继续只由 `src/text_input.rs` 管理编辑、IME、选区与光标逻辑。
 
@@ -67,7 +67,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - 默认页面、列表、行和导航使用平面 surface；阴影只用于菜单、对话框、toast 和遮罩上方的明确浮层。
 - 不新增装饰性渐变、玻璃态或多层卡片边框。
-- 键盘焦点不设可视化焦点环（全局移除 `focus_visible`，避免修饰键触发样式突变）；Tab 导航、Enter/Space 激活与稳定 `FocusHandle` 保留。后续新控件同样不得添加 `focus_visible` 样式。
+- 所有按钮纯鼠标交互：不可聚焦、无键盘激活、无焦点环（键盘白名单见 AGENTS.md §8——仅保留应用级可配置快捷键、文本框内编辑/提交、变更列表 Shift/Ctrl 点选）。后续新控件同样不得添加 `focus_visible` 样式、`track_focus`/`tab_index` 或按键激活。
 - 禁用控件保留可解释 tooltip；普通可点击按钮不强制 tooltip，图标-only 控件提供标签。
 - 保持键盘快捷键和原有点击目标；Context Navigator 的模式按钮只是增加入口，不能移除原业务操作。
 

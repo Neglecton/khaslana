@@ -196,15 +196,6 @@ fn workflow_template_click_loads_on_standard_click_not_only_double_click() {
 }
 
 #[test]
-fn workflow_template_keyboard_activation_only_accepts_enter_or_space_when_idle() {
-    assert!(workflow_template_key_activates("enter", false));
-    assert!(workflow_template_key_activates("space", false));
-    assert!(!workflow_template_key_activates("escape", false));
-    assert!(!workflow_template_key_activates("enter", true));
-    assert!(!workflow_template_key_activates("space", true));
-}
-
-#[test]
 fn workflow_content_scroll_ids_are_distinct() {
     assert_ne!(
         WORKFLOW_INPUT_LIST_SCROLL_ID,

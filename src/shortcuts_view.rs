@@ -79,10 +79,6 @@ fn shortcut_reset_enabled(recording: Option<ShortcutAction>) -> bool {
     recording.is_none()
 }
 
-fn shortcut_button_key_activates(key: &str) -> bool {
-    matches!(key, "enter" | "space")
-}
-
 fn shortcut_reset_disabled_reason(recording: Option<ShortcutAction>) -> Option<&'static str> {
     (!shortcut_reset_enabled(recording)).then_some("请先结束快捷键录制")
 }
@@ -189,30 +185,7 @@ impl RepositoryView {
                                     .text_size(px(12.0))
                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .cursor_pointer()
-                                    .tab_index(0)
                                     .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
-                                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                                        if shortcut_button_key_activates(event.keystroke.key.as_str()) {
-                                            if this.recording_shortcut == Some(action_val) {
-                                                this.recording_shortcut = None;
-                                                crate::register_all_key_bindings(
-                                                    &mut cx.deref_mut(),
-                                                    &this.shortcut_bindings,
-                                                    false,
-                                                );
-                                            } else {
-                                                this.recording_shortcut = Some(action_val);
-                                                window.focus(&this.settings_center_focus);
-                                                crate::register_all_key_bindings(
-                                                    &mut cx.deref_mut(),
-                                                    &this.shortcut_bindings,
-                                                    true,
-                                                );
-                                            }
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        }
-                                    }))
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         if this.recording_shortcut == Some(action_val) {
                                             // 取消录制，恢复正常绑定。
@@ -264,29 +237,9 @@ impl RepositoryView {
                                         .when(!reset_enabled, |this| {
                                             this.cursor_not_allowed().opacity(0.62)
                                         })
-                                        .tab_index(if reset_enabled { 0 } else { -1 })
-                                        .tab_stop(reset_enabled)
                                         .when_some(reset_disabled_reason, |this, reason| {
                                             this.tooltip(move |_window, cx| tooltip_text(reason, cx))
                                         })
-                                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                                            if reset_enabled
-                                                && shortcut_button_key_activates(event.keystroke.key.as_str())
-                                            {
-                                                this.shortcut_bindings.bindings.insert(
-                                                    action_val.action_id().to_string(),
-                                                    action_val.default_keystroke().to_string(),
-                                                );
-                                                this.save_shortcut_bindings();
-                                                crate::register_all_key_bindings(
-                                                    &mut cx.deref_mut(),
-                                                    &this.shortcut_bindings,
-                                                    false,
-                                                );
-                                                cx.stop_propagation();
-                                                cx.notify();
-                                            }
-                                        }))
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             if reset_enabled {
                                                 this.shortcut_bindings.bindings.insert(

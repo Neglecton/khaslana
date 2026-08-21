@@ -547,13 +547,10 @@ impl RepositoryView {
         let content_present = content.is_some();
         let handle = self.uniform_scroll_handle("browse-content-scroll");
         let list_handle = handle.clone();
-        let focus = self.browse_content_focus.clone();
         let entity = cx.entity();
 
         let inner_content = div()
             .id("browse-content-list")
-            .track_focus(&focus)
-            .key_context("BrowseContent")
             .flex()
             .flex_col()
             .flex_1()
@@ -563,11 +560,11 @@ impl RepositoryView {
             .font_family("Consolas, monospace")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
-            .on_action(cx.listener(Self::on_browse_content_copy))
-            .on_action(cx.listener(Self::on_browse_content_select_all))
+            // 内容区行选择纯鼠标（拖选）；不设键盘上下文/焦点——键盘复制/全选
+            // 仅保留在文本框内（键盘白名单见 AGENTS.md §8）。
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     let line_count = this
                         .browse
                         .content
@@ -581,7 +578,6 @@ impl RepositoryView {
                     this.browse.sel_start = Some(row);
                     this.browse.sel_end = Some(row);
                     this.browse.selecting = true;
-                    window.focus(&this.browse_content_focus);
                     cx.notify();
                 }),
             )

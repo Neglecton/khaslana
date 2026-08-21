@@ -1,4 +1,4 @@
-use gpui::{Context, IntoElement, KeyDownEvent, Window, div, prelude::*, px};
+use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::NetworkProxyMode;
 
 use crate::ui::{components::tooltip_text, theme::rgb};
@@ -126,21 +126,9 @@ impl RepositoryView {
         let enabled = !self.busy;
         let disabled_reason = proxy_mode_disabled_reason(enabled);
         segmented_button(format!("proxy-mode-{label}"), selected, enabled)
-            .when(enabled, |this| this.tab_index(0))
-            .when(!enabled, |this| this.tab_index(-1).tab_stop(false))
             .when_some(disabled_reason, |this, reason| {
                 this.tooltip(move |_window, cx| tooltip_text(reason, cx))
             })
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                if enabled
-                    && !this.busy
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                {
-                    this.set_proxy_mode(mode);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 if enabled && !this.busy {
                     this.set_proxy_mode(mode);
