@@ -282,7 +282,7 @@ pub(crate) fn gitee_run_code_flow<F>(
     proxy_url: Option<String>,
     cancel: &AtomicBool,
     on_ready: F,
-) -> Result<(String, String), String>
+) -> Result<GiteeLoginGrant, String>
 where
     F: FnOnce(&str),
 {
@@ -330,10 +330,72 @@ where
     };
 
     // 4. 通过 broker 用 code 换 token（客户端不带 client_secret）。
-    let token = exchange_via_broker(proxy_url.clone(), &code)?;
+    let grant = exchange_via_broker(proxy_url.clone(), &code)?;
+    let access_token = grant.access_token.clone();
     // 5. 取登录名。
-    let login = fetch_gitee_login(proxy_url, &token)?;
-    Ok((token, login))
+    let login = fetch_gitee_login(proxy_url, &access_token)?;
+    Ok(GiteeLoginGrant {
+        access_token,
+        username: login,
+        refresh_token: grant.refresh_token,
+        expires_at: grant.expires_at,
+    })
+}
+
+/// Gitee 登录成功后的一次性令牌授予（access_token + 可选的自动续期材料）。
+///
+/// `refresh_token`/`expires_at` 仅在 broker（Gitee）返回时存在；刷新必须经
+/// broker 代办（需要 client_secret，客户端不持有）。
+#[derive(Clone, Debug)]
+pub(crate) struct GiteeLoginGrant {
+    pub(crate) access_token: String,
+    pub(crate) username: String,
+    pub(crate) refresh_token: Option<String>,
+    /// access_token 过期时间（Unix 秒）；None = broker 未返回 expires_in。
+    pub(crate) expires_at: Option<i64>,
+}
+
+/// broker 刷新响应（与换码响应同构：新 access_token + 可能轮换的 refresh_token）。
+#[derive(Clone, Debug)]
+pub(crate) struct GiteeRefreshedGrant {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: Option<String>,
+    pub(crate) expires_at: Option<i64>,
+}
+
+/// 距过期不足该秒数时触发自动刷新（提前量覆盖一次远端操作的时长）。
+pub(crate) const GITEE_REFRESH_MARGIN_SECS: i64 = 2 * 3600;
+
+/// 是否需要自动刷新：过期时间已知且距现在不足提前量（含已过期）。
+pub(crate) fn gitee_needs_refresh(expires_at: i64, now_secs: i64) -> bool {
+    expires_at - now_secs <= GITEE_REFRESH_MARGIN_SECS
+}
+
+/// 经 broker 用 refresh_token 换新 access_token（broker 持 client_secret
+/// 向 Gitee 发起 `grant_type=refresh_token`）。失败返回面向用户的中文错误。
+pub(crate) fn gitee_refresh_via_broker(
+    proxy_url: Option<String>,
+    refresh_token: &str,
+) -> Result<GiteeRefreshedGrant, String> {
+    let agent = build_agent(proxy_url)?;
+    let body = serde_json::json!({
+        "refresh_token": refresh_token,
+    });
+    let mut resp = agent
+        .post(GITEE_BROKER_URL)
+        .header("Accept", "application/json")
+        .send_json(&body)
+        .map_err(|e| format!("刷新请求失败（broker）：{e}"))?;
+    let parsed: BrokerTokenResponse = resp
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("解析刷新响应失败：{e}"))?;
+    let error_text = parsed
+        .error_description
+        .clone()
+        .or_else(|| parsed.error.clone())
+        .unwrap_or_else(|| "broker 未返回新令牌".to_string());
+    parsed.into_grant().ok_or(error_text)
 }
 
 /// 读取回调 HTTP 请求，解析出 `(code, state, error)`。
@@ -401,7 +463,10 @@ fn respond_callback_success(stream: &mut TcpStream) -> std::io::Result<()> {
 }
 
 /// 通过 broker 用授权码换 token（broker 持有 client_secret 向 Gitee 交换）。
-fn exchange_via_broker(proxy_url: Option<String>, code: &str) -> Result<String, String> {
+fn exchange_via_broker(
+    proxy_url: Option<String>,
+    code: &str,
+) -> Result<GiteeRefreshedGrant, String> {
     let agent = build_agent(proxy_url)?;
     let body = serde_json::json!({
         "code": code,
@@ -416,20 +481,42 @@ fn exchange_via_broker(proxy_url: Option<String>, code: &str) -> Result<String, 
         .body_mut()
         .read_json()
         .map_err(|e| format!("解析令牌响应失败：{e}"))?;
-    parsed.access_token.ok_or_else(|| {
-        // 优先用 Gitee 返回的中文 error_description，便于用户理解。
-        parsed
-            .error_description
-            .or(parsed.error)
-            .unwrap_or_else(|| "broker 未返回令牌".to_string())
-    })
+    // 优先用 Gitee 返回的中文 error_description，便于用户理解。
+    let error_text = parsed
+        .error_description
+        .clone()
+        .or_else(|| parsed.error.clone())
+        .unwrap_or_else(|| "broker 未返回令牌".to_string());
+    parsed.into_grant().ok_or(error_text)
 }
 
+/// broker 响应体：换码与刷新共用（Gitee 原样字段 + broker 透传）。
 #[derive(Debug, Deserialize)]
 struct BrokerTokenResponse {
     access_token: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
+}
+
+impl BrokerTokenResponse {
+    fn into_grant(self) -> Option<GiteeRefreshedGrant> {
+        let expires_at = self.expires_in.map(|secs| now_unix_secs() + secs.max(0));
+        self.access_token.map(|access_token| GiteeRefreshedGrant {
+            access_token,
+            refresh_token: self.refresh_token,
+            expires_at,
+        })
+    }
+}
+
+/// 当前 Unix 秒。
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 用 access_token 获取 Gitee 登录名（作为 git 认证用户名）。
@@ -712,9 +799,13 @@ mod tests {
 
     #[test]
     fn broker_token_response_parses_success_and_error() {
-        let ok: BrokerTokenResponse =
-            serde_json::from_str(r#"{"access_token":"gtoken","token_type":"bearer"}"#).unwrap();
+        let ok: BrokerTokenResponse = serde_json::from_str(
+            r#"{"access_token":"gtoken","refresh_token":"rnew","expires_in":86400}"#,
+        )
+        .unwrap();
         assert_eq!(ok.access_token.as_deref(), Some("gtoken"));
+        assert_eq!(ok.refresh_token.as_deref(), Some("rnew"));
+        assert_eq!(ok.expires_in, Some(86400));
         assert!(ok.error.is_none());
 
         let err: BrokerTokenResponse =
@@ -722,6 +813,52 @@ mod tests {
                 .unwrap();
         assert!(err.access_token.is_none());
         assert_eq!(err.error.as_deref(), Some("invalid_grant"));
+    }
+
+    #[test]
+    fn broker_response_into_grant_computes_expires_at() {
+        let ok: BrokerTokenResponse = serde_json::from_str(
+            r#"{"access_token":"gtoken","refresh_token":"rnew","expires_in":86400}"#,
+        )
+        .unwrap();
+        let grant = ok.into_grant().expect("access_token 存在时应产出 grant");
+        assert_eq!(grant.access_token, "gtoken");
+        assert_eq!(grant.refresh_token.as_deref(), Some("rnew"));
+        // expires_at = now + expires_in，允许计算与断言之间的毫秒级误差
+        let now = now_unix_secs();
+        let expected = now + 86400;
+        assert!(
+            (expected - 5..=expected + 5).contains(&grant.expires_at.unwrap()),
+            "expires_at 应约为 now+86400，实际 {:?}",
+            grant.expires_at
+        );
+
+        // 无 expires_in：expires_at 为 None（未知过期时间，不做自动刷新）
+        let no_expiry: BrokerTokenResponse =
+            serde_json::from_str(r#"{"access_token":"gtoken"}"#).unwrap();
+        let grant = no_expiry.into_grant().unwrap();
+        assert!(grant.expires_at.is_none());
+
+        // 无 access_token：不产出 grant（走错误文案路径）
+        let no_token: BrokerTokenResponse =
+            serde_json::from_str(r#"{"refresh_token":"r"}"#).unwrap();
+        assert!(no_token.into_grant().is_none());
+    }
+
+    #[test]
+    fn gitee_needs_refresh_margin_boundaries() {
+        let now = 1_700_000_000i64;
+        // 距过期恰好等于提前量：需要刷新（边界含等号）
+        assert!(gitee_needs_refresh(now + GITEE_REFRESH_MARGIN_SECS, now));
+        // 提前量 + 1 秒：不需要
+        assert!(!gitee_needs_refresh(
+            now + GITEE_REFRESH_MARGIN_SECS + 1,
+            now
+        ));
+        // 已过期：需要刷新
+        assert!(gitee_needs_refresh(now - 1, now));
+        // 全新令牌（24h，远大于 2h 余量）：不需要
+        assert!(!gitee_needs_refresh(now + 86400, now));
     }
 
     #[test]

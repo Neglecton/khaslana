@@ -222,6 +222,8 @@ pub trait CredentialStore: Send + Sync {
     fn list_records(&self) -> Result<Vec<CredentialRecord>>;
     fn credential_for_record(&self, record_id: &str) -> Result<Option<GitCredential>>;
     fn touch_record(&self, record_id: &str) -> Result<Option<CredentialRecord>>;
+    /// 原位更新某记录的 secret（Gitee OAuth 令牌自动续期后写回新令牌）。
+    fn update_secret(&self, record_id: &str, secret: &str) -> Result<()>;
     fn update_record_remote_url(
         &self,
         record_id: &str,
@@ -409,6 +411,23 @@ impl CredentialStore for MemoryCredentialStore {
             .get(record_id)
             .cloned();
         Ok(secret.and_then(|secret| GitCredential::from_record(&record, secret)))
+    }
+
+    fn update_secret(&self, record_id: &str, secret: &str) -> Result<()> {
+        let exists = self
+            .index
+            .lock()
+            .map_err(|_| GitError::Credential("凭据缓存状态异常".to_string()))?
+            .iter()
+            .any(|record| record.id == record_id);
+        if !exists {
+            return Err(GitError::Credential("凭据记录不存在".to_string()));
+        }
+        self.secrets
+            .lock()
+            .map_err(|_| GitError::Credential("凭据缓存状态异常".to_string()))?
+            .insert(record_id.to_string(), secret.to_string());
+        Ok(())
     }
 
     fn touch_record(&self, record_id: &str) -> Result<Option<CredentialRecord>> {
@@ -709,6 +728,8 @@ impl CredentialStore for KeyringCredentialStore {
                 return Err(GitError::Credential(format!("系统凭据删除失败：{err:?}")));
             }
         }
+        // Gitee 自动续期材料随记录一并清理（best-effort，失败不阻断删除）。
+        delete_gitee_refresh_payload(record_id);
         index.records.retain(|record| record.id != record_id);
         self.save_index(&index)?;
         Ok(())
@@ -736,6 +757,22 @@ impl CredentialStore for KeyringCredentialStore {
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(err) => Err(GitError::Credential(format!("系统凭据读取失败：{err:?}"))),
         }
+    }
+
+    fn update_secret(&self, record_id: &str, secret: &str) -> Result<()> {
+        self.ensure_store()?;
+        let index = self.load_index()?;
+        let Some(record) = index
+            .records
+            .into_iter()
+            .find(|record| record.id == record_id)
+        else {
+            return Err(GitError::Credential("凭据记录不存在".to_string()));
+        };
+        let entry = Self::entry_for_record(record_id, &record.username)?;
+        entry
+            .set_password(secret)
+            .map_err(|err| GitError::Credential(format!("系统凭据更新失败：{err:?}")))
     }
 
     fn touch_record(&self, record_id: &str) -> Result<Option<CredentialRecord>> {
@@ -1192,6 +1229,71 @@ pub fn normalize_remote_url(url: &str) -> String {
 
 fn new_keyring_service(record_id: &str) -> String {
     format!("{KEYRING_SERVICE_PREFIX}:{record_id}")
+}
+
+// ── Gitee OAuth 自动续期材料（refresh_token + 过期时间，按记录 id 独立存 Keyring）──
+
+/// Gitee OAuth 自动续期材料。secret 类信息按项目约定不进 SQLite，与凭据本体
+/// 分条目存放（载荷以 JSON 序列化）；按 `record_id` 索引，随记录删除一并清理。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GiteeRefreshPayload {
+    pub refresh_token: String,
+    /// access_token 过期时间（Unix 秒）。
+    pub expires_at: i64,
+}
+
+/// Gitee 续期材料在系统凭据库中的服务名（与凭据本体条目同前缀，便于辨识归属）。
+fn gitee_refresh_keyring_service(record_id: &str) -> String {
+    format!("{KEYRING_SERVICE_PREFIX}:gitee-refresh:{record_id}")
+}
+
+fn gitee_refresh_entry(record_id: &str) -> Result<keyring_core::Entry> {
+    keyring_core::Entry::new(&gitee_refresh_keyring_service(record_id), "refresh")
+        .map_err(|err| GitError::Credential(format!("Gitee 续期条目创建失败：{err:?}")))
+}
+
+/// 保存/覆盖某凭据记录的 Gitee 续期材料。
+pub fn save_gitee_refresh_payload(
+    record_id: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> Result<()> {
+    let payload = GiteeRefreshPayload {
+        refresh_token: refresh_token.to_string(),
+        expires_at,
+    };
+    let json = serde_json::to_string(&payload)
+        .map_err(|err| GitError::Credential(format!("Gitee 续期材料序列化失败：{err}")))?;
+    gitee_refresh_entry(record_id)?
+        .set_password(&json)
+        .map_err(|err| GitError::Credential(format!("Gitee 续期材料保存失败：{err:?}")))
+}
+
+/// 读取某凭据记录的 Gitee 续期材料；无条目或载荷损坏返回 None（损坏时顺带清理）。
+pub fn load_gitee_refresh_payload(record_id: &str) -> Option<GiteeRefreshPayload> {
+    let entry = gitee_refresh_entry(record_id).ok()?;
+    match entry.get_password() {
+        Ok(json) => match serde_json::from_str::<GiteeRefreshPayload>(&json) {
+            Ok(payload) => Some(payload),
+            Err(_) => {
+                // 载荷损坏（旧版本格式或手改）：清理后按无续期能力处理。
+                let _ = entry.delete_credential();
+                None
+            }
+        },
+        Err(keyring_core::Error::NoEntry) => None,
+        Err(_) => None,
+    }
+}
+
+/// 删除某凭据记录的 Gitee 续期材料（best-effort：失败只记 warn 不阻断调用方）。
+pub fn delete_gitee_refresh_payload(record_id: &str) {
+    if let Ok(entry) = gitee_refresh_entry(record_id)
+        && let Err(err) = entry.delete_credential()
+        && !matches!(err, keyring_core::Error::NoEntry)
+    {
+        tracing::warn!("Gitee 续期材料删除失败：{err:?}");
+    }
 }
 
 fn now_seconds() -> i64 {

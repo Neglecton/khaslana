@@ -2236,10 +2236,17 @@ pub(crate) enum UiEvent {
         provider: OAuthProvider,
         username: String,
         token: String,
+        /// Gitee 专属：自动续期材料（refresh_token + 过期时间）；GitHub/旧 broker 为 None。
+        gitee_refresh: Option<(String, i64)>,
     },
     OAuthLoginFailed {
         request_id: u64,
         error: String,
+    },
+    // Gitee 令牌自动续期结果（后台任务线程回传，成功仅状态栏、失败加 toast）
+    GiteeTokenRefreshed {
+        success: bool,
+        message: String,
     },
 }
 
@@ -2278,6 +2285,8 @@ struct TabCredentialProvider {
     rejected_record_ids: Arc<Mutex<Vec<String>>>,
     last_stored_attempt: Arc<Mutex<Option<StoredCredentialAttempt>>>,
     tab_id: RepoTabId,
+    /// Gitee 令牌自动续期用的代理设置（刷新经 broker，与 git 操作同一代理策略）。
+    proxy_settings: NetworkProxySettings,
 }
 
 const STORED_CREDENTIAL_REUSE_LIMIT_PER_OPERATION: usize = 2;
@@ -2324,6 +2333,7 @@ impl TabCredentialProvider {
         remote_bindings: Arc<Mutex<RemoteCredentialBindings>>,
         tx: Sender<UiEvent>,
         tab_id: RepoTabId,
+        proxy_settings: NetworkProxySettings,
     ) -> Self {
         Self {
             store,
@@ -2333,6 +2343,102 @@ impl TabCredentialProvider {
             rejected_record_ids: Arc::new(Mutex::new(Vec::new())),
             last_stored_attempt: Arc::new(Mutex::new(None)),
             tab_id,
+            proxy_settings,
+        }
+    }
+
+    /// 是否为 Gitee 的 HTTPS 凭据记录（自动续期只对 Gitee OAuth 令牌生效）。
+    /// `record.host` 是 host_key 形态（协议 + 小写主机，如 `https://gitee.com`）。
+    fn is_gitee_https_record(record: &khaslana::credentials::CredentialRecord) -> bool {
+        record.host == "https://gitee.com"
+    }
+
+    /// Gitee OAuth 令牌惰性续期：命中已存凭据时检查过期时间，距过期不足
+    /// 提前量（或已过期）则经 broker 刷新，成功后把新令牌写回 Keyring 并
+    /// 返回续期后的凭据；失败时沿用旧令牌（认证若失败会走正常的凭据
+    /// 重试/提示流程），仅 toast 提示重新登录。
+    fn maybe_refresh_gitee_token(
+        &self,
+        stored: &khaslana::credentials::StoredCredential,
+    ) -> GitCredential {
+        if !Self::is_gitee_https_record(&stored.record)
+            || stored.record.kind != khaslana::StoredCredentialKind::HttpsUserPass
+            || !matches!(stored.credential, GitCredential::UserPass { .. })
+        {
+            return stored.credential.clone();
+        }
+        let Some(payload) = khaslana::credentials::load_gitee_refresh_payload(&stored.record.id)
+        else {
+            return stored.credential.clone();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if !oauth::gitee_needs_refresh(payload.expires_at, now) {
+            return stored.credential.clone();
+        }
+
+        let proxy_url = self
+            .proxy_settings
+            .proxy_url_for_target("https://gitee.com/");
+        match oauth::gitee_refresh_via_broker(proxy_url, &payload.refresh_token) {
+            Ok(refreshed) => {
+                let new_token = refreshed.access_token;
+                // 写回新令牌 + 更新续期材料（refresh_token 可能轮换，以响应为准；
+                // 响应未带新值时沿用旧的——Gitee 刷新不总是轮换）。
+                let next_refresh = refreshed
+                    .refresh_token
+                    .clone()
+                    .unwrap_or(payload.refresh_token);
+                let next_expires = refreshed.expires_at.unwrap_or(payload.expires_at);
+                if let Err(err) = self.store.update_secret(&stored.record.id, &new_token) {
+                    tracing::warn!("Gitee 令牌续期后写回失败：{err}");
+                }
+                if let Err(err) = khaslana::credentials::save_gitee_refresh_payload(
+                    &stored.record.id,
+                    &next_refresh,
+                    next_expires,
+                ) {
+                    tracing::warn!("Gitee 续期材料更新失败：{err}");
+                }
+                send_ui_event(
+                    &self.tx,
+                    UiEvent::GiteeTokenRefreshed {
+                        success: true,
+                        message: "Gitee 令牌已自动续期".into(),
+                    },
+                );
+                match stored.credential.clone() {
+                    GitCredential::UserPass {
+                        username,
+                        secret: _,
+                        display_name,
+                        save_to_keyring,
+                        scope,
+                    } => GitCredential::UserPass {
+                        username,
+                        secret: new_token,
+                        display_name,
+                        save_to_keyring,
+                        scope,
+                    },
+                    other => other,
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Gitee 令牌自动续期失败：{error}");
+                send_ui_event(
+                    &self.tx,
+                    UiEvent::GiteeTokenRefreshed {
+                        success: false,
+                        message: format!(
+                            "Gitee 令牌自动续期失败：{error}；请重新登录 Gitee 更新凭据"
+                        ),
+                    },
+                );
+                stored.credential.clone()
+            }
         }
     }
 }
@@ -2406,7 +2512,8 @@ impl CredentialProvider for TabCredentialProvider {
                         ));
                     }
                 }
-                return Ok(Some(stored.credential));
+                // Gitee OAuth 凭据：按需惰性续期（距过期 <2h 或已过期时刷新）。
+                return Ok(Some(self.maybe_refresh_gitee_token(&stored)));
             }
             Ok(None) => {}
             Err(err) => tracing::warn!("keyring read skipped: {err}"),
@@ -2790,6 +2897,10 @@ pub(crate) struct RepositoryView {
     credential_use_ssh_agent: bool,
     pub(crate) ssh_credential_discovery: SshCredentialDiscoveryState,
     oauth_login_flow: OAuthLoginFlowState,
+    /// Gitee 登录成功后刚保存的凭据记录 id：`save_credential_form` 写入，
+    /// `OAuthLoginSucceeded` 处理器取走并把 refresh_token 等续期材料落到
+    /// 独立的 Keyring 条目（见 `credentials::save_gitee_refresh_payload`）。
+    pending_gitee_refresh_record: Option<String>,
     clone_url: TextFieldState,
     clone_path: TextFieldState,
     clone_recursive_submodules: bool,
@@ -3054,6 +3165,7 @@ impl RepositoryView {
             credential_use_ssh_agent: false,
             ssh_credential_discovery: SshCredentialDiscoveryState::default(),
             oauth_login_flow: OAuthLoginFlowState::default(),
+            pending_gitee_refresh_record: None,
             clone_url: TextFieldState::new(cx, "远程仓库 URL"),
             clone_path: TextFieldState::new(cx, "克隆到父文件夹"),
             clone_recursive_submodules: default_clone_recursive_submodules(),
@@ -3836,6 +3948,7 @@ impl RepositoryView {
                 self.remote_credential_bindings.clone(),
                 self.tx.clone(),
                 tab_id,
+                self.proxy_settings.clone(),
             )),
             Arc::new(TabProgress {
                 tx: self.tx.clone(),
@@ -4365,13 +4478,19 @@ impl RepositoryView {
                 provider,
                 username,
                 token,
+                gitee_refresh,
             } => {
                 if request_id == self.oauth_login_flow.request_id {
                     let (host_url, note) = match provider {
                         OAuthProvider::Github => ("github.com", "GitHub 登录成功，凭据已保存"),
                         OAuthProvider::Gitee => (
                             "gitee.com",
-                            "Gitee 登录成功，凭据已保存（令牌约 1 天过期，过期后重新登录）",
+                            if gitee_refresh.is_some() {
+                                "Gitee 登录成功，凭据已保存（令牌将自动续期）"
+                            } else {
+                                // 旧版 broker 未透传 refresh_token：保持手动续期提示。
+                                "Gitee 登录成功，凭据已保存（令牌约 1 天过期，过期后重新登录）"
+                            },
                         ),
                     };
                     let provider_label = provider.label();
@@ -4401,7 +4520,34 @@ impl RepositoryView {
                     }
                     self.credential_scope = CredentialScope::Host;
                     self.save_credential_form();
+                    // Gitee：把自动续期材料落到独立 Keyring 条目（绑定刚保存的记录）。
+                    if let (OAuthProvider::Gitee, Some(record_id)) =
+                        (provider, self.pending_gitee_refresh_record.take())
+                        && let Some((refresh_token, expires_at)) = gitee_refresh
+                    {
+                        if let Err(err) = khaslana::credentials::save_gitee_refresh_payload(
+                            &record_id,
+                            &refresh_token,
+                            expires_at,
+                        ) {
+                            tracing::warn!("Gitee 续期材料保存失败：{err}");
+                            self.notify_warning(
+                                "Gitee 令牌已保存，但自动续期材料写入失败，令牌过期后需重新登录",
+                                cx,
+                            );
+                        }
+                    } else {
+                        self.pending_gitee_refresh_record = None;
+                    }
                     self.notify_success(note, cx);
+                }
+            }
+            UiEvent::GiteeTokenRefreshed { success, message } => {
+                if success {
+                    self.status = message;
+                } else {
+                    // 续期失败不阻断当前操作（旧令牌继续尝试），提示重新登录即可恢复。
+                    self.notify_warning(message, cx);
                 }
             }
             UiEvent::OAuthLoginFailed { request_id, error } => {
@@ -7164,6 +7310,7 @@ impl RepositoryView {
                                 provider: OAuthProvider::Github,
                                 username,
                                 token,
+                                gitee_refresh: None,
                             },
                         ),
                         Err(error) => {
@@ -7205,13 +7352,14 @@ impl RepositoryView {
                 );
             });
             match result {
-                Ok((token, username)) => send_ui_event(
+                Ok(grant) => send_ui_event(
                     &tx,
                     UiEvent::OAuthLoginSucceeded {
                         request_id,
                         provider: OAuthProvider::Gitee,
-                        username,
-                        token,
+                        username: grant.username,
+                        token: grant.access_token,
+                        gitee_refresh: grant.refresh_token.zip(grant.expires_at),
                     },
                 ),
                 Err(error) => send_ui_event(&tx, UiEvent::OAuthLoginFailed { request_id, error }),
@@ -7315,11 +7463,12 @@ impl RepositoryView {
             operation_id: None,
         };
         match self.credential_store.save_record(&request, &credential) {
-            Ok(_) => {
+            Ok(record) => {
                 self.reset_credential_form();
                 self.open_credential_manager();
                 self.last_error = None;
                 self.reload_credential_records("凭据已添加");
+                self.pending_gitee_refresh_record = Some(record.id);
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());

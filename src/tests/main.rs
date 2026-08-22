@@ -43,7 +43,14 @@ fn credential_provider_with_store(
     let (tx, rx) = async_channel::unbounded();
     let storage = Arc::new(khaslana::AppStorage::open_in_memory().unwrap());
     (
-        TabCredentialProvider::new(store, storage, bindings, tx, RepoTabId(7)),
+        TabCredentialProvider::new(
+            store,
+            storage,
+            bindings,
+            tx,
+            RepoTabId(7),
+            NetworkProxySettings::default(),
+        ),
         rx,
     )
 }
@@ -1642,4 +1649,36 @@ fn display_diff_line_kind_maps_untracked_added_to_context() {
         display_diff_line_kind(DiffLineKind::Header, true),
         DiffLineKind::Header
     );
+}
+
+// Gitee 自动续期的记录门控：record.host 是 host_key 形态（协议 + 主机），
+// 纯主机名 "gitee.com" 或其它平台不得命中。
+#[test]
+fn is_gitee_https_record_matches_host_key_form_only() {
+    let mut record = khaslana::credentials::CredentialRecord {
+        id: "rec".into(),
+        display_name: None,
+        scope: CredentialScope::Host,
+        kind: khaslana::StoredCredentialKind::HttpsUserPass,
+        host: "https://gitee.com".into(),
+        remote_url: "https://gitee.com/team/repo.git".into(),
+        username: "user".into(),
+        key_path: None,
+        created_at: 1,
+        updated_at: 1,
+        last_used: None,
+    };
+    assert!(TabCredentialProvider::is_gitee_https_record(&record));
+
+    record.host = "gitee.com".into();
+    assert!(
+        !TabCredentialProvider::is_gitee_https_record(&record),
+        "纯主机名形态不是存储格式，不应命中"
+    );
+
+    record.host = "https://github.com".into();
+    assert!(!TabCredentialProvider::is_gitee_https_record(&record));
+
+    record.host = "ssh://gitee.com".into();
+    assert!(!TabCredentialProvider::is_gitee_https_record(&record));
 }

@@ -443,6 +443,54 @@ fn ssh_username_prefers_remote_url_identity() {
 }
 
 #[test]
+fn gitee_refresh_payload_json_roundtrip() {
+    let payload = GiteeRefreshPayload {
+        refresh_token: "rt-abc".to_string(),
+        expires_at: 1_700_000_000,
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    let parsed: GiteeRefreshPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, payload);
+}
+
+#[test]
+fn gitee_refresh_keyring_service_names_record() {
+    // 服务名必须带记录 id：不同 Gitee 凭据记录的续期材料互不串档。
+    let service = gitee_refresh_keyring_service("rec-123");
+    assert!(service.starts_with(KEYRING_SERVICE_PREFIX));
+    assert!(service.contains(":gitee-refresh:rec-123"));
+    assert_ne!(
+        gitee_refresh_keyring_service("rec-123"),
+        gitee_refresh_keyring_service("rec-456")
+    );
+}
+
+#[test]
+fn memory_store_update_secret_replaces_and_validates() {
+    let store = MemoryCredentialStore::new();
+    let req = request(
+        "https://gitee.com/team/repo.git",
+        CredentialType::USER_PASS_PLAINTEXT,
+    );
+    let record = store
+        .save_record(&req, &https_credential(CredentialScope::Host, "old-token"))
+        .unwrap();
+
+    store.update_secret(&record.id, "new-token").unwrap();
+    let updated = store.credential_for_record(&record.id).unwrap().unwrap();
+    assert!(
+        matches!(
+            &updated,
+            GitCredential::UserPass { secret, .. } if secret == "new-token"
+        ),
+        "update_secret 后凭据本体应返回新令牌"
+    );
+
+    // 不存在的记录：报错而非静默成功
+    assert!(store.update_secret("missing-id", "x").is_err());
+}
+
+#[test]
 fn system_git_ssh_command_uses_selected_key_and_strict_host_check() {
     let credential = ssh_credential(CredentialScope::Host, "C:/Users/me/.ssh/id_ed25519");
     let command = git_ssh_command_for_credential(&credential).unwrap();
