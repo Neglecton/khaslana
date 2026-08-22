@@ -21,8 +21,7 @@ use crate::{
     FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
     ScrollbarMode, TextFieldState, UiEvent, WORKFLOW_TEMPLATE_MENU_HEIGHT,
     WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu, clamped_menu_position,
-    placeholder_row, scrollable_frame_when, section_header_action, scrollable_uniform_frame,
-    send_ui_event,
+    scrollable_frame_when, scrollable_uniform_frame, send_ui_event,
     system::open_directory,
     tasks::TaskKind,
     ui::{
@@ -264,6 +263,18 @@ impl RepositoryView {
                 self.status = err;
             }
         }
+    }
+
+    /// 清空已加载的工作流（定义/预览/文件路径/变量输入/日志）。
+    /// 合并自 dev_lcc：删除模板时若删的是当前加载的工作流，用它避免
+    /// 详情区残留失效引用；新版 UI 重构时该方法曾被移除导致合并冲突遗漏。
+    pub(crate) fn clear_workflow_file(&mut self) {
+        self.workflow_state.definition = None;
+        self.workflow_state.preview = None;
+        self.workflow_state.file_path = None;
+        self.workflow_state.inputs.clear();
+        self.workflow_state.log.clear();
+        self.last_error = None;
     }
 
     pub(crate) fn open_workflow_template_dir(&mut self) {
@@ -611,7 +622,7 @@ impl RepositoryView {
             .w(px(width))
             .min_w(px(crate::MIN_WORKFLOW_TEMPLATES_WIDTH))
             .min_h(px(0.0))
-// 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
+            // 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
             // 面板不自画右边框，避免出现两条平行框线。
             .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
