@@ -492,3 +492,62 @@ fn save_target_new_mode_writes_relative_name() {
     assert_eq!(target, Path::new("brand-new.json5"));
     assert!(stale.is_none());
 }
+
+#[test]
+fn ai_generated_json5_fills_editor_data() {
+    let mut data = WorkflowEditorData::default();
+    data.editing_path = Some(PathBuf::from("D:/t/existing.json5"));
+    data.file_name = "existing".to_string();
+    let json5 = r#"{
+        version: 1,
+        name: "AI 模板",
+        steps: [
+            { op: "checkout", branch: "master" },
+            { op: "push" },
+        ],
+    }"#;
+    apply_ai_generated_to_editor_data(&mut data, json5).unwrap();
+    // 表单内容被替换
+    assert_eq!(data.steps.len(), 2);
+    assert_eq!(data.name, "AI 模板");
+    // 语义字段保留：编辑目标不动、文件名不被 AI 名称覆盖
+    assert_eq!(
+        data.editing_path,
+        Some(PathBuf::from("D:/t/existing.json5"))
+    );
+    assert_eq!(data.file_name, "existing");
+    // 无 inputs/vars：高级区不自动展开
+    assert!(!data.advanced_expanded);
+}
+
+#[test]
+fn ai_generated_strips_code_fence_and_expands_advanced() {
+    let mut data = WorkflowEditorData::default();
+    let json5 = "```json5\n\
+        { version: 1, name: \"带围栏\", inputs: { target: { label: \"目标\" } }, steps: [{ op: \"ensureClean\" }] }\n\
+        ```";
+    apply_ai_generated_to_editor_data(&mut data, json5).unwrap();
+    assert_eq!(data.steps.len(), 1);
+    assert_eq!(data.inputs.len(), 1);
+    // 有 inputs：高级区自动展开方便检查
+    assert!(data.advanced_expanded);
+    // file_name 原为空：按 AI 显示名推导主干
+    assert_eq!(data.file_name, "带围栏");
+}
+
+#[test]
+fn ai_generated_invalid_json5_returns_chinese_error() {
+    let mut data = WorkflowEditorData::default();
+    let err = apply_ai_generated_to_editor_data(&mut data, "这不是 JSON").unwrap_err();
+    assert!(err.contains("不是有效的工作流模板"), "实际：{err}");
+    assert!(err.contains("重试"), "应含重试引导：{err}");
+    // 原数据不被半途污染
+    assert!(data.steps.is_empty());
+}
+
+#[test]
+fn ai_generated_invalid_op_rejected_by_domain_validation() {
+    let mut data = WorkflowEditorData::default();
+    let json5 = r#"{ version: 1, steps: [{ op: "notARealOp", branch: "x" }] }"#;
+    assert!(apply_ai_generated_to_editor_data(&mut data, json5).is_err());
+}

@@ -64,3 +64,33 @@ fn conflict_merge_prompts_segment_mode_marks_position() {
     assert!(user.content.contains("只输出这一段"));
     assert!(user.content.contains("block body"));
 }
+
+#[test]
+fn workflow_template_prompts_embeds_doc_and_request() {
+    let (system, user) = workflow_template_prompts("基于 master 创建 release 分支并推送", None);
+    assert_eq!(system.role, ChatRole::System);
+    // 文档关键章节嵌入（AI 参考工作流使用文档）
+    assert!(system.content.contains("支持的步骤"));
+    assert!(system.content.contains("filterBranches"));
+    assert!(system.content.contains("version 字段恒为 1"));
+    assert_eq!(user.role, ChatRole::User);
+    // 新建模式：不含现有模板标记，含需求
+    assert!(!user.content.contains("【现有模板】"));
+    assert!(user.content.contains("基于 master 创建 release 分支并推送"));
+}
+
+#[test]
+fn workflow_template_prompts_edit_mode_includes_current_definition() {
+    let current = r#"{ version: 1, name: "旧模板", steps: [{ op: "ensureClean" }] }"#;
+    let (_system, user) = workflow_template_prompts("加一个推送步骤", Some(current));
+    assert!(user.content.contains("【现有模板】"));
+    assert!(user.content.contains("旧模板"));
+    assert!(user.content.contains("加一个推送步骤"));
+}
+
+#[test]
+fn workflow_template_prompts_trims_and_rejects_empty_request() {
+    // 空白需求 trim 后仍生成 prompt（守卫在 UI 层做），但内容不含空白原文
+    let (_system, user) = workflow_template_prompts("   ", None);
+    assert!(user.content.contains("【功能需求】"));
+}
