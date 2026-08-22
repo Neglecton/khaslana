@@ -7,7 +7,9 @@ use crate::ui::theme::rgb;
 use chrono::{DateTime, Local};
 use directories::BaseDirs;
 use git2::Repository;
-use gpui::{ClickEvent, Context, IntoElement, Window, div, prelude::*, px};
+use gpui::{
+    ClickEvent, Context, IntoElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px,
+};
 use khaslana::{
     WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
     WorkflowProgressEvent, WorkflowRunOptions, parse_workflow_json5,
@@ -15,8 +17,9 @@ use khaslana::{
 
 use crate::{
     FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
-    ScrollbarMode, TextFieldState, UiEvent, placeholder_row, scrollable_frame_when,
-    section_header_action, send_ui_event,
+    ScrollbarMode, TextFieldState, UiEvent, WORKFLOW_TEMPLATE_MENU_HEIGHT,
+    WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu, clamped_menu_position,
+    placeholder_row, scrollable_frame_when, section_header_action, send_ui_event,
     system::open_directory,
     tasks::TaskKind,
     ui::{
@@ -513,6 +516,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let click_path = template.path.clone();
+        let right_click_path = template.path.clone();
         let has_error = template.error.is_some();
         let selected = self
             .workflow_state
@@ -546,6 +550,34 @@ impl RepositoryView {
                 }
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // 右键菜单互斥：先清掉其它弹层再打开本菜单
+                    this.branch_context_menu = None;
+                    this.remote_context_menu = None;
+                    this.change_context_menu = None;
+                    this.file_path_context_menu = None;
+                    this.credential_context_menu = None;
+                    this.tag_context_menu = None;
+                    this.stash_context_menu = None;
+                    this.commit_context_menu = None;
+                    this.encoding_menu_target = None;
+                    this.active_dialog = None;
+                    let (x, y) = clamped_menu_position(
+                        event,
+                        window,
+                        WORKFLOW_TEMPLATE_MENU_WIDTH,
+                        WORKFLOW_TEMPLATE_MENU_HEIGHT,
+                    );
+                    this.workflow_template_context_menu = Some(WorkflowTemplateContextMenu {
+                        path: right_click_path.clone(),
+                        x,
+                        y,
+                    });
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .w_full()

@@ -331,6 +331,8 @@ pub(crate) const TAG_MENU_WIDTH: f32 = 170.0;
 pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_WIDTH: f32 = 150.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 76.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
 const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
@@ -607,6 +609,13 @@ pub(crate) enum DialogState {
     StashForm,
     /// 工作流模板可视化创建器（v1 仅新建）。
     WorkflowEditor,
+    /// 编辑带注释的工作流模板前的确认弹窗（保存会丢失注释与排版）。
+    ConfirmWorkflowEditComments,
+    /// 删除工作流模板文件的确认弹窗。
+    ConfirmDeleteWorkflowTemplate {
+        path: PathBuf,
+        display_name: String,
+    },
     ConfirmDropStash {
         index: usize,
         message: String,
@@ -665,6 +674,14 @@ pub(crate) struct TagContextMenu {
 #[derive(Clone, Debug)]
 pub(crate) struct StashContextMenu {
     pub(crate) index: usize,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+/// 工作流模板列表行的右键菜单（编辑此模板 / 复制为副本）。
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowTemplateContextMenu {
+    pub(crate) path: PathBuf,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
@@ -2575,6 +2592,8 @@ pub(crate) struct RepositoryView {
     pub(crate) workflow_template_dir: Option<PathBuf>,
     /// 工作流模板创建器状态（仅弹窗打开期间存在）。
     pub(crate) workflow_editor: Option<WorkflowEditorState>,
+    /// 注释丢失确认前的暂存（编辑带注释模板时，确认后据此进入编辑器）。
+    pub(crate) pending_workflow_edit: Option<workflow_editor::PendingWorkflowEdit>,
     diff_encoding_preferences: DiffEncodingPreferences,
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
@@ -2647,6 +2666,7 @@ pub(crate) struct RepositoryView {
     credential_context_menu: Option<CredentialContextMenu>,
     pub(crate) tag_context_menu: Option<TagContextMenu>,
     pub(crate) stash_context_menu: Option<StashContextMenu>,
+    pub(crate) workflow_template_context_menu: Option<WorkflowTemplateContextMenu>,
     pub(crate) commit_context_menu: Option<CommitContextMenu>,
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
@@ -2799,6 +2819,8 @@ impl RepositoryView {
             workflow_templates: Vec::new(),
             workflow_template_dir: workflow_templates_dir(),
             workflow_editor: None,
+            pending_workflow_edit: None,
+            workflow_template_context_menu: None,
             diff_encoding_preferences: Self::load_diff_encoding_preferences(&storage),
             diff_cache: RefCell::new(LruCache::new(
                 NonZeroUsize::new(DIFF_CACHE_CAPACITY)
@@ -6076,6 +6098,7 @@ impl RepositoryView {
         self.tag_context_menu = None;
         self.stash_context_menu = None;
         self.commit_context_menu = None;
+        self.workflow_template_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
         self.close_repo_switcher();
@@ -6127,6 +6150,7 @@ impl RepositoryView {
             || self.tag_context_menu.is_some()
             || self.stash_context_menu.is_some()
             || self.commit_context_menu.is_some()
+            || self.workflow_template_context_menu.is_some()
             || self.encoding_menu_target.is_some()
     }
 
@@ -9142,9 +9166,21 @@ impl RepositoryView {
         }) || self.stash_context_menu.as_ref().is_some_and(|menu| {
             point_in_menu(x, y, menu.x, menu.y, STASH_MENU_WIDTH, STASH_MENU_HEIGHT)
         }) || self
-            .commit_context_menu
+            .workflow_template_context_menu
             .as_ref()
-            .is_some_and(|menu| point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height))
+            .is_some_and(|menu| {
+                point_in_menu(
+                    x,
+                    y,
+                    menu.x,
+                    menu.y,
+                    WORKFLOW_TEMPLATE_MENU_WIDTH,
+                    WORKFLOW_TEMPLATE_MENU_HEIGHT,
+                )
+            })
+            || self.commit_context_menu.as_ref().is_some_and(|menu| {
+                point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height)
+            })
             || self.repo_switcher_menu.as_ref().is_some_and(|menu| {
                 point_in_repo_switcher(x, y, menu, self.repo_switcher_anchor.as_ref())
             })
@@ -12666,6 +12702,95 @@ impl RepositoryView {
             .into_any_element()
     }
 
+    fn render_workflow_template_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.workflow_template_context_menu.clone() else {
+            return div().into_any_element();
+        };
+        let edit_path = menu.path.clone();
+        let copy_path = menu.path.clone();
+        // 删除确认弹窗展示用名称：优先解析出的显示名不可得（坏模板也允许删），退回文件名主干
+        let delete_path = menu.path.clone();
+        let delete_display_name = menu
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "该模板".to_string());
+
+        glass_menu()
+            .absolute()
+            .left(px(menu.x))
+            .top(px(menu.y))
+            .w(px(WORKFLOW_TEMPLATE_MENU_WIDTH))
+            .child(context_menu_item_with_context(
+                "编辑此模板",
+                !self.busy,
+                move |this, cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = edit_path.clone();
+                    this.open_workflow_editor_for_path(path, false, cx);
+                },
+                cx,
+            ))
+            .child(context_menu_item_with_context(
+                "复制为副本",
+                !self.busy,
+                move |this, cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = copy_path.clone();
+                    this.open_workflow_editor_for_path(path, true, cx);
+                },
+                cx,
+            ))
+            .child(menu_separator())
+            .child(context_menu_item_with_context(
+                "删除模板...",
+                !self.busy,
+                move |this, _cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = delete_path.clone();
+                    let name = delete_display_name.clone();
+                    this.open_delete_workflow_template_confirm(path, name);
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// 打开「删除工作流模板」确认弹窗。
+    pub(crate) fn open_delete_workflow_template_confirm(
+        &mut self,
+        path: PathBuf,
+        display_name: String,
+    ) {
+        self.active_dialog =
+            Some(DialogState::ConfirmDeleteWorkflowTemplate { path, display_name });
+        self.last_error = None;
+    }
+
+    /// 删除工作流模板文件（纯本地 IO，小文件同步执行）；若它是当前加载的
+    /// 工作流则同时清空详情区，避免残留失效引用。
+    pub(crate) fn delete_workflow_template(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                if self.workflow_state.selected_template_path.as_ref() == Some(&path) {
+                    self.clear_workflow_file();
+                    self.workflow_state.selected_template_path = None;
+                }
+                self.refresh_workflow_templates();
+                self.status = format!("工作流模板已删除：{file_name}");
+                self.notify_success(format!("工作流模板已删除：{file_name}"), cx);
+            }
+            Err(err) => {
+                self.last_error = Some(format!("工作流模板删除失败：{err}"));
+            }
+        }
+    }
+
     fn render_change_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(menu) = self.change_context_menu.clone() else {
             return div().into_any_element();
@@ -14754,6 +14879,12 @@ impl RepositoryView {
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
             DialogState::WorkflowEditor => self
                 .render_workflow_editor_dialog(window, cx)
+                .into_any_element(),
+            DialogState::ConfirmWorkflowEditComments => self
+                .render_confirm_workflow_edit_comments(cx)
+                .into_any_element(),
+            DialogState::ConfirmDeleteWorkflowTemplate { path, display_name } => self
+                .render_confirm_delete_workflow_template_dialog(path, display_name, cx)
                 .into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
@@ -17074,6 +17205,7 @@ impl Render for RepositoryView {
                     || this.tag_context_menu.is_some()
                     || this.stash_context_menu.is_some()
                     || this.commit_context_menu.is_some()
+                    || this.workflow_template_context_menu.is_some()
                     || this.encoding_menu_target.is_some()
                     || this.repo_switcher_menu.is_some()
                 {
@@ -17086,6 +17218,7 @@ impl Render for RepositoryView {
                     this.tag_context_menu = None;
                     this.stash_context_menu = None;
                     this.commit_context_menu = None;
+                    this.workflow_template_context_menu = None;
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
                     this.close_repo_switcher();
@@ -17176,6 +17309,7 @@ impl Render for RepositoryView {
             .child(self.render_commit_context_menu(cx))
             .child(self.render_tag_context_menu(cx))
             .child(self.render_stash_context_menu(cx))
+            .child(self.render_workflow_template_context_menu(cx))
             .child(self.render_repo_switcher_menu(window, cx))
             .child(self.render_settings_center_overlay(window, cx))
             .child(self.render_dialogs(window, cx))
