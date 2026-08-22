@@ -2156,6 +2156,10 @@ pub(crate) enum UiEvent {
     AiCommitMessageGenerated {
         message: String,
     },
+    /// 工作流模板 AI 生成/编辑完成（JSON5 文本，经编辑器解析回填表单）。
+    AiWorkflowTemplateGenerated {
+        content: String,
+    },
     AiCommitMessageDelta {
         delta: String,
     },
@@ -2823,7 +2827,7 @@ pub(crate) struct RepositoryView {
     pub(crate) pending_workflow_edit: Option<workflow_editor::PendingWorkflowEdit>,
     diff_encoding_preferences: DiffEncodingPreferences,
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
-    proxy_settings: NetworkProxySettings,
+    pub(crate) proxy_settings: NetworkProxySettings,
     pub(crate) theme_mode: ThemeMode,
     /// 当前激活的主题色预设索引（0 = 靛蓝默认）。
     pub(crate) theme_accent: usize,
@@ -5383,6 +5387,9 @@ impl RepositoryView {
                     self.last_error = None;
                 }
             }
+            UiEvent::AiWorkflowTemplateGenerated { content } => {
+                self.handle_ai_workflow_template_generated(content, cx);
+            }
             UiEvent::AiCommitMessageGenerated { message } => {
                 self.ai_commit_loading = false;
                 self.ai_commit_buffer.clear();
@@ -5550,6 +5557,9 @@ impl RepositoryView {
                 self.ai_commit_loading = false;
                 self.ai_conflict_loading = false;
                 self.ai_commit_buffer.clear();
+                // 工作流模板编辑器的 AI 生成失败：错误写进编辑器内错误条
+                // （弹窗仍开着，用户可直接改需求重试），并复位其 loading。
+                self.handle_ai_workflow_template_failed(&error);
                 // 评审失败走带代际的 AiReviewFailed（旧任务的失败不能
                 // 误复位当前附着任务的状态）。
                 // 测试连接失败时也要解锁借用的 busy，否则按钮永久禁用。
@@ -11787,7 +11797,11 @@ impl RepositoryView {
     fn is_multiline_field(id: FieldId) -> bool {
         matches!(
             id,
-            FieldId::CommitMessage | FieldId::ConflictEditor | FieldId::TagMessage
+            FieldId::CommitMessage
+                | FieldId::ConflictEditor
+                | FieldId::TagMessage
+                // 工作流模板 AI 功能需求描述（编辑器弹窗内多行输入）。
+                | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::AiDescription)
         )
     }
 

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::{
-    RemoteBranchGuardAction, WorkflowDefinition, WorkflowInputDefinition, WorkflowStep,
+    ChatClient, RemoteBranchGuardAction, WorkflowDefinition, WorkflowInputDefinition, WorkflowStep,
     parse_workflow_json5,
 };
 
@@ -56,6 +56,8 @@ pub(crate) enum WorkflowEditorFieldId {
     },
     /// 第 N 个自定义变量的键或值。
     VarPart { index: usize, key: bool },
+    /// AI 功能需求描述输入框（多行）。
+    AiDescription,
 }
 
 /// 输入变量编辑行的子字段。
@@ -699,6 +701,78 @@ pub(crate) fn workflow_editor_data_from_definition(
     }
 }
 
+/// 把 AI 生成的 JSON5 文本解析并回填到编辑器数据（AI 创建/编辑的落地步骤）。
+///
+/// - 先剥 AI 可能添加的 markdown 代码块围栏，再走标准解析 + 校验；
+/// - 替换 name / require_clean_worktree / steps / inputs / vars；
+/// - 保留调用方语义字段：`editing_path`、`error` 不动；`file_name` 仅在
+///   原为空时按 AI 给的显示名推导；有 inputs/vars 时自动展开高级区，
+///   方便用户检查 AI 写的变量。
+/// - 解析/校验失败返回中文错误（含原始解析信息与重试引导）。
+pub(crate) fn apply_ai_generated_to_editor_data(
+    data: &mut WorkflowEditorData,
+    json5_text: &str,
+) -> Result<(), String> {
+    let cleaned = khaslana::strip_code_fence(json5_text.trim());
+    let definition = parse_workflow_json5(&cleaned)
+        .map_err(|err| format!("AI 生成的内容不是有效的工作流模板：{err}。请重试或调整需求描述"));
+
+    let generated = match definition {
+        Ok(definition) => {
+            // file_name 已填则以它为准；为空时用 AI 给的显示名推导主干。
+            let stem_hint = if data.file_name.trim().is_empty() {
+                definition.name.clone().unwrap_or_default()
+            } else {
+                data.file_name.clone()
+            };
+            workflow_editor_data_from_definition(&definition, &stem_hint)
+        }
+        Err(err) => return Err(err),
+    };
+
+    let file_name_empty = data.file_name.trim().is_empty();
+    let has_advanced = !generated.inputs.is_empty() || !generated.vars.is_empty();
+    let editing_path = data.editing_path.clone();
+    let error = data.error.take();
+
+    *data = WorkflowEditorData {
+        // AI 未提供名称时保留编辑器当前文件名（新建模式为空则由用户填写）。
+        file_name: if file_name_empty && !generated.name.is_empty() {
+            slug_from_display_name(&generated.name)
+        } else {
+            data.file_name.clone()
+        },
+        advanced_expanded: data.advanced_expanded || has_advanced,
+        editing_path,
+        error,
+        ..generated
+    };
+    Ok(())
+}
+
+/// 由显示名推导保守的文件名主干：仅保留字母数字/连字符/下划线/中文，
+/// 其余替换为连字符；结果可能仍不合法（如全符号），保存时由
+/// `workflow_editor_file_name` 兜底校验。
+fn slug_from_display_name(display_name: &str) -> String {
+    let mut slug = display_name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "ai-template".to_string()
+    } else {
+        slug
+    }
+}
+
 /// 读取领域步骤的 serde op tag（反映射分发用，与 `WorkflowStepKind::op_name` 对应）。
 fn step_op_name(step: &WorkflowStep) -> &'static str {
     match step {
@@ -1001,6 +1075,10 @@ pub(crate) struct WorkflowEditorState {
     /// 当前展开的守卫策略下拉：(步骤下标, 是否 on_exists)，None = 全部收起。
     /// 互斥展开，同一时间只开一个。
     guard_menu_open: Option<(usize, bool)>,
+    /// AI 模板生成进行中（防重入 + 按钮加载态）。
+    ai_loading: bool,
+    /// AI 功能需求描述输入框（用户自然语言描述想要的模板）。
+    ai_description_field: TextFieldState,
 }
 
 struct WorkflowEditorInputRowState {
@@ -1036,6 +1114,11 @@ impl WorkflowEditorState {
             var_fields: Vec::new(),
             kind_menu_open: None,
             guard_menu_open: None,
+            ai_loading: false,
+            ai_description_field: TextFieldState::new(
+                cx,
+                "用一句话描述你想要的模板，如：基于 master 创建 release 分支并推送",
+            ),
         };
         state.ensure_field_capacity();
         state
@@ -1532,6 +1615,7 @@ impl RepositoryView {
                     row_state.value_field.as_ref()?
                 }
             }
+            WorkflowEditorFieldId::AiDescription => &state.ai_description_field,
         })
     }
 
@@ -1566,6 +1650,7 @@ impl RepositoryView {
                     row_state.value_field.as_mut()
                 }
             }
+            WorkflowEditorFieldId::AiDescription => Some(&mut state.ai_description_field),
         }
     }
 
@@ -1620,6 +1705,11 @@ impl RepositoryView {
                 }
             }
         }
+        if state.ai_description_field.focus.is_focused(window) {
+            return Some(FieldId::WorkflowEditor(
+                WorkflowEditorFieldId::AiDescription,
+            ));
+        }
         None
     }
 
@@ -1629,6 +1719,119 @@ impl RepositoryView {
             state.sync_from_fields();
         }
         let _ = id;
+    }
+
+    /// AI 生成失败事件处理（由 main.rs 的 AiRequestFailed 分支调用）：
+    /// 复位编辑器 loading 并把错误写进弹窗内错误条，用户可直接重试。
+    pub(crate) fn handle_ai_workflow_template_failed(&mut self, error: &str) {
+        if let Some(state) = self.workflow_editor.as_mut() {
+            state.ai_loading = false;
+            state.data.error = Some(format!("AI 生成失败：{error}"));
+        }
+    }
+
+    /// AI 生成完成事件处理：解析回填编辑器表单。
+    /// 编辑器已关闭（用户在生成期间关掉弹窗）则静默丢弃结果；
+    /// 解析失败把错误写进编辑器内错误条，弹窗不关闭、可立即重试。
+    pub(crate) fn handle_ai_workflow_template_generated(
+        &mut self,
+        content: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.workflow_editor.as_mut() else {
+            return;
+        };
+        state.ai_loading = false;
+        // 以 AI 结果为准整体替换表单；仅保留语义字段（editing_path 等），
+        // 由 apply_ai_generated_to_editor_data 处理。
+        state.sync_from_fields();
+        let mut data = state.data.clone();
+        match apply_ai_generated_to_editor_data(&mut data, &content) {
+            Ok(()) => {
+                *state = WorkflowEditorState::from_data(data, cx);
+                self.status = "AI 已生成工作流模板，请检查后保存".to_string();
+                self.notify_success("AI 已生成模板，请检查无误后保存", cx);
+            }
+            Err(err) => {
+                state.data.error = Some(err);
+                self.notify_error("AI 返回的内容无法解析为工作流模板", cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// AI 生成/修改工作流模板：把用户需求描述（编辑模式附当前模板内容）
+    /// 发给大模型，返回的 JSON5 经解析校验后回填当前编辑器表单。
+    ///
+    /// 照提交信息生成模式：独立 `ai_loading` 防重入（不借用全局 busy），
+    /// `TaskKind::Long` 后台执行，成功发 `AiWorkflowTemplateGenerated`、
+    /// 失败发共用 `AiRequestFailed`。保存仍走既有「保存模板」链路。
+    pub(crate) fn generate_workflow_template_with_ai(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.workflow_editor.as_mut() else {
+            return;
+        };
+        if state.ai_loading {
+            return;
+        }
+        if !self.ai_settings.is_usable() {
+            state.data.error = Some("请先在设置中心的 AI 设置中配置并启用供应商".into());
+            cx.notify();
+            return;
+        }
+        state.sync_from_fields();
+        let request = state.ai_description_field.value.trim().to_string();
+        if request.is_empty() {
+            state.data.error = Some("请先在输入框中描述你想要的模板功能，再点击 AI 生成".into());
+            cx.notify();
+            return;
+        }
+        // 编辑模式携带当前模板内容作为上下文；序列化失败按无上下文降级
+        // （新建语义从零生成），不阻断生成。
+        let current_json5 = build_workflow_definition(&state.data)
+            .ok()
+            .and_then(|definition| json5::to_string(&definition).ok());
+
+        state.ai_loading = true;
+        // 清掉上一次的错误提示（新一轮生成开始）。
+        state.data.error = None;
+        self.status = "AI 正在生成工作流模板".to_string();
+
+        let settings = self.ai_settings.clone();
+        let proxy_url = self
+            .proxy_settings
+            .proxy_url_for_target(&settings.normalized_base_url());
+        let tx = self.tx.clone();
+        self.tasks.spawn(crate::TaskKind::Long, move || {
+            let result = (|| -> khaslana::Result<String> {
+                let (system, user) =
+                    khaslana::workflow_template_prompts(&request, current_json5.as_deref());
+                let client = ChatClient::new(settings, proxy_url);
+                // 等待完成一次性回填：流式请求但不转发 Delta。
+                let result = client.request_stream(&[system, user], &mut |_delta| {})?;
+                khaslana::ai::validate_generated_content(
+                    &result,
+                    "AI 返回的内容为空，请重试或检查模型配置",
+                    "AI 未返回正文（仅返回了思考过程），请重试或更换模型",
+                )
+            })();
+            match result {
+                Ok(content) => {
+                    crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiWorkflowTemplateGenerated { content },
+                    );
+                }
+                Err(err) => {
+                    crate::send_ui_event(
+                        &tx,
+                        crate::UiEvent::AiRequestFailed {
+                            error: err.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+        cx.notify();
     }
 
     /// 保存模板：校验 -> 序列化 -> 回读校验 -> 写盘 -> 刷新列表。
@@ -2098,6 +2301,7 @@ impl RepositoryView {
                     .overflow_y_scroll()
                     .track_scroll(&scroll_handle)
                     .child(self.render_workflow_editor_basic_fields(window, cx))
+                    .child(self.render_workflow_editor_ai_section(window, cx))
                     .when(data.steps.is_empty(), |this| {
                         this.child(self.render_workflow_editor_presets(cx))
                     })
@@ -2180,6 +2384,67 @@ impl RepositoryView {
                 },
                 cx,
             ))
+    }
+
+    /// AI 助手区块：需求描述输入框 + 「AI 生成」按钮。
+    /// 编辑模式提示将基于当前模板内容修改；未配置 AI 时按钮禁用并说明原因。
+    fn render_workflow_editor_ai_section(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+        let loading = editor.ai_loading;
+        let ai_ready = self.ai_settings.is_usable();
+        let button_label = if loading {
+            "AI 生成中..."
+        } else if ai_ready {
+            "AI 生成"
+        } else {
+            "AI 生成（未配置）"
+        };
+        let enabled = ai_ready && !loading;
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(rgb(ui_theme::BORDER))
+            .rounded_sm()
+            .child(section_title("AI 助手"))
+            .child(self.input(
+                FieldId::WorkflowEditor(WorkflowEditorFieldId::AiDescription),
+                false,
+                window,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(if editor.data.editing_path.is_some() {
+                                "将基于当前模板内容按需求修改"
+                            } else {
+                                "生成结果会直接填入下方表单，保存前可自由调整"
+                            }),
+                    )
+                    .child(self.button(
+                        button_label,
+                        enabled,
+                        |this, _, cx| {
+                            this.generate_workflow_template_with_ai(cx);
+                        },
+                        cx,
+                    )),
+            )
     }
 
     /// 预设模板卡片区（仅步骤为空时展示，添加步骤后消失防止误覆盖）。

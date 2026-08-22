@@ -114,6 +114,78 @@ pub fn conflict_merge_prompts(
     (system, user)
 }
 
+/// 工作流模板 AI 生成：system prompt 中嵌入的工作流格式参考文档
+///（编译期嵌入，随 docs/workflows.md 更新自动同步）。
+const WORKFLOW_DOC_TEXT: &str = include_str!("../../docs/workflows.md");
+
+/// 用户需求描述的最大字符数（防超长输入撑爆上下文）。
+pub(crate) const WORKFLOW_REQUEST_TEXT_LIMIT: usize = 4000;
+
+/// 构造工作流模板生成/编辑的 system + user prompt。
+///
+/// - `request`：用户对模板功能的自然语言描述。
+/// - `current_definition_json5`：编辑模式下当前模板的 JSON5 序列化文本；
+///   新建模式传 `None`，AI 从零生成。
+///
+/// system 要求模型只输出一个完整的工作流 JSON5 对象；user 携带需求描述，
+/// 编辑模式附当前模板内容让 AI 在其基础上修改。
+pub fn workflow_template_prompts(
+    request: &str,
+    current_definition_json5: Option<&str>,
+) -> (ChatMessage, ChatMessage) {
+    let mut system = String::from(
+        "你是 Khaslana Git 客户端的工作流模板生成助手。请根据用户的功能需求，生成一份可直接保存使用的 Khaslana 工作流模板（JSON5 格式）。
+
+         下面是工作流的完整使用文档，请严格遵循其中的文件格式、步骤类型、变量语法和限制：
+
+",
+    );
+    system.push_str(WORKFLOW_DOC_TEXT);
+    system.push_str(
+        "
+
+输出要求（必须严格遵守）：
+         1. 只输出一个完整的工作流 JSON5 对象，不要输出任何解释、前后缀文字或 markdown 代码块标记。
+         2. version 字段恒为 1。
+         3. steps 至少一个，op 只能使用文档「支持的步骤」章节列出的类型。
+         4. 变量引用一律使用 ${...} 表达式语法；inputs 的键不得以 git. / run. / date: 开头。
+         5. 为字段填写合理的中文 label 与说明，便于其他用户理解。",
+    );
+
+    let request = truncate_text(request.trim(), WORKFLOW_REQUEST_TEXT_LIMIT);
+    let mut user = match current_definition_json5 {
+        Some(current) => format!(
+            "请修改以下现有工作流模板，使其满足新的功能需求。保持未涉及的部分不变，只改动需求要求的部分。
+
+             【现有模板】
+```json5
+{current}
+```
+
+"
+        ),
+        None => String::from("请从零生成一个新的工作流模板。
+
+"),
+    };
+    user.push_str(
+        "【功能需求】
+",
+    );
+    user.push_str(&request);
+
+    (
+        ChatMessage {
+            role: ChatRole::System,
+            content: system,
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            content: user,
+        },
+    )
+}
+
 /// 截断文本到指定字符数；超出时追加截断提示。
 pub(crate) fn truncate_text(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {

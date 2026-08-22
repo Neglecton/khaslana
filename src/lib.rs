@@ -47,7 +47,7 @@ pub use ai::{
     MERGE_WHOLE_FILE_LIMIT, MergeSegment, ReviewAgentInput, StreamDelta, ToolSchema,
     build_segment_messages, conflict_merge_prompts, file_diff_to_patch_text, list_review_records,
     response_contains_conflict_markers, run_review_agent, save_review_record, split_diff3_text,
-    split_reasoning, strip_code_fence, validate_generated_content,
+    split_reasoning, strip_code_fence, validate_generated_content, workflow_template_prompts,
 };
 
 // 浏览模式领域类型已在 types::* 中重新导出（BrowseTarget / BrowseEntry / BrowseEntryKind / BrowseFileContent）。

@@ -29,7 +29,10 @@ pub use merge::{
     MERGE_WHOLE_FILE_LIMIT, MergeSegment, build_segment_messages,
     response_contains_conflict_markers, split_diff3_text, strip_code_fence,
 };
-pub use prompt::{ChatMessage, ChatRole, commit_message_prompts, conflict_merge_prompts};
+pub use prompt::{
+    ChatMessage, ChatRole, commit_message_prompts, conflict_merge_prompts,
+    workflow_template_prompts,
+};
 pub use review::{AiReviewResult, AiReviewStep};
 pub use review_agent::{AgentEvent, ReviewAgentInput, file_diff_to_patch_text, run_review_agent};
 pub use review_store::{AiReviewRecord, list_review_records, save_review_record};
