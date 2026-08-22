@@ -938,7 +938,7 @@ fn hidden_commit_refs_tooltip(refs: &[CommitRefInfo]) -> String {
     push_commit_ref_group(&mut parts, "远端分支", remote_branches);
     push_commit_ref_group(&mut parts, "标签", tags);
 
-    format!("隐藏引用（{} 个）：{}", refs.len(), parts.join("；"))
+    format!("隐藏引用（{} 个）：\n{}", refs.len(), parts.join("\n"))
 }
 
 fn push_commit_ref_group(parts: &mut Vec<String>, label: &'static str, names: Vec<String>) {
