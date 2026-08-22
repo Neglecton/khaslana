@@ -25,7 +25,7 @@ use crate::{
     system::open_directory,
     tasks::TaskKind,
     ui::{
-        components::{command_group, list_row_surface, page_header, tooltip_text},
+        components::{command_group, list_row_surface, page_header},
         theme as ui_theme,
     },
 };
@@ -101,7 +101,6 @@ const WORKFLOW_TEMPLATE_LIST_SCROLL_ID: &str = "workflow-template-list";
 const WORKFLOW_INPUT_LIST_SCROLL_ID: &str = "workflow-input-list";
 const WORKFLOW_PREVIEW_LIST_SCROLL_ID: &str = "workflow-preview-list";
 const WORKFLOW_LOG_LIST_SCROLL_ID: &str = "workflow-log-list";
-const WORKFLOW_REFRESH_DISABLED_REASON: &str = "工作流运行期间无法刷新模板";
 
 /// Runbook Studio 的内容分栏策略，保持布局判断与 GPUI 渲染解耦。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -651,40 +650,15 @@ impl RepositoryView {
                                 |this, _, cx| this.open_workflow_editor(cx),
                                 cx,
                             ))
-                            .child({
-                                let enabled = !self.busy;
-                                div()
-                                    .id("workflow-refresh-templates")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .flex_none()
-                                    .min_h(px(24.0))
-                                    .px_2()
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .text_size(px(11.0))
-                                    .text_color(if enabled {
-                                        rgb(ui_theme::CONTENT_SECONDARY)
-                                    } else {
-                                        rgb(ui_theme::MUTED_FOREGROUND)
-                                    })
-                                    .when(enabled, |el| {
-                                        el.cursor_pointer()
-                                            .hover(|el| el.bg(rgb(ui_theme::STATE_HOVER)))
-                                    })
-                                    .when(!enabled, |el| {
-                                        el.cursor_not_allowed().tooltip(move |_window, cx| {
-                                            tooltip_text(WORKFLOW_REFRESH_DISABLED_REASON, cx)
-                                        })
-                                    })
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        if enabled {
-                                            this.refresh_workflow_templates();
-                                            cx.notify();
-                                        }
-                                    }))
-                                    .child("刷新")
-                            })
+                            .child(self.button(
+                                "刷新",
+                                !self.busy,
+                                |this, _, cx| {
+                                    this.refresh_workflow_templates();
+                                    cx.notify();
+                                },
+                                cx,
+                            ))
                             .child(self.button(
                                 "目录",
                                 !self.busy,
