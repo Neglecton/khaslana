@@ -35,9 +35,9 @@ pub use storage::{
 };
 pub use types::*;
 pub use workflow::{
-    RemoteBranchGuardAction, WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition,
-    WorkflowPreview, WorkflowPreviewStep, WorkflowProgressEvent, WorkflowRunOptions,
-    WorkflowRunResult, WorkflowStep, parse_workflow_json5,
+    RemoteBranchGuardAction, WorkflowDefaults, WorkflowDefinition, WorkflowExecutor,
+    WorkflowInputDefinition, WorkflowPreview, WorkflowPreviewStep, WorkflowProgressEvent,
+    WorkflowRunOptions, WorkflowRunResult, WorkflowStep, parse_workflow_json5,
 };
 
 pub use ai::{

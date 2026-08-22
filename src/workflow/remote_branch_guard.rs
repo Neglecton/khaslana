@@ -1,9 +1,9 @@
 use git2::Repository;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{GitError, Result};
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteBranchGuardAction {
     Fail,

@@ -31,6 +31,7 @@ mod theme_view;
 mod tray;
 mod ui;
 mod ui_helpers;
+mod workflow_editor;
 mod workflow_view;
 mod worktree_view;
 
@@ -105,6 +106,7 @@ use ui::{
     theme as ui_theme,
 };
 use ui_helpers::*;
+use workflow_editor::{WorkflowEditorState, workflow_editor_field_or_fallback};
 use workflow_view::{
     WorkflowInputFieldState, WorkflowLogEntry, WorkflowTemplateItem, workflow_templates_dir,
 };
@@ -336,6 +338,8 @@ pub(crate) const TAG_MENU_WIDTH: f32 = 170.0;
 pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_WIDTH: f32 = 150.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 76.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
 const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
@@ -392,6 +396,9 @@ enum FieldId {
     ExternalMergeIntellijPath,
     StashMessage,
     WorkflowInput(usize),
+    /// 工作流模板编辑器的动态字段（模板名/文件名/步骤参数/变量行），
+    /// 经 `workflow_editor_field_mut` 路由，不进 DEDICATED_FIELDS。
+    WorkflowEditor(workflow_editor::WorkflowEditorFieldId),
 }
 
 /// 专用（非 WorkflowInput 动态索引）文本字段的注册表：FieldId → 状态访问器。
@@ -622,6 +629,15 @@ pub(crate) enum DialogState {
         label: String,
     },
     StashForm,
+    /// 工作流模板可视化创建器（v1 仅新建）。
+    WorkflowEditor,
+    /// 编辑带注释的工作流模板前的确认弹窗（保存会丢失注释与排版）。
+    ConfirmWorkflowEditComments,
+    /// 删除工作流模板文件的确认弹窗。
+    ConfirmDeleteWorkflowTemplate {
+        path: PathBuf,
+        display_name: String,
+    },
     ConfirmDropStash {
         index: usize,
         message: String,
@@ -680,6 +696,14 @@ pub(crate) struct TagContextMenu {
 #[derive(Clone, Debug)]
 pub(crate) struct StashContextMenu {
     pub(crate) index: usize,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+/// 工作流模板列表行的右键菜单（编辑此模板 / 复制为副本）。
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowTemplateContextMenu {
+    pub(crate) path: PathBuf,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
@@ -2793,6 +2817,10 @@ pub(crate) struct RepositoryView {
     credential_records: Vec<CredentialRecord>,
     pub(crate) workflow_templates: Vec<WorkflowTemplateItem>,
     pub(crate) workflow_template_dir: Option<PathBuf>,
+    /// 工作流模板创建器状态（仅弹窗打开期间存在）。
+    pub(crate) workflow_editor: Option<WorkflowEditorState>,
+    /// 注释丢失确认前的暂存（编辑带注释模板时，确认后据此进入编辑器）。
+    pub(crate) pending_workflow_edit: Option<workflow_editor::PendingWorkflowEdit>,
     diff_encoding_preferences: DiffEncodingPreferences,
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
@@ -2866,6 +2894,7 @@ pub(crate) struct RepositoryView {
     credential_context_menu: Option<CredentialContextMenu>,
     pub(crate) tag_context_menu: Option<TagContextMenu>,
     pub(crate) stash_context_menu: Option<StashContextMenu>,
+    pub(crate) workflow_template_context_menu: Option<WorkflowTemplateContextMenu>,
     pub(crate) commit_context_menu: Option<CommitContextMenu>,
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
@@ -3044,6 +3073,9 @@ impl RepositoryView {
             credential_records: Vec::new(),
             workflow_templates: Vec::new(),
             workflow_template_dir: workflow_templates_dir(),
+            workflow_editor: None,
+            pending_workflow_edit: None,
+            workflow_template_context_menu: None,
             diff_encoding_preferences: Self::load_diff_encoding_preferences(&storage),
             diff_cache: RefCell::new(LruCache::new(
                 NonZeroUsize::new(DIFF_CACHE_CAPACITY)
@@ -6073,6 +6105,10 @@ impl RepositoryView {
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
         }
+        // 编辑器文本框值变化即同步回纯数据层（预览/保存校验都读数据层）
+        if let FieldId::WorkflowEditor(editor_id) = field {
+            self.workflow_editor_field_changed(editor_id);
+        }
     }
 
     fn focused_text_field(&self, window: &Window, cx: &App) -> Option<FieldId> {
@@ -6293,11 +6329,17 @@ impl RepositoryView {
             .iter()
             .find_map(|(id, access)| access(self).focus.is_focused(window).then_some(*id))
             .or_else(|| self.focused_workflow_input(window))
+            .or_else(|| self.workflow_editor_focused_field(window))
     }
 
     fn field(&self, id: FieldId) -> &TextFieldState {
         match id {
             FieldId::WorkflowInput(index) => self.workflow_input_field(index),
+            // 编辑器字段经独立寻址（渲染前 ensure 已初始化；弹窗关闭瞬间
+            // 的在途渲染回落到静态字段兜底）。
+            FieldId::WorkflowEditor(editor_id) => self
+                .workflow_editor_field_ref(editor_id)
+                .unwrap_or(&self.branch_name),
             // 经 DEDICATED_FIELDS 单一注册表查找：与 focused_field 共用一份
             // 清单，漏注册会在此处 panic（首次渲染即暴露）而非静默丢输入。
             _ => DEDICATED_FIELDS
@@ -6341,6 +6383,12 @@ impl RepositoryView {
             FieldId::AiModel => &mut self.ai_model,
             FieldId::ExternalMergeIntellijPath => &mut self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field_mut(index),
+            // 编辑器字段惰性初始化需要 Context（focus_handle）；
+            // 编辑器未打开而字段仍被寻址（弹窗关闭瞬间的在途事件）时
+            // 退回一个无关紧要的静态字段，保证返回值满足借用契约。
+            FieldId::WorkflowEditor(editor_id) => {
+                return workflow_editor_field_or_fallback(self, editor_id);
+            }
         }
     }
 
@@ -6406,6 +6454,7 @@ impl RepositoryView {
         self.tag_context_menu = None;
         self.stash_context_menu = None;
         self.commit_context_menu = None;
+        self.workflow_template_context_menu = None;
         self.encoding_menu_target = None;
         self.encoding_menu_closed_by_capture = None;
         self.commit_graph_branch_menu_closed_by_capture = false;
@@ -6463,6 +6512,7 @@ impl RepositoryView {
             || self.stash_context_menu.is_some()
             || self.commit_graph.branch_menu_open
             || self.commit_context_menu.is_some()
+            || self.workflow_template_context_menu.is_some()
             || self.encoding_menu_target.is_some()
     }
 
@@ -9488,9 +9538,21 @@ impl RepositoryView {
         }) || self.stash_context_menu.as_ref().is_some_and(|menu| {
             point_in_menu(x, y, menu.x, menu.y, STASH_MENU_WIDTH, STASH_MENU_HEIGHT)
         }) || self
-            .commit_context_menu
+            .workflow_template_context_menu
             .as_ref()
-            .is_some_and(|menu| point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height))
+            .is_some_and(|menu| {
+                point_in_menu(
+                    x,
+                    y,
+                    menu.x,
+                    menu.y,
+                    WORKFLOW_TEMPLATE_MENU_WIDTH,
+                    WORKFLOW_TEMPLATE_MENU_HEIGHT,
+                )
+            })
+            || self.commit_context_menu.as_ref().is_some_and(|menu| {
+                point_in_menu(x, y, menu.x, menu.y, COMMIT_MENU_WIDTH, menu.height)
+            })
             || self.repo_switcher_menu.as_ref().is_some_and(|menu| {
                 point_in_repo_switcher(x, y, menu, self.repo_switcher_anchor.as_ref())
             })
@@ -12762,6 +12824,95 @@ impl RepositoryView {
             .into_any_element()
     }
 
+    fn render_workflow_template_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = self.workflow_template_context_menu.clone() else {
+            return div().into_any_element();
+        };
+        let edit_path = menu.path.clone();
+        let copy_path = menu.path.clone();
+        // 删除确认弹窗展示用名称：优先解析出的显示名不可得（坏模板也允许删），退回文件名主干
+        let delete_path = menu.path.clone();
+        let delete_display_name = menu
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "该模板".to_string());
+
+        glass_menu()
+            .absolute()
+            .left(px(menu.x))
+            .top(px(menu.y))
+            .w(px(WORKFLOW_TEMPLATE_MENU_WIDTH))
+            .child(context_menu_item_with_context(
+                "编辑此模板",
+                !self.busy,
+                move |this, cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = edit_path.clone();
+                    this.open_workflow_editor_for_path(path, false, cx);
+                },
+                cx,
+            ))
+            .child(context_menu_item_with_context(
+                "复制为副本",
+                !self.busy,
+                move |this, cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = copy_path.clone();
+                    this.open_workflow_editor_for_path(path, true, cx);
+                },
+                cx,
+            ))
+            .child(menu_separator())
+            .child(context_menu_item_with_context(
+                "删除模板...",
+                !self.busy,
+                move |this, _cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = delete_path.clone();
+                    let name = delete_display_name.clone();
+                    this.open_delete_workflow_template_confirm(path, name);
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// 打开「删除工作流模板」确认弹窗。
+    pub(crate) fn open_delete_workflow_template_confirm(
+        &mut self,
+        path: PathBuf,
+        display_name: String,
+    ) {
+        self.active_dialog =
+            Some(DialogState::ConfirmDeleteWorkflowTemplate { path, display_name });
+        self.last_error = None;
+    }
+
+    /// 删除工作流模板文件（纯本地 IO，小文件同步执行）；若它是当前加载的
+    /// 工作流则同时清空详情区，避免残留失效引用。
+    pub(crate) fn delete_workflow_template(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                if self.workflow_state.selected_template_path.as_ref() == Some(&path) {
+                    self.clear_workflow_file();
+                    self.workflow_state.selected_template_path = None;
+                }
+                self.refresh_workflow_templates();
+                self.status = format!("工作流模板已删除：{file_name}");
+                self.notify_success(format!("工作流模板已删除：{file_name}"), cx);
+            }
+            Err(err) => {
+                self.last_error = Some(format!("工作流模板删除失败：{err}"));
+            }
+        }
+    }
+
     fn render_change_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(menu) = self.change_context_menu.clone() else {
             return div().into_any_element();
@@ -14227,6 +14378,15 @@ impl RepositoryView {
                 .render_confirm_delete_credential_dialog(record_id, label, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
+            DialogState::WorkflowEditor => self
+                .render_workflow_editor_dialog(window, cx)
+                .into_any_element(),
+            DialogState::ConfirmWorkflowEditComments => self
+                .render_confirm_workflow_edit_comments(cx)
+                .into_any_element(),
+            DialogState::ConfirmDeleteWorkflowTemplate { path, display_name } => self
+                .render_confirm_delete_workflow_template_dialog(path, display_name, cx)
+                .into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
                 .into_any_element(),
@@ -16759,6 +16919,9 @@ impl DerefMut for RepositoryView {
 impl Render for RepositoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_events(cx);
+        // 工作流模板编辑器：渲染前确保当前展示的文本框已创建
+        //（field_mut 无 cx 不能惰性建框，text_input 的 paint 路径依赖它已存在）。
+        self.ensure_workflow_editor_fields_inited(window, cx);
         let shell_policy = self.shell_layout_policy(window);
         let shell_content_height =
             chrome_view::shell_content_height(window.viewport_size().height.into());
@@ -16793,6 +16956,7 @@ impl Render for RepositoryView {
                     || this.tag_context_menu.is_some()
                     || this.stash_context_menu.is_some()
                     || this.commit_context_menu.is_some()
+                    || this.workflow_template_context_menu.is_some()
                     || this.encoding_menu_target.is_some()
                     || this.repo_switcher_menu.is_some()
                     || this.commit_graph.branch_menu_open
@@ -16807,6 +16971,7 @@ impl Render for RepositoryView {
                     this.tag_context_menu = None;
                     this.stash_context_menu = None;
                     this.commit_context_menu = None;
+                    this.workflow_template_context_menu = None;
                     this.encoding_menu_target = None;
                     this.encoding_menu_closed_by_capture = closed_encoding_menu;
                     this.commit_graph.branch_menu_open = false;
@@ -16920,6 +17085,7 @@ impl Render for RepositoryView {
             .child(self.render_commit_context_menu(cx))
             .child(self.render_tag_context_menu(cx))
             .child(self.render_stash_context_menu(cx))
+            .child(self.render_workflow_template_context_menu(cx))
             .child(self.render_repo_switcher_menu(window, cx))
             .child(self.render_settings_center_overlay(window, cx))
             .child(self.render_dialogs(window, cx))

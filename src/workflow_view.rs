@@ -9,7 +9,8 @@ use chrono::{DateTime, Local};
 use directories::BaseDirs;
 use git2::Repository;
 use gpui::{
-    ClickEvent, Context, IntoElement, ListSizingBehavior, Window, div, prelude::*, px, uniform_list,
+    ClickEvent, Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, Window, div,
+    prelude::*, px, uniform_list,
 };
 use khaslana::{
     WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
@@ -18,7 +19,9 @@ use khaslana::{
 
 use crate::{
     FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
-    ScrollbarMode, TextFieldState, UiEvent, scrollable_frame_when, scrollable_uniform_frame,
+    ScrollbarMode, TextFieldState, UiEvent, WORKFLOW_TEMPLATE_MENU_HEIGHT,
+    WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu, clamped_menu_position,
+    placeholder_row, scrollable_frame_when, section_header_action, scrollable_uniform_frame,
     send_ui_event,
     system::open_directory,
     tasks::TaskKind,
@@ -608,7 +611,7 @@ impl RepositoryView {
             .w(px(width))
             .min_w(px(crate::MIN_WORKFLOW_TEMPLATES_WIDTH))
             .min_h(px(0.0))
-            // 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
+// 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
             // 面板不自画右边框，避免出现两条平行框线。
             .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
@@ -631,6 +634,12 @@ impl RepositoryView {
                     )
                     .child(
                         command_group()
+                            .child(self.button(
+                                "新建",
+                                !self.busy,
+                                |this, _, cx| this.open_workflow_editor(cx),
+                                cx,
+                            ))
                             .child({
                                 let enabled = !self.busy;
                                 div()
@@ -762,6 +771,7 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let click_path = template.path.clone();
         let enabled = !self.busy;
+        let right_click_path = template.path.clone();
         let has_error = template.error.is_some();
         let selected = workflow_template_selection_matches(
             self.workflow_state.selected_template_path.as_deref(),
@@ -797,6 +807,34 @@ impl RepositoryView {
             }
             cx.notify();
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                // 右键菜单互斥：先清掉其它弹层再打开本菜单
+                this.branch_context_menu = None;
+                this.remote_context_menu = None;
+                this.change_context_menu = None;
+                this.file_path_context_menu = None;
+                this.credential_context_menu = None;
+                this.tag_context_menu = None;
+                this.stash_context_menu = None;
+                this.commit_context_menu = None;
+                this.encoding_menu_target = None;
+                this.active_dialog = None;
+                let (x, y) = clamped_menu_position(
+                    event,
+                    window,
+                    WORKFLOW_TEMPLATE_MENU_WIDTH,
+                    WORKFLOW_TEMPLATE_MENU_HEIGHT,
+                );
+                this.workflow_template_context_menu = Some(WorkflowTemplateContextMenu {
+                    path: right_click_path.clone(),
+                    x,
+                    y,
+                });
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .min_w(px(0.0))
