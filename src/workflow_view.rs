@@ -425,6 +425,12 @@ impl RepositoryView {
                         .flex_none()
                         .items_center()
                         .gap_1()
+                        .child(self.button(
+                            "新建",
+                            !self.busy,
+                            |this, _, cx| this.open_workflow_editor(cx),
+                            cx,
+                        ))
                         .child({
                             let enabled = !self.busy;
                             div()

@@ -29,6 +29,7 @@ mod theme_view;
 mod tray;
 mod ui;
 mod ui_helpers;
+mod workflow_editor;
 mod workflow_view;
 
 use std::cell::{Cell, RefCell};
@@ -102,6 +103,7 @@ use ui::{
     theme as ui_theme,
 };
 use ui_helpers::*;
+use workflow_editor::{WorkflowEditorState, workflow_editor_field_or_fallback};
 use workflow_view::{
     WorkflowInputFieldState, WorkflowLogEntry, WorkflowTemplateItem, workflow_templates_dir,
 };
@@ -381,6 +383,9 @@ enum FieldId {
     ExternalMergeIntellijPath,
     StashMessage,
     WorkflowInput(usize),
+    /// 工作流模板编辑器的动态字段（模板名/文件名/步骤参数/变量行），
+    /// 经 `workflow_editor_field_mut` 路由，不进 DEDICATED_FIELDS。
+    WorkflowEditor(workflow_editor::WorkflowEditorFieldId),
 }
 
 /// 专用（非 WorkflowInput 动态索引）文本字段的注册表：FieldId → 状态访问器。
@@ -600,6 +605,8 @@ pub(crate) enum DialogState {
         label: String,
     },
     StashForm,
+    /// 工作流模板可视化创建器（v1 仅新建）。
+    WorkflowEditor,
     ConfirmDropStash {
         index: usize,
         message: String,
@@ -2566,6 +2573,8 @@ pub(crate) struct RepositoryView {
     credential_records: Vec<CredentialRecord>,
     pub(crate) workflow_templates: Vec<WorkflowTemplateItem>,
     pub(crate) workflow_template_dir: Option<PathBuf>,
+    /// 工作流模板创建器状态（仅弹窗打开期间存在）。
+    pub(crate) workflow_editor: Option<WorkflowEditorState>,
     diff_encoding_preferences: DiffEncodingPreferences,
     diff_cache: RefCell<LruCache<DiffCacheKey, Arc<FileDiff>>>,
     proxy_settings: NetworkProxySettings,
@@ -2789,6 +2798,7 @@ impl RepositoryView {
             credential_records: Vec::new(),
             workflow_templates: Vec::new(),
             workflow_template_dir: workflow_templates_dir(),
+            workflow_editor: None,
             diff_encoding_preferences: Self::load_diff_encoding_preferences(&storage),
             diff_cache: RefCell::new(LruCache::new(
                 NonZeroUsize::new(DIFF_CACHE_CAPACITY)
@@ -5655,6 +5665,10 @@ impl RepositoryView {
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
         }
+        // 编辑器文本框值变化即同步回纯数据层（预览/保存校验都读数据层）
+        if let FieldId::WorkflowEditor(editor_id) = field {
+            self.workflow_editor_field_changed(editor_id);
+        }
         // 仓库切换搜索词变化即重新过滤列表，键盘高亮复位（输入/退格/粘贴/剪切都会走到这里）
         if matches!(field, FieldId::RepoSwitcherSearch) {
             self.repo_switcher_highlight = None;
@@ -5939,11 +5953,17 @@ impl RepositoryView {
             .iter()
             .find_map(|(id, access)| access(self).focus.is_focused(window).then_some(*id))
             .or_else(|| self.focused_workflow_input(window))
+            .or_else(|| self.workflow_editor_focused_field(window))
     }
 
     fn field(&self, id: FieldId) -> &TextFieldState {
         match id {
             FieldId::WorkflowInput(index) => self.workflow_input_field(index),
+            // 编辑器字段经独立寻址（渲染前 ensure 已初始化；弹窗关闭瞬间
+            // 的在途渲染回落到静态字段兜底）。
+            FieldId::WorkflowEditor(editor_id) => self
+                .workflow_editor_field_ref(editor_id)
+                .unwrap_or(&self.branch_name),
             // 经 DEDICATED_FIELDS 单一注册表查找：与 focused_field 共用一份
             // 清单，漏注册会在此处 panic（首次渲染即暴露）而非静默丢输入。
             _ => DEDICATED_FIELDS
@@ -5985,6 +6005,12 @@ impl RepositoryView {
             FieldId::AiModel => &mut self.ai_model,
             FieldId::ExternalMergeIntellijPath => &mut self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field_mut(index),
+            // 编辑器字段惰性初始化需要 Context（focus_handle）；
+            // 编辑器未打开而字段仍被寻址（弹窗关闭瞬间的在途事件）时
+            // 退回一个无关紧要的静态字段，保证返回值满足借用契约。
+            FieldId::WorkflowEditor(editor_id) => {
+                return workflow_editor_field_or_fallback(self, editor_id);
+            }
         }
     }
 
@@ -14726,6 +14752,9 @@ impl RepositoryView {
                 .render_confirm_delete_credential_dialog(record_id, label, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
+            DialogState::WorkflowEditor => self
+                .render_workflow_editor_dialog(window, cx)
+                .into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
                 .into_any_element(),
@@ -17022,6 +17051,9 @@ impl DerefMut for RepositoryView {
 impl Render for RepositoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_events(cx);
+        // 工作流模板编辑器：渲染前确保当前展示的文本框已创建
+        //（field_mut 无 cx 不能惰性建框，text_input 的 paint 路径依赖它已存在）。
+        self.ensure_workflow_editor_fields_inited(window, cx);
 
         app_shell_surface()
             .id("app-root")

@@ -1200,3 +1200,113 @@ fn reproduce_user_scenario_uat_branch_with_alt_and_inputs() {
         "应命中 uat 分支，实际 details: {filter_details:?}"
     );
 }
+
+#[test]
+fn workflow_step_serialization_round_trip_all_variants() {
+    // 覆盖全部 11 种步骤变体：序列化 -> 回读解析应得到与原定义完全一致的结构。
+    // 一次性暴露 serde tag / rename（onExists、dateFormat 等）在序列化侧的不对称。
+    let definition = WorkflowDefinition {
+        version: 1,
+        name: Some("序列化往返".to_string()),
+        defaults: crate::workflow::WorkflowDefaults {
+            require_clean_worktree: false,
+        },
+        inputs: {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "target".to_string(),
+                WorkflowInputDefinition {
+                    label: Some("目标分支".to_string()),
+                    description: None,
+                    default: Some("A-${date:%Y%m%d}".to_string()),
+                    required: true,
+                },
+            );
+            m
+        },
+        vars: {
+            let mut m = BTreeMap::new();
+            m.insert("remote".to_string(), "origin".to_string());
+            m
+        },
+        steps: vec![
+            WorkflowStep::Checkout {
+                branch: "master".to_string(),
+            },
+            WorkflowStep::Fetch {
+                remote: Some("origin".to_string()),
+            },
+            WorkflowStep::Pull {
+                remote: Some("origin".to_string()),
+            },
+            WorkflowStep::CreateBranch {
+                name: "feature".to_string(),
+                from: Some("master".to_string()),
+                checkout: true,
+            },
+            WorkflowStep::Merge {
+                branch: "dev".to_string(),
+            },
+            WorkflowStep::Push {
+                remote: Some("origin".to_string()),
+                branch: Some("feature".to_string()),
+                set_upstream: true,
+            },
+            WorkflowStep::GuardRemoteBranch {
+                remote: Some("origin".to_string()),
+                branch: "release".to_string(),
+                fetch: true,
+                on_exists: RemoteBranchGuardAction::Fail,
+                on_missing: RemoteBranchGuardAction::Continue,
+            },
+            WorkflowStep::EnsureClean,
+            WorkflowStep::AssertBranch {
+                branch: "feature".to_string(),
+            },
+            WorkflowStep::FilterBranches {
+                output: "stale".to_string(),
+                pattern: r"uat_(?<date>\d{8})".to_string(),
+                date_format: "%Y%m%d".to_string(),
+                date_group: "date".to_string(),
+                older_than_months: "3".to_string(),
+                skip_current: true,
+            },
+            WorkflowStep::DeleteBranches {
+                branches: "${out.stale}".to_string(),
+                dry_run: true,
+                skip_current: true,
+            },
+        ],
+    };
+
+    let serialized = json5::to_string(&definition).expect("序列化工作流定义");
+    let reparsed = parse_workflow_json5(&serialized).expect("回读解析序列化结果");
+    assert_eq!(reparsed, definition, "序列化往返应保持结构一致");
+}
+
+#[test]
+fn workflow_step_serialization_omits_none_fields() {
+    // None 字段省略：生成的模板文件不应出现 remote: null 之类的噪音键。
+    let definition = WorkflowDefinition {
+        version: 1,
+        name: None,
+        defaults: crate::workflow::WorkflowDefaults::default(),
+        inputs: BTreeMap::new(),
+        vars: BTreeMap::new(),
+        steps: vec![
+            WorkflowStep::Pull { remote: None },
+            WorkflowStep::CreateBranch {
+                name: "x".to_string(),
+                from: None,
+                checkout: true,
+            },
+        ],
+    };
+    let serialized = json5::to_string(&definition).unwrap();
+    assert!(
+        !serialized.contains("null"),
+        "None 字段应被省略而非输出 null"
+    );
+    let reparsed = parse_workflow_json5(&serialized).unwrap();
+    assert_eq!(reparsed, definition);
+}

@@ -5,7 +5,7 @@ use std::path::Path;
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use git2::Repository;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     BranchInfo, BranchKind, BranchName, GitError, GitService, RemoteName, RepositorySnapshot,
@@ -23,11 +23,13 @@ use remote_branch_guard::{
     validate_remote_branch_name,
 };
 
-#[derive(Clone, Debug, Deserialize)]
+/// 工作流模板定义。同时支持反序列化（加载 .json5 模板）与序列化
+/// （可视化模板编辑器保存），序列化省略值为 None 的可选字段保持文件简洁。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowDefinition {
     pub version: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
     pub defaults: WorkflowDefaults,
@@ -47,20 +49,20 @@ impl WorkflowDefinition {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowInputDefinition {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     #[serde(default = "default_workflow_input_required")]
     pub required: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowDefaults {
     #[serde(default = "default_require_clean_worktree")]
@@ -75,23 +77,25 @@ impl Default for WorkflowDefaults {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+/// 工作流步骤。`op` 作为 serde tag；各变体的 Option 字段序列化时省略 None，
+/// 布尔字段保持与解析侧一致的默认值语义（`default = ...`）。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum WorkflowStep {
     Checkout {
         branch: String,
     },
     Fetch {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<String>,
     },
     Pull {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<String>,
     },
     CreateBranch {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<String>,
         #[serde(default = "default_create_branch_checkout")]
         checkout: bool,
@@ -100,15 +104,15 @@ pub enum WorkflowStep {
         branch: String,
     },
     Push {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
         #[serde(default = "default_set_upstream")]
         set_upstream: bool,
     },
     GuardRemoteBranch {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<String>,
         branch: String,
         #[serde(default = "default_guard_fetch")]
