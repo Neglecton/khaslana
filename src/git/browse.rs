@@ -177,9 +177,28 @@ impl GitService {
             ));
         }
 
-        // 二进制检测：前 8KB 含 NUL 字节视为二进制
+        // 二进制检测：前 8KB 含 NUL 字节视为二进制。Office 文档（docx/
+        // xlsx/pptx）尝试提取文本行（is_binary 保持 true 以沿用二进制语义
+        // ——无编码切换/语法高亮），提取失败按普通二进制返回空行。
         let sample_for_binary = &content[..content.len().min(8 * 1024)];
         let is_binary = sample_for_binary.find_byte(0).is_some();
+
+        if is_binary {
+            if let Some(office_lines) =
+                super::office::office_text_lines(&super::path_to_git(path), content)
+            {
+                return Ok(BrowseFileContent {
+                    path: super::path_to_git(path),
+                    is_binary: true,
+                    encoding: DiffEncodingInfo {
+                        requested: encoding,
+                        resolved: DiffEncodingChoice::Utf8,
+                        lossy: false,
+                    },
+                    lines: office_lines,
+                });
+            }
+        }
 
         if is_binary {
             return Ok(BrowseFileContent {

@@ -4636,3 +4636,307 @@ fn diff_for_untracked_file_shows_full_content() {
         .unwrap();
     assert!(!tracked_diff.untracked);
 }
+
+// ── Office 文档（docx/xlsx/pptx）文本化差异 ─────────────────────────────────
+
+/// 构造最小可用 docx（zip + word/document.xml，段落 = 行）。
+fn office_docx_bytes(paragraphs: &[&str]) -> Vec<u8> {
+    let body: String = paragraphs
+        .iter()
+        .map(|p| format!("<w:p><w:r><w:t>{p}</w:t></w:r></w:p>"))
+        .collect();
+    let xml = format!(
+        "<w:document xmlns:w=\"http://example.com/w\"><w:body>{body}</w:body></w:document>"
+    );
+    office_zip_bytes(&[("word/document.xml", xml.as_bytes().to_vec())])
+}
+
+fn office_zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(content).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    cursor.into_inner()
+}
+
+#[test]
+fn untracked_docx_diff_shows_extracted_text_lines() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_bytes(
+        dir.path(),
+        "新建 Microsoft Word 文档.docx",
+        &office_docx_bytes(&["第一段", "第二段"]),
+    );
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("新建 Microsoft Word 文档.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    // is_binary 保持 true（沿用二进制门控：部分暂存/编码/追溯），
+    // 但 lines 携带提取文本 → 渲染层显示文本行而非占位卡。
+    assert!(diff.is_binary);
+    assert!(diff.untracked);
+    let body: Vec<&DiffLine> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .collect();
+    let contents: Vec<&str> = body.iter().map(|line| line.content.as_str()).collect();
+    assert_eq!(contents, vec!["第一段", "第二段"]);
+    assert_eq!(body[0].new_lineno, Some(1));
+    assert_eq!(body[1].new_lineno, Some(2));
+    // 合成文件头含真实路径
+    assert!(
+        diff.lines
+            .iter()
+            .any(|line| line.kind == DiffLineKind::Header
+                && line.content.contains("新建 Microsoft Word 文档.docx"))
+    );
+}
+
+#[test]
+fn modified_docx_diff_compares_extracted_text_both_sides() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_bytes(
+        dir.path(),
+        "doc.docx",
+        &office_docx_bytes(&["保留段", "旧段"]),
+    );
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_bytes(
+        dir.path(),
+        "doc.docx",
+        &office_docx_bytes(&["保留段", "新段"]),
+    );
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("doc.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(diff.is_binary);
+    let removed: Vec<&str> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect();
+    let added: Vec<&str> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(removed, vec!["旧段"]);
+    assert_eq!(added, vec!["新段"]);
+}
+
+#[test]
+fn corrupt_docx_diff_falls_back_to_binary_placeholder_path() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    // 只有 zip 魔法的截断字节：提取失败 → lines 为空 → 渲染层走二进制占位卡
+    git_support::write_bytes(
+        dir.path(),
+        "bad.docx",
+        &[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, 0x08],
+    );
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("bad.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(diff.is_binary);
+    assert!(
+        diff.lines
+            .iter()
+            .all(|line| line.kind == DiffLineKind::Header)
+    );
+}
+
+#[test]
+fn xlsx_and_pptx_untracked_diffs_show_extracted_lines() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+
+    let sheet = "<worksheet><sheetData>\
+        <row><c t=\"s\"><v>0</v></c><c><v>1</v></c></row>\
+        </sheetData></worksheet>";
+    let shared = "<sst><si><t>标题</t></si></sst>";
+    git_support::write_bytes(
+        dir.path(),
+        "table.xlsx",
+        &office_zip_bytes(&[
+            ("xl/sharedStrings.xml", shared.as_bytes().to_vec()),
+            ("xl/worksheets/sheet1.xml", sheet.as_bytes().to_vec()),
+        ]),
+    );
+    let slide = "<p:sld><p:txBody><a:p><a:r><a:t>幻灯内容</a:t></a:r></a:p></p:txBody></p:sld>";
+    git_support::write_bytes(
+        dir.path(),
+        "deck.pptx",
+        &office_zip_bytes(&[("ppt/slides/slide1.xml", slide.as_bytes().to_vec())]),
+    );
+
+    let xlsx_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("table.xlsx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(xlsx_diff.is_binary);
+    let added: Vec<&str> = xlsx_diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(added, vec!["标题\t1"]);
+
+    let pptx_diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("deck.pptx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(pptx_diff.is_binary);
+    let added: Vec<&str> = pptx_diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(added, vec!["── 幻灯片 1 ──", "幻灯内容"]);
+}
+
+// ── 子目录未跟踪文件的内容展示 ─────────────────────────────────────────────
+// 回归：diff_for_path 的 pathspec 会把迭代器限定到文件完整路径，索引侧对
+// 未跟踪路径产出为空；若不带 recurse_untracked_dirs，libgit2 对祖先目录
+// 条目不下钻（contains_oitem=false 且目录路径匹配不上 pathspec），整个
+// 子树被跳过 → 零 delta →「没有可显示的文本差异」。根目录未跟踪文件不受
+// 影响（无祖先目录条目）。
+
+#[test]
+fn diff_for_untracked_file_in_subdirectory_shows_full_content() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    // 同目录里有已跟踪文件：证明「目录含已跟踪内容」救不了 pathspec 限定的场景
+    git_support::write_file(dir.path(), "src/keep.txt", "keep\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_file(dir.path(), "src/deep/nested/new.rs", "fn main() {\n}\n");
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("src/deep/nested/new.rs"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(!diff.is_binary);
+    assert!(diff.untracked, "子目录未跟踪文件应带 untracked 标记");
+    let body: Vec<&DiffLine> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .collect();
+    let contents: Vec<&str> = body.iter().map(|line| line.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec!["fn main() {", "}"],
+        "整份文件作为 Added 行输出"
+    );
+    assert_eq!(body[0].new_lineno, Some(1));
+}
+
+#[test]
+fn diff_for_untracked_binary_in_subdirectory_marks_binary() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_bytes(dir.path(), "assets/logo.bin", &[0x00, 0x01, 0x02, 0x00]);
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("assets/logo.bin"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(diff.is_binary, "NUL 嗅探应把子目录未跟踪二进制标为 binary");
+}
+
+#[test]
+fn diff_for_untracked_docx_in_subdirectory_shows_extracted_lines() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_bytes(
+        dir.path(),
+        "docs/report.docx",
+        &office_docx_bytes(&["深层文档段落"]),
+    );
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("docs/report.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+
+    assert!(diff.is_binary);
+    assert!(diff.untracked);
+    let added: Vec<&str> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(
+        added,
+        vec!["深层文档段落"],
+        "office 提取钩子需要 delta 存在——子目录未跟踪 docx 也应提取出文本"
+    );
+}

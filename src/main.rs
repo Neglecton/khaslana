@@ -13746,8 +13746,13 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         // 二进制文件不渲染逐行 diff（也不显示「Binary files ... differ」原始行），
-        // 直接显示信息占位卡片，含文件大小/新增删除信息。
-        if let Some(diff) = diff.as_deref().filter(|diff| diff.is_binary) {
+        // 直接显示信息占位卡片，含文件大小/新增删除信息。例外：Office 文档
+        // （docx/xlsx/pptx）提取出的文本差异行——is_binary 保持 true（沿用
+        // 全部二进制门控）但携带 lines，按普通行渲染文本化预览。
+        if let Some(diff) = diff
+            .as_deref()
+            .filter(|diff| diff.is_binary && diff.lines.is_empty())
+        {
             return binary_diff_placeholder(diff).into_any_element();
         }
         let model = diff_render_model_for(diff.as_deref(), headers_expanded);
@@ -13839,8 +13844,11 @@ impl RepositoryView {
         empty_message: &str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // 仅工作区差异视图提供部分暂存交互（历史/贮藏/浏览只读）。
-        let partial_stage_enabled = header_target == DiffHeaderTarget::Worktree;
+        // 仅工作区差异视图提供部分暂存交互（历史/贮藏/浏览只读）；Office
+        // 文档的文本化差异是提取合成的，不能按块/按行回写（部分暂存守卫在
+        // 服务层同样拒绝），这里直接不显示按钮。
+        let partial_stage_enabled =
+            header_target == DiffHeaderTarget::Worktree && !diff.is_some_and(|d| d.is_binary);
         match row {
             DiffRenderRow::HeaderToggle => {
                 let summary = if headers_expanded {

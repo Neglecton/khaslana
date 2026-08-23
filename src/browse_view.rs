@@ -536,7 +536,8 @@ impl RepositoryView {
         let loading = self.browse.loading_content;
 
         let row_count = if let Some(content) = content.as_ref() {
-            if content.is_binary {
+            // Office 文档提取的文本行按普通内容渲染（is_binary 仅用于语义门控）
+            if content.is_binary && content.lines.is_empty() {
                 1
             } else {
                 content.lines.len().max(1)
@@ -569,7 +570,13 @@ impl RepositoryView {
                         .browse
                         .content
                         .as_ref()
-                        .map(|c| if c.is_binary { 0 } else { c.lines.len() })
+                        .map(|c| {
+                            if c.is_binary && c.lines.is_empty() {
+                                0
+                            } else {
+                                c.lines.len()
+                            }
+                        })
                         .unwrap_or(0);
                     if line_count == 0 {
                         return;
@@ -598,7 +605,13 @@ impl RepositoryView {
                         .browse
                         .content
                         .as_ref()
-                        .map(|c| if c.is_binary { 0 } else { c.lines.len() })
+                        .map(|c| {
+                            if c.is_binary && c.lines.is_empty() {
+                                0
+                            } else {
+                                c.lines.len()
+                            }
+                        })
                         .unwrap_or(0);
                     if line_count == 0 {
                         return;
@@ -644,7 +657,7 @@ impl RepositoryView {
                                     };
                                     return empty_state("内容画布", detail).into_any_element();
                                 };
-                                if content.is_binary {
+                                if content.is_binary && content.lines.is_empty() {
                                     return empty_state(
                                         "无法预览二进制文件",
                                         "请切换到差异视图查看文件变更信息",

@@ -33,6 +33,7 @@ mod browse;
 mod commit_trace;
 mod conflicts;
 mod merge;
+mod office;
 mod partial_stage;
 mod rebase;
 mod search;
@@ -135,6 +136,12 @@ fn workdir_file_is_binary(repo: &Repository, rel_path: &Path) -> bool {
         return false;
     };
     buf[..read].contains(&0)
+}
+
+/// 读工作区文件全部字节（Office 文本提取用）；文件缺失或读取失败返回 None。
+fn workdir_file_bytes(repo: &Repository, rel_path: &str) -> Option<Vec<u8>> {
+    let workdir = repo.workdir()?;
+    std::fs::read(workdir.join(rel_path)).ok()
 }
 
 /// 已知二进制格式的扩展名兜底：内容检测（NUL 嗅探 / libgit2 BINARY 标志）对
@@ -1672,6 +1679,13 @@ impl GitService {
             // 未跟踪文件输出完整内容（默认只出文件头无正文），
             // 行为对齐 SourceTree：差异区展示整份文件。
             .show_untracked_content(true)
+            // 必须配合递归未跟踪目录：pathspec 会把新旧迭代器都限定到文件
+            // 完整路径，索引侧对未跟踪路径产出为空，libgit2 对祖先目录条目
+            // 若无此 flag 不会下钻（contains_oitem=false），整个子树被跳过
+            // → 零 delta → 「没有可显示的文本差异」。根目录未跟踪文件无
+            // 祖先目录条目所以不受影响，这也解释了为何只有深层未跟踪文件
+            // 出问题。
+            .recurse_untracked_dirs(true)
             .context_lines(diff_context_lines(full_context));
 
         let diff = match scope {
@@ -2281,6 +2295,184 @@ impl GitService {
         Ok(repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?)
     }
 
+    /// Office 文档的文本化差异：路径命中 docx/xlsx/pptx 时提取两侧文本、
+    /// 经 `diff_buffers` 生成行级差异。返回 None 表示不适用或提取失败，
+    /// 调用方回退常规二进制处理。
+    fn office_file_diff(
+        &self,
+        repo: &Repository,
+        diff: &git2::Diff<'_>,
+        path: &str,
+        scope: DiffScope,
+        encoding: DiffEncodingChoice,
+    ) -> Option<FileDiff> {
+        if !office::path_has_office_extension(path) {
+            return None;
+        }
+        let delta = diff.deltas().next()?;
+        let status = delta.status();
+        let untracked = status == git2::Delta::Untracked;
+        let old_id = delta.old_file().id();
+        let new_id = delta.new_file().id();
+        let old_size = (status != git2::Delta::Added && status != git2::Delta::Untracked)
+            .then(|| delta_side_size(repo, delta.old_file()))
+            .flatten();
+        let new_size = (status != git2::Delta::Deleted)
+            .then(|| delta_side_size(repo, delta.new_file()))
+            .flatten();
+
+        // 侧字节：优先按 blob id 读 ODB（树/index 侧必经此路）；id 为零
+        // （工作区/未跟踪）时读工作区文件，读取失败按提取失败回退。
+        let read_blob = |id: git2::Oid| -> Option<Vec<u8>> {
+            if id.is_zero() {
+                None
+            } else {
+                repo.find_blob(id).ok().map(|blob| blob.content().to_vec())
+            }
+        };
+        let old_bytes = if status == git2::Delta::Added || status == git2::Delta::Untracked {
+            None
+        } else {
+            Some(read_blob(old_id).or_else(|| {
+                // 树对树 diff 的 old 侧理论上必有 blob；退而读工作区只对
+                // 未删除的当前文件有意义，这里仅作兜底。
+                if status == git2::Delta::Deleted {
+                    None
+                } else {
+                    workdir_file_bytes(repo, path)
+                }
+            })?)
+        };
+        let new_bytes = if status == git2::Delta::Deleted {
+            None
+        } else {
+            Some(read_blob(new_id).or_else(|| workdir_file_bytes(repo, path))?)
+        };
+
+        let extract = |bytes: &Option<Vec<u8>>| -> Option<String> {
+            match bytes.as_ref() {
+                Some(bytes) => office::office_text_lines(path, bytes).map(|lines| {
+                    // 末尾换行避免「文件末尾无换行」标记行（EOFNL）——
+                    // 提取文本是我们合成的，按完整文件处理。
+                    let mut text = lines.join("\n");
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text
+                }),
+                None => Some(String::new()),
+            }
+        };
+        let old_text = extract(&old_bytes)?;
+        let new_text = extract(&new_bytes)?;
+
+        let mut options = git2::DiffOptions::new();
+        options.context_lines(DIFF_CONTEXT_LINES);
+        let mut text_patch = git2::Patch::from_buffers(
+            old_text.as_bytes(),
+            Some(std::path::Path::new(path)),
+            new_text.as_bytes(),
+            Some(std::path::Path::new(path)),
+            Some(&mut options),
+        )
+        .ok()?;
+
+        // 文件头行手工合成（buffer diff 的 blob 哈希是内存内容的哈希而非
+        // 仓库 blob id，真实路径与 blob 短 id 只有这里知道）；正文行来自
+        // buffer diff，行号真实。
+        let short = |id: git2::Oid| -> String {
+            if id.is_zero() {
+                "0000000".to_string()
+            } else {
+                id.to_string()[..7].to_string()
+            }
+        };
+        let mut lines = vec![
+            format!("diff --git a/{path} b/{path}"),
+            if old_bytes.is_none() {
+                format!("new file mode 100644\nindex 0000000..{}", short(new_id))
+            } else if new_bytes.is_none() {
+                format!("deleted file mode 100644\nindex {}..0000000", short(old_id))
+            } else {
+                format!("index {}..{} 100644", short(old_id), short(new_id))
+            },
+            if old_bytes.is_none() {
+                "--- /dev/null".to_string()
+            } else {
+                format!("--- a/{path}")
+            },
+            if new_bytes.is_none() {
+                "+++ /dev/null".to_string()
+            } else {
+                format!("+++ b/{path}")
+            },
+        ]
+        .into_iter()
+        .map(|content| DiffLine {
+            kind: DiffLineKind::Header,
+            old_lineno: None,
+            new_lineno: None,
+            content,
+            hunk_index: 0,
+        })
+        .collect::<Vec<_>>();
+
+        // hunk 分组序号：文件头为 0，@@ 头递增（与常规 diff 一致）。
+        let mut hunk_index = 0usize;
+        let print_result = text_patch.print(&mut |_delta, _hunk, line| {
+            if line.origin() == 'F' {
+                // buffer diff 的文件头行被上面的合成头替代。
+                return true;
+            }
+            if line.origin() == 'H' {
+                hunk_index += 1;
+            }
+            let kind = match line.origin() {
+                '+' => DiffLineKind::Added,
+                '-' => DiffLineKind::Removed,
+                'H' => DiffLineKind::Header,
+                _ => DiffLineKind::Context,
+            };
+            let mut content = String::from_utf8_lossy(line.content()).into_owned();
+            // 与常规 diff 的 decode_diff_line 一致：剥掉行尾 \n / \r
+            //（显示层按行渲染，不携带换行符）。
+            if content.ends_with('\n') {
+                content.pop();
+            }
+            if content.ends_with('\r') {
+                content.pop();
+            }
+            lines.push(DiffLine {
+                kind,
+                old_lineno: line.old_lineno(),
+                new_lineno: line.new_lineno(),
+                content,
+                hunk_index,
+            });
+            true
+        });
+        if print_result.is_err() {
+            return None;
+        }
+
+        Some(FileDiff {
+            path: path.to_string(),
+            scope,
+            // 关键：保持二进制语义（部分暂存/编码/追溯/语法高亮门控全生效），
+            // 仅在提取出 lines 时渲染层显示文本。
+            is_binary: true,
+            untracked,
+            old_size,
+            new_size,
+            encoding: DiffEncodingInfo {
+                requested: encoding,
+                resolved: DiffEncodingChoice::Utf8,
+                lossy: false,
+            },
+            lines,
+        })
+    }
+
     pub(crate) fn file_diff_from_diff(
         &self,
         repo: &Repository,
@@ -2289,6 +2481,17 @@ impl GitService {
         scope: DiffScope,
         encoding: DiffEncodingChoice,
     ) -> Result<FileDiff> {
+        // Office Open XML（docx/xlsx/pptx）：提取文本做两侧差异预览。提取
+        // 成功时 is_binary 仍为 true（沿用全部二进制门控：无部分暂存/编码/
+        // 追溯按钮、无语法高亮），但 lines 携带提取文本行；渲染层对
+        // 「is_binary 且有 lines」显示文本行而非占位卡。提取失败（损坏/
+        // 加密/超限）返回 None 走下方正常二进制路径。
+        if let Some(office_diff) =
+            self.office_file_diff(repo, &diff, &path, scope.clone(), encoding)
+        {
+            return Ok(office_diff);
+        }
+
         let started = Instant::now();
         struct RawDiffLine {
             kind: DiffLineKind,
