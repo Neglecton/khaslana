@@ -379,6 +379,7 @@ enum FieldId {
     CredentialPassphrase,
     CredentialRemoteUrl,
     CredentialDisplayName,
+    CredentialTestUrl,
     ConflictEditor,
     RemoteBranchName,
     RemoteBranchSearch,
@@ -446,6 +447,9 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     }),
     (FieldId::CredentialRemoteUrl, |view: &RepositoryView| {
         &view.credential_remote_url
+    }),
+    (FieldId::CredentialTestUrl, |view: &RepositoryView| {
+        &view.credential_test_url
     }),
     (FieldId::CredentialDisplayName, |view: &RepositoryView| {
         &view.credential_display_name
@@ -611,6 +615,11 @@ pub(crate) enum DialogState {
     },
     CredentialForm {
         editing: Option<String>,
+    },
+    /// 凭据测试前的地址确认弹窗：预填记录远端地址，用户可改（如裸主机
+    /// 换成真实仓库地址）再发起连接测试。
+    TestCredential {
+        record_id: String,
     },
     SubmoduleManager,
     RemoteManager,
@@ -2739,6 +2748,55 @@ fn send_credential_response(
     response_tx.send(response).is_ok()
 }
 
+/// 凭据测试地址校验（纯函数，可单测）：非空 → 协议族（HTTPS 记录须
+/// http(s)、SSH 记录须 SSH 地址）→ HTTPS 记录再做同站点校验（令牌不
+/// 通用，跨站点测试只会得到误导性的认证失败；真实操作中凭据也只会在
+/// 同站点被命中）。SSH 私钥主机无关（同一把钥匙可部署多个平台），
+/// 不做站点限制。
+fn validate_credential_test_url(
+    kind: khaslana::StoredCredentialKind,
+    record_host: &str,
+    url: &str,
+) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err("需要填写测试地址".to_string());
+    }
+    let url = url.trim();
+    let inferred_mode = credential_form_mode_for_request(&CredentialRequest {
+        url: url.to_string(),
+        username_from_url: None,
+        allowed_types: git2::CredentialType::USER_PASS_PLAINTEXT | git2::CredentialType::SSH_KEY,
+        repo_path: None,
+        remote_name: None,
+        operation_id: None,
+    });
+    let expected_mode = match kind {
+        khaslana::StoredCredentialKind::HttpsUserPass => CredentialFormMode::Https,
+        khaslana::StoredCredentialKind::SshKey => CredentialFormMode::Ssh,
+    };
+    if inferred_mode != expected_mode {
+        return Err(match expected_mode {
+            CredentialFormMode::Https => {
+                "该记录是 HTTPS 凭据，测试地址必须是 http(s) 地址".to_string()
+            }
+            CredentialFormMode::Ssh => {
+                "该记录是 SSH 凭据，测试地址必须是 SSH 地址（git@主机:仓库 或 ssh://）".to_string()
+            }
+        });
+    }
+    if kind == khaslana::StoredCredentialKind::HttpsUserPass {
+        match khaslana::credentials::remote_host_key(url) {
+            Some(host_key) if host_key == record_host => Ok(()),
+            Some(host_key) => Err(format!(
+                "该凭据绑定 {record_host}，令牌不通用，不能用其它站点（{host_key}）的地址测试"
+            )),
+            None => Err("无法解析测试地址".to_string()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 fn credential_form_mode_for_request(request: &CredentialRequest) -> CredentialFormMode {
     let lower = request.url.to_ascii_lowercase();
     if lower.starts_with("ssh://")
@@ -3019,7 +3077,12 @@ pub(crate) struct RepositoryView {
     credential_secret: TextFieldState,
     credential_key_path: TextFieldState,
     credential_passphrase: TextFieldState,
+
     credential_remote_url: TextFieldState,
+    /// 凭据测试弹窗的「测试地址」输入（预填记录远端地址，可改）。
+    credential_test_url: TextFieldState,
+    /// 凭据测试弹窗的内联校验错误（地址非法/跨站点），关窗即清。
+    credential_test_error: Option<String>,
     credential_display_name: TextFieldState,
     conflict_editor: TextFieldState,
     remote_name: TextFieldState,
@@ -3287,7 +3350,10 @@ impl RepositoryView {
             credential_secret: TextFieldState::new(cx, "密码或 PAT").secret(),
             credential_key_path: TextFieldState::new(cx, "SSH 私钥路径"),
             credential_passphrase: TextFieldState::new(cx, "SSH 密码短语").secret(),
+
             credential_remote_url: TextFieldState::new(cx, "适用远端 URL"),
+            credential_test_url: TextFieldState::new(cx, "测试地址"),
+            credential_test_error: None,
             credential_display_name: TextFieldState::new(cx, "凭据名称（可选）"),
             conflict_editor: TextFieldState::new(cx, "冲突结果"),
             remote_name: TextFieldState::new(cx, "远端名称"),
@@ -6193,6 +6259,10 @@ impl RepositoryView {
             if self.settings_center == Some(SettingsCategory::Ai) {
                 self.save_ai_provider_settings_from_form();
             }
+        } else if matches!(field, FieldId::CredentialTestUrl) {
+            if matches!(self.active_dialog, Some(DialogState::TestCredential { .. })) {
+                self.confirm_test_credential();
+            }
         } else if matches!(
             field,
             FieldId::CredentialSecret
@@ -6475,6 +6545,7 @@ impl RepositoryView {
             FieldId::CredentialKeyPath => &mut self.credential_key_path,
             FieldId::CredentialPassphrase => &mut self.credential_passphrase,
             FieldId::CredentialRemoteUrl => &mut self.credential_remote_url,
+            FieldId::CredentialTestUrl => &mut self.credential_test_url,
             FieldId::CredentialDisplayName => &mut self.credential_display_name,
             FieldId::ConflictEditor => &mut self.conflict_editor,
             FieldId::RemoteBranchName => &mut self.remote_branch_name,
@@ -7906,11 +7977,9 @@ impl RepositoryView {
         }
     }
 
-    fn test_credential_record(&mut self, record_id: String) {
-        if self.busy || self.global_busy_tab.is_some() {
-            self.last_error = Some("已有操作正在运行".into());
-            return;
-        }
+    /// 打开凭据测试地址确认弹窗：预填记录保存的远端地址，用户可改成
+    /// 其它地址（典型：裸主机地址换成真实仓库地址）再开始测试。
+    fn open_test_credential_dialog(&mut self, record_id: String) {
         let Some(record) = self
             .credential_records
             .iter()
@@ -7920,6 +7989,55 @@ impl RepositoryView {
             self.last_error = Some("凭据记录不存在".into());
             return;
         };
+        self.credential_test_error = None;
+        self.credential_test_url
+            .set_value(record.remote_url.clone());
+        self.active_dialog = Some(DialogState::TestCredential { record_id });
+    }
+
+    /// 凭据测试弹窗的「开始测试」：非空 → 协议族 → HTTPS 同站点校验，
+    /// 全过才关窗发起连接；任一失败写弹窗内错误条、不关窗。
+    pub(crate) fn confirm_test_credential(&mut self) {
+        let Some(DialogState::TestCredential { record_id }) = self.active_dialog.clone() else {
+            return;
+        };
+        let Some(record) = self
+            .credential_records
+            .iter()
+            .find(|record| record.id == record_id)
+            .cloned()
+        else {
+            // 记录列表已刷新导致记录消失：直接关窗提示。
+            self.close_dialog();
+            self.last_error = Some("凭据记录不存在".into());
+            return;
+        };
+        let url = self.credential_test_url.value.trim().to_string();
+        if let Err(error) = validate_credential_test_url(record.kind, &record.host, &url) {
+            self.credential_test_error = Some(error);
+            return;
+        }
+        self.credential_test_error = None;
+        self.close_dialog();
+        self.test_credential_record(record_id, url);
+    }
+
+    fn test_credential_record(&mut self, record_id: String, url: String) {
+        if self.busy || self.global_busy_tab.is_some() {
+            self.last_error = Some("已有操作正在运行".into());
+            return;
+        }
+        let Some(mut record) = self
+            .credential_records
+            .iter()
+            .find(|record| record.id == record_id)
+            .cloned()
+        else {
+            self.last_error = Some("凭据记录不存在".into());
+            return;
+        };
+        // 连接目标用弹窗确认的地址（记录本体保持原值，测试不改凭据）。
+        record.remote_url = url;
         self.begin_global_test_busy("正在测试凭据连接");
         let store: Arc<dyn CredentialStore> = self.credential_store.clone();
         let tx = self.tx.clone();
@@ -14485,6 +14603,9 @@ impl RepositoryView {
             DialogState::CredentialForm { editing } => self
                 .render_credential_form_dialog(editing, window, cx)
                 .into_any_element(),
+            DialogState::TestCredential { record_id } => self
+                .render_test_credential_dialog(record_id, window, cx)
+                .into_any_element(),
             DialogState::SubmoduleManager => {
                 self.render_submodule_manager_dialog(cx).into_any_element()
             }
@@ -16488,6 +16609,63 @@ impl RepositoryView {
         panel
     }
 
+    /// 凭据测试地址确认弹窗：预填记录远端地址；说明裸主机地址的局限。
+    fn render_test_credential_dialog(
+        &self,
+        record_id: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let record_label = self
+            .credential_records
+            .iter()
+            .find(|record| record.id == record_id)
+            .map(|record| {
+                record
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| record.username.clone())
+            })
+            .unwrap_or_else(|| "未知记录".to_string());
+        let testing = self.busy || self.global_busy_tab.is_some();
+        self.dialog_panel("测试凭据连接", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child(format!("凭据：{record_label}")),
+            )
+            .child(self.input(FieldId::CredentialTestUrl, false, window, cx))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(
+                        "将使用此地址发起一次 Git 连接验证凭据。建议填写真实仓库地址；                         裸站点地址（如 https://gitee.com）可能因服务器不发起认证而无法验证凭据。",
+                    ),
+            )
+            .when_some(self.credential_test_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
+                        .child(error),
+                )
+            })
+            .child(
+                dialog_actions()
+                    .child(
+                        self.button("取消", true, |this, _, _| this.close_dialog(), cx),
+                    )
+                    .child(self.primary_button(
+                        "开始测试",
+                        !testing,
+                        |this, _, _| this.confirm_test_credential(),
+                        cx,
+                    )),
+            )
+    }
+
     fn render_credential_form_dialog(
         &self,
         _editing: Option<String>,
@@ -16960,7 +17138,7 @@ impl RepositoryView {
                         !self.busy,
                         move |this, _, cx| {
                             cx.stop_propagation();
-                            this.test_credential_record(record_id.clone());
+                            this.open_test_credential_dialog(record_id.clone());
                         },
                         cx,
                     ))

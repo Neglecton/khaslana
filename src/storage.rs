@@ -1284,13 +1284,24 @@ fn load_ai_provider_settings_from_conn(conn: &Connection) -> Result<AiProviderSe
         [],
         |row| {
             let payload: String = row.get(0)?;
-            serde_json::from_str::<AiProviderSettings>(&payload).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(StorageConversionError(format!("AI 配置解析失败：{err}"))),
-                )
-            })
+            let mut settings: AiProviderSettings =
+                serde_json::from_str(&payload).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(StorageConversionError(format!("AI 配置解析失败：{err}"))),
+                    )
+                })?;
+            // 未暴露 UI 的三个旋钮（temperature / max_tokens / 超时）不认
+            // 存档值，一律以代码当前默认为准：存档里的值只是随整份 JSON
+            // 序列化带进去的历史默认（如 max_tokens 曾为 800），若认存档，
+            // 改代码默认对老用户永远不生效。将来若在 UI 暴露任一项，
+            // 从这里删掉对应覆盖即可。
+            let defaults = AiProviderSettings::default();
+            settings.temperature = defaults.temperature;
+            settings.max_tokens = defaults.max_tokens;
+            settings.request_timeout_secs = defaults.request_timeout_secs;
+            Ok(settings)
         },
     )
     .optional()

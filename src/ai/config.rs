@@ -59,7 +59,11 @@ impl Default for AiProviderSettings {
             api_key: String::new(),
             model: String::new(),
             temperature: 0.3,
-            max_tokens: 800,
+            // 一次性生成（commit message / 工作流模板）共用此默认输出上限；
+            // 800 连 reasoning 模型的思维链都装不下（思考与正文共享预算，
+            // 极易触发 finish_reason=length 截断）。冲突合并与 AI 评审另有
+            // 按需覆盖（段长放宽 / REVIEW_MAX_TOKENS），不走这个值。
+            max_tokens: 4000,
             request_timeout_secs: 60,
         }
     }

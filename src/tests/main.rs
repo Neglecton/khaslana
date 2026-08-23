@@ -1695,3 +1695,76 @@ fn should_toast_completion_accepts_test_passed_messages() {
         "已发现 3 个 SSH 私钥"
     ));
 }
+
+// 凭据测试地址校验矩阵：空/协议族/HTTPS 跨站点拦截、SSH 跨站点放行。
+#[test]
+fn validate_credential_test_url_matrix() {
+    use khaslana::StoredCredentialKind as Kind;
+
+    // 空/空白
+    assert!(validate_credential_test_url(Kind::HttpsUserPass, "https://gitee.com", "").is_err());
+    assert!(validate_credential_test_url(Kind::HttpsUserPass, "https://gitee.com", "   ").is_err());
+
+    // HTTPS 记录：同站点任一仓库地址通过（含裸主机）
+    assert!(
+        validate_credential_test_url(
+            Kind::HttpsUserPass,
+            "https://gitee.com",
+            "https://gitee.com"
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_credential_test_url(
+            Kind::HttpsUserPass,
+            "https://gitee.com",
+            "https://gitee.com/user/repo.git"
+        )
+        .is_ok()
+    );
+
+    // HTTPS 记录：跨站点拦截（Gitee 令牌测 GitHub / 其它平台）
+    let err = validate_credential_test_url(
+        Kind::HttpsUserPass,
+        "https://gitee.com",
+        "https://github.com/user/repo.git",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("令牌不通用"),
+        "拦截文案应说明令牌不通用：{err}"
+    );
+    assert!(
+        err.contains("https://gitee.com"),
+        "拦截文案应指明绑定站点：{err}"
+    );
+
+    // HTTPS 记录：SSH 地址属协议族错误
+    assert!(
+        validate_credential_test_url(
+            Kind::HttpsUserPass,
+            "https://gitee.com",
+            "git@gitee.com:user/repo.git"
+        )
+        .is_err()
+    );
+
+    // SSH 记录：跨站点放行（私钥主机无关）
+    assert!(
+        validate_credential_test_url(
+            Kind::SshKey,
+            "ssh://gitee.com",
+            "git@github.com:user/repo.git"
+        )
+        .is_ok()
+    );
+    // SSH 记录：http(s) 地址属协议族错误
+    assert!(
+        validate_credential_test_url(
+            Kind::SshKey,
+            "ssh://gitee.com",
+            "https://gitee.com/user/repo.git"
+        )
+        .is_err()
+    );
+}

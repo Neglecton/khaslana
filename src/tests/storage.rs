@@ -101,9 +101,12 @@ fn ai_provider_settings_round_trip() {
     assert_eq!(loaded.base_url, settings.base_url);
     assert_eq!(loaded.api_key, settings.api_key);
     assert_eq!(loaded.model, settings.model);
-    assert_eq!(loaded.temperature, settings.temperature);
-    assert_eq!(loaded.max_tokens, settings.max_tokens);
-    assert_eq!(loaded.request_timeout_secs, settings.request_timeout_secs);
+    // 未暴露 UI 的三个旋钮不认存档值：即使存了非默认值，加载也回退到
+    // 代码默认（改代码默认对老用户即刻生效，不被存档遮住）。
+    let defaults = AiProviderSettings::default();
+    assert_eq!(loaded.temperature, defaults.temperature);
+    assert_eq!(loaded.max_tokens, defaults.max_tokens);
+    assert_eq!(loaded.request_timeout_secs, defaults.request_timeout_secs);
 }
 
 #[test]

@@ -1184,6 +1184,13 @@ pub fn credential_record_matches_remote_url(record: &CredentialRecord, url: &str
     }
 }
 
+/// 取远端 URL 的 host_key（协议 + 小写主机，如 `https://gitee.com`）。
+/// 凭据测试用它与记录的 host 比对做同站点校验——HTTPS 令牌不通用，
+/// 跨站点测试只会得到误导性的认证失败。无法解析返回 None。
+pub fn remote_host_key(url: &str) -> Option<String> {
+    remote_metadata(url).map(|metadata| metadata.host_key)
+}
+
 fn remote_metadata(url: &str) -> Option<RemoteMetadata> {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();

@@ -313,7 +313,7 @@ impl RepositoryView {
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 800 / 60s）。"),
+                    .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。"),
             )
             // 测试连接期间的进度/结果状态行：在分类内容内展示，避免被设置中心遮挡。
             .when(self.busy, |this| {
