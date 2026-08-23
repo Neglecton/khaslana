@@ -5,12 +5,15 @@
 
 use std::sync::Arc;
 
+use async_channel::Sender;
 use gpui::{Context, IntoElement, Window, div, point, prelude::*, px};
-use khaslana::{AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope};
+use khaslana::{
+    AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
+};
 
 use crate::ui::theme::rgb;
 use crate::{
-    FieldId, RepositoryView,
+    AiThinkingOverlayState, FieldId, RepositoryView, UiEvent,
     ui::{
         components::{dialog_actions, dialog_overlay},
         theme as ui_theme,
@@ -19,6 +22,188 @@ use crate::{
 };
 
 impl RepositoryView {
+    /// 公共 AI 思考弹窗执行器：一次性生成类请求的统一入口。
+    ///
+    /// 打开思维链流式弹窗后，在 Long 任务池执行 `task`；闭包收到
+    /// `(client, proxy_url, tx, on_delta)`——预建好的 ChatClient、当前
+    /// 代理 URL（业务需按段重建客户端时用）、UI 事件发送端（自定义进度
+    /// 事件）、以及 StreamDelta 转发回调（思维链/正文增量实时进弹窗）。
+    /// 成功结果经调用方提供的 `emit_result` 组装事件回传，失败统一发
+    /// 共用 `AiRequestFailed`。任务完成或失败后事件处理器自动关闭思考
+    /// 弹窗。空正文校验等业务逻辑留在 `task` 内。
+    pub(crate) fn start_ai_thinking_task<R, F, E>(&mut self, title: &str, emit_result: E, task: F)
+    where
+        R: Send + 'static,
+        F: FnOnce(
+                ChatClient,
+                Option<String>,
+                &Sender<UiEvent>,
+                &mut dyn FnMut(StreamDelta),
+            ) -> khaslana::Result<R>
+            + Send
+            + 'static,
+        E: FnOnce(R) -> UiEvent + Send + 'static,
+    {
+        self.ai_thinking_overlay = Some(AiThinkingOverlayState {
+            title: title.to_string(),
+            reasoning: String::new(),
+            content: String::new(),
+        });
+        self.status = title.to_string();
+
+        let settings = self.ai_settings.clone();
+        let proxy_url = self
+            .proxy_settings
+            .proxy_url_for_target(&settings.normalized_base_url());
+        let tx = self.tx.clone();
+        let task_tx = tx.clone();
+        self.tasks.spawn(crate::TaskKind::Long, move || {
+            let outcome = (|| -> khaslana::Result<R> {
+                let client = ChatClient::new(settings, proxy_url.clone());
+                let mut forward = |delta: StreamDelta| {
+                    let (content_delta, reasoning_delta) = match delta {
+                        StreamDelta::Content(text) => (Some(text), String::new()),
+                        StreamDelta::Reasoning(text) => (None, text),
+                    };
+                    crate::send_ui_event(
+                        &task_tx,
+                        UiEvent::AiThinkingDelta {
+                            content_delta,
+                            reasoning_delta,
+                        },
+                    );
+                };
+                task(client, proxy_url, &task_tx, &mut forward)
+            })();
+            match outcome {
+                Ok(result) => {
+                    crate::send_ui_event(&tx, emit_result(result));
+                }
+                Err(err) => {
+                    tracing::warn!(target: "khaslana::ai", "AI 思考任务失败：{err}");
+                    crate::send_ui_event(
+                        &tx,
+                        UiEvent::AiRequestFailed {
+                            error: err.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+    }
+
+    /// 渲染 AI 思考弹窗：一次性生成类请求进行中的全屏遮罩 + 居中面板，
+    /// 实时流式展示思维链。任务完成或失败后由事件处理关闭弹窗。
+    pub(crate) fn render_ai_thinking_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(overlay) = &self.ai_thinking_overlay else {
+            return div().into_any_element();
+        };
+        let title = overlay.title.clone();
+        let reasoning = overlay.reasoning.clone();
+        let content_text = overlay.content.clone();
+        let handle = self.scroll_handle("ai-thinking-scroll");
+        let has_live = !reasoning.trim().is_empty() || !content_text.trim().is_empty();
+        let content = div()
+            .id("ai-thinking-content")
+            .flex()
+            .flex_col()
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .text_size(px(11.0))
+            .line_height(px(16.0))
+            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            // 思维链在前（reasoning 模型的主要反馈），正文增量在后
+            // （非 reasoning 模型的唯一反馈）。GPUI 文本默认 Normal 换行，
+            // 长行与 \n 都能正确折行。
+            .when(!reasoning.trim().is_empty(), |this| {
+                this.child(div().child(reasoning))
+            })
+            .when(!content_text.trim().is_empty(), |this| {
+                this.child(
+                    div()
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .child(content_text),
+                )
+            })
+            // 空白兜底：尚未产出第一片时给出提示，避免空面板。
+            .when(!has_live, |this| this.child("模型思考中…".to_string()));
+
+        dialog_overlay()
+            .child(
+                div()
+                    .w(px(560.0))
+                    .max_h(px(420.0))
+                    .p_4()
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER))
+                    .bg(rgb(ui_theme::CARD))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(rgb(ui_theme::PRIMARY)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(self.button(
+                                "后台运行",
+                                true,
+                                |this, _, _| {
+                                    // 仅收起弹窗不终止任务：结果仍会经事件回传
+                                    // （toast / 输入框回填），弹窗不再出现。
+                                    this.ai_thinking_overlay = None;
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(div().flex_1().min_h(px(0.0)).child(scrollable_frame_when(
+                        "ai-thinking-scroll",
+                        ScrollbarMode::Vertical,
+                        content.into_any_element(),
+                        handle,
+                        true,
+                        cx,
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    /// 思维链增量后把弹窗滚动条钉到底部（跟随最新内容）；用户手动上滚
+    /// 后不做强制回弹的判定成本高且思维链场景价值低，始终跟随。
+    pub(crate) fn scroll_ai_thinking_to_bottom(&self) {
+        let handle = self.scroll_handle("ai-thinking-scroll");
+        let max_offset = f32::from(handle.max_offset().height).max(0.0);
+        handle.set_offset(point(px(0.0), px(-max_offset)));
+    }
+
     /// 渲染 AI 供应商设置弹窗。
     pub(crate) fn render_ai_provider_settings_dialog(
         &self,
@@ -160,18 +345,14 @@ impl RepositoryView {
         }
 
         self.ai_commit_loading = true;
-        self.ai_commit_buffer.clear();
-        self.status = "正在生成提交信息".into();
         self.last_error = None;
 
         let service = self.service_for_tab(tab_id);
-        let settings = self.ai_settings.clone();
-        let proxy_url = self
-            .proxy_settings
-            .proxy_url_for_target(&settings.normalized_base_url());
-        let tx = self.tx.clone();
-        self.tasks.spawn(crate::TaskKind::Long, move || {
-            let result = (|| -> khaslana::Result<String> {
+        let staged_paths = staged_paths;
+        self.start_ai_thinking_task(
+            "正在生成提交信息",
+            |message| crate::UiEvent::AiCommitMessageGenerated { message },
+            move |client, _proxy_url, _tx, on_delta| {
                 let repo = git2::Repository::open(&repo_path)?;
                 // 收集所有 staged 文件的 diff 文本。
                 let mut diff_text = String::new();
@@ -191,16 +372,10 @@ impl RepositoryView {
                     diff_text.push_str(&khaslana::ai::file_diff_to_patch_text(&file_diff));
                 }
                 let (system, user) = khaslana::ai::commit_message_prompts(&diff_text, None);
-                let client = ChatClient::new(settings, proxy_url);
-                // 流式请求：每个 content chunk 增量推回 UI，让用户实时看到生成进度。
-                let tx = tx.clone();
+                // 全部增量（正文/思维链）经公共执行器转发到思考弹窗；
+                // 弹窗遮挡输入框，正文在完成后由 Generated 事件一次填入。
                 let result = client.request_stream(&[system, user], &mut |delta| {
-                    if let khaslana::StreamDelta::Content(text) = delta {
-                        crate::send_ui_event(
-                            &tx,
-                            crate::UiEvent::AiCommitMessageDelta { delta: text },
-                        );
-                    }
+                    on_delta(delta);
                 })?;
                 // 空正文按失败处理并给出可读提示：仅返回思考过程（reasoning 模型）
                 // 或完全为空时，避免按钮恢复后输入框无内容也无报错。
@@ -208,22 +383,10 @@ impl RepositoryView {
                     &result,
                     "AI 返回的提交信息为空，请重试或检查模型配置",
                     "AI 未返回提交信息正文（仅返回了思考过程），请重试或更换模型",
-                )
-            })();
-            match result {
-                Ok(message) => {
-                    crate::send_ui_event(&tx, crate::UiEvent::AiCommitMessageGenerated { message });
-                }
-                Err(err) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiRequestFailed {
-                            error: err.to_string(),
-                        },
-                    );
-                }
-            }
-        });
+                )?;
+                Ok(result.content)
+            },
+        );
     }
 
     /// AI 冲突合并建议按钮是否可用。
@@ -261,7 +424,7 @@ impl RepositoryView {
         self.start_ai_conflict_merge(path);
     }
 
-    /// 启动 AI 合并建议生成（后台 Long 任务）：
+    /// 启动 AI 合并建议生成（公共思考弹窗执行器）：
     /// 取 diff3 文本 → 整文件（≤ 上限）单请求，超限按块边界分段逐段请求
     /// （携带滑动窗口对话历史）→ 拼接整份合并文件回填草稿。
     /// 任一段失败整体失败，不部分写入草稿。
@@ -283,17 +446,16 @@ impl RepositoryView {
         };
 
         self.ai_conflict_loading = true;
-        self.status = "正在生成 AI 合并建议".into();
         self.last_error = None;
 
         let service = self.service_for_tab(tab_id);
-        let settings = self.ai_settings.clone();
-        let proxy_url = self
-            .proxy_settings
-            .proxy_url_for_target(&settings.normalized_base_url());
-        let tx = self.tx.clone();
-        self.tasks.spawn(crate::TaskKind::Long, move || {
-            let result = (|| -> khaslana::Result<String> {
+        let base_settings = self.ai_settings.clone();
+        let task_path = path.clone();
+        self.start_ai_thinking_task(
+            "正在生成 AI 合并建议",
+            |draft| crate::UiEvent::AiConflictMergeGenerated { path, draft },
+            move |_client, proxy_url, tx, on_delta| {
+                let path = task_path;
                 let repo = git2::Repository::open(&repo_path)?;
                 let diff3_text =
                     service.conflict_diff3_text(&repo, std::path::Path::new(&path))?;
@@ -339,12 +501,14 @@ impl RepositoryView {
                             khaslana::MERGE_CONTEXT_BUDGET_CHARS,
                         )
                     };
-                    // 默认 max_tokens（800）放不下整段输出：按段长放宽。
-                    let mut request_settings = settings.clone();
+                    // 默认 max_tokens（800）放不下整段输出：按段长放宽
+                    // （每段独立建客户端，代理设置与全局一致）。
+                    let mut request_settings = base_settings.clone();
                     request_settings.max_tokens =
                         (segment.text.chars().count() / 3 + 1024).clamp(1024, 16_384) as u32;
-                    let client = ChatClient::new(request_settings, proxy_url.clone());
-                    let result = client.request_stream(&messages, &mut |_delta| {})?;
+                    let segment_client = ChatClient::new(request_settings, proxy_url.clone());
+                    let result =
+                        segment_client.request_stream(&messages, &mut |delta| on_delta(delta))?;
                     let content = khaslana::validate_generated_content(
                         &result,
                         "AI 返回的合并结果为空，请重试或检查模型配置",
@@ -373,7 +537,7 @@ impl RepositoryView {
                     // 整文件模式只有一段，进度事件无信息量，不发。
                     if request_segments > 1 {
                         crate::send_ui_event(
-                            &tx,
+                            tx,
                             crate::UiEvent::AiConflictMergeProgress {
                                 path: path.clone(),
                                 segment: request_done,
@@ -383,24 +547,8 @@ impl RepositoryView {
                     }
                 }
                 Ok(merged)
-            })();
-            match result {
-                Ok(draft) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiConflictMergeGenerated { path, draft },
-                    );
-                }
-                Err(err) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiRequestFailed {
-                            error: err.to_string(),
-                        },
-                    );
-                }
-            }
-        });
+            },
+        );
     }
 
     /// 测试 AI 连接：发送一个最小请求。

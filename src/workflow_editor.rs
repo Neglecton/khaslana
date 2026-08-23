@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::{
-    ChatClient, RemoteBranchGuardAction, WorkflowDefinition, WorkflowInputDefinition, WorkflowStep,
+    RemoteBranchGuardAction, WorkflowDefinition, WorkflowInputDefinition, WorkflowStep,
     parse_workflow_json5,
 };
 
@@ -1738,6 +1738,8 @@ impl RepositoryView {
         content: String,
         cx: &mut Context<Self>,
     ) {
+        // 思考弹窗随完成自动关闭（编辑器弹窗仍开着，结果直接回填表单）。
+        self.ai_thinking_overlay = None;
         let Some(state) = self.workflow_editor.as_mut() else {
             return;
         };
@@ -1794,43 +1796,25 @@ impl RepositoryView {
         state.ai_loading = true;
         // 清掉上一次的错误提示（新一轮生成开始）。
         state.data.error = None;
-        self.status = "AI 正在生成工作流模板".to_string();
 
-        let settings = self.ai_settings.clone();
-        let proxy_url = self
-            .proxy_settings
-            .proxy_url_for_target(&settings.normalized_base_url());
-        let tx = self.tx.clone();
-        self.tasks.spawn(crate::TaskKind::Long, move || {
-            let result = (|| -> khaslana::Result<String> {
+        // 公共思考弹窗执行器：思维链在弹窗内实时流式展示，完成后弹窗
+        // 自动关闭并把 JSON5 回填编辑器表单。
+        self.start_ai_thinking_task(
+            "AI 正在生成工作流模板",
+            |content| crate::UiEvent::AiWorkflowTemplateGenerated { content },
+            move |client, _proxy_url, _tx, on_delta| {
                 let (system, user) =
                     khaslana::workflow_template_prompts(&request, current_json5.as_deref());
-                let client = ChatClient::new(settings, proxy_url);
-                // 等待完成一次性回填：流式请求但不转发 Delta。
-                let result = client.request_stream(&[system, user], &mut |_delta| {})?;
+                let result =
+                    client.request_stream(&[system, user], &mut |delta| on_delta(delta))?;
                 khaslana::ai::validate_generated_content(
                     &result,
                     "AI 返回的内容为空，请重试或检查模型配置",
                     "AI 未返回正文（仅返回了思考过程），请重试或更换模型",
-                )
-            })();
-            match result {
-                Ok(content) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiWorkflowTemplateGenerated { content },
-                    );
-                }
-                Err(err) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiRequestFailed {
-                            error: err.to_string(),
-                        },
-                    );
-                }
-            }
-        });
+                )?;
+                Ok(result.content)
+            },
+        );
         cx.notify();
     }
 

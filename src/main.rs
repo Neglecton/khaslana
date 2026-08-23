@@ -1353,6 +1353,19 @@ pub(crate) struct AiReviewHistoryState {
     pub error: Option<String>,
 }
 
+/// AI 思考弹窗状态：一次性 AI 请求（commit message / 冲突合并建议 /
+/// 工作流模板生成）进行中的流式展示。思维链与正文增量实时追加，
+/// 任务完成或失败后由对应事件处理关闭弹窗。
+pub(crate) struct AiThinkingOverlayState {
+    /// 弹窗标题（说明正在生成的业务，如「正在生成提交信息」）。
+    pub title: String,
+    /// 思维链流式累积文本。
+    pub reasoning: String,
+    /// 正文流式累积文本（非 reasoning 模型没有思维链，正文增量是
+    /// 唯一的进度反馈）。
+    pub content: String,
+}
+
 /// 分支浏览模式的 per-repository 状态。
 ///
 /// 维护已加载的文件树（按目录懒加载）、展开/选中状态，以及当前文件的只读内容或差异。
@@ -2160,9 +2173,6 @@ pub(crate) enum UiEvent {
     AiWorkflowTemplateGenerated {
         content: String,
     },
-    AiCommitMessageDelta {
-        delta: String,
-    },
     AiReviewGenerated {
         /// 任务代际：与 `ai_review_active_generation` 匹配才应用到面板，
         /// 不匹配说明 UI 已分离（切目标/取消），仅做后台完成提示。
@@ -2212,6 +2222,12 @@ pub(crate) enum UiEvent {
     AiConflictMergeGenerated {
         path: String,
         draft: String,
+    },
+    /// AI 思考弹窗的流式增量（思维链/正文），由公共执行器转发；
+    /// `content_delta` 为 None 表示本片是思维链。
+    AiThinkingDelta {
+        content_delta: Option<String>,
+        reasoning_delta: String,
     },
     AiRequestFailed {
         error: String,
@@ -2986,8 +3002,6 @@ pub(crate) struct RepositoryView {
     ai_api_key: TextFieldState,
     ai_model: TextFieldState,
     pub(crate) ai_commit_loading: bool,
-    /// commit message 流式生成时的实时缓冲。
-    pub(crate) ai_commit_buffer: String,
     pub(crate) ai_review: Option<Arc<AiReviewResult>>,
     pub(crate) ai_review_loading: bool,
     /// agent 评审实时累积的执行轨迹（思维链 + 工具调用），生成期间与
@@ -3022,6 +3036,10 @@ pub(crate) struct RepositoryView {
     /// 冲突工作台「AI 合并建议」生成中标志（不借用 busy，生成期间其它
     /// 冲突操作保持可用，与 commit message 生成同一模式）。
     pub(crate) ai_conflict_loading: bool,
+    /// AI 思考弹窗状态（None = 关闭）：公共执行器发起的一次性 AI 请求
+    /// （commit message / 冲突合并建议 / 工作流模板生成）期间展示思维链
+    /// 流式输出，任务完成或失败后自动关闭弹窗。
+    pub(crate) ai_thinking_overlay: Option<AiThinkingOverlayState>,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -3248,7 +3266,6 @@ impl RepositoryView {
                 .with_value(external_merge_settings.normalized_intellij_path()),
             external_merge_detection: None,
             ai_commit_loading: false,
-            ai_commit_buffer: String::new(),
             ai_review: None,
             ai_review_loading: false,
             ai_review_steps: Vec::new(),
@@ -3265,6 +3282,7 @@ impl RepositoryView {
             ai_review_history: None,
             conflict_pane_scroll_sync: Rc::new(RefCell::new(None)),
             ai_conflict_loading: false,
+            ai_thinking_overlay: None,
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
@@ -5392,7 +5410,8 @@ impl RepositoryView {
             }
             UiEvent::AiCommitMessageGenerated { message } => {
                 self.ai_commit_loading = false;
-                self.ai_commit_buffer.clear();
+                // 思考弹窗随完成自动关闭。
+                self.ai_thinking_overlay = None;
                 // 兜底守卫：空结果不覆盖输入框（避免清掉用户草稿）并显式提示。
                 // 正常路径已在生成任务里按空正文报错，这里防御未来回归。
                 if message.trim().is_empty() {
@@ -5406,13 +5425,6 @@ impl RepositoryView {
                     self.status = "AI 已生成提交信息".into();
                     self.last_error = None;
                 }
-            }
-            UiEvent::AiCommitMessageDelta { delta } => {
-                // 直接把增量追加到输入框，让用户实时看到生成内容，
-                // 而不是等全部完成后才一次性填入。
-                self.ai_commit_buffer.push_str(&delta);
-                self.commit_message.value.push_str(&delta);
-                self.commit_message.caret = self.commit_message.value.len();
             }
             UiEvent::AiReviewGenerated {
                 generation,
@@ -5534,6 +5546,8 @@ impl RepositoryView {
             }
             UiEvent::AiConflictMergeGenerated { path, draft } => {
                 self.ai_conflict_loading = false;
+                // 思考弹窗随完成自动关闭。
+                self.ai_thinking_overlay = None;
                 match self.conflict_workbench.files.get_mut(&path) {
                     Some(view) if view.kind == ConflictFileKind::Text => {
                         // Merged 写入：被覆盖块标记「已合并」（绿色），不再
@@ -5556,7 +5570,8 @@ impl RepositoryView {
             UiEvent::AiRequestFailed { error } => {
                 self.ai_commit_loading = false;
                 self.ai_conflict_loading = false;
-                self.ai_commit_buffer.clear();
+                // 思考弹窗随失败自动关闭（无论哪路业务失败）。
+                self.ai_thinking_overlay = None;
                 // 工作流模板编辑器的 AI 生成失败：错误写进编辑器内错误条
                 // （弹窗仍开着，用户可直接改需求重试），并复位其 loading。
                 self.handle_ai_workflow_template_failed(&error);
@@ -5568,6 +5583,21 @@ impl RepositoryView {
                 self.status = "AI 请求失败".into();
                 self.last_error = Some(error.clone());
                 self.notify_error(format!("AI 请求失败：{error}"), cx);
+            }
+            UiEvent::AiThinkingDelta {
+                content_delta,
+                reasoning_delta,
+            } => {
+                // 思考弹窗已关闭（后台运行）时丢弃增量。
+                let Some(overlay) = self.ai_thinking_overlay.as_mut() else {
+                    return;
+                };
+                overlay.reasoning.push_str(&reasoning_delta);
+                if let Some(delta) = content_delta {
+                    overlay.content.push_str(&delta);
+                }
+                // 增量驱动滚动跟随到最新内容。
+                self.scroll_ai_thinking_to_bottom();
             }
             UiEvent::AiConnectionTested { message } => {
                 self.end_global_test_busy();
@@ -17103,6 +17133,9 @@ impl Render for RepositoryView {
             .child(self.render_repo_switcher_menu(window, cx))
             .child(self.render_settings_center_overlay(window, cx))
             .child(self.render_dialogs(window, cx))
+            // AI 思考弹窗：一次性生成类请求的思维链流式展示，层级在
+            // 普通对话框之上（工作流编辑器弹窗内触发时覆盖其上）。
+            .child(self.render_ai_thinking_overlay(cx))
             .child(self.render_credential_context_menu(cx))
             .child(self.render_operation_blocker())
             .child(self.render_credentials(window, cx))
