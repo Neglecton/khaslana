@@ -208,28 +208,100 @@ fn preset_feature_branch_references_input_var() {
 }
 
 #[test]
-fn step_draft_summaries_show_pending_placeholder() {
-    let empty = WorkflowEditorStepData::new(WorkflowStepKind::Checkout);
+fn extract_template_var_refs_scans_and_filters_builtins() {
+    let refs = extract_template_var_refs("release/${date:%Y%m%d}-${base}");
+    assert_eq!(refs, vec!["base"]);
+    // 同名去重 + 多变量保序
+    assert_eq!(extract_template_var_refs("${a}/${b}/${a}"), vec!["a", "b"]);
+    // 内建命名空间不算用户变量；未闭合片段安全忽略
+    assert!(extract_template_var_refs("${git.head}${run.id}${date:x}").is_empty());
     assert_eq!(
-        workflow_step_draft_summary(WorkflowStepKind::Checkout, &empty),
-        "切换到分支 （未填写）"
+        extract_template_var_refs("${unclosed"),
+        Vec::<String>::new()
     );
-    let mut push = WorkflowEditorStepData::new(WorkflowStepKind::Push);
-    push.branch = "dev".to_string();
+}
+
+#[test]
+fn step_binding_reports_used_unknown_and_outputs() {
+    let mut inputs = minimal_data();
+    inputs.inputs.push(WorkflowEditorInputRowData {
+        key: "target".to_string(),
+        label: String::new(),
+        description: String::new(),
+        default_value: String::new(),
+        required: true,
+    });
+    let mut filter = WorkflowEditorStepData::new(WorkflowStepKind::FilterBranches);
+    filter.output = "stale".to_string();
+    let mut delete = WorkflowEditorStepData::new(WorkflowStepKind::DeleteBranches);
+    delete.branches = "${out.stale}".to_string();
+    let mut checkout = WorkflowEditorStepData::new(WorkflowStepKind::Checkout);
+    checkout.branch = "${ghost}".to_string();
+    let steps = vec![
+        WorkflowEditorStepData::new(WorkflowStepKind::EnsureClean),
+        filter,
+        delete,
+        checkout,
+    ];
+    let declared_inputs = vec!["target".to_string()];
+
+    // filterBranches 声明输出
+    let binding = workflow_step_binding(1, &steps, &declared_inputs, &[]);
+    assert_eq!(binding.produces.as_deref(), Some("out.stale"));
+
+    // 后续步骤引用上方输出：算已声明
+    let binding = workflow_step_binding(2, &steps, &declared_inputs, &[]);
+    assert_eq!(binding.used, vec!["out.stale"]);
+    assert!(binding.unknown.is_empty());
+
+    // 引用未声明变量：进 unknown
+    let binding = workflow_step_binding(3, &steps, &declared_inputs, &[]);
+    assert_eq!(binding.unknown, vec!["ghost"]);
+}
+
+#[test]
+fn binding_summary_text_prioritizes_warning() {
+    let binding = WorkflowStepBinding {
+        used: vec!["a".to_string()],
+        unknown: vec!["ghost".to_string()],
+        produces: Some("out.x".to_string()),
+    };
+    let text = workflow_binding_summary(&binding);
+    assert!(text.contains("使用变量 a"));
+    assert!(text.contains("输出 out.x"));
+    assert!(text.contains("引用了未声明变量 ghost"));
+    // 无任何引用时的占位文案
     assert_eq!(
-        workflow_step_draft_summary(WorkflowStepKind::Push, &push),
-        "推送分支 dev"
+        workflow_binding_summary(&WorkflowStepBinding::default()),
+        "未引用变量"
     );
-    let pull = WorkflowEditorStepData::new(WorkflowStepKind::Pull);
-    assert_eq!(
-        workflow_step_draft_summary(WorkflowStepKind::Pull, &pull),
-        "拉取（默认远端）"
-    );
-    let clean = WorkflowEditorStepData::new(WorkflowStepKind::EnsureClean);
-    assert_eq!(
-        workflow_step_draft_summary(WorkflowStepKind::EnsureClean, &clean),
-        "检查工作区干净"
-    );
+}
+
+#[test]
+fn var_referenced_by_steps_returns_one_based_indices() {
+    let mut checkout = WorkflowEditorStepData::new(WorkflowStepKind::Checkout);
+    checkout.branch = "${target}".to_string();
+    let steps = vec![
+        WorkflowEditorStepData::new(WorkflowStepKind::EnsureClean),
+        checkout,
+    ];
+    assert_eq!(workflow_var_referenced_by_steps("target", &steps), vec![2]);
+    assert!(workflow_var_referenced_by_steps("other", &steps).is_empty());
+}
+
+#[test]
+fn picker_filter_matches_name_op_and_description() {
+    // 空查询返回全量（常用在前）
+    assert_eq!(filter_workflow_step_kinds("").len(), 11);
+    // 中文名匹配
+    let by_cn = filter_workflow_step_kinds("切换");
+    assert_eq!(by_cn.first(), Some(&WorkflowStepKind::Checkout));
+    // 操作名匹配（大小写不敏感）
+    assert!(filter_workflow_step_kinds("CREATEBRANCH").contains(&WorkflowStepKind::CreateBranch));
+    // 说明匹配
+    assert!(filter_workflow_step_kinds("正则筛选").contains(&WorkflowStepKind::FilterBranches));
+    // 无匹配为空
+    assert!(filter_workflow_step_kinds("不存在的操作xyz").is_empty());
 }
 
 #[test]
@@ -516,12 +588,12 @@ fn ai_generated_json5_fills_editor_data() {
         Some(PathBuf::from("D:/t/existing.json5"))
     );
     assert_eq!(data.file_name, "existing");
-    // 无 inputs/vars：高级区不自动展开
-    assert!(!data.advanced_expanded);
+    // 无 inputs/vars：事件层不会触发「跳到变量设置」
+    assert!(data.inputs.is_empty() && data.vars.is_empty());
 }
 
 #[test]
-fn ai_generated_strips_code_fence_and_expands_advanced() {
+fn ai_generated_strips_code_fence_and_fills_vars() {
     let mut data = WorkflowEditorData::default();
     let json5 = "```json5\n\
         { version: 1, name: \"带围栏\", inputs: { target: { label: \"目标\" } }, steps: [{ op: \"ensureClean\" }] }\n\
@@ -529,8 +601,7 @@ fn ai_generated_strips_code_fence_and_expands_advanced() {
     apply_ai_generated_to_editor_data(&mut data, json5).unwrap();
     assert_eq!(data.steps.len(), 1);
     assert_eq!(data.inputs.len(), 1);
-    // 有 inputs：高级区自动展开方便检查
-    assert!(data.advanced_expanded);
+    // 有 inputs：事件层据此跳到「变量设置」步（UI 状态，不在纯数据层断言）
     // file_name 原为空：按 AI 显示名推导主干
     assert_eq!(data.file_name, "带围栏");
 }
