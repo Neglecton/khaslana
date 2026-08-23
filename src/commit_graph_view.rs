@@ -670,61 +670,61 @@ impl RepositoryView {
             .unwrap_or(&[]);
         let query = self.commit_graph_branch_search.value.trim().to_lowercase();
         let (local_branches, remote_branches) = commit_graph_branch_menu_groups(branches, &query);
-        let highlight_branch = self.commit_graph.highlight_branch.clone();
         let remote_loading =
             self.loading.remote() && remote_branches.is_empty() && query.is_empty();
-        let scroll_handle = self.scroll_handle(COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID);
-
-        // 先物化条目再挂载：闭包内同时借用 self 与 cx 会引发逃逸借用。
-        let mut list_children: Vec<gpui::AnyElement> = Vec::new();
+        // 虚拟化：与侧边栏同一数据集（远端分支可达上万条），预建全量
+        // 行元素会在每次搜索键入时整表重建。轻量下标模型 + uniform_list，
+        // 只为可视 range 创建行；全部行固定 26px 槽位保证等高。
+        const BRANCH_MENU_ROW_HEIGHT: f32 = 26.0;
+        const BRANCH_MENU_MAX_HEIGHT: f32 = 320.0;
+        #[derive(Clone, Copy)]
+        enum BranchMenuRow {
+            GroupLabel(&'static str),
+            Branch { group_index: usize, remote: bool },
+            RemoteLoading,
+            Empty,
+        }
+        let mut rows: Vec<BranchMenuRow> = Vec::new();
         if !local_branches.is_empty() || !remote_branches.is_empty() || !remote_loading {
-            list_children.push(commit_graph_branch_group_label("本地分支"));
-            for branch in &local_branches {
-                let selected = highlight_branch.as_deref() == Some(branch.name.as_str());
-                list_children.push(self.commit_graph_branch_menu_item(
-                    &branch.name,
-                    selected,
-                    false,
-                    cx,
-                ));
-            }
-            if !remote_branches.is_empty() || remote_loading {
-                list_children.push(commit_graph_branch_group_label("远端分支"));
-                for branch in &remote_branches {
-                    let selected = highlight_branch.as_deref() == Some(branch.name.as_str());
-                    list_children.push(self.commit_graph_branch_menu_item(
-                        &branch.name,
-                        selected,
-                        true,
-                        cx,
-                    ));
-                }
-                if remote_loading {
-                    list_children.push(
-                        div()
-                            .id("commit-graph-branch-remote-loading")
-                            .px_3()
-                            .py_1()
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .child("远端分支加载中...")
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-        if list_children.is_empty() {
-            list_children.push(
-                div()
-                    .id("commit-graph-branch-empty")
-                    .px_3()
-                    .py_1()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("没有匹配的分支")
-                    .into_any_element(),
+            rows.push(BranchMenuRow::GroupLabel("本地分支"));
+            rows.extend(
+                (0..local_branches.len()).map(|group_index| BranchMenuRow::Branch {
+                    group_index,
+                    remote: false,
+                }),
             );
+            if !remote_branches.is_empty() || remote_loading {
+                rows.push(BranchMenuRow::GroupLabel("远端分支"));
+                rows.extend(
+                    (0..remote_branches.len()).map(|group_index| BranchMenuRow::Branch {
+                        group_index,
+                        remote: true,
+                    }),
+                );
+                if remote_loading {
+                    rows.push(BranchMenuRow::RemoteLoading);
+                }
+            }
         }
+        if rows.is_empty() {
+            rows.push(BranchMenuRow::Empty);
+        }
+        // 借用的分支列表不能进 'static 渲染闭包：只克隆过滤后的分支名
+        //（字符串克隆远轻于预建全量行元素，搜索键入时一次）。
+        let groups = Arc::new((
+            local_branches
+                .iter()
+                .map(|branch| branch.name.clone())
+                .collect::<Vec<_>>(),
+            remote_branches
+                .iter()
+                .map(|branch| branch.name.clone())
+                .collect::<Vec<_>>(),
+        ));
+        let groups_for_rows = Arc::clone(&groups);
+        let row_count = rows.len().max(1);
+        let list_height = (row_count as f32 * BRANCH_MENU_ROW_HEIGHT).min(BRANCH_MENU_MAX_HEIGHT);
+        let uniform_handle = self.uniform_scroll_handle(COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID);
 
         glass_menu()
             .absolute()
@@ -755,12 +755,66 @@ impl RepositoryView {
             )
             .child(menu_separator())
             .child(
-                div()
-                    .id(COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID)
-                    .max_h(px(320.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll_handle)
-                    .children(list_children),
+                uniform_list(
+                    COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID,
+                    row_count,
+                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                        range
+                            .map(|row| {
+                                let inner = match rows.get(row) {
+                                    Some(BranchMenuRow::GroupLabel(label)) => {
+                                        commit_graph_branch_group_label(label)
+                                    }
+                                    Some(BranchMenuRow::Branch {
+                                        group_index,
+                                        remote,
+                                    }) => {
+                                        let (local, remotes) = &*groups_for_rows;
+                                        let group = if *remote { remotes } else { local };
+                                        let Some(branch_name) = group.get(*group_index) else {
+                                            return placeholder_row("").into_any_element();
+                                        };
+                                        let selected =
+                                            this.commit_graph.highlight_branch.as_deref()
+                                                == Some(branch_name.as_str());
+                                        this.commit_graph_branch_menu_item(
+                                            branch_name,
+                                            selected,
+                                            *remote,
+                                            cx,
+                                        )
+                                    }
+                                    Some(BranchMenuRow::RemoteLoading) => div()
+                                        .id("commit-graph-branch-remote-loading")
+                                        .px_3()
+                                        .py_1()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .child("远端分支加载中...")
+                                        .into_any_element(),
+                                    _ => div()
+                                        .id("commit-graph-branch-empty")
+                                        .px_3()
+                                        .py_1()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .child("没有匹配的分支")
+                                        .into_any_element(),
+                                };
+                                // 固定槽位保证 uniform_list 等高约束。
+                                div()
+                                    .h(px(BRANCH_MENU_ROW_HEIGHT))
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .child(inner)
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&uniform_handle)
+                .h(px(list_height)),
             )
             .child(menu_separator())
             // 「关闭高亮」固定底部，不受搜索过滤影响。

@@ -480,7 +480,10 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(ui_theme::TYPE_BODY))
                     .text_color(rgb(visual.text))
-                    .truncate()
+                    // uniform_list 行禁 truncate（MinContent 测量坍缩后省略号
+                    // 固化到绘制），硬裁剪替代。
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(path_label),
             )
     }

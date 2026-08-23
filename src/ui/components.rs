@@ -650,9 +650,12 @@ pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
             div()
                 .w_full()
                 .h_full()
-                .when(checked, |this| this.child("✓"))
+                // items_center/justify_center 需要 flex 布局才生效，
+                // 否则勾号贴在 14px 盒子的左上角。
+                .flex()
                 .items_center()
                 .justify_center()
+                .when(checked, |this| this.child("✓"))
                 .text_color(rgb(theme::PRIMARY_FOREGROUND))
                 .text_size(px(10.0)),
         )
@@ -1004,6 +1007,7 @@ impl RepositoryView {
         message.contains("完成")
             || message.contains("失败")
             || message.contains("冲突")
+            || message.contains("测试通过")
             || message.contains("已复制")
             || message.contains("已添加")
             || message.contains("已更新")

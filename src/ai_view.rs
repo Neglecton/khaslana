@@ -44,6 +44,15 @@ impl RepositoryView {
             + 'static,
         E: FnOnce(R) -> UiEvent + Send + 'static,
     {
+        // 互斥：三个业务（commit message / 冲突合并建议 / 工作流模板）共用
+        // 这一个弹窗与一组 loading 标志。并发开跑会输出交错、先完成者关掉
+        // 弹窗（后续增量被丢弃）、共用的 AiRequestFailed 处理器互相复位
+        // 对方的标志——直接拒绝第二个任务。
+        if self.ai_thinking_overlay.is_some() {
+            self.status = "已有 AI 生成任务进行中，请等待完成或点击后台运行".to_string();
+            self.last_error = Some("已有 AI 生成任务进行中".to_string());
+            return;
+        }
         self.ai_thinking_overlay = Some(AiThinkingOverlayState {
             title: title.to_string(),
             reasoning: String::new(),
@@ -63,7 +72,11 @@ impl RepositoryView {
         let tx = self.tx.clone();
         let task_tx = tx.clone();
         self.tasks.spawn(crate::TaskKind::Long, move || {
-            let outcome = (|| -> khaslana::Result<R> {
+            // panic 兜底（第二层）：TaskExecutor 的 catch_unwind 只发全局
+            // BackgroundTaskPanicked（无法区分任务种类，不复位本业务的
+            // loading 标志与弹窗）；这里补发共用失败事件精确复位（与 AI
+            // 评审任务同一模式）。
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let client = ChatClient::new(settings, proxy_url.clone());
                 let mut forward = |delta: StreamDelta| {
                     let (content_delta, reasoning_delta) = match delta {
@@ -79,7 +92,17 @@ impl RepositoryView {
                     );
                 };
                 task(client, proxy_url, &task_tx, &mut forward)
-            })();
+            }));
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let message = crate::tasks::panic_message(payload);
+                    tracing::error!(target: "khaslana::ai", "AI 思考任务 panic：{message}");
+                    Err(khaslana::GitError::Message(format!(
+                        "AI 任务异常终止：{message}"
+                    )))
+                }
+            };
             match outcome {
                 Ok(result) => {
                     crate::send_ui_event(&tx, emit_result(result));
@@ -390,9 +413,18 @@ impl RepositoryView {
             |message| crate::UiEvent::AiCommitMessageGenerated { message },
             move |client, _proxy_url, _tx, on_delta| {
                 let repo = git2::Repository::open(&repo_path)?;
-                // 收集所有 staged 文件的 diff 文本。
+                // 收集所有 staged 文件的 diff 文本。体积预算对齐评审 agent
+                // 的初始 diff 模式：大暂存（lockfile/vendored 目录）直接打满
+                // 上下文只会得到供应商侧的容量报错或高额账单。
+                const COMMIT_DIFF_TOTAL_BUDGET: usize = 30_000;
+                const COMMIT_DIFF_PER_FILE_BUDGET: usize = 4_000;
                 let mut diff_text = String::new();
+                let mut budget_left = COMMIT_DIFF_TOTAL_BUDGET;
                 for path in &staged_paths {
+                    if budget_left == 0 {
+                        diff_text.push_str(&format!("--- {}（已达输入预算，未包含）\n", path));
+                        continue;
+                    }
                     let file_diff = service.diff_for_path(
                         &repo,
                         std::path::Path::new(path),
@@ -404,8 +436,23 @@ impl RepositoryView {
                         diff_text.push_str(&format!("--- {} (二进制文件)\n", path));
                         continue;
                     }
-                    diff_text.push_str(&format!("--- a/{}\n", path));
-                    diff_text.push_str(&khaslana::ai::file_diff_to_patch_text(&file_diff));
+                    let patch = khaslana::ai::file_diff_to_patch_text(&file_diff);
+                    let file_budget = budget_left.min(COMMIT_DIFF_PER_FILE_BUDGET);
+                    if patch.len() > file_budget {
+                        // 截断按字符边界对齐（patch 含多字节中文路径/内容）。
+                        let mut end = file_budget;
+                        while end > 0 && !patch.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        diff_text.push_str(&format!("--- a/{}\n", path));
+                        diff_text.push_str(&patch[..end]);
+                        diff_text.push_str("\n（此文件差异过长已截断）\n");
+                        budget_left = budget_left.saturating_sub(end);
+                    } else {
+                        diff_text.push_str(&format!("--- a/{}\n", path));
+                        diff_text.push_str(&patch);
+                        budget_left = budget_left.saturating_sub(patch.len());
+                    }
                 }
                 let (system, user) = khaslana::ai::commit_message_prompts(&diff_text, None);
                 // 全部增量（正文/思维链）经公共执行器转发到思考弹窗；

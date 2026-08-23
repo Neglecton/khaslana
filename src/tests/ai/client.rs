@@ -505,3 +505,24 @@ fn parse_sse_line_accepts_data_prefix_without_space() {
     // 非 data 前缀不受影响。
     assert!(parse_sse_line("event: message").is_none());
 }
+
+// ── 一次性生成流的截断判定（plain_stream_truncation_message）──
+
+#[test]
+fn plain_stream_truncation_message_length_and_missing_done() {
+    // length：触及 max_tokens，文案含上限数值
+    let msg = plain_stream_truncation_message(false, Some("length"), 800).unwrap();
+    assert!(
+        msg.contains("800"),
+        "length 型文案应包含 max_tokens 数值：{msg}"
+    );
+
+    // EOF 无 [DONE]：无论正文多少都判不完整
+    let msg = plain_stream_truncation_message(false, Some("stop"), 800).unwrap();
+    assert!(msg.contains("未收到结束标记"));
+
+    // 正常完成：None
+    assert!(plain_stream_truncation_message(true, Some("stop"), 800).is_none());
+    // [DONE] 且供应商未给 finish_reason：视为正常完成
+    assert!(plain_stream_truncation_message(true, None, 800).is_none());
+}

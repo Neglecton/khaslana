@@ -508,3 +508,13 @@ fn system_git_ssh_command_escapes_single_quotes_in_key_path() {
     // 单引号路径内的 ' 必须转义为 '\''，否则会提前闭合引号。
     assert!(command.contains("-i 'C:/odd'\\''name/key'"));
 }
+
+#[test]
+fn http_and_https_remotes_get_scheme_distinct_host_keys() {
+    // host_key 必须带协议：https 保存的凭据不能明文重放给同域 http。
+    let https = remote_metadata("https://git.internal.example/team/repo.git").unwrap();
+    let http = remote_metadata("http://git.internal.example/team/repo.git").unwrap();
+    assert_eq!(https.host_key, "https://git.internal.example");
+    assert_eq!(http.host_key, "http://git.internal.example");
+    assert_ne!(https.host_key, http.host_key);
+}

@@ -207,3 +207,30 @@ fn oversized_file_returns_none() {
     assert_eq!(OFFICE_EXTRACT_MAX_FILE_BYTES, 3 * 1024 * 1024);
     assert_eq!(OFFICE_EXTRACT_MAX_ENTRY_BYTES, 8 * 1024 * 1024);
 }
+
+#[test]
+fn xlsx_gap_cells_pad_empty_columns_by_r_reference() {
+    // A1 有值、B1 被 xlsx 省略、C1 有值：B 位必须补空串，
+    // 否则删除中间值后行整体左移、与旧行 diff 列错位。
+    let sheet = "<worksheet><sheetData>\
+        <row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"C1\" t=\"s\"><v>1</v></c></row>\
+        <row r=\"2\"><c r=\"A2\"><v>1</v></c><c r=\"B2\"><f>SUM(1)</f></c><c r=\"C2\"><v>3</v></c></row>\
+        </sheetData></worksheet>";
+    let lines = office_text_lines("gap.xlsx", &xlsx_bytes(sheet, None)).unwrap();
+    assert_eq!(
+        lines,
+        vec![
+            "姓名\t\t富文本拼接", // B1 空位 = 连续制表符
+            "1\t\t3",             // B2 只含未计算公式 <f>：空串占位
+        ]
+    );
+}
+
+#[test]
+fn docx_w_cr_soft_break_splits_lines() {
+    let xml = "<w:document><w:body>\
+        <w:p><w:r><w:t>软换行前</w:t><w:cr/><w:t>软换行后</w:t></w:r></w:p>\
+        </w:body></w:document>";
+    let lines = office_text_lines("cr.docx", &docx_bytes(xml)).unwrap();
+    assert_eq!(lines, vec!["软换行前", "软换行后"]);
+}

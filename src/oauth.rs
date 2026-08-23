@@ -311,14 +311,17 @@ where
             Ok((mut stream, _)) => {
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                 if let Some((code, cb_state, err)) = read_callback_request(&mut stream) {
-                    let _ = respond_callback_success(&mut stream);
+                    // 先校验再回页：授权被拒/state 校验失败时不该给浏览器回
+                    // 一张「登录成功」页。
                     if let Some(err) = err {
                         return Err(format!("Gitee 拒绝授权：{err}"));
                     }
                     if cb_state.as_deref() != Some(state.as_str()) {
                         return Err("授权 state 校验失败，已放弃以防 CSRF".into());
                     }
-                    break code.ok_or_else(|| "回调未携带授权码".to_string())?;
+                    let code = code.ok_or_else(|| "回调未携带授权码".to_string())?;
+                    let _ = respond_callback_success(&mut stream);
+                    break code;
                 }
                 // 没读到有效请求行：继续等下一个连接。
             }

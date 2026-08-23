@@ -380,7 +380,10 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(12.0))
                     .text_color(rgb(name_color))
-                    .truncate()
+                    // uniform_list 行禁 truncate（MinContent 测量坍缩后省略号
+                    // 固化到绘制），硬裁剪替代。
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(entry.name),
             )
     }

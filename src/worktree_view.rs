@@ -564,7 +564,10 @@ impl RepositoryView {
                 .min_w(px(0.0))
                 .text_size(px(12.0))
                 .text_color(rgb(ui_theme::FOREGROUND))
-                .truncate()
+                // uniform_list 行禁 truncate（MinContent 测量坍缩后省略号
+                // 固化到绘制），硬裁剪替代。
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .child(change.path),
         )
         // 设计图：行内图标按钮 20×20

@@ -859,11 +859,26 @@ impl RepositoryView {
     }
 
     pub(crate) fn workflow_input_field(&self, index: usize) -> &TextFieldState {
-        &self.workflow_state.inputs[index].field
+        // 直接索引会在 inputs 被异步重建后越界 panic（FieldId 跨重建存活的
+        // 场景：IME 组合中/暂存焦点）。回退 branch_name 满足借用契约，
+        // 与 WorkflowEditor 分支的 Option 化处理同构。
+        self.workflow_state
+            .inputs
+            .get(index)
+            .map(|input| &input.field)
+            .unwrap_or(&self.branch_name)
     }
 
     pub(crate) fn workflow_input_field_mut(&mut self, index: usize) -> &mut TextFieldState {
-        &mut self.workflow_state.inputs[index].field
+        // 借用隔离（同 workflow_editor_field_or_fallback 的探测-分路技巧）：
+        // workflow_state 经 Deref 落在 RepoTabState 上，match 写法会让
+        // scrutinee 的借用横跨两臂。越界（inputs 异步重建后 FieldId 仍被
+        // 寻址的瞬态）回落 branch_name，与只读版兜底一致、不 panic。
+        if self.workflow_state.inputs.get(index).is_some() {
+            &mut self.workflow_state.inputs[index].field
+        } else {
+            &mut self.branch_name
+        }
     }
 
     pub(crate) fn focused_workflow_input(&self, window: &Window) -> Option<FieldId> {

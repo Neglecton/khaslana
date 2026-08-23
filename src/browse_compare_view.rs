@@ -429,7 +429,9 @@ impl RepositoryView {
                             .min_w(px(0.0))
                             .text_size(px(ui_theme::TYPE_BODY))
                             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .truncate()
+                            // uniform_list 行禁 truncate，硬裁剪替代。
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .child(row.name),
                     )
             }
@@ -481,7 +483,9 @@ impl RepositoryView {
                             .min_w(px(0.0))
                             .text_size(px(ui_theme::TYPE_BODY))
                             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .truncate()
+                            // uniform_list 行禁 truncate，硬裁剪替代。
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .child(display),
                     )
             }

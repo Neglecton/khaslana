@@ -585,6 +585,11 @@ impl ChatClient {
         // “供应商响应格式异常”与“有响应但没有内容”）。
         let mut valid_chunks = 0usize;
         let mut malformed_data_lines = 0usize;
+        // 截断诊断信号（与 agent 路径同一套语义）：是否收到 [DONE]、最后
+        // 的 finish_reason。缺失即按失败处理——网关优雅断流时半截结果不能
+        // 当成功返回（冲突合并建议最坏会把截断段拼进草稿被用户应用）。
+        let mut saw_done = false;
+        let mut finish_reason: Option<String> = None;
         for line in reader.lines() {
             let line = line.map_err(|err| GitError::Message(format!("AI 流读取失败：{err}")))?;
             match parse_sse_line(&line) {
@@ -603,9 +608,17 @@ impl ChatClient {
                                 on_delta(StreamDelta::Reasoning(text));
                             }
                         }
+                        if let Some(reason) = choice.finish_reason
+                            && !reason.is_empty()
+                        {
+                            finish_reason = Some(reason);
+                        }
                     }
                 }
-                Some(SseLineResult::Done) => break,
+                Some(SseLineResult::Done) => {
+                    saw_done = true;
+                    break;
+                }
                 None => {
                     if line.trim_start().starts_with("data:") {
                         malformed_data_lines += 1;
@@ -618,6 +631,13 @@ impl ChatClient {
                 target: "khaslana::ai",
                 "AI 响应流中有 {malformed_data_lines} 行 data 数据解析失败"
             );
+        }
+        if let Some(message) = plain_stream_truncation_message(
+            saw_done,
+            finish_reason.as_deref(),
+            self.settings.max_tokens,
+        ) {
+            return Err(GitError::Message(message));
         }
 
         // 结束后统一剥离 `<think>`，与非流式逻辑一致。
@@ -989,6 +1009,34 @@ pub fn agent_stream_truncation_message(
              （疑似供应商网关掐断了连接）"
                 .to_string(),
         ));
+    }
+    None
+}
+
+/// 一次性生成流（commit message / 冲突合并建议 / 工作流模板）结束后的
+/// 截断判定（纯函数，可单测）。条件与 `agent_stream_truncation_message`
+/// 相同、文案面向单次生成场景（无重试语义）：
+/// 1. `finish_reason=length` —— 输出触及 max_tokens 上限被切断；
+/// 2. 未收到 `[DONE]` —— 连接在流完成前被供应商/网关中断。
+/// 两者无论已产出多少正文都判不完整——放行会出现「生成看似完成实为
+/// 半句话且无报错」，冲突合并建议甚至会把截断段拼进草稿。
+pub fn plain_stream_truncation_message(
+    saw_done: bool,
+    finish_reason: Option<&str>,
+    max_tokens: u32,
+) -> Option<String> {
+    if finish_reason == Some("length") {
+        return Some(format!(
+            "AI 输出触及 max_tokens 上限（{max_tokens}）被截断，已生成的内容不完整\
+             （reasoning 模型的思考与正文共用输出预算）；请重试或调大输出上限"
+        ));
+    }
+    if !saw_done {
+        return Some(
+            "AI 响应流在完成前被中断（未收到结束标记），已生成的内容不完整\
+             （疑似供应商网关掐断了连接），请重试"
+                .to_string(),
+        );
     }
     None
 }

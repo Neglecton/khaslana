@@ -2430,6 +2430,14 @@ impl TabCredentialProvider {
             return stored.credential.clone();
         }
 
+        // single-flight：凭据回调可能同时发生在多个 long 线程（多仓库并发
+        // fetch/push），双发同一 refresh_token 会浪费一次轮换甚至双双失败；
+        // 已有刷新在途时本次直接沿用旧令牌（下次操作会再触发）。
+        static GITEE_REFRESH_IN_FLIGHT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let Ok(_flight_guard) = GITEE_REFRESH_IN_FLIGHT.try_lock() else {
+            return stored.credential.clone();
+        };
+
         let proxy_url = self
             .proxy_settings
             .proxy_url_for_target("https://gitee.com/");
@@ -2442,16 +2450,46 @@ impl TabCredentialProvider {
                     .refresh_token
                     .clone()
                     .unwrap_or(payload.refresh_token);
-                let next_expires = refreshed.expires_at.unwrap_or(payload.expires_at);
+                // 响应缺 expires_in 时不能沿用旧值（已在提前量内会立刻再次
+                // 触发刷新）：兜底前移 12h（Gitee 典型 24h 的一半）。
+                let next_expires = refreshed.expires_at.unwrap_or_else(|| now + 12 * 3600);
                 if let Err(err) = self.store.update_secret(&stored.record.id, &new_token) {
                     tracing::warn!("Gitee 令牌续期后写回失败：{err}");
                 }
+                // 轮换出的新 refresh_token 若写回失败，存储里留下的是已被
+                // 消费的旧 token，自动续期从此静默失效——必须提示用户重新
+                // 登录，不能只记日志。
                 if let Err(err) = khaslana::credentials::save_gitee_refresh_payload(
                     &stored.record.id,
                     &next_refresh,
                     next_expires,
                 ) {
-                    tracing::warn!("Gitee 续期材料更新失败：{err}");
+                    send_ui_event(
+                        &self.tx,
+                        UiEvent::GiteeTokenRefreshed {
+                            success: false,
+                            message: format!(
+                                "Gitee 令牌已续期，但续期材料保存失败（{err}）；请重新登录 Gitee 恢复自动续期"
+                            ),
+                        },
+                    );
+                    // 本操作仍用新令牌（内存中已刷新）；仅持久化受损。
+                    return match stored.credential.clone() {
+                        GitCredential::UserPass {
+                            username,
+                            secret: _,
+                            display_name,
+                            save_to_keyring,
+                            scope,
+                        } => GitCredential::UserPass {
+                            username,
+                            secret: new_token,
+                            display_name,
+                            save_to_keyring,
+                            scope,
+                        },
+                        other => other,
+                    };
                 }
                 send_ui_event(
                     &self.tx,
@@ -3464,42 +3502,50 @@ impl RepositoryView {
     }
 
     fn scroll_local_branch_to_current(&self) {
+        // 旧实现用的是 Stateful<Div> 列表的 bounds_for_item /
+        // scroll_to_top_of_item——侧边栏改为单一 uniform_list 后这两个 API
+        // 静默 no-op，手算几何也按旧模型的行高/间隙估算（现模型 36px 定高
+        // 无间隙，且行号需包含分组标题/搜索框占位）。改为重建展平模型定位
+        // 行号，交给 uniform_list 的滚动目标机制。
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
-        let Some(index) = snapshot
+        let Some(head_branch_index) = snapshot
             .branches
             .iter()
-            .filter(|branch| branch.kind == BranchKind::Local)
-            .position(|branch| branch.is_head)
+            .position(|branch| branch.kind == BranchKind::Local && branch.is_head)
         else {
             return;
         };
-
-        let handle = self.scroll_handle("local-branch-list");
-        let bounds = handle.bounds();
-        let max_offset = f32::from(handle.max_offset().height).max(0.0);
-        if max_offset <= 1.0 || f32::from(bounds.size.height) <= 1.0 {
-            handle.scroll_to_top_of_item(index);
+        let local_query = if self.sidebar_local_branch_search_open {
+            self.sidebar_local_branch_search.value.trim()
+        } else {
+            ""
+        };
+        let remote_query = if self.sidebar_remote_branch_search_open {
+            self.sidebar_remote_branch_search.value.trim()
+        } else {
+            ""
+        };
+        let items = sidebar_view::sidebar_navigation_items(
+            &snapshot.branches,
+            snapshot.remotes.len(),
+            snapshot.tags.len(),
+            snapshot.stashes.len(),
+            self.sidebar_sections,
+            self.sidebar_local_branch_search_open,
+            local_query,
+            self.sidebar_remote_branch_search_open,
+            remote_query,
+            self.loading.remote(),
+        );
+        let Some(row) = items.iter().position(|item| {
+            matches!(item, sidebar_view::SidebarNavItem::Branch(index) if *index == head_branch_index)
+        }) else {
             return;
-        }
-
-        let item_top = handle
-            .bounds_for_item(index)
-            .map(|item_bounds| f32::from(item_bounds.top() - bounds.top()))
-            .unwrap_or_else(|| {
-                let list_padding = 8.0;
-                let row_gap = 4.0;
-                list_padding + index as f32 * (NAV_ROW_HEIGHT + row_gap)
-            });
-        let row_height = handle
-            .bounds_for_item(index)
-            .map(|item_bounds| f32::from(item_bounds.size.height))
-            .unwrap_or(NAV_ROW_HEIGHT);
-        let viewport_height = f32::from(bounds.size.height);
-        let target_scroll =
-            (item_top - viewport_height / 2.0 + row_height / 2.0).clamp(0.0, max_offset);
-        handle.set_offset(point(px(0.0), px(-target_scroll)));
+        };
+        self.uniform_scroll_handle("local-branch-list")
+            .scroll_to_item(row, ScrollStrategy::Center);
     }
 
     pub(crate) fn uniform_scroll_handle(&self, id: &'static str) -> UniformListScrollHandle {
@@ -5678,6 +5724,16 @@ impl RepositoryView {
                     tab.history_loading = HistoryLoading::default();
                 }
                 self.active_repository_loads = 0;
+                // 全局一次性标志同样复位：AI 生成（commit/冲突合并）、思考
+                // 弹窗、全局 busy 槽位、更新下载与工作流编辑器的 AI 生成
+                // 标志——任何一项卡死都会永久阻断对应入口（按钮禁用 /
+                // 「已有操作正在运行」）。
+                self.ai_commit_loading = false;
+                self.ai_conflict_loading = false;
+                self.ai_thinking_overlay = None;
+                self.global_busy_tab = None;
+                self.update_downloading = false;
+                self.reset_ai_loading_after_panic();
                 self.status = "后台任务异常".into();
                 self.notify_toast(
                     AppToastKind::Error,
@@ -6515,6 +6571,8 @@ impl RepositoryView {
         self.commit_graph_branch_search.clear();
         self.context_navigator_overlay_open = false;
         self.close_repo_switcher();
+        // 工作流编辑器的下拉（类型/守卫）在弹窗关闭时一并收起，防陈旧态。
+        self.workflow_editor_close_menus();
     }
 
     /// 切换仓库切换下拉的展开/收起；展开时菜单固定在触发器按钮正下方（按记录的锚点定位）。
@@ -6567,6 +6625,7 @@ impl RepositoryView {
             || self.commit_context_menu.is_some()
             || self.workflow_template_context_menu.is_some()
             || self.encoding_menu_target.is_some()
+            || self.workflow_editor_menu_open()
     }
 
     pub(crate) fn toggle_sidebar_section(&mut self, section: SidebarSection) {

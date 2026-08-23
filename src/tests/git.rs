@@ -4940,3 +4940,58 @@ fn diff_for_untracked_docx_in_subdirectory_shows_extracted_lines() {
         "office 提取钩子需要 delta 存在——子目录未跟踪 docx 也应提取出文本"
     );
 }
+
+#[test]
+fn oversized_office_file_falls_back_without_loading() {
+    // >3MB 的 docx（含不可压缩随机条目撑大体积）：先检后载守卫应在
+    // 读文件前就用 stat 尺寸拒绝，回退二进制占位路径（无提取行）。
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+
+    // LCG 伪随机字节：不可压缩，确保 zip 文件本体超 3MB。
+    let mut noise = Vec::with_capacity(4 * 1024 * 1024);
+    let mut state: u64 = 0x2545F4914F6CDD1D;
+    for _ in 0..4 * 1024 * 1024 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        noise.push((state >> 33) as u8);
+    }
+    let mut entries = vec![(
+        "word/document.xml",
+        "<w:document><w:body><w:p><w:r><w:t>巨大文档</w:t></w:r></w:p></w:body></w:document>"
+            .as_bytes()
+            .to_vec(),
+    )];
+    entries.push(("assets/noise.bin", noise));
+    let bytes = office_zip_bytes(
+        &entries
+            .iter()
+            .map(|(name, content)| (*name, content.clone()))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        bytes.len() as u64 > 3 * 1024 * 1024,
+        "测试前提：zip 本体需超 3MB，实际 {}",
+        bytes.len()
+    );
+    git_support::write_bytes(dir.path(), "big.docx", &bytes);
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("big.docx"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert!(diff.is_binary);
+    assert!(
+        diff.lines
+            .iter()
+            .all(|line| line.kind == DiffLineKind::Header),
+        "超限文件不应有提取行（占位卡路径）"
+    );
+}

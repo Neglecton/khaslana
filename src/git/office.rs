@@ -14,7 +14,7 @@ use std::io::Read;
 
 /// 提取入口的文件体积上限：与全文差异视图同一档（`FULL_FILE_MAX_BYTES`），
 /// 超限的 Office 文档不做提取（避免超大文档解压内存峰值）。
-const OFFICE_EXTRACT_MAX_FILE_BYTES: u64 = 3 * 1024 * 1024;
+pub(crate) const OFFICE_EXTRACT_MAX_FILE_BYTES: u64 = 3 * 1024 * 1024;
 /// 单个 ZIP 条目解压后的体积上限：document.xml / sheet XML 可能远大于
 /// 压缩体积，解压前先看声明大小，超限放弃。
 const OFFICE_EXTRACT_MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
@@ -65,8 +65,13 @@ fn read_entry(
     if entry.size() > OFFICE_EXTRACT_MAX_ENTRY_BYTES {
         return None;
     }
+    // take() 硬限解压体积：头部声明的大小不可信（损坏/恶意 zip 可声明小
+    // 尺寸实际解压更大），不能只靠事后检查（内存已经分配）。
     let mut out = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut out).ok()?;
+    entry
+        .take(OFFICE_EXTRACT_MAX_ENTRY_BYTES)
+        .read_to_end(&mut out)
+        .ok()?;
     if out.len() as u64 > OFFICE_EXTRACT_MAX_ENTRY_BYTES {
         return None;
     }
@@ -191,6 +196,10 @@ fn paragraph_text_lines(element: &str, text_tag: &str) -> Vec<String> {
     let mut lines = vec![String::new()];
     let tab = "<w:tab";
     let br = "<w:br";
+    // w:cr 是软换行（部分转换器/生成器用它代替 w:br），同样拆行。
+    let cr = "<w:cr";
+    // 注意：开标签模式不含 '>'（前缀匹配 + is_tag_boundary 判定下一个
+    // 字符），带上 '>' 会把所有匹配送进边界检查的内容字符而被过滤光。
     let text_open = format!("<{text_tag}");
     let text_close = format!("</{text_tag}>");
     let mut pos = 0;
@@ -206,11 +215,15 @@ fn paragraph_text_lines(element: &str, text_tag: &str) -> Vec<String> {
             .find(br)
             .map(|o| (pos + o, 1))
             .filter(|(at, _)| is_tag_boundary(&element[*at + br.len()..]));
+        let next_cr = element[pos..]
+            .find(cr)
+            .map(|o| (pos + o, 1))
+            .filter(|(at, _)| is_tag_boundary(&element[*at + cr.len()..]));
         let next_text = element[pos..]
             .find(&text_open)
             .map(|o| (pos + o, 2))
             .filter(|(at, _)| is_tag_boundary(&element[*at + text_open.len()..]));
-        let Some((at, which)) = [next_tab, next_br, next_text]
+        let Some((at, which)) = [next_tab, next_br, next_cr, next_text]
             .into_iter()
             .flatten()
             .min_by_key(|(at, which)| (*at, *which))
@@ -223,8 +236,14 @@ fn paragraph_text_lines(element: &str, text_tag: &str) -> Vec<String> {
                 pos = at + tab.len();
             }
             1 => {
+                // w:br / w:cr 拆行
                 lines.push(String::new());
-                pos = at + br.len();
+                pos = at
+                    + if element[at..].starts_with(br) {
+                        br.len()
+                    } else {
+                        cr.len()
+                    };
             }
             _ => {
                 // 文本 run：<w:t>…</w:t>（可能有属性，如 xml:space="preserve"）。
@@ -292,30 +311,76 @@ fn shared_string_table(xml: &str) -> Vec<String> {
 
 /// 一行 `<row>` 的单元格文本：以制表符连接。`t="s"` 查共享表、
 /// `t="inlineStr"` 取内联 `<is><t>`、其余（数字/日期/公式值）取 `<v>` 原文。
+///
+/// 按 `r="A1"` 列引用对齐列位：xlsx 会**省略空单元格**，只连接存在的
+/// 单元格会让删除中间值后的行整体左移、与旧行 diff 列错位——空位补空串
+/// （连续制表符）。只含 `<f>`（未计算公式）无 `<v>` 的单元格按空串；
+/// 无 `r` 属性的非常规文件退回顺序追加。
 fn row_cells_text(row_element: &str, shared: Option<&[String]>) -> String {
-    let mut cells = Vec::new();
+    let mut cells: Vec<String> = Vec::new();
     for element in scan_elements(row_element, "c") {
         let is_shared = element.contains("t=\"s\"");
         let is_inline = element.contains("t=\"inlineStr\"");
-        if is_shared
+        let text = if is_shared
             && let Some(idx) =
                 tag_inner_text(element, "v").and_then(|v| v.trim().parse::<usize>().ok())
             && let Some(table) = shared
         {
-            cells.push(table.get(idx).cloned().unwrap_or_default());
+            table.get(idx).cloned().unwrap_or_default()
         } else if is_inline {
-            cells.push(
-                scan_elements(element, "is")
-                    .into_iter()
-                    .map(|is_element| paragraph_text_lines(is_element, "t").join(""))
-                    .collect::<Vec<_>>()
-                    .join(""),
-            );
+            scan_elements(element, "is")
+                .into_iter()
+                .map(|is_element| paragraph_text_lines(is_element, "t").join(""))
+                .collect::<Vec<_>>()
+                .join("")
         } else if let Some(value) = tag_inner_text(element, "v") {
-            cells.push(decode_xml_entities(value));
+            decode_xml_entities(value)
+        } else {
+            // 空 `<c/>` 或只含未计算公式 `<f>` 的单元格：占位空串。
+            String::new()
+        };
+        match cell_column_index(element) {
+            Some(column) => {
+                while cells.len() < column {
+                    cells.push(String::new());
+                }
+                if column < cells.len() {
+                    cells[column] = text;
+                } else {
+                    cells.push(text);
+                }
+            }
+            None => cells.push(text),
         }
     }
     cells.join("\t")
+}
+
+/// 单元格 `r="BC12"` 的 0-based 列号（A=0、Z=25、AA=26…）；无 r 属性、
+/// 非法或溢出的列号返回 None。只在开标签内查找——`<v>` 的文本值里
+/// 同样可能出现 `r="` 字样；r 值里的行号数字（"C1" 的 1）不属于列号，
+/// 只取前导字母段。
+fn cell_column_index(element: &str) -> Option<usize> {
+    let open_tag_end = element.find('>')?;
+    let open_tag = &element[..open_tag_end];
+    let r_start = open_tag.find(" r=\"")? + 4;
+    let rest = &open_tag[r_start..];
+    let r_end = rest.find('"')?;
+    let ref_value = &rest[..r_end];
+    let letters: &str = ref_value
+        .split_once(|ch: char| ch.is_ascii_digit() || !ch.is_ascii_alphabetic())
+        .map(|(letters, _)| letters)
+        .unwrap_or(ref_value);
+    if letters.is_empty() {
+        return None;
+    }
+    let mut column = 0usize;
+    for ch in letters.bytes() {
+        column = column
+            .checked_mul(26)?
+            .checked_add((ch.to_ascii_uppercase() - b'A') as usize + 1)?;
+    }
+    Some(column - 1)
 }
 
 /// 取元素内 `<{tag}>…</{tag}>` 的首段文本（无则 None）。

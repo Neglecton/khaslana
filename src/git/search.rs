@@ -158,6 +158,9 @@ struct SearchContext<'a> {
 /// 扫描数达上限同样剪枝——否则只是跳过 blob 读取，树遍历本身与每棵
 /// 子树的 `to_object` 加载仍会走完全仓库。
 fn walk_tree(context: &mut SearchContext<'_>, tree: &Tree<'_>, prefix: String) {
+    // prefix 恒为 `a/b/` 形态（尾随 '/'，根为空串）：初始调用来自
+    // normalize_path_prefix，递归调用在 Tree 分支补尾斜杠——两侧约定
+    // 一致才能既不出双斜杠、递归层也不丢分隔符。
     for entry in tree.iter() {
         if context.remaining == 0 || context.scanned >= SEARCH_FILE_SCAN_LIMIT {
             return;
@@ -166,17 +169,13 @@ fn walk_tree(context: &mut SearchContext<'_>, tree: &Tree<'_>, prefix: String) {
         if name.is_empty() {
             continue;
         }
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let path = format!("{prefix}{name}");
         match entry.kind() {
             Some(ObjectType::Tree) => {
                 if let Ok(child) = entry.to_object(context.repo)
                     && let Ok(child) = child.into_tree()
                 {
-                    walk_tree(context, &child, path);
+                    walk_tree(context, &child, format!("{path}/"));
                 }
             }
             // 子模块不搜索。

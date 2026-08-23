@@ -1312,6 +1312,23 @@ impl WorkflowEditorState {
     }
 }
 
+/// 步骤类型下拉菜单滚动区的 'static id：按 index 惰性生成一次并缓存
+/// （渲染闭包每帧取用，不能每帧泄漏新串）。
+fn workflow_step_menu_scroll_id(index: usize) -> &'static str {
+    static CACHE: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if index >= cache.len() {
+        cache.resize(index + 1, "");
+    }
+    if cache[index].is_empty() {
+        cache[index] =
+            Box::leak(format!("workflow-editor-step-kind-{index}-menu").into_boxed_str());
+    }
+    cache[index]
+}
+
 impl RepositoryView {
     /// 打开「新建工作流模板」编辑器。
     pub(crate) fn open_workflow_editor(&mut self, cx: &mut Context<Self>) {
@@ -1554,6 +1571,25 @@ impl RepositoryView {
     }
 
     /// 守卫策略下拉是否展开。
+    /// 任一编辑器下拉（类型/守卫）是否打开（main.rs 的 any_popup_menu_open
+    /// 引用，弹层打开期间分割线等交互门控与其它菜单一致）。
+    pub(crate) fn workflow_editor_menu_open(&self) -> bool {
+        self.workflow_editor
+            .as_ref()
+            .is_some_and(|state| state.kind_menu_open.is_some() || state.guard_menu_open.is_some())
+    }
+
+    /// 关闭编辑器的全部下拉菜单；返回是否有菜单被关闭（决定是否 notify）。
+    pub(crate) fn workflow_editor_close_menus(&mut self) -> bool {
+        let Some(state) = self.workflow_editor.as_mut() else {
+            return false;
+        };
+        let had_open = state.kind_menu_open.is_some() || state.guard_menu_open.is_some();
+        state.kind_menu_open = None;
+        state.guard_menu_open = None;
+        had_open
+    }
+
     pub(crate) fn workflow_editor_guard_menu_open(&self, index: usize, on_exists: bool) -> bool {
         self.workflow_editor
             .as_ref()
@@ -1879,6 +1915,14 @@ impl RepositoryView {
         if let Some(state) = self.workflow_editor.as_mut() {
             state.ai_loading = false;
             state.data.error = Some(format!("AI 生成失败：{error}"));
+        }
+    }
+
+    /// 后台任务 panic 后的兜底复位（由 BackgroundTaskPanicked 调用）：
+    /// ai_loading 是私有字段且失败路径还需要写错误条，统一走编辑器模块。
+    pub(crate) fn reset_ai_loading_after_panic(&mut self) {
+        if let Some(state) = self.workflow_editor.as_mut() {
+            state.ai_loading = false;
         }
     }
 
@@ -2260,6 +2304,10 @@ impl RepositoryView {
                         .bg(rgb(ui_theme::CARD))
                         .cursor_pointer()
                         .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                        // 同类型触发器：阻断 mouse_down 冒泡保住 toggle 语义。
+                        .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.workflow_editor_toggle_guard_menu(index, on_exists);
                             cx.notify();
@@ -2394,9 +2442,18 @@ impl RepositoryView {
             .flex()
             .flex_col()
             .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
-                cx.stop_propagation();
-            })
+            // 弹窗空白处点击收起步骤下拉（类型/守卫菜单）：模态遮罩挡住根层
+            // capture，这些菜单无法走全局「点外部关闭」链，由弹窗壳层兜底；
+            // 菜单本体已 stop_propagation，点击菜单项不会到达这里。
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    if this.workflow_editor_close_menus() {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
             // 顶栏：标题 + 副标题 + 关闭
             .child(
                 div()
@@ -2994,6 +3051,11 @@ impl RepositoryView {
                 .rounded(px(ui_theme::RADIUS_XS))
                 .cursor_pointer()
                 .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                // 阻断 mouse_down 冒泡：否则弹窗壳层的「收起菜单」先执行，
+                // 随后的 toggle 又把菜单打开，触发器永远关不掉菜单。
+                .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                    cx.stop_propagation();
+                })
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.workflow_editor_toggle_kind_menu(index);
                     cx.notify();
@@ -3012,8 +3074,10 @@ impl RepositoryView {
                 ),
         );
         if menu_open {
-            let menu_scroll_id: &'static str =
-                Box::leak(format!("{menu_id}-menu").into_boxed_str());
+            // 滚动 id 按 index 惰性生成一次并缓存（scrollable_frame_when 要求
+            // 'static id）：这里每帧执行，直接 Box::leak 会让开着菜单的每一帧
+            // 都泄漏一个新字符串、无限增长。
+            let menu_scroll_id = workflow_step_menu_scroll_id(index);
             let handle = self.scroll_handle(menu_scroll_id);
             kind_dropdown = kind_dropdown.child(
                 gpui::deferred(

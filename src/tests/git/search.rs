@@ -143,7 +143,13 @@ fn search_code_path_prefix_limits_scope() {
     let matches = service
         .search_code(&repo, &oid, "alpha", false, Some("src"), 50)
         .unwrap();
-    assert!(matches.iter().all(|m| m.path.starts_with("src/")));
+    // 精确路径断言：前缀拼接曾产出 "src//lib.rs" 这类双斜杠畸形路径，
+    // starts_with 断言无法暴露。
+    assert!(
+        matches
+            .iter()
+            .all(|m| { m.path.starts_with("src/") && !m.path.contains("//") })
+    );
     assert_eq!(matches.len(), 3);
 
     // 前缀带斜杠/空白也能归一化。

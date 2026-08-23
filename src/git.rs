@@ -2320,6 +2320,15 @@ impl GitService {
         let new_size = (status != git2::Delta::Deleted)
             .then(|| delta_side_size(repo, delta.new_file()))
             .flatten();
+        // 先检后载：`delta_side_size` 走 ODB 对象头/stat（不加载内容），任一
+        // 侧超限直接回退二进制占位卡——否则紧凑视图（不走 guard_full_file_size）
+        // 会先把几百 MB 的 blob 整体 inflate 进内存/把工作区大文件整个
+        // fs::read 进来，再被 office_text_lines 的上限拒绝。
+        if old_size.is_some_and(|size| size > office::OFFICE_EXTRACT_MAX_FILE_BYTES)
+            || new_size.is_some_and(|size| size > office::OFFICE_EXTRACT_MAX_FILE_BYTES)
+        {
+            return None;
+        }
 
         // 侧字节：优先按 blob id 读 ODB（树/index 侧必经此路）；id 为零
         // （工作区/未跟踪）时读工作区文件，读取失败按提取失败回退。

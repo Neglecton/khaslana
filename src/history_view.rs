@@ -636,7 +636,10 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .text_size(px(12.0))
                     .text_color(rgb(ui_theme::FOREGROUND))
-                    .truncate()
+                    // uniform_list 行禁 truncate（MinContent 测量坍缩后省略号
+                    // 固化），硬裁剪替代。
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(path_label),
             )
     }
@@ -716,7 +719,9 @@ pub(crate) fn commit_row_content(
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(rgb(ui_theme::FOREGROUND))
-                        .truncate()
+                        // uniform_list 行禁 truncate，硬裁剪替代（见上）。
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .child(commit.summary.clone()),
                 )
                 .children(ref_labels)
@@ -733,7 +738,14 @@ pub(crate) fn commit_row_content(
                 .text_size(px(10.0))
                 .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                 .child(author_avatar(&author))
-                .child(div().max_w(px(76.0)).truncate().child(author))
+                // uniform_list 行禁 truncate：max_w 定宽 + overflow_hidden 硬裁剪。
+                .child(
+                    div()
+                        .max_w(px(76.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(author),
+                )
                 .child(div().flex_none().child(time))
                 .child(
                     div()

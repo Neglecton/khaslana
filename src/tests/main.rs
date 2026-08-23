@@ -1682,3 +1682,16 @@ fn is_gitee_https_record_matches_host_key_form_only() {
     record.host = "ssh://gitee.com".into();
     assert!(!TabCredentialProvider::is_gitee_https_record(&record));
 }
+
+// 凭据测试通过必须走气泡（与代理/AI 测试一致）：此前「凭据测试通过」不含
+// 任何已收录关键词，只有状态栏小字。
+#[test]
+fn should_toast_completion_accepts_test_passed_messages() {
+    assert!(RepositoryView::should_toast_completion("凭据测试通过"));
+    assert!(RepositoryView::should_toast_completion("代理测试通过"));
+    // 非完成语义的消息仍然不打扰
+    assert!(!RepositoryView::should_toast_completion("正在测试凭据连接"));
+    assert!(!RepositoryView::should_toast_completion(
+        "已发现 3 个 SSH 私钥"
+    ));
+}

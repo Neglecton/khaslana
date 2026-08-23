@@ -469,6 +469,12 @@ impl CredentialStore for MemoryCredentialStore {
 
 pub struct KeyringCredentialStore {
     initialized: Mutex<bool>,
+    /// 索引互斥锁：store 实例被多标签页的凭据回调（long 线程池）共享，
+    /// 所有 load→mutate→save_index 序列必须持锁执行——save_credential_records
+    /// 是全表 DELETE+重插，两个交错的读改写会静默丢失对方的记录（丢掉的
+    /// 记录其 Keyring 密文成为 UI 不可见、无法删除的孤儿）。只读路径
+    /// （load_index/list_records）不持锁。
+    index_lock: Mutex<()>,
     storage: Arc<AppStorage>,
 }
 
@@ -476,6 +482,7 @@ impl KeyringCredentialStore {
     pub fn new() -> Result<Self> {
         Ok(Self {
             initialized: Mutex::new(false),
+            index_lock: Mutex::new(()),
             storage: Arc::new(AppStorage::open_default()?),
         })
     }
@@ -483,6 +490,7 @@ impl KeyringCredentialStore {
     pub fn new_with_recreated_database() -> Result<Self> {
         Ok(Self {
             initialized: Mutex::new(false),
+            index_lock: Mutex::new(()),
             storage: Arc::new(AppStorage::recreate_default_after_failure()?),
         })
     }
@@ -490,6 +498,7 @@ impl KeyringCredentialStore {
     pub fn with_storage_path(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             initialized: Mutex::new(false),
+            index_lock: Mutex::new(()),
             storage: Arc::new(AppStorage::open(path)?),
         })
     }
@@ -497,6 +506,7 @@ impl KeyringCredentialStore {
     pub fn with_storage(storage: Arc<AppStorage>) -> Self {
         Self {
             initialized: Mutex::new(false),
+            index_lock: Mutex::new(()),
             storage,
         }
     }
@@ -572,6 +582,10 @@ impl KeyringCredentialStore {
     }
 
     fn touch_record(&self, record_id: &str) -> Result<Option<CredentialRecord>> {
+        let _index_guard = self
+            .index_lock
+            .lock()
+            .map_err(|_| GitError::Credential("凭据索引锁状态异常".to_string()))?;
         let mut index = self.load_index()?;
         let now = next_record_timestamp(&index.records);
         let touched = index
@@ -581,8 +595,9 @@ impl KeyringCredentialStore {
         let Some(touched) = touched else {
             return Ok(None);
         };
+        // 只更新 last_used：updated_at 保持创建/修改语义（与 Memory store
+        // 的注释约定一致），避免每次凭据命中都覆写导致列表排序漂移。
         touched.last_used = Some(now);
-        touched.updated_at = now;
         let record = touched.clone();
         self.save_index(&index)?;
         Ok(Some(record))
@@ -633,6 +648,10 @@ impl CredentialStore for KeyringCredentialStore {
         credential: &GitCredential,
     ) -> Result<CredentialRecord> {
         self.ensure_store()?;
+        let _index_guard = self
+            .index_lock
+            .lock()
+            .map_err(|_| GitError::Credential("凭据索引锁状态异常".to_string()))?;
         let metadata = remote_metadata(&request.url)
             .ok_or_else(|| GitError::Credential("无法解析远端地址，不能保存凭据".to_string()))?;
         let mut index = self.load_index()?;
@@ -709,6 +728,10 @@ impl CredentialStore for KeyringCredentialStore {
 
     fn delete_record(&self, record_id: &str) -> Result<()> {
         self.ensure_store()?;
+        let _index_guard = self
+            .index_lock
+            .lock()
+            .map_err(|_| GitError::Credential("凭据索引锁状态异常".to_string()))?;
         let mut index = self.load_index()?;
         let removed = index
             .records
@@ -761,6 +784,10 @@ impl CredentialStore for KeyringCredentialStore {
 
     fn update_secret(&self, record_id: &str, secret: &str) -> Result<()> {
         self.ensure_store()?;
+        let _index_guard = self
+            .index_lock
+            .lock()
+            .map_err(|_| GitError::Credential("凭据索引锁状态异常".to_string()))?;
         let index = self.load_index()?;
         let Some(record) = index
             .records
@@ -785,6 +812,10 @@ impl CredentialStore for KeyringCredentialStore {
         remote_url: &str,
     ) -> Result<CredentialRecord> {
         self.ensure_store()?;
+        let _index_guard = self
+            .index_lock
+            .lock()
+            .map_err(|_| GitError::Credential("凭据索引锁状态异常".to_string()))?;
         let metadata = remote_metadata(remote_url)
             .ok_or_else(|| GitError::Credential("无法解析远端地址，不能绑定凭据".to_string()))?;
         let mut index = self.load_index()?;
@@ -1168,7 +1199,10 @@ fn remote_metadata(url: &str) -> Option<RemoteMetadata> {
             return None;
         }
         return Some(RemoteMetadata {
-            host_key: format!("https://{}", host_port.to_ascii_lowercase()),
+            // host_key 携带协议：https 保存的凭据不能明文重放给同域 http
+            // （反之亦然）。旧记录统一为 "https://host"，仍匹配 https 远端；
+            // http 远端需重存一次（一次性成本，无数据丢失）。
+            host_key: format!("{scheme}://{}", host_port.to_ascii_lowercase()),
             protocol_family: if scheme == "https" || scheme == "http" {
                 ProtocolFamily::Https
             } else {
