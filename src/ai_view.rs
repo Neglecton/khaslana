@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_channel::Sender;
-use gpui::{Context, IntoElement, Window, div, point, prelude::*, px};
+use gpui::{Context, IntoElement, Window, canvas, div, point, prelude::*, px};
 use khaslana::{
     AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
 };
@@ -49,6 +49,11 @@ impl RepositoryView {
             reasoning: String::new(),
             content: String::new(),
         });
+        // 复位钉底跟随键：弹窗重开时强制首帧重新钉底（防止与上次生成
+        // 结束时长度恰好相同而跳过）。
+        self.ai_thinking_follow_state
+            .last_key
+            .set((usize::MAX, usize::MAX));
         self.status = title.to_string();
 
         let settings = self.ai_settings.clone();
@@ -103,8 +108,15 @@ impl RepositoryView {
         let content_text = overlay.content.clone();
         let handle = self.scroll_handle("ai-thinking-scroll");
         let has_live = !reasoning.trim().is_empty() || !content_text.trim().is_empty();
+        // 钉底跟随的输入：内容长度变化键 + 独立句柄（canvas 闭包持有，
+        // 原句柄稍后移交给 scrollable_frame_when）。
+        let reasoning_len = reasoning.len();
+        let content_len = content_text.len();
+        let follow_state = self.ai_thinking_follow_state.clone();
+        let follow_handle = handle.clone();
         let content = div()
             .id("ai-thinking-content")
+            .relative()
             .flex()
             .flex_col()
             .w_full()
@@ -131,13 +143,39 @@ impl RepositoryView {
                 )
             })
             // 空白兜底：尚未产出第一片时给出提示，避免空面板。
-            .when(!has_live, |this| this.child("模型思考中…".to_string()));
+            .when(!has_live, |this| this.child("模型思考中…".to_string()))
+            // 钉底跟随：末位零绘制 canvas 的 prepaint 按内容长度变化键
+            // 门控 set_offset（同帧生效 + refresh_windows 补一帧，与冲突
+            // 工作台三栏同步同一模式）。键不变（用户滚动引发的重绘）不
+            // 回弹抢夺视口。prepaint 比事件处理器里直接 set_offset 的优势：
+            // 事件时机的 max_offset 还是上一帧的，会恒落后一帧。
+            .child(
+                canvas(
+                    move |_, _, cx| {
+                        let key = (reasoning_len, content_len);
+                        if follow_state.last_key.get() != key {
+                            follow_state.last_key.set(key);
+                            let max_offset = f32::from(follow_handle.max_offset().height).max(0.0);
+                            follow_handle.set_offset(point(px(0.0), px(-max_offset)));
+                            cx.refresh_windows();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(1.0)),
+            );
 
         dialog_overlay()
             .child(
                 div()
                     .w(px(560.0))
-                    .max_h(px(420.0))
+                    // 固定高度（而非 max_h）：内容流式增长时居中弹窗的上下
+                    // 边缘都会移动，头部「后台运行」按钮跟着漂移难以命中；
+                    // 固定高度让按钮从第一帧起位置恒定。
+                    .h(px(420.0))
                     .p_4()
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
@@ -154,6 +192,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap_2()
                             .child(
@@ -184,24 +223,21 @@ impl RepositoryView {
                                 cx,
                             )),
                     )
-                    .child(div().flex_1().min_h(px(0.0)).child(scrollable_frame_when(
+                    // 滚动结构必须与 AI 评审面板同构（见 ai_view.rs 评审面板
+                    // 处注释）：scrollable_frame_when 直接作为弹窗的 flex 子
+                    // 元素（自带 flex_1 + min_h(0)），不得再包一层
+                    // div().flex_1()——约束不沿多层 flex 收缩链传递，多一层
+                    // 滚动容器就拿不到确定高度，内容会画穿弹窗边界。
+                    .child(scrollable_frame_when(
                         "ai-thinking-scroll",
                         ScrollbarMode::Vertical,
                         content.into_any_element(),
                         handle,
                         true,
                         cx,
-                    ))),
+                    )),
             )
             .into_any_element()
-    }
-
-    /// 思维链增量后把弹窗滚动条钉到底部（跟随最新内容）；用户手动上滚
-    /// 后不做强制回弹的判定成本高且思维链场景价值低，始终跟随。
-    pub(crate) fn scroll_ai_thinking_to_bottom(&self) {
-        let handle = self.scroll_handle("ai-thinking-scroll");
-        let max_offset = f32::from(handle.max_offset().height).max(0.0);
-        handle.set_offset(point(px(0.0), px(-max_offset)));
     }
 
     /// 渲染 AI 供应商设置弹窗。

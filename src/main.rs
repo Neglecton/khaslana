@@ -1366,6 +1366,13 @@ pub(crate) struct AiThinkingOverlayState {
     pub content: String,
 }
 
+/// AI 思考弹窗的钉底跟随状态：prepaint 期按内容长度变化键门控滚动
+/// （键不变不回弹，用户滚动不被抢夺）。Rc 共享给渲染闭包，弹窗打开时
+/// 复位以强制首帧钉底。
+pub(crate) struct AiThinkingFollowState {
+    pub last_key: std::cell::Cell<(usize, usize)>,
+}
+
 /// 分支浏览模式的 per-repository 状态。
 ///
 /// 维护已加载的文件树（按目录懒加载）、展开/选中状态，以及当前文件的只读内容或差异。
@@ -3040,6 +3047,8 @@ pub(crate) struct RepositoryView {
     /// （commit message / 冲突合并建议 / 工作流模板生成）期间展示思维链
     /// 流式输出，任务完成或失败后自动关闭弹窗。
     pub(crate) ai_thinking_overlay: Option<AiThinkingOverlayState>,
+    /// 思考弹窗钉底跟随的跨帧状态（内容长度键），见 `AiThinkingFollowState`。
+    pub(crate) ai_thinking_follow_state: std::rc::Rc<AiThinkingFollowState>,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -3283,6 +3292,9 @@ impl RepositoryView {
             conflict_pane_scroll_sync: Rc::new(RefCell::new(None)),
             ai_conflict_loading: false,
             ai_thinking_overlay: None,
+            ai_thinking_follow_state: std::rc::Rc::new(AiThinkingFollowState {
+                last_key: std::cell::Cell::new((usize::MAX, usize::MAX)),
+            }),
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
@@ -5596,8 +5608,9 @@ impl RepositoryView {
                 if let Some(delta) = content_delta {
                     overlay.content.push_str(&delta);
                 }
-                // 增量驱动滚动跟随到最新内容。
-                self.scroll_ai_thinking_to_bottom();
+                // 钉底跟随不在这里做：事件时机的 max_offset 是上一帧的，
+                // 会恒落后一帧；改由弹窗内容末位 canvas 的 prepaint 按内容
+                // 长度键门控执行（见 render_ai_thinking_overlay）。
             }
             UiEvent::AiConnectionTested { message } => {
                 self.end_global_test_busy();
