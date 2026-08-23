@@ -7,7 +7,7 @@
 
 use gpui::{
     Context, CursorStyle, IntoElement, MouseButton, Stateful, Window, WindowControlArea, div,
-    prelude::*, px,
+    prelude::*, px, svg,
 };
 
 use crate::{
@@ -594,18 +594,14 @@ impl RepositoryView {
             .cursor(CursorStyle::Arrow)
             .window_control_area(WindowControlArea::Drag)
             .child(
-                div()
-                    .flex_none()
+                // v6「负空间分支」应用标志（assets/icons/app-mark.svg）。
+                // svg() 按渲染 alpha 染色：实心方块取主题色 PRIMARY（跟随主题色切换），
+                // 刻痕透出标题栏底色，与桌面 app.ico 同构。
+                svg()
+                    .path("icons/app-mark.svg")
                     .size(px(26.0))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(rgb(theme::PRIMARY))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(theme::PRIMARY_FOREGROUND))
-                    .child("K"),
+                    .text_color(rgb(theme::PRIMARY))
+                    .flex_none(),
             )
             .child(
                 div()

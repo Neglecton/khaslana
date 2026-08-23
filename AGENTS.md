@@ -46,10 +46,10 @@ Khaslana 是一个使用 Rust 编写的桌面 Git 客户端，界面语言以中
 - `Cargo.toml`：包元信息、依赖和构建依赖。
 - `build.rs`：Windows 下嵌入应用图标资源。
 - `installer/khaslana.iss`：Inno Setup 7 安装器脚本（用户级安装，见 §6 发版产物说明），版本经 `/DAppVersion` 注入。
-- `assets/app.ico`：应用图标。
-- `assets/icons/`：应用内自绘矢量图标，当前用于顶部操作栏和工作流入口，通过 `src/assets.rs` 嵌入到 GPUI asset source。
+- `assets/app.ico`：应用图标（11 尺寸 ICO：256/128/96/72/64/48/40/32/24/20/16，覆盖 100%–200% DPI 各视图档；图形为 90% 画布填充的图标变体，比 logo.png 的留白形态更满——桌面图标惯例）。
+- `assets/icons/`：应用内自绘矢量图标，当前用于顶部操作栏和工作流入口，通过 `src/assets.rs` 嵌入到 GPUI asset source；`app-mark.svg` 为 v6「负空间分支」应用标志的单色形态（SVG mask 挖刻痕、只依赖 alpha 通道），titlebar 品牌区经 `svg().text_color(PRIMARY)` 渲染、随主题色换色。
 - `assets/windows/app.rc`：Windows 资源脚本。
-- `logo.png`：项目 logo，目前未被源码直接引用。
+- `logo.png`：项目 logo（v6「负空间分支」设计：靛蓝 #4F46E5 圆角方 + 透明负空间 Git 分支刻痕），目前未被源码直接引用。
 - `src/lib.rs`：库入口，重新导出 Git、凭据和类型模块，供 `main.rs` 使用。
 - `src/assets.rs`：应用自有静态资源入口，将 `assets/icons/` 与 Yororen 内置资源合并注册给 GPUI。
 - `src/types.rs`：领域类型和错误类型的汇总入口；较独立的领域类型放到 `src/types/` 子目录，例如冲突解决类型在 `src/types/conflicts.rs`。

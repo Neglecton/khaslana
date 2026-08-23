@@ -1,0 +1,25 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    v6「负空间分支」应用标志（GUI 内用单色形态）。
+    与 assets/app.ico 同几何（90% 画布填充的图标变体）：
+    实心圆角方 + 透明负空间 Git 分支刻痕（主干竖线 + 左上支线 + 两枚节点）。
+    单色 alpha 蒙版语义：GPUI 的 svg() 按渲染结果的 alpha 通道染色，
+    白色区域 = 实心（取 text_color），mask 黑色刻痕 = 挖空透底，
+    颜色完全由调用方的 text_color（主题色）决定。
+  -->
+  <title>Khaslana 应用标志（负空间分支）</title>
+  <defs>
+    <mask id="carve">
+      <rect x="5" y="5" width="90" height="90" rx="26.47" fill="white"/>
+      <g fill="none" stroke="black" stroke-width="7.28" stroke-linecap="round">
+        <!-- 主干：自下而上 -->
+        <path d="M 60.59 73.82 V 28.82"/>
+        <!-- 支线：主干中部向左上弯出 -->
+        <path d="M 60.59 52.65 C 47.35 52.65, 39.41 46.03, 39.41 36.76"/>
+      </g>
+      <circle cx="39.41" cy="28.82" r="7.28" fill="black"/>
+      <circle cx="60.59" cy="73.82" r="7.28" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="5" y="5" width="90" height="90" rx="26.47" fill="white" mask="url(#carve)"/>
+</svg>
