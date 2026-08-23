@@ -58,6 +58,8 @@ pub(crate) enum WorkflowEditorFieldId {
     VarPart { index: usize, key: bool },
     /// AI 功能需求描述输入框（多行）。
     AiDescription,
+    /// 添加步骤选择器的搜索框。
+    PickerSearch,
 }
 
 /// 输入变量编辑行的子字段。
@@ -460,8 +462,6 @@ pub(crate) struct WorkflowEditorData {
     pub(crate) selected_step: usize,
     pub(crate) inputs: Vec<WorkflowEditorInputRowData>,
     pub(crate) vars: Vec<WorkflowEditorVarRowData>,
-    /// 高级区（inputs/vars）是否展开。
-    pub(crate) advanced_expanded: bool,
     /// 编辑器内错误提示（保存校验失败时显示，弹窗不关闭）。
     pub(crate) error: Option<String>,
     /// 编辑目标文件：None = 新建语义（写模板目录 + file_name）；
@@ -480,64 +480,8 @@ impl Default for WorkflowEditorData {
             selected_step: 0,
             inputs: Vec::new(),
             vars: Vec::new(),
-            advanced_expanded: false,
             error: None,
             editing_path: None,
-        }
-    }
-}
-
-/// 步骤草稿摘要：用于编辑器左侧列表，不做任何校验；未填的必填位置
-/// 显示「（未填写）」。纯函数，可单测。
-pub(crate) fn workflow_step_draft_summary(
-    kind: WorkflowStepKind,
-    step: &WorkflowEditorStepData,
-) -> String {
-    fn or_pending(value: &str) -> std::borrow::Cow<'_, str> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            "（未填写）".into()
-        } else {
-            trimmed.into()
-        }
-    }
-    match kind {
-        WorkflowStepKind::Checkout => format!("切换到分支 {}", or_pending(&step.branch)),
-        WorkflowStepKind::Fetch => {
-            if step.remote.trim().is_empty() {
-                "获取（默认远端）".to_string()
-            } else {
-                format!("获取远端 {}", or_pending(&step.remote))
-            }
-        }
-        WorkflowStepKind::Pull => {
-            if step.remote.trim().is_empty() {
-                "拉取（默认远端）".to_string()
-            } else {
-                format!("拉取远端 {}", or_pending(&step.remote))
-            }
-        }
-        WorkflowStepKind::CreateBranch => format!(
-            "基于 {} 新建分支 {}",
-            or_pending(&step.from),
-            or_pending(&step.name)
-        ),
-        WorkflowStepKind::Merge => format!("合并分支 {}", or_pending(&step.branch)),
-        WorkflowStepKind::Push => {
-            if step.branch.trim().is_empty() {
-                "推送当前分支".to_string()
-            } else {
-                format!("推送分支 {}", or_pending(&step.branch))
-            }
-        }
-        WorkflowStepKind::GuardRemoteBranch => {
-            format!("检查远端分支 {}", or_pending(&step.branch))
-        }
-        WorkflowStepKind::EnsureClean => "检查工作区干净".to_string(),
-        WorkflowStepKind::AssertBranch => format!("断言当前分支为 {}", or_pending(&step.branch)),
-        WorkflowStepKind::FilterBranches => format!("筛选分支 -> {}", or_pending(&step.output)),
-        WorkflowStepKind::DeleteBranches => {
-            format!("删除分支列表 {}", or_pending(&step.branches))
         }
     }
 }
@@ -695,7 +639,6 @@ pub(crate) fn workflow_editor_data_from_definition(
         selected_step: 0,
         inputs,
         vars,
-        advanced_expanded: false,
         error: None,
         editing_path: None,
     }
@@ -731,7 +674,6 @@ pub(crate) fn apply_ai_generated_to_editor_data(
     };
 
     let file_name_empty = data.file_name.trim().is_empty();
-    let has_advanced = !generated.inputs.is_empty() || !generated.vars.is_empty();
     let editing_path = data.editing_path.clone();
     let error = data.error.take();
 
@@ -742,7 +684,6 @@ pub(crate) fn apply_ai_generated_to_editor_data(
         } else {
             data.file_name.clone()
         },
-        advanced_expanded: data.advanced_expanded || has_advanced,
         editing_path,
         error,
         ..generated
@@ -1042,6 +983,160 @@ const WORKFLOW_EDITOR_PRESETS: &[WorkflowEditorPreset] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// 分步向导（纯函数）
+// ---------------------------------------------------------------------------
+
+/// 向导各步的标签（下标即展示顺序，步骤指示器与底部计数共用）。
+pub(crate) const WORKFLOW_WIZARD_STEPS: [&str; 4] = ["基本信息", "操作步骤", "变量设置", "完成"];
+
+/// 「变量设置」步在向导中的下标（绑定条的「去定义」跳转目标）。
+pub(crate) const WIZARD_STEP_VARS: usize = 2;
+
+/// 提取参数值里引用的模板变量名：扫描 `${...}` 片段，内建命名空间
+/// （git. / run. / date:）不属于用户变量，跳过。同名去重、保持首次出现顺序。
+/// 纯函数，可单测。
+pub(crate) fn extract_template_var_refs(value: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'$' && bytes[index + 1] == b'{' {
+            let Some(close) = value[index + 2..].find('}') else {
+                break;
+            };
+            let name = value[index + 2..index + 2 + close].trim();
+            let builtin =
+                name.starts_with("git.") || name.starts_with("run.") || name.starts_with("date:");
+            if !builtin && !name.is_empty() && !refs.iter().any(|existing| existing == name) {
+                refs.push(name.to_string());
+            }
+            index = index + 2 + close + 1;
+        } else {
+            index += 1;
+        }
+    }
+    refs
+}
+
+/// 单个步骤的变量引用分析结果：引用了哪些已声明变量、哪些未声明、
+/// 以及本步骤（filterBranches）对外输出的变量名。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkflowStepBinding {
+    /// 引用的全部用户变量名（含上方步骤输出的 out.*）。
+    pub(crate) used: Vec<String>,
+    /// 引用了但既不在 inputs/vars、也不是任何更早步骤输出的名字。
+    pub(crate) unknown: Vec<String>,
+    /// filterBranches 的输出变量（`out.{output}`），供后续步骤引用。
+    pub(crate) produces: Option<String>,
+}
+
+/// 分析第 `step_index` 个步骤的变量引用：声明集合为 inputs/vars 键 +
+/// 更早 filterBranches 步骤累计的输出名。纯函数，可单测。
+pub(crate) fn workflow_step_binding(
+    step_index: usize,
+    steps: &[WorkflowEditorStepData],
+    declared_inputs: &[String],
+    declared_vars: &[String],
+) -> WorkflowStepBinding {
+    let Some(step) = steps.get(step_index) else {
+        return WorkflowStepBinding::default();
+    };
+    // 更早 filterBranches 步骤的输出集合（out.{output}）。
+    let mut earlier_outputs: Vec<String> = Vec::new();
+    for earlier in steps.iter().take(step_index) {
+        if earlier.kind == WorkflowStepKind::FilterBranches {
+            let output = earlier.output.trim();
+            if !output.is_empty() {
+                earlier_outputs.push(format!("out.{output}"));
+            }
+        }
+    }
+
+    let mut used: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for slot in step.kind.slots() {
+        for name in extract_template_var_refs(step.slot_value(*slot)) {
+            let declared = declared_inputs.contains(&name)
+                || declared_vars.contains(&name)
+                || earlier_outputs.contains(&name);
+            if !used.contains(&name) {
+                used.push(name.clone());
+            }
+            if !declared && !unknown.contains(&name) {
+                unknown.push(name);
+            }
+        }
+    }
+
+    let produces = (step.kind == WorkflowStepKind::FilterBranches)
+        .then(|| format!("out.{}", step.output.trim()))
+        .filter(|out| out != "out.");
+
+    WorkflowStepBinding {
+        used,
+        unknown,
+        produces,
+    }
+}
+
+/// 绑定条文案：使用变量 / 输出变量 / 未声明警告三段拼接。纯函数，可单测。
+pub(crate) fn workflow_binding_summary(binding: &WorkflowStepBinding) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !binding.used.is_empty() {
+        parts.push(format!("使用变量 {}", binding.used.join("、")));
+    }
+    if let Some(out) = &binding.produces {
+        parts.push(format!("输出 {out} 可供后续步骤使用"));
+    }
+    if !binding.unknown.is_empty() {
+        parts.push(format!(
+            "引用了未声明变量 {} · 去「变量设置」定义",
+            binding.unknown.join("、")
+        ));
+    }
+    if parts.is_empty() {
+        "未引用变量".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// 汇总某个输入/自定义变量被哪些步骤（1 起始序号）引用，用于变量卡片的
+/// 「被步骤 N 引用」标签。返回空 vec 表示未被引用。纯函数，可单测。
+pub(crate) fn workflow_var_referenced_by_steps(
+    name: &str,
+    steps: &[WorkflowEditorStepData],
+) -> Vec<usize> {
+    let mut referencing = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let references = step.kind.slots().iter().any(|slot| {
+            extract_template_var_refs(step.slot_value(*slot)).contains(&name.to_string())
+        });
+        if references {
+            referencing.push(index + 1);
+        }
+    }
+    referencing
+}
+
+/// 按搜索词过滤选择器里的步骤类型：匹配中文名 / 操作名 / 说明，
+/// 大小写不敏感；空词返回全量（常用在前、高级在后）。纯函数，可单测。
+pub(crate) fn filter_workflow_step_kinds(query: &str) -> Vec<WorkflowStepKind> {
+    let query = query.trim().to_lowercase();
+    let all = WorkflowStepKind::all();
+    if query.is_empty() {
+        return all.to_vec();
+    }
+    all.into_iter()
+        .filter(|kind| {
+            kind.display_name().to_lowercase().contains(&query)
+                || kind.op_name().to_lowercase().contains(&query)
+                || kind.description().to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // UI 状态层（文本框包装）
 // ---------------------------------------------------------------------------
 
@@ -1079,6 +1174,12 @@ pub(crate) struct WorkflowEditorState {
     ai_loading: bool,
     /// AI 功能需求描述输入框（用户自然语言描述想要的模板）。
     ai_description_field: TextFieldState,
+    /// 向导当前步下标（0 基本信息 / 1 操作步骤 / 2 变量设置 / 3 完成）。
+    wizard_step: usize,
+    /// 第 2 步是否处于「添加步骤选择器」视图（替代步骤卡片列表）。
+    step_picker_open: bool,
+    /// 选择器的搜索框（按名称 / 操作名 / 说明过滤步骤类型）。
+    picker_search_field: TextFieldState,
 }
 
 struct WorkflowEditorInputRowState {
@@ -1119,6 +1220,9 @@ impl WorkflowEditorState {
                 cx,
                 "用一句话描述你想要的模板，如：基于 master 创建 release 分支并推送",
             ),
+            wizard_step: 0,
+            step_picker_open: false,
+            picker_search_field: TextFieldState::new(cx, "搜索操作"),
         };
         state.ensure_field_capacity();
         state
@@ -1294,20 +1398,78 @@ impl RepositoryView {
         if let Some(state) = self.workflow_editor.as_mut() {
             if state.data.steps.is_empty() {
                 *state = WorkflowEditorState::from_data(preset.build_data(), cx);
+                // 预设的主体是步骤序列，载入后直接进入「操作步骤」步。
+                state.wizard_step = 1;
             }
         }
     }
 
-    /// 添加一个步骤（默认「切换分支」），并选中新步骤。
-    pub(crate) fn workflow_editor_add_step(&mut self) {
+    /// 按类型添加一个步骤（选择器点击选项），并选中新步骤。
+    pub(crate) fn workflow_editor_add_step_of_kind(&mut self, kind: WorkflowStepKind) {
         if let Some(state) = self.workflow_editor.as_mut() {
-            state
-                .data
-                .steps
-                .push(WorkflowEditorStepData::new(WorkflowStepKind::Checkout));
+            state.data.steps.push(WorkflowEditorStepData::new(kind));
             state.data.selected_step = state.data.steps.len() - 1;
+            state.step_picker_open = false;
             state.ensure_field_capacity();
         }
+    }
+
+    /// 跳转到向导第 step 步（越界钳制），并收起弹出的菜单。
+    pub(crate) fn workflow_editor_goto_step(&mut self, step: usize) {
+        if let Some(state) = self.workflow_editor.as_mut() {
+            state.wizard_step = step.min(WORKFLOW_WIZARD_STEPS.len() - 1);
+            state.kind_menu_open = None;
+            state.guard_menu_open = None;
+            // 离开第 2 步时收起选择器视图。
+            if state.wizard_step != 1 {
+                state.step_picker_open = false;
+            }
+        }
+    }
+
+    /// 向导下一步。
+    pub(crate) fn workflow_editor_next_step(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .workflow_editor
+            .as_ref()
+            .map(|state| state.wizard_step)
+            .unwrap_or(0);
+        self.workflow_editor_goto_step(current + 1);
+        cx.notify();
+    }
+
+    /// 向导上一步（第 1 步时无效）。
+    pub(crate) fn workflow_editor_prev_step(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .workflow_editor
+            .as_ref()
+            .map(|state| state.wizard_step)
+            .unwrap_or(0);
+        if current > 0 {
+            self.workflow_editor_goto_step(current - 1);
+        }
+        cx.notify();
+    }
+
+    /// 打开「添加步骤」选择器视图，并清空上次的搜索词。
+    pub(crate) fn workflow_editor_open_step_picker(&mut self) {
+        if let Some(state) = self.workflow_editor.as_mut() {
+            state.step_picker_open = true;
+            state.picker_search_field.set_value(String::new());
+        }
+    }
+
+    /// 关闭选择器视图，回到步骤卡片列表。
+    pub(crate) fn workflow_editor_close_step_picker(&mut self) {
+        if let Some(state) = self.workflow_editor.as_mut() {
+            state.step_picker_open = false;
+        }
+    }
+
+    /// 绑定条「去定义」：跳到变量设置步并展开对应分组（inputs/vars 共页）。
+    pub(crate) fn workflow_editor_jump_to_vars(&mut self, cx: &mut Context<Self>) {
+        self.workflow_editor_goto_step(WIZARD_STEP_VARS);
+        cx.notify();
     }
 
     /// 删除第 index 个步骤；选中态钳制到剩余范围。
@@ -1340,15 +1502,6 @@ impl RepositoryView {
                     state.step_fields.swap(index, target);
                 }
                 state.data.selected_step = target;
-            }
-        }
-    }
-
-    /// 选中第 index 个步骤（右侧表单切换目标）。
-    pub(crate) fn workflow_editor_select_step(&mut self, index: usize) {
-        if let Some(state) = self.workflow_editor.as_mut() {
-            if index < state.data.steps.len() {
-                state.data.selected_step = index;
             }
         }
     }
@@ -1516,16 +1669,10 @@ impl RepositoryView {
         }
     }
 
-    /// 折叠/展开高级区。
-    pub(crate) fn workflow_editor_toggle_advanced(&mut self) {
-        if let Some(state) = self.workflow_editor.as_mut() {
-            state.data.advanced_expanded = !state.data.advanced_expanded;
-        }
-    }
-
     /// 渲染前确保编辑器当前需要展示的文本框已存在（惰性创建 + 预填）。
     /// 文本框创建需要 Context（focus_handle），而 field_mut 的调用点
     /// （text_input paint 闭包）没有 cx，因此初始化统一前移到渲染期。
+    /// 向导第 2 步所有步骤卡片同屏渲染，全部步骤的槽文本框都要就位。
     pub(crate) fn ensure_workflow_editor_fields_inited(
         &mut self,
         window: &Window,
@@ -1534,15 +1681,15 @@ impl RepositoryView {
         let Some(state) = self.workflow_editor.as_mut() else {
             return;
         };
-        // 当前选中步骤的槽文本框
-        let selected = state.data.selected_step;
-        if let Some(step) = state.data.steps.get(selected) {
-            for &slot in step.kind.slots() {
-                let _ = WorkflowEditorState::step_slot_field(state, selected, slot, cx);
+        // 全部步骤的槽文本框（卡片化后参数表单内联在每张卡片里）。
+        for step_index in 0..state.data.steps.len() {
+            let slots = state.data.steps[step_index].kind.slots().to_vec();
+            for slot in slots {
+                let _ = WorkflowEditorState::step_slot_field(state, step_index, slot, cx);
             }
         }
-        // 高级区展开时初始化所有变量行文本框
-        if state.data.advanced_expanded {
+        // 变量设置步初始化所有变量行文本框
+        if state.wizard_step == WIZARD_STEP_VARS {
             let inputs = state.data.inputs.clone();
             for (index, row) in inputs.iter().enumerate() {
                 let Some(row_state) = state.input_fields.get_mut(index) else {
@@ -1616,6 +1763,7 @@ impl RepositoryView {
                 }
             }
             WorkflowEditorFieldId::AiDescription => &state.ai_description_field,
+            WorkflowEditorFieldId::PickerSearch => &state.picker_search_field,
         })
     }
 
@@ -1651,6 +1799,7 @@ impl RepositoryView {
                 }
             }
             WorkflowEditorFieldId::AiDescription => Some(&mut state.ai_description_field),
+            WorkflowEditorFieldId::PickerSearch => Some(&mut state.picker_search_field),
         }
     }
 
@@ -1710,6 +1859,9 @@ impl RepositoryView {
                 WorkflowEditorFieldId::AiDescription,
             ));
         }
+        if state.picker_search_field.focus.is_focused(window) {
+            return Some(FieldId::WorkflowEditor(WorkflowEditorFieldId::PickerSearch));
+        }
         None
     }
 
@@ -1750,7 +1902,13 @@ impl RepositoryView {
         let mut data = state.data.clone();
         match apply_ai_generated_to_editor_data(&mut data, &content) {
             Ok(()) => {
+                let has_vars = !data.inputs.is_empty() || !data.vars.is_empty();
                 *state = WorkflowEditorState::from_data(data, cx);
+                // AI 生成了变量：跳到「变量设置」步方便逐项检查（对应旧版
+                // 自动展开高级区的行为）。
+                if has_vars {
+                    state.wizard_step = WIZARD_STEP_VARS;
+                }
                 self.status = "AI 已生成工作流模板，请检查后保存".to_string();
                 self.notify_success("AI 已生成模板，请检查无误后保存", cx);
             }
@@ -2202,7 +2360,10 @@ impl RepositoryView {
 }
 
 impl RepositoryView {
-    /// 渲染「新建工作流模板」编辑器弹窗（宽面板，内容区滚动）。
+    /// 渲染「新建/编辑工作流模板」分步向导弹窗（宽面板，内容区滚动）。
+    ///
+    /// 四步向导（对齐设计稿）：基本信息 → 操作步骤（含添加步骤选择器）
+    /// → 变量设置 → 完成（摘要 + JSON5 预览）。保存链路不变。
     pub(crate) fn render_workflow_editor_dialog(
         &self,
         window: &Window,
@@ -2211,8 +2372,15 @@ impl RepositoryView {
         let Some(editor) = self.workflow_editor.as_ref() else {
             return div().into_any_element();
         };
-        let data = &editor.data;
+        let step = editor.wizard_step;
         let scroll_handle = self.scroll_handle("workflow-editor-scroll");
+
+        let content = match step {
+            0 => self.render_wizard_step_basic(window, cx),
+            1 => self.render_wizard_step_steps(window, cx),
+            2 => self.render_wizard_step_vars(window, cx),
+            _ => self.render_wizard_step_review(),
+        };
 
         div()
             .id("workflow-editor-panel")
@@ -2229,7 +2397,7 @@ impl RepositoryView {
             .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
                 cx.stop_propagation();
             })
-            // 顶栏
+            // 顶栏：标题 + 副标题 + 关闭
             .child(
                 div()
                     .flex()
@@ -2237,40 +2405,50 @@ impl RepositoryView {
                     .items_center()
                     .justify_between()
                     .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .pt_3()
+                    .gap_3()
                     .child(
                         div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
-                            .child(if data.editing_path.is_some() {
-                                "编辑工作流模板"
-                            } else {
-                                "新建工作流模板"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("workflow-editor-close")
-                            .size(px(24.0))
                             .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .cursor_pointer()
-                            .text_size(px(14.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.close_workflow_editor();
-                                cx.notify();
-                            }))
-                            .child("✕"),
-                    ),
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(16.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child(if editor.data.editing_path.is_some() {
+                                        "编辑工作流模板"
+                                    } else {
+                                        "新建工作流模板"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child("按引导分步完成，变量随步骤绑定，不会遗漏"),
+                            ),
+                    )
+                    .child(self.primary_button(
+                        "关闭",
+                        true,
+                        |this, _, _| this.close_workflow_editor(),
+                        cx,
+                    )),
             )
-            // 主体：滚动内容区（外层有界 + scrollable_frame_when 直接子元素 + 内容 div 滚动）
+            // 步骤指示器 + 分隔线
+            .child(self.render_wizard_indicator(step))
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(rgb(ui_theme::BORDER)),
+            )
+            // 内容区（滚动）
             .child(scrollable_frame_when(
                 "workflow-editor-scroll",
                 ScrollbarMode::Vertical,
@@ -2281,158 +2459,847 @@ impl RepositoryView {
                     .flex_1()
                     .min_h(px(0.0))
                     .p_4()
-                    .gap_3()
                     .overflow_y_scroll()
                     .track_scroll(&scroll_handle)
-                    .child(self.render_workflow_editor_basic_fields(window, cx))
-                    .child(self.render_workflow_editor_ai_section(window, cx))
-                    .when(data.steps.is_empty(), |this| {
-                        this.child(self.render_workflow_editor_presets(cx))
-                    })
-                    .child(self.render_workflow_editor_steps(window, cx))
-                    .child(self.render_workflow_editor_advanced(window, cx))
-                    .child(self.render_workflow_editor_error())
+                    .child(content)
                     .into_any_element(),
                 scroll_handle,
                 true,
                 cx,
             ))
-            // 底部按钮
-            .child(
-                dialog_actions().flex_none().child(
+            // 错误条（固定在底部导航上方，任何一步都可见）
+            .when_some(editor.data.error.clone(), |this, error| {
+                this.child(
                     div()
-                        .flex()
-                        .gap_2()
-                        .child(self.button(
-                            "取消",
-                            true,
-                            |this, _, _| this.close_workflow_editor(),
-                            cx,
-                        ))
-                        .child(self.primary_button(
-                            "保存模板",
-                            true,
-                            |this, _, cx| this.save_workflow_editor(cx),
-                            cx,
-                        )),
-                ),
-            )
+                        .mx_4()
+                        .mb_2()
+                        .flex_none()
+                        .px_3()
+                        .py_2()
+                        .border_1()
+                        .border_color(rgb(ui_theme::DESTRUCTIVE))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::DESTRUCTIVE))
+                        .child(error),
+                )
+            })
+            // 底部导航
+            .child(self.render_wizard_footer(cx))
             .into_any_element()
     }
 
-    /// 基本信息区：模板名 / 保存文件名 / 干净工作区开关。
-    fn render_workflow_editor_basic_fields(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+    /// 向导步骤指示器：四枚 chip，当前步主色高亮（设计稿步骤条）。
+    fn render_wizard_indicator(&self, current: usize) -> impl IntoElement {
         div()
             .flex()
-            .flex_col()
+            .flex_none()
+            .items_center()
             .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("模板名称（可选）", false))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::Name),
-                        false,
-                        window,
-                        cx,
-                    )),
+            .px_4()
+            .py_2()
+            .children(
+                WORKFLOW_WIZARD_STEPS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| {
+                        let active = index == current;
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(if active {
+                                ui_theme::PRIMARY
+                            } else {
+                                ui_theme::TILE
+                            }))
+                            .child(
+                                div()
+                                    .size(px(18.0))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(rgb(if active {
+                                        ui_theme::PRIMARY_FOREGROUND
+                                    } else {
+                                        ui_theme::SECONDARY
+                                    }))
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(if active {
+                                        ui_theme::PRIMARY
+                                    } else {
+                                        ui_theme::MUTED_FOREGROUND
+                                    }))
+                                    .child(format!("{}", index + 1)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(if active {
+                                        ui_theme::PRIMARY_FOREGROUND
+                                    } else {
+                                        ui_theme::MUTED_FOREGROUND
+                                    }))
+                                    .child((*label).to_string()),
+                            )
+                    })
+                    .collect::<Vec<_>>(),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("保存文件名（.json5）", true))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::FileName),
-                        false,
-                        window,
-                        cx,
-                    )),
-            )
-            .child(self.toggle_row(
-                "workflow-editor-require-clean",
-                "运行前要求工作区干净（推荐）",
-                editor.data.require_clean_worktree,
-                |this, _, _| {
-                    if let Some(state) = this.workflow_editor.as_mut() {
-                        state.data.require_clean_worktree = !state.data.require_clean_worktree;
-                    }
-                },
-                cx,
-            ))
     }
 
-    /// AI 助手区块：需求描述输入框 + 「AI 生成」按钮。
-    /// 编辑模式提示将基于当前模板内容修改；未配置 AI 时按钮禁用并说明原因。
-    fn render_workflow_editor_ai_section(
+    /// 底部导航：左「← 上一步」、中「下一步 → / 保存模板」、右步骤计数。
+    fn render_wizard_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let step = self
+            .workflow_editor
+            .as_ref()
+            .map(|editor| editor.wizard_step)
+            .unwrap_or(0);
+        let last = step + 1 >= WORKFLOW_WIZARD_STEPS.len();
+        let left: gpui::AnyElement = if step == 0 {
+            div().into_any_element()
+        } else {
+            self.button(
+                "← 上一步",
+                true,
+                |this, _, cx| this.workflow_editor_prev_step(cx),
+                cx,
+            )
+            .into_any_element()
+        };
+        let center: gpui::AnyElement = if last {
+            self.primary_button(
+                "保存模板",
+                true,
+                |this, _, cx| this.save_workflow_editor(cx),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            self.primary_button(
+                "下一步 →",
+                true,
+                |this, _, cx| this.workflow_editor_next_step(cx),
+                cx,
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .py_3()
+            .border_t_1()
+            .border_color(rgb(ui_theme::BORDER))
+            .child(left)
+            .child(center)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(format!(
+                        "第 {} 步 / 共 {} 步",
+                        step + 1,
+                        WORKFLOW_WIZARD_STEPS.len()
+                    )),
+            )
+    }
+
+    // ------------------------------------------------------------------
+    // 第 1 步：基本信息
+    // ------------------------------------------------------------------
+
+    fn render_wizard_step_basic(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
-        let loading = editor.ai_loading;
         let ai_ready = self.ai_settings.is_usable();
-        let button_label = if loading {
+        let ai_enabled = ai_ready && !editor.ai_loading;
+        let ai_label = if editor.ai_loading {
             "AI 生成中..."
         } else if ai_ready {
             "AI 生成"
         } else {
             "AI 生成（未配置）"
         };
-        let enabled = ai_ready && !loading;
 
         div()
+            .flex()
+            .gap_5()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    // AI 助手区块（普通底色 + 边框，不跟随主题色）
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .border_1()
+                            .border_color(rgb(ui_theme::BORDER))
+                            .rounded(px(ui_theme::RADIUS_MD))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(rgb(ui_theme::PRIMARY))
+                                            .child("✨"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(ui_theme::PRIMARY))
+                                            .child("AI 助手"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child(match editor.data.editing_path.is_some() {
+                                        true => "描述修改需求，AI 会基于当前模板内容调整步骤与变量。",
+                                        false => "用一句话描述你想要的工作流，AI 生成步骤与变量并自动填入后续各步，你只需检查和微调。",
+                                    }),
+                            )
+                            .child(self.input(
+                                FieldId::WorkflowEditor(WorkflowEditorFieldId::AiDescription),
+                                false,
+                                window,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .child(self.button(ai_label, ai_enabled, |this, _, cx| {
+                                        this.generate_workflow_template_with_ai(cx);
+                                    }, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(workflow_editor_field_label("模板名称（可选）", false))
+                            .child(self.input(
+                                FieldId::WorkflowEditor(WorkflowEditorFieldId::Name),
+                                false,
+                                window,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(workflow_editor_field_label("保存文件名（.json5）", true))
+                            .child(self.input(
+                                FieldId::WorkflowEditor(WorkflowEditorFieldId::FileName),
+                                false,
+                                window,
+                                cx,
+                            )),
+                    )
+                    .child(self.toggle_row(
+                        "workflow-editor-require-clean",
+                        "运行前要求工作区干净（推荐）",
+                        editor.data.require_clean_worktree,
+                        |this, _, _| {
+                            if let Some(state) = this.workflow_editor.as_mut() {
+                                state.data.require_clean_worktree =
+                                    !state.data.require_clean_worktree;
+                            }
+                        },
+                        cx,
+                    )),
+            )
+            .child(workflow_guide_card(
+                "这一步要做什么",
+                "填写模板的显示名称和保存文件名。名称显示在工作流列表里；文件名是保存到模板目录时的名字（不含扩展名）。",
+            ))
+            .into_any_element()
+    }
+
+    // ------------------------------------------------------------------
+    // 第 2 步：操作步骤（卡片列表 / 添加步骤选择器两个视图）
+    // ------------------------------------------------------------------
+
+    fn render_wizard_step_steps(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+        if editor.step_picker_open {
+            return self.render_wizard_step_picker(window, cx);
+        }
+        let data = &editor.data;
+
+        let mut list = div().flex().flex_col().flex_1().min_w_0().gap_2();
+        if data.steps.is_empty() {
+            list = list.child(self.render_wizard_presets(cx));
+        } else {
+            for index in 0..data.steps.len() {
+                list = list.child(self.render_workflow_step_card(index, window, cx));
+            }
+        }
+        list = list.child(
+            div()
+                .id("workflow-editor-add-step")
+                .flex()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(32.0))
+                .border_1()
+                .border_color(rgb(ui_theme::BORDER))
+                .rounded(px(ui_theme::RADIUS_XS))
+                .cursor_pointer()
+                .text_size(px(12.0))
+                .text_color(rgb(ui_theme::PRIMARY))
+                .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.workflow_editor_open_step_picker();
+                    cx.notify();
+                }))
+                .child("+ 添加步骤"),
+        );
+
+        div()
+            .flex()
+            .gap_5()
+            .child(list)
+            .child(workflow_guide_card(
+                "操作步骤",
+                "每个步骤按顺序执行。参数直接填在卡片里，${变量} 会标出引用情况；用 ↑ ↓ 调整顺序，点 ✕ 删除。",
+            ))
+            .into_any_element()
+    }
+
+    /// 添加步骤选择器视图：搜索框 + 常用/高级两组选项卡网格。
+    fn render_wizard_step_picker(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+        let query = editor.picker_search_field.value.clone();
+        let kinds = filter_workflow_step_kinds(&query);
+        let split = WorkflowStepKind::COMMON_COUNT.min(kinds.len());
+
+        let mut panel = div().flex().flex_col().flex_1().min_w_0().gap_3().child(
+            div()
+                .flex()
+                .items_end()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .child("添加操作步骤"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child("选择要加入工作流的 Git 操作，参数稍后在卡片里填写"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(200.0)).child(self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::PickerSearch),
+                            true,
+                            window,
+                            cx,
+                        )))
+                        .child(self.button(
+                            "返回列表",
+                            true,
+                            |this, _, _| this.workflow_editor_close_step_picker(),
+                            cx,
+                        )),
+                ),
+        );
+
+        if kinds.is_empty() {
+            panel = panel.child(placeholder_row("没有匹配的操作"));
+        } else {
+            let groups: [(&str, &[WorkflowStepKind]); 2] =
+                [("常用", &kinds[..split]), ("高级", &kinds[split..])];
+            for (label, group_kinds) in groups {
+                if group_kinds.is_empty() {
+                    continue;
+                }
+                let mut group = div().flex().flex_col().gap_1p5().child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child(label.to_string()),
+                );
+                for pair in group_kinds.chunks(2) {
+                    group = group.child(
+                        div().flex().gap_2().children(
+                            pair.iter()
+                                .map(|kind| self.render_step_kind_option(*kind, cx))
+                                .collect::<Vec<_>>(),
+                        ),
+                    );
+                }
+                panel = panel.child(group);
+            }
+        }
+        panel = panel.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child("点击某个操作即可添加为工作流步骤，并回到步骤列表"),
+        );
+
+        div()
+            .flex()
+            .gap_5()
+            .child(panel)
+            .child(workflow_guide_card(
+                "选择一个操作",
+                "常用操作覆盖日常分支协作；高级操作用于守卫与批量清理。加入后会自动选中新步骤，继续点「+ 添加步骤」可追加多个。",
+            ))
+            .into_any_element()
+    }
+
+    /// 选择器里的单个操作选项卡。
+    fn render_step_kind_option(
+        &self,
+        kind: WorkflowStepKind,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .id(format!("workflow-editor-picker-{}", kind.op_name()))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .p(px(10.0))
+            .border_1()
+            .border_color(rgb(ui_theme::BORDER))
+            .rounded(px(ui_theme::RADIUS_MD))
+            .cursor_pointer()
+            .hover(|this| {
+                this.border_color(rgb(ui_theme::PRIMARY))
+                    .bg(rgb(ui_theme::TILE))
+            })
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                cx.stop_propagation();
+                this.workflow_editor_add_step_of_kind(kind);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                            .text_size(px(13.0))
+                            .text_color(rgb(ui_theme::PRIMARY))
+                            .child(workflow_step_kind_glyph(kind)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child(kind.display_name().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child(kind.op_name().to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child(kind.description().to_string()),
+            )
+            .into_any_element()
+    }
+
+    /// 第 2 步的单张步骤卡：序号徽标 + 类型下拉 + ↑↓✕ + 内联参数 + 绑定条。
+    fn render_workflow_step_card(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+        let Some(step) = editor.data.steps.get(index) else {
+            return div().into_any_element();
+        };
+        let kind = step.kind;
+        let menu_id = format!("workflow-editor-step-kind-{index}");
+        let menu_open = self.workflow_editor_kind_menu_open(index);
+
+        // 类型下拉：触发器与锚定弹出层同处一个 relative 包裹
+        // （deferred + 高优先级绘制，避免被后续输入框遮挡）。
+        let mut kind_dropdown = div().relative().child(
+            div()
+                .id(menu_id.clone())
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .h(px(24.0))
+                .rounded(px(ui_theme::RADIUS_XS))
+                .cursor_pointer()
+                .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.workflow_editor_toggle_kind_menu(index);
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .child(kind.display_name().to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child("▾"),
+                ),
+        );
+        if menu_open {
+            let menu_scroll_id: &'static str =
+                Box::leak(format!("{menu_id}-menu").into_boxed_str());
+            let handle = self.scroll_handle(menu_scroll_id);
+            kind_dropdown = kind_dropdown.child(
+                gpui::deferred(
+                    glass_menu()
+                        .absolute()
+                        .top_full()
+                        .left_0()
+                        .mt(px(4.0))
+                        .w(px(240.0))
+                        .max_h(px(240.0))
+                        .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_down(gpui::MouseButton::Right, |_ev, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(scrollable_frame_when(
+                            menu_scroll_id,
+                            ScrollbarMode::Vertical,
+                            div()
+                                .id(format!("{menu_id}-menu"))
+                                .flex()
+                                .flex_col()
+                                .max_h(px(240.0))
+                                .overflow_y_scroll()
+                                .track_scroll(&handle)
+                                .children(render_workflow_kind_menu_items(
+                                    index, kind, &menu_id, cx,
+                                ))
+                                .into_any_element(),
+                            handle,
+                            true,
+                            cx,
+                        )),
+                )
+                .with_priority(100),
+            );
+        }
+
+        let mut card = div()
             .flex()
             .flex_col()
             .gap_2()
             .p_3()
             .border_1()
             .border_color(rgb(ui_theme::BORDER))
-            .rounded_sm()
-            .child(section_title("AI 助手"))
-            .child(self.input(
-                FieldId::WorkflowEditor(WorkflowEditorFieldId::AiDescription),
-                false,
-                window,
-                cx,
-            ))
+            .rounded(px(ui_theme::RADIUS_MD))
+            .bg(rgb(ui_theme::CARD))
+            // 卡头：序号 + 类型下拉 + 排序/删除
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap_2()
+                    .w_full()
                     .child(
                         div()
+                            .size(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgb(ui_theme::PRIMARY))
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                            .child(if editor.data.editing_path.is_some() {
-                                "将基于当前模板内容按需求修改"
-                            } else {
-                                "生成结果会直接填入下方表单，保存前可自由调整"
-                            }),
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                            .child(format!("{}", index + 1)),
                     )
-                    .child(self.button(
-                        button_label,
-                        enabled,
-                        |this, _, cx| {
-                            this.generate_workflow_template_with_ai(cx);
-                        },
+                    .child(
+                        // 类型下拉触发器 + 锚定弹出层（同 relative 包裹）
+                        kind_dropdown,
+                    )
+                    .child(div().flex_1())
+                    .child(workflow_editor_step_row_actions(index, cx)),
+            );
+
+        // 参数槽（内联在卡片里）
+        for slot in kind.slots() {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(workflow_editor_field_label(
+                        slot.label(),
+                        kind.slot_required(*slot),
+                    ))
+                    .child(self.input(
+                        FieldId::WorkflowEditor(WorkflowEditorFieldId::StepParam {
+                            step: index,
+                            slot: *slot,
+                        }),
+                        false,
+                        window,
                         cx,
                     )),
-            )
+            );
+        }
+
+        // 类型相关开关与守卫策略（沿用原表单语义）
+        match kind {
+            WorkflowStepKind::CreateBranch => {
+                card = card.child(self.toggle_row(
+                    "workflow-editor-create-checkout",
+                    "创建后切换到新分支",
+                    step.checkout,
+                    move |this, _, _| {
+                        this.workflow_editor_toggle_step_flag(
+                            index,
+                            WorkflowStepFlag::CreateCheckout,
+                        )
+                    },
+                    cx,
+                ));
+            }
+            WorkflowStepKind::Push => {
+                card = card.child(self.toggle_row(
+                    "workflow-editor-push-upstream",
+                    "推送时建立上游跟踪",
+                    step.set_upstream,
+                    move |this, _, _| {
+                        this.workflow_editor_toggle_step_flag(
+                            index,
+                            WorkflowStepFlag::PushSetUpstream,
+                        )
+                    },
+                    cx,
+                ));
+            }
+            WorkflowStepKind::GuardRemoteBranch => {
+                card = card
+                    .child(self.toggle_row(
+                        "workflow-editor-guard-fetch",
+                        "检查前先从远端获取（刷新引用）",
+                        step.guard_fetch,
+                        move |this, _, _| {
+                            this.workflow_editor_toggle_step_flag(
+                                index,
+                                WorkflowStepFlag::GuardFetch,
+                            )
+                        },
+                        cx,
+                    ))
+                    .child(self.render_workflow_editor_guard_select(
+                        index,
+                        true,
+                        step.on_exists,
+                        cx,
+                    ))
+                    .child(self.render_workflow_editor_guard_select(
+                        index,
+                        false,
+                        step.on_missing,
+                        cx,
+                    ));
+            }
+            WorkflowStepKind::FilterBranches => {
+                card = card.child(self.toggle_row(
+                    "workflow-editor-filter-skip-current",
+                    "排除当前分支",
+                    step.filter_skip_current,
+                    move |this, _, _| {
+                        this.workflow_editor_toggle_step_flag(
+                            index,
+                            WorkflowStepFlag::FilterSkipCurrent,
+                        )
+                    },
+                    cx,
+                ));
+            }
+            WorkflowStepKind::DeleteBranches => {
+                card = card
+                    .child(self.toggle_row(
+                        "workflow-editor-delete-dry-run",
+                        "试运行（只列出将删除的分支，不真正删除）",
+                        step.delete_dry_run,
+                        move |this, _, _| {
+                            this.workflow_editor_toggle_step_flag(
+                                index,
+                                WorkflowStepFlag::DeleteDryRun,
+                            )
+                        },
+                        cx,
+                    ))
+                    .child(self.toggle_row(
+                        "workflow-editor-delete-skip-current",
+                        "自动跳过当前分支",
+                        step.delete_skip_current,
+                        move |this, _, _| {
+                            this.workflow_editor_toggle_step_flag(
+                                index,
+                                WorkflowStepFlag::DeleteSkipCurrent,
+                            )
+                        },
+                        cx,
+                    ));
+            }
+            WorkflowStepKind::EnsureClean => {
+                card = card.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .child("该步骤无需参数：运行到此步时检查工作区，有未提交改动则停止。"),
+                );
+            }
+            _ => {}
+        }
+
+        // 绑定条：变量使用情况（设计稿卡片底部 accent 条）
+        let input_keys = editor
+            .data
+            .inputs
+            .iter()
+            .map(|row| row.key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+        let var_keys = editor
+            .data
+            .vars
+            .iter()
+            .map(|row| row.key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+        let binding = workflow_step_binding(index, &editor.data.steps, &input_keys, &var_keys);
+        let summary = workflow_binding_summary(&binding);
+        let has_unknown = !binding.unknown.is_empty();
+        let (strip_bg, strip_fg) = if has_unknown {
+            (ui_theme::COLOR_WARNING, ui_theme::COLOR_WARNING_FOREGROUND)
+        } else if binding.used.is_empty() && binding.produces.is_some() {
+            (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
+        } else if !binding.used.is_empty() {
+            (ui_theme::PRIMARY_SUBTLE, ui_theme::PRIMARY)
+        } else {
+            (ui_theme::TILE, ui_theme::MUTED_FOREGROUND)
+        };
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded(px(ui_theme::RADIUS_XS))
+                .bg(rgb(strip_bg))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(strip_fg))
+                        .child("$"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.0))
+                        .text_color(rgb(strip_fg))
+                        .child(summary),
+                )
+                .when(has_unknown, |this| {
+                    this.child(
+                        div()
+                            .id(format!("workflow-editor-binding-goto-{index}"))
+                            .flex_none()
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .cursor_pointer()
+                            .text_size(px(10.0))
+                            .bg(rgb(strip_fg))
+                            .text_color(rgb(strip_bg))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.workflow_editor_jump_to_vars(cx);
+                            }))
+                            .child("去定义"),
+                    )
+                }),
+        );
+
+        card.into_any_element()
     }
 
-    /// 预设模板卡片区（仅步骤为空时展示，添加步骤后消失防止误覆盖）。
-    fn render_workflow_editor_presets(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 第 2 步空列表时的预设模板卡片区。
+    fn render_wizard_presets(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex()
             .flex_col()
@@ -2483,244 +3350,104 @@ impl RepositoryView {
                 div()
                     .text_size(px(11.0))
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child("也可以跳过预设，直接在下方添加步骤。"),
+                    .child("也可以跳过预设，点下方「+ 添加步骤」从零开始。"),
             )
+            .into_any_element()
     }
 
-    /// 步骤区：左侧步骤列表（增删/上下移/选中）+ 右侧选中步骤参数表单。
-    fn render_workflow_editor_steps(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    // ------------------------------------------------------------------
+    // 第 3 步：变量设置
+    // ------------------------------------------------------------------
+
+    fn render_wizard_step_vars(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
         let data = &editor.data;
-        let selected = data
-            .steps
-            .get(data.selected_step)
-            .map(|_| data.selected_step);
 
-        div()
+        let mut inputs_group = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(section_title("工作流步骤"))
+            .gap_1p5()
             .child(
                 div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    // 左：步骤列表
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_none()
-                            .w(px(300.0))
-                            .gap_1()
-                            .children({
-                                // 循环而非闭包：渲染行需要 &mut cx（toggle 等），
-                                // FnMut 闭包捕获 &mut 引用会逃逸。
-                                let mut rows = Vec::new();
-                                for (index, step) in data.steps.iter().enumerate() {
-                                    rows.push(
-                                        self.render_workflow_editor_step_row(index, step, cx)
-                                            .into_any_element(),
-                                    );
-                                }
-                                rows
-                            })
-                            .when(data.steps.is_empty(), |this| {
-                                this.child(placeholder_row("还没有步骤，点击下方按钮添加"))
-                            })
-                            .child(
-                                div()
-                                    .id("workflow-editor-add-step")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .min_h(px(28.0))
-                                    .px_3()
-                                    .border_1()
-                                    .border_color(rgb(ui_theme::BORDER))
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::PRIMARY))
-                                    .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.workflow_editor_add_step();
-                                        cx.notify();
-                                    }))
-                                    .child("+ 添加步骤"),
-                            ),
-                    )
-                    // 右：选中步骤参数表单
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .gap_2()
-                            .child(match selected {
-                                Some(index) => self
-                                    .render_workflow_editor_step_params(index, window, cx)
-                                    .into_any_element(),
-                                None => placeholder_row("添加或选中左侧步骤后编辑参数")
-                                    .into_any_element(),
-                            }),
-                    ),
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("运行前用户填写的变量（inputs）"),
             )
-    }
-
-    /// 左侧单个步骤行：序号 + 摘要 + 上移/下移/删除。
-    fn render_workflow_editor_step_row(
-        &self,
-        index: usize,
-        step: &WorkflowEditorStepData,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
-        let selected = editor.data.selected_step == index;
-        let summary = workflow_step_draft_summary(step.kind, step);
-        div()
-            .id(format!("workflow-editor-step-{index}"))
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .rounded(px(ui_theme::RADIUS_XS))
-            .border_1()
-            .border_color(rgb(if selected {
-                ui_theme::PRIMARY
-            } else {
-                ui_theme::BORDER
-            }))
-            .bg(rgb(if selected {
-                ui_theme::ACCENT
-            } else {
-                ui_theme::CARD
-            }))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.workflow_editor_select_step(index);
-                cx.notify();
-            }))
             .child(
                 div()
-                    .flex_none()
                     .text_size(px(11.0))
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(format!("{}", index + 1)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(if selected {
-                        ui_theme::PRIMARY
-                    } else {
-                        ui_theme::FOREGROUND
-                    }))
-                    .truncate()
-                    .child(format!("{} · {}", step.kind.display_name(), summary)),
-            )
-            .child(workflow_editor_step_row_actions(index, cx))
-    }
-
-    /// 高级折叠区：输入变量 / 自定义变量行编辑。
-    fn render_workflow_editor_advanced(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
-        let data = &editor.data;
-        let mut section = div().flex().flex_col().gap_2().child(
-            div()
-                .id("workflow-editor-advanced-toggle")
-                .flex()
-                .items_center()
-                .gap_1()
-                .cursor_pointer()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.workflow_editor_toggle_advanced();
-                    cx.notify();
-                }))
-                .child(if data.advanced_expanded { "▾" } else { "▸" })
-                .child("高级选项（输入变量与自定义变量）"),
-        );
-        if !data.advanced_expanded {
-            return section;
-        }
-
-        section = section
-            // 输入变量区
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .rounded_sm()
-                    .child(section_title("输入变量（运行前让用户填写）"))
-                    .children({
-                        let mut rows = Vec::new();
-                        for index in 0..data.inputs.len() {
-                            rows.push(
-                                self.render_workflow_editor_input_row(index, window, cx)
-                                    .into_any_element(),
-                            );
-                        }
-                        rows
-                    })
-                    .child(workflow_editor_add_button(
-                        "workflow-editor-add-input",
-                        "+ 添加输入变量",
-                        |this| this.workflow_editor_add_input_row(),
-                        cx,
-                    )),
-            )
-            // 自定义变量区
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .rounded_sm()
-                    .child(section_title("自定义变量（固定值，可写 ${...} 表达式）"))
-                    .children({
-                        let mut rows = Vec::new();
-                        for index in 0..data.vars.len() {
-                            rows.push(
-                                self.render_workflow_editor_var_row(index, window, cx)
-                                    .into_any_element(),
-                            );
-                        }
-                        rows
-                    })
-                    .child(workflow_editor_add_button(
-                        "workflow-editor-add-var",
-                        "+ 添加自定义变量",
-                        |this| this.workflow_editor_add_var_row(),
-                        cx,
-                    )),
+                    .child("运行工作流前在页面填写"),
             );
-        section
+        if data.inputs.is_empty() {
+            inputs_group = inputs_group.child(placeholder_row("暂无输入变量"));
+        } else {
+            for index in 0..data.inputs.len() {
+                inputs_group =
+                    inputs_group.child(self.render_workflow_input_card(index, window, cx));
+            }
+        }
+        inputs_group = inputs_group.child(workflow_editor_add_button(
+            "workflow-editor-add-input",
+            "+ 添加输入变量",
+            |this| this.workflow_editor_add_input_row(),
+            cx,
+        ));
+
+        let mut vars_group = div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .child("自定义变量（vars）"),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .child("工作流内部使用的固定值，可写 ${...} 表达式"),
+            );
+        if data.vars.is_empty() {
+            vars_group = vars_group.child(placeholder_row("暂无自定义变量"));
+        } else {
+            for index in 0..data.vars.len() {
+                vars_group = vars_group.child(self.render_workflow_var_card(index, window, cx));
+            }
+        }
+        vars_group = vars_group.child(workflow_editor_add_button(
+            "workflow-editor-add-var",
+            "+ 添加自定义变量",
+            |this| this.workflow_editor_add_var_row(),
+            cx,
+        ));
+
+        div()
+            .flex()
+            .gap_5()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_4()
+                    .child(inputs_group)
+                    .child(vars_group),
+            )
+            .child(workflow_guide_card(
+                "核对变量绑定",
+                "这里统一管理所有 ${变量}。每个变量卡片会标出被哪些步骤引用；步骤卡片里标红的未声明变量，在这里补一个同名变量即可。",
+            ))
+            .into_any_element()
     }
 
-    /// 单条输入变量行：变量名 / 显示名 / 说明 / 默认值 / 必填 / 删除。
-    fn render_workflow_editor_input_row(
+    /// 输入变量卡片：键徽标 + 引用标签 + 四个字段 + 必填开关 + 删除。
+    fn render_workflow_input_card(
         &self,
         index: usize,
         window: &Window,
@@ -2730,79 +3457,135 @@ impl RepositoryView {
         let Some(row) = editor.data.inputs.get(index) else {
             return div().into_any_element();
         };
+        let key_live = self
+            .workflow_editor_field_ref(WorkflowEditorFieldId::InputPart {
+                index,
+                part: WorkflowInputPart::Key,
+            })
+            .map(|field| field.value.clone())
+            .unwrap_or_else(|| row.key.clone());
+        let trimmed_key = key_live.trim().to_string();
+        let referenced = if trimmed_key.is_empty() {
+            Vec::new()
+        } else {
+            workflow_var_referenced_by_steps(&trimmed_key, &editor.data.steps)
+        };
+
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
+            .gap_1p5()
+            .p_2p5()
             .border_1()
             .border_color(rgb(ui_theme::BORDER))
-            .rounded(px(ui_theme::RADIUS_XS))
+            .rounded(px(ui_theme::RADIUS_MD))
+            // 卡头：键徽标 + 引用标签 + 删除
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("变量名", true))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
-                            index,
-                            part: WorkflowInputPart::Key,
-                        }),
-                        false,
-                        window,
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::PRIMARY))
+                            .child(if trimmed_key.is_empty() {
+                                "(未命名)".to_string()
+                            } else {
+                                trimmed_key.clone()
+                            }),
+                    )
+                    .child(div().flex_1().min_w_0())
+                    .when(!referenced.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(format!(
+                                    "→ 被步骤 {} 引用",
+                                    referenced
+                                        .iter()
+                                        .map(|step_no| step_no.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("、")
+                                )),
+                        )
+                    })
+                    .child(workflow_editor_card_remove_button(
+                        format!("workflow-editor-remove-input-{index}"),
+                        move |this, cx| {
+                            this.workflow_editor_remove_input_row(index);
+                            cx.notify();
+                        },
                         cx,
+                    )),
+            )
+            // 字段两列排布
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(field_column(
+                        "变量名",
+                        true,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
+                                index,
+                                part: WorkflowInputPart::Key,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
+                    ))
+                    .child(field_column(
+                        "显示名（可选）",
+                        false,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
+                                index,
+                                part: WorkflowInputPart::Label,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
                     )),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("显示名（可选）", false))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
-                            index,
-                            part: WorkflowInputPart::Label,
-                        }),
-                        false,
-                        window,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label(
+                    .gap_2()
+                    .child(field_column(
                         "说明（可选，运行时展示）",
                         false,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
+                                index,
+                                part: WorkflowInputPart::Description,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
                     ))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
-                            index,
-                            part: WorkflowInputPart::Description,
-                        }),
+                    .child(field_column(
+                        "默认值（可选）",
                         false,
-                        window,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("默认值（可选）", false))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
-                            index,
-                            part: WorkflowInputPart::Default,
-                        }),
-                        false,
-                        window,
-                        cx,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::InputPart {
+                                index,
+                                part: WorkflowInputPart::Default,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
                     )),
             )
             .child(self.toggle_row(
@@ -2812,348 +3595,401 @@ impl RepositoryView {
                 move |this, _, _| this.workflow_editor_toggle_input_required(index),
                 cx,
             ))
-            .child(workflow_editor_remove_button(
-                "workflow-editor-remove-input",
-                index,
-                |this, index| this.workflow_editor_remove_input_row(index),
-                cx,
-            ))
             .into_any_element()
     }
 
-    /// 单条自定义变量行：变量名 / 值 / 删除。
-    fn render_workflow_editor_var_row(
+    /// 自定义变量卡片：键徽标 + 引用标签 + 变量名/值字段 + 删除。
+    fn render_workflow_var_card(
         &self,
         index: usize,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
+        let Some(row) = editor.data.vars.get(index) else {
+            return div().into_any_element();
+        };
+        let key_live = self
+            .workflow_editor_field_ref(WorkflowEditorFieldId::VarPart { index, key: true })
+            .map(|field| field.value.clone())
+            .unwrap_or_else(|| row.key.clone());
+        let trimmed_key = key_live.trim().to_string();
+        let referenced = if trimmed_key.is_empty() {
+            Vec::new()
+        } else {
+            workflow_var_referenced_by_steps(&trimmed_key, &editor.data.steps)
+        };
+
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
+            .gap_1p5()
+            .p_2p5()
             .border_1()
             .border_color(rgb(ui_theme::BORDER))
-            .rounded(px(ui_theme::RADIUS_XS))
+            .rounded(px(ui_theme::RADIUS_MD))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("变量名", true))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::VarPart {
-                            index,
-                            key: true,
-                        }),
-                        false,
-                        window,
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::PRIMARY))
+                            .child(if trimmed_key.is_empty() {
+                                "(未命名)".to_string()
+                            } else {
+                                trimmed_key.clone()
+                            }),
+                    )
+                    .child(div().flex_1().min_w_0())
+                    .when(!referenced.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .child(format!(
+                                    "→ 被步骤 {} 引用",
+                                    referenced
+                                        .iter()
+                                        .map(|step_no| step_no.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("、")
+                                )),
+                        )
+                    })
+                    .child(workflow_editor_card_remove_button(
+                        format!("workflow-editor-remove-var-{index}"),
+                        move |this, cx| {
+                            this.workflow_editor_remove_var_row(index);
+                            cx.notify();
+                        },
                         cx,
                     )),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("值", false))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::VarPart {
-                            index,
-                            key: false,
-                        }),
+                    .gap_2()
+                    .child(field_column(
+                        "变量名",
+                        true,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::VarPart {
+                                index,
+                                key: true,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
+                    ))
+                    .child(field_column(
+                        "值",
                         false,
-                        window,
-                        cx,
+                        self.input(
+                            FieldId::WorkflowEditor(WorkflowEditorFieldId::VarPart {
+                                index,
+                                key: false,
+                            }),
+                            false,
+                            window,
+                            cx,
+                        ),
                     )),
             )
-            .child(workflow_editor_remove_button(
-                "workflow-editor-remove-var",
-                index,
-                |this, index| this.workflow_editor_remove_var_row(index),
-                cx,
-            ))
             .into_any_element()
     }
 
-    /// 编辑器内错误提示条。
-    fn render_workflow_editor_error(&self) -> impl IntoElement {
-        let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
-        div().when_some(editor.data.error.clone(), |this, error| {
-            this.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_1()
-                    .border_color(rgb(ui_theme::DESTRUCTIVE))
-                    .rounded(px(ui_theme::RADIUS_XS))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::DESTRUCTIVE))
-                    .child(error),
-            )
-        })
-    }
+    // ------------------------------------------------------------------
+    // 第 4 步：完成（摘要 + JSON5 预览）
+    // ------------------------------------------------------------------
 
-    /// 右侧选中步骤的参数表单：类型下拉 + 文本槽 + 布尔开关 + 守卫策略。
-    fn render_workflow_editor_step_params(
-        &self,
-        index: usize,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_wizard_step_review(&self) -> gpui::AnyElement {
         let editor = self.workflow_editor.as_ref().expect("编辑器状态缺失");
-        let Some(step) = editor.data.steps.get(index) else {
-            return div().into_any_element();
+        let data = &editor.data;
+
+        let name = data.name.trim();
+        let op_names = data
+            .steps
+            .iter()
+            .map(|step| step.kind.display_name().to_string())
+            .collect::<Vec<_>>();
+        let steps_value = if data.steps.is_empty() {
+            "尚未添加步骤".to_string()
+        } else {
+            format!("共 {} 步（{}）", data.steps.len(), op_names.join("、"))
         };
-        let kind = step.kind;
+        let input_names = data
+            .inputs
+            .iter()
+            .map(|row| row.key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+        let var_names = data
+            .vars
+            .iter()
+            .map(|row| row.key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+        let inputs_value = if input_names.is_empty() {
+            "无".to_string()
+        } else {
+            format!("{} 个（{}）", input_names.len(), input_names.join("、"))
+        };
+        let vars_value = if var_names.is_empty() {
+            "无".to_string()
+        } else {
+            format!("{} 个（{}）", var_names.len(), var_names.join("、"))
+        };
+        let save_label = data
+            .editing_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}.json5", data.file_name.trim()));
 
-        // 类型下拉：yororen select 菜单无内建限高，11 个选项会平铺撑出超长
-        // 列表；改用自绘 glass_menu 弹出层——固定高度内部滚动 + 常用/高级
-        // 分组标题（编码选择菜单同模式）。展开状态经 `WorkflowEditorState`
-        // 的 kind_menu_open 记录（按步骤下标），触发按钮锚定在正下方。
-        let menu_id = format!("workflow-editor-step-kind-{index}");
+        // JSON5 预览：合法时输出 pretty JSON（同为合法 JSON5）；否则给占位说明。
+        let preview = build_workflow_definition(data)
+            .ok()
+            .and_then(|definition| serde_json::to_string_pretty(&definition).ok())
+            .unwrap_or_else(|| {
+                "// 当前表单还缺必填内容，暂不能生成完整模板。\n// 保存时会给出具体提示。"
+                    .to_string()
+            });
 
-        let mut form = div()
+        let summary_rows = [
+            (
+                "模板名称",
+                if name.is_empty() {
+                    "(未填写)".to_string()
+                } else {
+                    name.to_string()
+                },
+            ),
+            ("步骤数", steps_value),
+            ("输入变量", inputs_value),
+            ("自定义变量", vars_value),
+            (
+                "运行要求",
+                if data.require_clean_worktree {
+                    "工作区干净".to_string()
+                } else {
+                    "允许脏工作区".to_string()
+                },
+            ),
+        ];
+
+        div()
             .flex()
-            .flex_col()
-            .gap_2()
+            .gap_5()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label("步骤类型", true))
-                    // 触发按钮 + 锚定弹出层：外层 relative，菜单 absolute top_full
+                    .w(px(340.0))
+                    .flex_none()
+                    .gap_3()
                     .child(
                         div()
-                            .relative()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .border_1()
+                            .border_color(rgb(ui_theme::BORDER))
+                            .rounded(px(ui_theme::RADIUS_MD))
                             .child(
                                 div()
-                                    .id(menu_id.clone())
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .child("模板摘要"),
+                            )
+                            .children(summary_rows.into_iter().map(|(label, value)| {
+                                div()
                                     .flex()
-                                    .items_center()
-                                    .justify_between()
                                     .gap_2()
-                                    .w_full()
-                                    .h(px(34.0))
-                                    .px_3()
-                                    .border_1()
-                                    .border_color(rgb(
-                                        if self.workflow_editor_kind_menu_open(index) {
-                                            ui_theme::PRIMARY
-                                        } else {
-                                            ui_theme::BORDER
-                                        },
-                                    ))
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::CARD))
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.workflow_editor_toggle_kind_menu(index);
-                                        cx.notify();
-                                    }))
                                     .child(
                                         div()
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(ui_theme::FOREGROUND))
-                                            .child(kind.display_name().to_string()),
+                                            .w(px(76.0))
+                                            .flex_none()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                            .child(label.to_string()),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                            .child("▾"),
-                                    ),
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(ui_theme::FOREGROUND))
+                                            .child(value),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .p_2()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::TILE))
+                            .child(
+                                div()
+                                    .size(px(18.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .child("⬇"),
                             )
-                            .when(self.workflow_editor_kind_menu_open(index), |this| {
-                                // deferred + 高 priority：菜单延迟到最后绘制，
-                                // 避免表单中排在其后的输入框盖住弹出列表
-                                //（remote_branch_dropdown_menu 同模式）。
-                                let menu = glass_menu()
-                                    .absolute()
-                                    .top_full()
-                                    .left_0()
-                                    .mt(px(4.0))
-                                    .w(px(240.0))
-                                    .max_h(px(240.0))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_mouse_down(gpui::MouseButton::Right, |_ev, _window, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .child({
-                                        // 固定高度滚动容器：内容超出 max_h 时内部滚动。
-                                        let menu_scroll_id: &'static str =
-                                            Box::leak(format!("{menu_id}-menu").into_boxed_str());
-                                        let handle = self.scroll_handle(menu_scroll_id);
-                                        let items = render_workflow_kind_menu_items(
-                                            index, kind, &menu_id, cx,
-                                        );
-                                        scrollable_frame_when(
-                                            menu_scroll_id,
-                                            ScrollbarMode::Vertical,
-                                            div()
-                                                .id(format!("{menu_id}-menu"))
-                                                .flex()
-                                                .flex_col()
-                                                .max_h(px(240.0))
-                                                .overflow_y_scroll()
-                                                .track_scroll(&handle)
-                                                .children(items)
-                                                .into_any_element(),
-                                            handle,
-                                            true,
-                                            cx,
-                                        )
-                                    });
-                                this.child(gpui::deferred(menu).with_priority(100))
-                            }),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .child(format!("将保存到工作流模板目录：{save_label}")),
+                            ),
                     ),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(kind.description()),
-            );
-
-        // 文本槽字段
-        for &slot in kind.slots() {
-            let required = kind.slot_required(slot);
-            form = form.child(
-                div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(workflow_editor_field_label(slot.label(), required))
-                    .child(self.input(
-                        FieldId::WorkflowEditor(WorkflowEditorFieldId::StepParam {
-                            step: index,
-                            slot,
-                        }),
-                        false,
-                        window,
-                        cx,
-                    )),
-            );
-        }
-
-        // 类型相关布尔开关与守卫策略
-        match kind {
-            WorkflowStepKind::CreateBranch => {
-                form = form.child(self.toggle_row(
-                    "workflow-editor-create-checkout",
-                    "创建后切换到新分支",
-                    step.checkout,
-                    move |this, _, _| {
-                        this.workflow_editor_toggle_step_flag(
-                            index,
-                            WorkflowStepFlag::CreateCheckout,
-                        )
-                    },
-                    cx,
-                ));
-            }
-            WorkflowStepKind::Push => {
-                form = form.child(self.toggle_row(
-                    "workflow-editor-push-upstream",
-                    "推送时建立上游跟踪",
-                    step.set_upstream,
-                    move |this, _, _| {
-                        this.workflow_editor_toggle_step_flag(
-                            index,
-                            WorkflowStepFlag::PushSetUpstream,
-                        )
-                    },
-                    cx,
-                ));
-            }
-            WorkflowStepKind::GuardRemoteBranch => {
-                form = form
-                    .child(self.toggle_row(
-                        "workflow-editor-guard-fetch",
-                        "检查前先从远端获取（刷新引用）",
-                        step.guard_fetch,
-                        move |this, _, _| {
-                            this.workflow_editor_toggle_step_flag(
-                                index,
-                                WorkflowStepFlag::GuardFetch,
-                            )
-                        },
-                        cx,
-                    ))
-                    .child(self.render_workflow_editor_guard_select(
-                        index,
-                        true,
-                        step.on_exists,
-                        cx,
-                    ))
-                    .child(self.render_workflow_editor_guard_select(
-                        index,
-                        false,
-                        step.on_missing,
-                        cx,
-                    ));
-            }
-            WorkflowStepKind::FilterBranches => {
-                form = form.child(self.toggle_row(
-                    "workflow-editor-filter-skip-current",
-                    "排除当前分支",
-                    step.filter_skip_current,
-                    move |this, _, _| {
-                        this.workflow_editor_toggle_step_flag(
-                            index,
-                            WorkflowStepFlag::FilterSkipCurrent,
-                        )
-                    },
-                    cx,
-                ));
-            }
-            WorkflowStepKind::DeleteBranches => {
-                form = form
-                    .child(self.toggle_row(
-                        "workflow-editor-delete-dry-run",
-                        "试运行（只列出将删除的分支，不真正删除）",
-                        step.delete_dry_run,
-                        move |this, _, _| {
-                            this.workflow_editor_toggle_step_flag(
-                                index,
-                                WorkflowStepFlag::DeleteDryRun,
-                            )
-                        },
-                        cx,
-                    ))
-                    .child(self.toggle_row(
-                        "workflow-editor-delete-skip-current",
-                        "自动跳过当前分支",
-                        step.delete_skip_current,
-                        move |this, _, _| {
-                            this.workflow_editor_toggle_step_flag(
-                                index,
-                                WorkflowStepFlag::DeleteSkipCurrent,
-                            )
-                        },
-                        cx,
-                    ));
-            }
-            WorkflowStepKind::EnsureClean => {
-                form = form.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .child("该步骤无需参数：运行到此步时检查工作区，有未提交改动则停止。"),
-                );
-            }
-            _ => {}
-        }
-
-        form.into_any_element()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child("生成的工作流（JSON5 预览）"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .child("确认无误后点「保存模板」，文件写入模板目录并出现在左侧列表"),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .border_1()
+                            .border_color(rgb(ui_theme::BORDER))
+                            .rounded(px(ui_theme::RADIUS_MD))
+                            .bg(rgb(ui_theme::TILE))
+                            .font_family("monospace")
+                            .text_size(px(10.5))
+                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .child(preview),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
+/// 右侧引导卡（accent 软底）：当前步的说明文案。各步共用样式。
+fn workflow_guide_card(title: &'static str, body: &'static str) -> gpui::AnyElement {
+    div()
+        .w(px(250.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded(px(ui_theme::RADIUS_MD))
+        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(ui_theme::PRIMARY))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .child(body),
+        )
+        .into_any_element()
+}
+
+/// 字段列：label + 输入框的纵向小列（变量卡片两列布局用）。
+fn field_column(
+    label: &'static str,
+    required: bool,
+    input: impl gpui::IntoElement,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .child(workflow_editor_field_label(label, required))
+        .child(input)
+        .into_any_element()
+}
+
+/// 变量卡片右上角的 ✕ 删除微按钮。
+fn workflow_editor_card_remove_button(
+    id: String,
+    on_click: impl Fn(&mut RepositoryView, &mut Context<RepositoryView>) + 'static,
+    cx: &mut Context<RepositoryView>,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(ui_theme::RADIUS_XS))
+        .text_size(px(11.0))
+        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .cursor_pointer()
+        .hover(|this| {
+            this.bg(rgb(ui_theme::COLOR_WARNING))
+                .text_color(rgb(ui_theme::COLOR_WARNING_FOREGROUND))
+        })
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            on_click(this, cx);
+        }))
+        .child("✕")
+        .into_any_element()
+}
+
+/// 步骤类型在选择器/图标位使用的简短符号。
+fn workflow_step_kind_glyph(kind: WorkflowStepKind) -> &'static str {
+    match kind {
+        WorkflowStepKind::Checkout => "⇄",
+        WorkflowStepKind::Fetch => "↙",
+        WorkflowStepKind::Pull => "↓",
+        WorkflowStepKind::CreateBranch => "⑂",
+        WorkflowStepKind::Merge => "⑃",
+        WorkflowStepKind::Push => "↑",
+        WorkflowStepKind::GuardRemoteBranch => "⊘",
+        WorkflowStepKind::EnsureClean => "✓",
+        WorkflowStepKind::AssertBranch => "＝",
+        WorkflowStepKind::FilterBranches => "⌕",
+        WorkflowStepKind::DeleteBranches => "✕",
+    }
+}
 /// 字段 label（带必填红点星号）。
 fn workflow_editor_field_label(label: &str, required: bool) -> impl IntoElement {
     div()
@@ -3318,34 +4154,6 @@ fn workflow_editor_add_button(
             cx.notify();
         }))
         .child(label)
-}
-
-/// 高级区的「删除此变量」按钮。
-fn workflow_editor_remove_button(
-    id: &'static str,
-    index: usize,
-    on_click: impl Fn(&mut RepositoryView, usize) + 'static,
-    cx: &mut Context<RepositoryView>,
-) -> impl IntoElement {
-    div()
-        .id(format!("{id}-{index}"))
-        .flex()
-        .items_center()
-        .justify_center()
-        .min_h(px(26.0))
-        .px_3()
-        .border_1()
-        .border_color(rgb(ui_theme::BORDER))
-        .rounded(px(ui_theme::RADIUS_XS))
-        .cursor_pointer()
-        .text_size(px(12.0))
-        .text_color(rgb(ui_theme::DESTRUCTIVE))
-        .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
-        .on_click(cx.listener(move |this, _event, _window, cx| {
-            on_click(this, index);
-            cx.notify();
-        }))
-        .child("删除此变量")
 }
 
 #[cfg(test)]
