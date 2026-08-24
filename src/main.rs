@@ -2258,6 +2258,9 @@ pub(crate) enum UiEvent {
     },
     UpdateCheckFailed {
         error: String,
+        /// 手动检查（设置页「立即检查」）：结果弹气泡；自动检查保持安静
+        ///（每次启动都弹「已是最新」会打扰）。
+        manual: bool,
     },
     UpdateDownloadProgress {
         downloaded: u64,
@@ -3430,9 +3433,10 @@ impl RepositoryView {
     fn new_with_session(cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.restore_session();
-        // 启动时自动检查更新
+        // 启动时自动检查更新（manual=false：结果不弹气泡，仅状态栏；
+        // 发现新版本仍会弹窗）
         if view.update_preferences.auto_check {
-            view.start_update_check();
+            view.start_update_check(false);
         }
         // 老用户首次进入便携版本时，提示把数据从 C 盘迁移到程序同级目录。
         view.maybe_prompt_portable_migration();
@@ -5743,13 +5747,15 @@ impl RepositoryView {
                     size: asset.size,
                 });
             }
-            UiEvent::UpdateCheckFailed { error } => {
+            UiEvent::UpdateCheckFailed { error, manual } => {
                 self.update_checking = false;
                 if !error.is_empty() {
                     self.update_error = Some(error.clone());
                     self.status = error.clone();
-                    if let Some(message) = update_check_toast_message(&error) {
-                        self.notify_toast(AppToastKind::Info, message, cx);
+                    // 手动检查弹气泡反馈（成功发现最新=成功气泡、真失败=
+                    // 错误气泡）；自动检查保持安静，仅状态栏与设置页错误条。
+                    if let Some((kind, message)) = update_check_toast(&error, manual) {
+                        self.notify_toast(kind, message, cx);
                     }
                 }
             }
@@ -6984,7 +6990,7 @@ impl RepositoryView {
 
     // ── 更新方法 ──────────────────────────────────────────────────────────
 
-    pub(crate) fn start_update_check(&mut self) {
+    pub(crate) fn start_update_check(&mut self, manual: bool) {
         if self.update_checking {
             return;
         }
@@ -7012,6 +7018,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: "当前已是最新版本".into(),
+                            manual,
                         },
                     );
                 }
@@ -7021,6 +7028,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: String::new(),
+                            manual,
                         },
                     );
                 }
@@ -7029,6 +7037,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: err.to_string(),
+                            manual,
                         },
                     );
                 }
@@ -15741,7 +15750,7 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "立即检查",
                         !self.update_checking && !self.busy,
-                        |this, _, _| this.start_update_check(),
+                        |this, _, _| this.start_update_check(true),
                         cx,
                     ))
                     .child(self.button(
@@ -17829,8 +17838,18 @@ fn operation_affects_commit_history(message: &str) -> bool {
     )
 }
 
-fn update_check_toast_message(_error: &str) -> Option<String> {
-    None
+/// 检查更新结果的气泡决策（纯函数，可单测）：手动检查需要即时反馈——
+/// 「已是最新」弹成功气泡、真失败弹错误气泡；自动检查每次启动都跑，
+/// 弹气泡会打扰，保持安静（发现新版本走弹窗不受此影响）。
+fn update_check_toast(error: &str, manual: bool) -> Option<(AppToastKind, String)> {
+    if !manual || error.is_empty() {
+        return None;
+    }
+    if error == "当前已是最新版本" {
+        Some((AppToastKind::Success, error.to_string()))
+    } else {
+        Some((AppToastKind::Error, format!("检查更新失败：{error}")))
+    }
 }
 
 fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {

@@ -530,10 +530,24 @@ fn worktree_diff_load_completion_does_not_emit_toast() {
 }
 
 #[test]
-fn update_check_result_stays_in_status_bar_without_toast() {
-    assert_eq!(update_check_toast_message("当前已是最新版本"), None);
-    assert_eq!(update_check_toast_message("更新检查失败"), None);
-    assert_eq!(update_check_toast_message(""), None);
+fn update_check_toast_only_for_manual_checks() {
+    // 手动检查：已是最新 → 成功气泡；真失败 → 错误气泡（带前缀）
+    assert_eq!(
+        update_check_toast("当前已是最新版本", true),
+        Some((AppToastKind::Success, "当前已是最新版本".to_string()))
+    );
+    assert_eq!(
+        update_check_toast("清单下载失败", true),
+        Some((
+            AppToastKind::Error,
+            "检查更新失败：清单下载失败".to_string()
+        ))
+    );
+    // 手动但静默：跳过版本（空 error）
+    assert_eq!(update_check_toast("", true), None);
+    // 自动检查：一律不弹（每次启动都弹会打扰）
+    assert_eq!(update_check_toast("当前已是最新版本", false), None);
+    assert_eq!(update_check_toast("清单下载失败", false), None);
 }
 
 #[test]
