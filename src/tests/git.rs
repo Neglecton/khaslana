@@ -4995,3 +4995,164 @@ fn oversized_office_file_falls_back_without_loading() {
         "超限文件不应有提取行（占位卡路径）"
     );
 }
+
+// ── Tab 展开供显示（gpui 文本管线无 tab 宽度，Tab 缩进文件会顶格）──
+
+#[test]
+fn expand_tabs_for_display_matrix() {
+    // 无 tab：借用快速路径，原样
+    assert_eq!(expand_tabs_for_display("    let x = 1;"), "    let x = 1;");
+    // 行首单个 tab → 4 列
+    assert_eq!(expand_tabs_for_display("\tlet x = 1;"), "    let x = 1;");
+    // 行首两个 tab → 8 列
+    assert_eq!(expand_tabs_for_display("\t\t}"), "        }");
+    // 行中 tab 按当前列对齐到 4 的倍数："ab\t" → 列 2，补 2 格
+    assert_eq!(expand_tabs_for_display("ab\tcd"), "ab  cd");
+    // 多字节字符按 1 列计："中\t" → 列 1，补 3 格
+    assert_eq!(expand_tabs_for_display("中\t文"), "中   文");
+    // 连续 tab：列 0 的 tab 补 4，落列 4 的 tab 再补 4
+    assert_eq!(expand_tabs_for_display("\t\tx"), "        x");
+    // 仅 tab
+    assert_eq!(expand_tabs_for_display("\t"), "    ");
+}
+
+#[test]
+fn diff_of_tab_indented_file_expands_tabs_for_display() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "tracked.txt", "base\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_file(
+        dir.path(),
+        "Tab.java",
+        "class A {\n\tpublic void run() {\n\t\tint x = 1;\n\t}\n}\n",
+    );
+
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("Tab.java"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    let added: Vec<&str> = diff
+        .lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(
+        added,
+        vec![
+            "class A {",
+            "    public void run() {",
+            "        int x = 1;",
+            "    }",
+            "}",
+        ],
+        "Tab 缩进的 diff 行应展开为空格显示"
+    );
+}
+
+#[test]
+fn blame_of_tab_indented_file_expands_tabs_in_view_lines() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "Tab.java",
+        "class A {\n\tpublic void run() {\n\t}\n}\n",
+    );
+    git_support::commit_all(&mut repo, "initial");
+    let view = service
+        .blame_file(&repo, Path::new("Tab.java"), DiffEncodingChoice::Auto)
+        .unwrap();
+    assert_eq!(
+        view.lines,
+        vec!["class A {", "    public void run() {", "    }", "}"],
+        "追溯视图行应展开 Tab"
+    );
+}
+
+#[test]
+fn browse_content_of_tab_indented_file_expands_tabs() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(
+        dir.path(),
+        "Tab.java",
+        "class A {\n\tpublic void run() {\n\t}\n}\n",
+    );
+    git_support::commit_all(&mut repo, "initial");
+    let head_oid = repo.head().unwrap().target().unwrap().to_string();
+    let content = service
+        .browse_file_content(
+            &repo,
+            &head_oid,
+            Path::new("Tab.java"),
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    assert_eq!(
+        content.lines,
+        vec!["class A {", "    public void run() {", "    }", "}"]
+    );
+}
+
+// 部分暂存回归：Tab 展开只在显示层，暂存进仓库的内容必须保留原始 Tab。
+#[test]
+fn partial_stage_of_tab_file_stages_original_bytes() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    // 旧版无缩进方法，工作区加上 Tab 缩进的新方法 → 未暂存改动可按行暂存
+    //（未跟踪文件没有 index 基线，不支持部分暂存）。
+    git_support::write_file(dir.path(), "Tab.java", "class A {\n}\n");
+    git_support::commit_all(&mut repo, "initial");
+    git_support::write_file(
+        dir.path(),
+        "Tab.java",
+        "class A {\n\tpublic void run() {\n\t\tint x = 1;\n\t}\n}\n",
+    );
+
+    // 按块暂存整个文件（选中全部 Added 行）
+    let diff = service
+        .diff_for_path(
+            &repo,
+            Path::new("Tab.java"),
+            DiffScope::Unstaged,
+            false,
+            DiffEncodingChoice::Auto,
+        )
+        .unwrap();
+    let mut selection = LineSelection::new();
+    for line in &diff.lines {
+        if line.kind == DiffLineKind::Added
+            && let Some(lineno) = line.new_lineno
+        {
+            selection.insert(SelectedDiffLine {
+                side: SelectionSide::Added,
+                lineno,
+            });
+        }
+    }
+    service
+        .stage_lines(&mut repo, Path::new("Tab.java"), &selection)
+        .unwrap_or_else(|err| panic!("Tab 文件按行暂存应成功：{err}"));
+
+    // 暂存区内容必须仍是原始 Tab（显示层展开不得污染暂存链路）
+    let index_text = {
+        let r = git2::Repository::open(dir.path()).unwrap();
+        let index_tree = r.index().unwrap().write_tree().unwrap();
+        let obj = r
+            .find_tree(index_tree)
+            .unwrap()
+            .get_path(Path::new("Tab.java"))
+            .unwrap()
+            .to_object(&r)
+            .unwrap();
+        let blob = obj.into_blob().unwrap();
+        String::from_utf8(blob.content().to_vec()).unwrap()
+    };
+    assert!(
+        index_text.contains("\t\tint x = 1;") && index_text.contains("\tpublic void run()"),
+        "暂存区必须保留原始 Tab 缩进，实际：{index_text:?}"
+    );
+}

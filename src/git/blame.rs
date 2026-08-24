@@ -194,7 +194,13 @@ impl GitService {
         let (resolved_encoding, encoding_impl) =
             super::resolve_diff_encoding(encoding, &content_bytes[..sample_len]);
         let (decoded, _used, _had_errors) = encoding_impl.decode(content_bytes);
-        let lines: Vec<String> = decoded.lines().map(str::to_string).collect();
+        // Tab 展开到空格供显示（gpui 文本管线无 tab 宽度，Tab 缩进的文件
+        // 会顶格）。追溯是只读视图，数据层展开安全；语法高亮在展开后的
+        // 行上计算，span 与显示文本对齐。
+        let lines: Vec<String> = decoded
+            .lines()
+            .map(|line| super::expand_tabs_for_display(line).into_owned())
+            .collect();
 
         // libgit2 会为每个 hunk 填充 final 签名与 summary（blame_buffer 的
         // 未提交行除外：零 OID、无签名），无需再逐提交查库。

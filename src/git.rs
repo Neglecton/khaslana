@@ -2583,7 +2583,11 @@ impl GitService {
                     kind: line.kind,
                     old_lineno: line.old_lineno,
                     new_lineno: line.new_lineno,
-                    content,
+                    // Tab 展开到空格供显示（gpui 文本管线无 tab 宽度，Tab
+                    // 缩进的文件会顶格）。部分暂存不消费 FileDiff.lines
+                    //（服务端重生成 diff 构造 patch），显示层展开安全；
+                    // file_diff_to_patch_text（AI 输入）随之看到展开文本。
+                    content: expand_tabs_for_display(&content).into_owned(),
                     hunk_index: line.hunk_index,
                 }
             })
@@ -3088,6 +3092,35 @@ fn decode_diff_line(bytes: &[u8], encoding: &'static Encoding) -> (String, bool)
     let trimmed = without_lf.strip_suffix(b"\r").unwrap_or(without_lf);
     let (decoded, _encoding_used, had_errors) = encoding.decode(trimmed);
     (decoded.into_owned(), had_errors)
+}
+
+/// 显示层 Tab 展开：把 '\t' 按显示列展开到 4 列对齐。gpui 的 DirectWrite
+/// 文本管线没有 tab 宽度（无 tab stop、字体 cmap 无 U+0009 字形 → 零宽），
+/// Tab 缩进的文件在文本视图会全部顶格；空格不受影响。**仅用于只读视图的
+/// 数据层**（差异/追溯/浏览内容）——冲突工作台的内容会应用回工作区，
+/// Office 提取文本用 '\t' 作单元格分隔，均严禁展开。列按字符数计（CJK
+/// 不加倍）：Tab 几乎只在行首，保持简单可预测。无 tab 的行走借用快速
+/// 路径，不产生分配。
+pub(crate) fn expand_tabs_for_display(line: &str) -> std::borrow::Cow<'_, str> {
+    const TAB_WIDTH: usize = 4;
+    if !line.contains('\t') {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len() + TAB_WIDTH);
+    let mut column = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            column += spaces;
+        } else {
+            out.push(ch);
+            column += 1;
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 pub(crate) fn signature(repo: &Repository) -> Result<Signature<'static>> {

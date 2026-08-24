@@ -265,6 +265,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - diff 头部可折叠
 - hunk 分隔行视觉增强：`@@ 行号范围 @@` 行使用独立底色 `DIFF_HUNK_BG` + 上下边框 + 圆角胶囊 + 行号列同底色（文件头行保持原浅色），深浅主题下均与底色明显区分
 - diff 编码可选
+- Tab 缩进的文件在差异/追溯/浏览内容视图中按 4 列展开为空格显示（`expand_tabs_for_display`，`src/git.rs`）：gpui 的 DirectWrite 文本管线没有 tab 宽度（无 tab stop、字体 cmap 无 U+0009 字形 → 零宽），不展开则逐行顶格。**展开仅限只读视图的数据层**（file_diff_from_diff 解码 pass / blame lines 切分 / browse_file_content）——部分暂存不消费 FileDiff.lines（服务端重生成 diff 构造 patch，有回归测试锁住暂存区保留原始 Tab）；`file_diff_to_patch_text`（AI 输入）随之看到展开文本。冲突工作台（内容应用回工作区）与 Office 提取文本（'	' 作单元格分隔）严禁展开
 - diff 区域支持左右滑动查看长行
 - 全文视图对超大文件（超过 `FULL_FILE_MAX_BYTES`）自动回退到紧凑差异并提示
 - 提交信息输入（多行框固定可视高度 `MULTILINE_LINE_HEIGHT * MULTILINE_MIN_LINES`（5 行），内容超出滚动并显示自绘滚动条；`MultiLineInputElement` prepaint 带光标跟随滚动，不要求聚焦，AI 流式回填也会滚到最新内容；跟随以跟随键（光标字节, 内容长度）门控——仅键变化（光标移动或内容改变）且光标行越界时才滚动，键不变视为用户手动滚动、不回弹抢夺视口，决策纯函数 `multiline_caret_follow_decision` 可单测）和 commit；「修补上次提交」开关（IDEA 式，位于输入框上方靠右）：开启后主按钮变「修补提交」、「提交并推送」变「修补提交并推送」（修补后推送，组合错误提示与提交并推送一致），输入框为空自动预填 HEAD 完整提交信息（优先用内存历史数据，未加载过历史时经后台任务读 HEAD 回填，不依赖进入过提交记录页；关闭开关时清除未被用户编辑的预填内容），输入框为空则修补保留原信息，以当前暂存区重写 HEAD；HEAD 已推送（branch_sync_status ahead==0 且有 upstream）时弹强推后果确认（按入口区分确认后动作）

@@ -218,9 +218,11 @@ impl GitService {
         let (resolved_encoding, encoding_impl) =
             super::resolve_diff_encoding(encoding, &content[..sample_len]);
         let (decoded, _used, had_errors) = encoding_impl.decode(content);
+        // Tab 展开到空格供显示（gpui 文本管线无 tab 宽度，Tab 缩进的文件
+        // 会顶格）。浏览内容是只读视图，数据层展开安全。
         let lines = decoded
             .lines()
-            .map(|line| line.to_string())
+            .map(|line| super::expand_tabs_for_display(line).into_owned())
             .collect::<Vec<_>>();
 
         Ok(BrowseFileContent {
