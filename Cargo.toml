@@ -45,6 +45,23 @@ unicode-segmentation = "1"
 # 0.3 改为 headless + renderer 架构（component 模块移除、Theme 结构重排），
 # 升级需重写组件接入层，暂留 0.2 系最新版本。
 yororen_ui = "0.2"
+# 代码索引引擎（src/code_index/）：tree-sitter AST 解析 + gitignore 感知目录遍历。
+# 各语言语法 crate 只导出 LanguageFn 常量（不链接 runtime），版本以共同编译为准。
+# Kotlin 用 tree-sitter-kotlin-ng：官方 tree-sitter-kotlin 0.3.8 依赖旧 runtime 0.21，
+# 与新版 tree-sitter 的 links 声明冲突，无法共存。
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-php = "0.24.2"
+tree-sitter-kotlin-ng = "1.1.0"
+ignore = "0.4.33"
 
 [target.'cfg(windows)'.dependencies]
 # git2 0.21 尚未暴露跳过被占用目录的 checkout 选项，Windows 工作区操作需直接配置 libgit2。

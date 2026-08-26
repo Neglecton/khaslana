@@ -53,6 +53,12 @@ pub struct DiffEncodingPreferences {
     pub repositories: BTreeMap<String, DiffEncodingChoice>,
 }
 
+/// 代码索引偏好：仓库路径 → 是否启用索引（per-repo 开关，设置中心「代码索引」页）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodeIndexPreferences {
+    pub repositories: BTreeMap<String, bool>,
+}
+
 /// 快捷键绑定：action_id → keystroke 字符串（如 "refresh" → "f5"）。
 /// 空 map 表示使用内置默认值（由 UI 层填充），持久化时只存用户自定义的完整映射。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +241,37 @@ impl AppStorage {
     pub fn load_diff_encoding_preferences(&self) -> Result<DiffEncodingPreferences> {
         let conn = self.lock_conn()?;
         load_diff_encoding_preferences_from_conn(&conn)
+    }
+
+    /// 读取全部仓库的代码索引开关。
+    pub fn load_code_index_preferences(&self) -> Result<CodeIndexPreferences> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT repo_path, enabled FROM code_index_preferences ORDER BY repo_path")
+            .map_err(storage_error)?;
+        let mut preferences = CodeIndexPreferences::default();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (repo_path, enabled) = row.map_err(storage_error)?;
+            preferences.repositories.insert(repo_path, enabled);
+        }
+        Ok(preferences)
+    }
+
+    /// 设置单个仓库的代码索引开关（upsert，设置页开关即时生效）。
+    pub fn set_code_index_enabled(&self, repo_path: &str, enabled: bool) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO code_index_preferences (repo_path, enabled, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo_path) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+            params![repo_path, i64::from(enabled), now_seconds()],
+        )
+        .map_err(storage_error)?;
+        Ok(())
     }
 
     pub fn save_diff_encoding_preferences(
@@ -836,6 +873,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS diff_encoding_preferences (
             repo_path TEXT PRIMARY KEY,
             choice TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS code_index_preferences (
+            repo_path TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
 

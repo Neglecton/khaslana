@@ -41,7 +41,9 @@ pub struct AiReviewRecord {
 /// std 哈希不保证跨版本稳定，目录名漂移会让旧记录「失联」。
 /// 哈希前先做小写折叠：Windows 路径大小写不敏感，`D:\Repo` 与 `d:\repo`
 /// 是同一仓库，不折叠会因盘符/目录大小写变化生成新目录导致旧记录「失联」。
-fn repo_key(repo_path: &str) -> String {
+/// 仓库路径 → 稳定短哈希键（FNV-1a + 小写折叠）。跨 crate 共享：
+/// code_index 的索引库目录与 ai-reviews 同一套仓库标识约定。
+pub fn repo_key(repo_path: &str) -> String {
     let normalized = repo_path.trim_end_matches(['/', '\\']).to_lowercase();
     fnv1a_32(normalized.as_bytes())
 }

@@ -6,6 +6,7 @@ mod blame_view;
 mod browse_compare_view;
 mod browse_view;
 mod chrome_view;
+mod code_index_view;
 mod commit_graph_view;
 mod conflicts;
 mod diff_view;
@@ -395,6 +396,8 @@ enum FieldId {
     AiApiKey,
     AiModel,
     ExternalMergeIntellijPath,
+    /// 设置中心「代码索引」页的符号搜索框。
+    CodeIndexSearch,
     StashMessage,
     WorkflowInput(usize),
     /// 工作流模板编辑器的动态字段（模板名/文件名/步骤参数/变量行），
@@ -501,6 +504,9 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
         FieldId::ExternalMergeIntellijPath,
         |view: &RepositoryView| &view.external_merge_intellij_path,
     ),
+    (FieldId::CodeIndexSearch, |view: &RepositoryView| {
+        &view.code_index_search_input
+    }),
 ];
 
 #[derive(Clone, Debug)]
@@ -555,6 +561,8 @@ pub(crate) enum SettingsCategory {
     Proxy,
     Ai,
     ExternalMerge,
+    /// 代码索引：per-仓库开关、索引状态与重建/删除入口。
+    CodeIndex,
     Theme,
     Update,
     Shortcuts,
@@ -647,6 +655,8 @@ pub(crate) enum DialogState {
         path: PathBuf,
         display_name: String,
     },
+    /// 删除仓库索引数据目录的确认弹窗（设置中心「代码索引」页）。
+    ConfirmDeleteCodeIndex,
     ConfirmDropStash {
         index: usize,
         message: String,
@@ -1360,6 +1370,13 @@ pub(crate) struct AiReviewHistoryState {
     pub loading: bool,
     pub records: Vec<AiReviewRecord>,
     pub error: Option<String>,
+}
+
+/// 在途代码索引任务状态（全局单任务，Index 池单线程串行化）。
+pub(crate) struct CodeIndexTaskState {
+    pub repo_path: String,
+    /// 置位后任务在文件/阶段边界退出，不落盘。
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// AI 思考弹窗状态：一次性 AI 请求（commit message / 冲突合并建议 /
@@ -2172,6 +2189,31 @@ pub(crate) enum UiEvent {
     /// 工作流模板目录后台刷新结果（目录 IO/JSON5 解析不占 UI 线程）。
     WorkflowTemplatesLoaded {
         result: Result<Vec<WorkflowTemplateItem>, String>,
+    },
+    /// 代码索引构建进度（按 repo_path 键控：索引中关闭仓库标签任务照常完成）。
+    CodeIndexProgress {
+        repo_path: String,
+        message: String,
+        done: usize,
+        total: usize,
+    },
+    /// 代码索引完成（stats 为空 None 表示增量检查后无变化）。
+    CodeIndexFinished {
+        repo_path: String,
+        stats: Option<khaslana::code_index::IndexRunStats>,
+    },
+    CodeIndexFailed {
+        repo_path: String,
+        error: String,
+    },
+    /// 设置页符号搜索结果回填。
+    CodeIndexSearchFinished {
+        hits: Vec<khaslana::code_index::SearchHit>,
+    },
+    /// 设置页打开/刷新时后台读库回填的索引统计。
+    CodeIndexStatsLoaded {
+        repo_path: String,
+        stats: Option<khaslana::code_index::IndexStats>,
     },
     OpenRepositoryFolderSelected {
         path: Option<PathBuf>,
@@ -3153,6 +3195,20 @@ pub(crate) struct RepositoryView {
     pub(crate) ai_thinking_overlay: Option<AiThinkingOverlayState>,
     /// 思考弹窗钉底跟随的跨帧状态（内容长度键），见 `AiThinkingFollowState`。
     pub(crate) ai_thinking_follow_state: std::rc::Rc<AiThinkingFollowState>,
+    // ── 代码索引 ──
+    /// 在途索引任务（全局单任务：Index 池单线程 + 此守卫双保险）。
+    pub(crate) code_index_task: Option<CodeIndexTaskState>,
+    /// 各仓库最近一次索引统计缓存（事件回填；设置页打开时也会后台查库刷新）。
+    pub(crate) code_index_stats: HashMap<String, khaslana::code_index::IndexStats>,
+    /// 设置页符号搜索框（验证卡输入框）。
+    pub(crate) code_index_search_input: TextFieldState,
+    /// 在途任务的最新进度文案（状态卡显示）。
+    pub(crate) code_index_progress_message: String,
+    /// 已启用索引的仓库键缓存（启动与设置页打开时从主库加载）。
+    pub(crate) code_index_enabled_cache: std::collections::HashSet<String>,
+    /// 最近一次符号搜索结果；None = 尚未搜索。
+    pub(crate) code_index_search_hits: Option<Vec<khaslana::code_index::SearchHit>>,
+    pub(crate) code_index_searching: bool,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -3402,6 +3458,25 @@ impl RepositoryView {
             ai_thinking_follow_state: std::rc::Rc::new(AiThinkingFollowState {
                 last_key: std::cell::Cell::new((usize::MAX, usize::MAX)),
             }),
+            code_index_task: None,
+            code_index_stats: HashMap::new(),
+            code_index_search_input: TextFieldState::new(cx, "搜索符号（如 pushBranch）"),
+            code_index_search_hits: None,
+            code_index_searching: false,
+            code_index_progress_message: String::new(),
+            code_index_enabled_cache: {
+                let mut cache = std::collections::HashSet::new();
+                if let Ok(prefs) = storage.load_code_index_preferences() {
+                    cache.extend(
+                        prefs
+                            .repositories
+                            .into_iter()
+                            .filter(|(_, enabled)| *enabled)
+                            .map(|(repo, _)| repo),
+                    );
+                }
+                cache
+            },
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
@@ -4351,6 +4426,9 @@ impl RepositoryView {
                         // 仓库（重）加载后历史引用已变：已有历史列表时不受视图限制地后台刷新，
                         // 覆盖切换分支/拉取/推送等引用类操作；初始打开（列表为空）不预加载。
                         this.reload_history_after_change();
+                        // 已启用索引的仓库：后台增量检查（mtime+size 无变化时零写入）。
+                        let loaded_path = this.repo_path.clone();
+                        this.maybe_auto_code_index_refresh(loaded_path.as_deref(), cx);
                     }
                 });
             }
@@ -4537,6 +4615,10 @@ impl RepositoryView {
                 // 守卫不匹配被丢弃，变更列表将停留在不含未跟踪文件的操作快照上。
                 if operation_refreshes_worktree_diff(&toast_message) {
                     self.refresh_diff_after_stage_change();
+                    let op_repo = tab_id
+                        .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+                        .and_then(|tab| tab.repo_path.clone());
+                    self.maybe_auto_code_index_refresh(op_repo.as_deref(), cx);
                 }
                 if let Some((tab_id, path, _)) = full_status_request {
                     // 代际需在差异重载之后取最新值（见上），否则结果会被守卫丢弃。
@@ -5452,6 +5534,28 @@ impl RepositoryView {
                     this.status = entry.message.clone();
                     this.workflow_state.log.push(entry);
                 });
+            }
+            UiEvent::CodeIndexProgress {
+                repo_path,
+                message,
+                done,
+                total,
+            } => {
+                self.handle_code_index_progress(repo_path, message, done, total);
+                cx.notify();
+            }
+            UiEvent::CodeIndexFinished { repo_path, stats } => {
+                self.handle_code_index_finished(repo_path, stats, cx);
+            }
+            UiEvent::CodeIndexFailed { repo_path, error } => {
+                self.handle_code_index_failed(repo_path, error, cx);
+            }
+            UiEvent::CodeIndexStatsLoaded { repo_path, stats } => {
+                self.handle_code_index_stats_loaded(repo_path, stats);
+                cx.notify();
+            }
+            UiEvent::CodeIndexSearchFinished { hits } => {
+                self.handle_code_index_search_finished(hits, cx);
             }
             UiEvent::WorkflowTemplatesLoaded { result } => {
                 self.apply_workflow_templates(result);
@@ -6557,6 +6661,7 @@ impl RepositoryView {
             FieldId::RemoteBranchName => &mut self.remote_branch_name,
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
+            FieldId::CodeIndexSearch => &mut self.code_index_search_input,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
@@ -6853,6 +6958,9 @@ impl RepositoryView {
             }
             SettingsCategory::ExternalMerge => {
                 self.reset_external_merge_form_from_settings();
+            }
+            SettingsCategory::CodeIndex => {
+                self.refresh_code_index_stats();
             }
             SettingsCategory::Theme
             | SettingsCategory::Update
@@ -12820,6 +12928,7 @@ impl RepositoryView {
                 ToolbarIcon::Workflow,
                 "合并工具",
             ),
+            (SettingsCategory::CodeIndex, ToolbarIcon::Search, "代码索引"),
             (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
             (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
             (SettingsCategory::Shortcuts, ToolbarIcon::Keyboard, "快捷键"),
@@ -12839,6 +12948,9 @@ impl RepositoryView {
                 .into_any_element(),
             SettingsCategory::ExternalMerge => self
                 .render_external_merge_settings_dialog(window, cx)
+                .into_any_element(),
+            SettingsCategory::CodeIndex => self
+                .render_code_index_settings_dialog(window, cx)
                 .into_any_element(),
             SettingsCategory::Theme => self
                 .render_theme_settings_dialog(window, cx)
@@ -14641,6 +14753,9 @@ impl RepositoryView {
             DialogState::ConfirmDeleteWorkflowTemplate { path, display_name } => self
                 .render_confirm_delete_workflow_template_dialog(path, display_name, cx)
                 .into_any_element(),
+            DialogState::ConfirmDeleteCodeIndex => {
+                self.render_code_index_delete_confirm(cx).into_any_element()
+            }
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
                 .into_any_element(),

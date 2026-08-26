@@ -11,6 +11,7 @@ pub(crate) struct TaskExecutor {
     short_pool: Arc<ThreadPool>,
     long_pool: Arc<ThreadPool>,
     ai_pool: Arc<ThreadPool>,
+    index_pool: Arc<ThreadPool>,
     event_tx: async_channel::Sender<UiEvent>,
 }
 
@@ -26,10 +27,13 @@ impl TaskExecutor {
         // fetch/push/clone 等网络 Git 操作饿死在队列里。池大小直接引用
         // 并发上限常量，避免两处硬编码脱钩（只改其一会让任务在队列里排队）。
         let ai_threads = crate::MAX_CONCURRENT_AI_REVIEWS;
+        // 代码索引同理：全量索引可达分钟级 CPU 密集，独占单线程串行化
+        // （提取阶段内部再用 scoped threads 并行，不占其他池）。
         Self {
             short_pool: Arc::new(build_pool("khaslana-short", short_threads)),
             long_pool: Arc::new(build_pool("khaslana-long", long_threads)),
             ai_pool: Arc::new(build_pool("khaslana-ai", ai_threads)),
+            index_pool: Arc::new(build_pool("khaslana-index", 1)),
             event_tx,
         }
     }
@@ -54,6 +58,7 @@ impl TaskExecutor {
             TaskKind::Short => self.short_pool.spawn(wrapped),
             TaskKind::Long => self.long_pool.spawn(wrapped),
             TaskKind::Ai => self.ai_pool.spawn(wrapped),
+            TaskKind::Index => self.index_pool.spawn(wrapped),
         }
     }
 }
@@ -76,6 +81,9 @@ pub(crate) enum TaskKind {
     Long,
     /// 分钟级 AI agent 任务（评审循环），独占 ai 池，不与网络 Git 操作抢线程。
     Ai,
+    /// 代码索引构建：CPU 密集可达分钟级，独占单线程串行化
+    /// （同仓库互斥由 UI 层守卫；提取阶段内部 scoped threads 并行）。
+    Index,
 }
 
 fn build_pool(name: &'static str, threads: usize) -> ThreadPool {
