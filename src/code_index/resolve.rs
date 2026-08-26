@@ -153,15 +153,28 @@ impl Registry {
     }
 }
 
-/// 导入尾段匹配：导入路径的最后 N 段与定义文件路径（去扩展名、统一分隔符）
-/// 的最后 N 段一致。`use crate::git::service` ↔ `src/git/service.rs` ✓；
-/// `os.path` ↔ `os/path.py` ✓。
+/// Rust 路径根段：`use crate::git::service` 的 crate 段在文件路径里对应
+/// 仓库名/`src`，永远对不上，剥掉后再比较。
+const RUST_PATH_ROOTS: &[&str] = &["crate", "self", "super"];
+
+/// 导入尾段匹配：导入路径（剥根段后）与定义文件路径（去扩展名、统一分隔符）
+/// 的尾段一致。`use crate::git::service` 剥 crate 后 `git.service` ↔
+/// `src/git/service.rs` 尾两段 ✓；`os.path` ↔ `os/path.py` ✓。
+/// 若整段尾匹配不中，再回退「导入路径去掉末段」与文件尾段比较
+/// （`use crate::git::browse` 指向目录，能命中目录下任意文件，对齐参考
+/// 项目 is_import_reachable 的前缀可达语义：导入是容器路径时可达其成员）。
 fn import_tail_matches(import: &str, file_path: &str) -> bool {
-    let import_segs: Vec<String> = import
+    let mut import_segs: Vec<String> = import
         .split('.')
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
         .collect();
+    while import_segs
+        .first()
+        .is_some_and(|seg| RUST_PATH_ROOTS.contains(&seg.as_str()))
+    {
+        import_segs.remove(0);
+    }
     if import_segs.is_empty() {
         return false;
     }
@@ -171,10 +184,20 @@ fn import_tail_matches(import: &str, file_path: &str) -> bool {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
         .collect();
-    if import_segs.len() > file_segs.len() {
-        return false;
+    if !import_segs.is_empty() && import_segs.len() <= file_segs.len() {
+        if file_seg_ends_with(&file_segs, &import_segs) {
+            return true;
+        }
+        // 回退：剥掉导入末段（模块名）后作为容器路径匹配文件路径。
+        // 至少保留一段，避免单段 `crate` 之类剥完匹配整个仓库。
+        if import_segs.len() >= 2 {
+            let container = &import_segs[..import_segs.len() - 1];
+            if file_seg_ends_with(&file_segs, container) {
+                return true;
+            }
+        }
     }
-    file_seg_ends_with(&file_segs, &import_segs)
+    false
 }
 
 fn file_seg_ends_with(file_segs: &[String], import_segs: &[String]) -> bool {

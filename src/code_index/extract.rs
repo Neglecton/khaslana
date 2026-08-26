@@ -100,13 +100,13 @@ impl Extractor {
 
     fn parser_for(&mut self, lang: LangId) -> Result<&mut Parser> {
         let key = lang as u32;
-        if !self.parsers.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.parsers.entry(key) {
             let mut parser = Parser::new();
             let language = super::lang_spec::language_of(lang);
             parser
                 .set_language(&language)
                 .map_err(|e| err(format!("初始化 {} 解析器失败：{e}", lang.display_name())))?;
-            self.parsers.insert(key, parser);
+            e.insert(parser);
         }
         Ok(self.parsers.get_mut(&key).expect("key 已插入"))
     }
@@ -133,19 +133,23 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
     }
 
     // 调用点：记录后继续下穿（嵌套调用 f(g(x)) 都要命中）。
-    if let Some((_, strategy)) = ctx.spec.call_types.iter().find(|(t, _)| *t == kind) {
-        if let Some(mut site) = extract_call_site(node, *strategy, ctx.source) {
-            site.owner = ctx.fn_stack.last().map(|fn_name| OwnerFunction {
-                class_chain: ctx.class_stack.clone(),
-                fn_name: fn_name.clone(),
-            });
-            ctx.result.calls.push(site);
-        }
+    if let Some((_, strategy)) = ctx.spec.call_types.iter().find(|(t, _)| *t == kind)
+        && let Some(mut site) = extract_call_site(node, *strategy, ctx.source)
+    {
+        site.owner = ctx.fn_stack.last().map(|fn_name| OwnerFunction {
+            class_chain: ctx.class_stack.clone(),
+            fn_name: fn_name.clone(),
+        });
+        ctx.result.calls.push(site);
     }
 
-    // 导入。
+    // 导入。JS/TS 的 import 语句优先取 source 字段（字符串字面量），
+    // 整节点文本清洗会连 `{ alpha } from` 一起吞进来。
     if ctx.spec.import_types.contains(&kind) {
-        let text = node.utf8_text(ctx.source).unwrap_or_default();
+        let text = node
+            .child_by_field_name("source")
+            .and_then(|s| s.utf8_text(ctx.source).ok())
+            .unwrap_or_else(|| node.utf8_text(ctx.source).unwrap_or_default());
         let module = clean_import_text(text);
         if !module.is_empty() {
             ctx.result.imports.push(ImportRef { module });
@@ -153,18 +157,18 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
     }
 
     // 字段定义。
-    if ctx.spec.field_types.contains(&kind) {
-        if let Some(name) = child_name_text(node, ctx.source) {
-            ctx.result.defs.push(SymbolDef {
-                label: NodeLabel::Field,
-                name,
-                scope: ctx.class_stack.clone(),
-                start_line: node.start_position().row as u32 + 1,
-                end_line: node.end_position().row as u32 + 1,
-            });
-        }
-        // 初始化器里的调用点由下方通用递归覆盖，此处不 return。
+    if ctx.spec.field_types.contains(&kind)
+        && let Some(name) = child_name_text(node, ctx.source)
+    {
+        ctx.result.defs.push(SymbolDef {
+            label: NodeLabel::Field,
+            name,
+            scope: ctx.class_stack.clone(),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+        });
     }
+    // 初始化器里的调用点由下方通用递归覆盖，此处不 return。
 
     // 类型声明节点上的继承关系字段。
     if is_type_decl_kind(kind, ctx.spec) {
@@ -172,27 +176,27 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
     }
 
     // 定义节点。
-    if let Some(&(node_kind, def_kind)) = ctx.spec.def_types.iter().find(|(t, _)| *t == kind) {
-        if let Some(def) = extract_def(node, node_kind, def_kind, ctx) {
-            ctx.result.defs.push(def.clone());
-            let container = is_container_def(def_kind, kind, ctx.spec);
-            let is_fn_def = matches!(def.label, NodeLabel::Function | NodeLabel::Method);
-            let class_len_before = ctx.class_stack.len();
-            if container {
-                ctx.class_stack.push(def.name.clone());
-            }
-            if is_fn_def {
-                ctx.fn_stack.push(def.name.clone());
-            }
-            recurse_children(node, depth, ctx);
-            if is_fn_def {
-                ctx.fn_stack.pop();
-            }
-            if container {
-                ctx.class_stack.truncate(class_len_before);
-            }
-            return;
+    if let Some(&(node_kind, def_kind)) = ctx.spec.def_types.iter().find(|(t, _)| *t == kind)
+        && let Some(def) = extract_def(node, node_kind, def_kind, ctx)
+    {
+        ctx.result.defs.push(def.clone());
+        let container = is_container_def(def_kind, kind, ctx.spec);
+        let is_fn_def = matches!(def.label, NodeLabel::Function | NodeLabel::Method);
+        let class_len_before = ctx.class_stack.len();
+        if container {
+            ctx.class_stack.push(def.name.clone());
         }
+        if is_fn_def {
+            ctx.fn_stack.push(def.name.clone());
+        }
+        recurse_children(node, depth, ctx);
+        if is_fn_def {
+            ctx.fn_stack.pop();
+        }
+        if container {
+            ctx.class_stack.truncate(class_len_before);
+        }
+        return;
     }
 
     // class 上下文但不是定义的节点（rust impl_item、cpp namespace_definition）：
@@ -461,8 +465,7 @@ fn extract_call_site(node: Node, strategy: CallNameStrategy, source: &[u8]) -> O
     };
     let name = callee_display
         .split(['.', ':', '>', ' '])
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .unwrap_or_default()
         .to_string();
     if callee_display.is_empty() || name.is_empty() {
@@ -632,6 +635,22 @@ fn clean_import_text(raw: &str) -> String {
         .trim_end_matches(['"', '>'])
         .trim()
         .to_string();
+    // JS/TS 命名导入的整体形态兜底（source 字段缺失时才走到这里）：
+    // `{ alpha, beta } from "./lib"` -> `./lib`。
+    if let Some(pos) = text.rfind(" from ") {
+        text = text[pos + " from ".len()..].trim().to_string();
+    }
+    if text.starts_with('{') && text.ends_with('}') {
+        // 剩下纯名字列表（无 from 部分）不是模块路径，丢弃。
+        return String::new();
+    }
+    // 通配导入 `a.b.*` / `a.b::{x, y}`：剥掉名字部分只留容器路径。
+    if let Some(stripped) = text.strip_suffix(".*") {
+        text = stripped.trim().to_string();
+    }
+    if let Some(pos) = text.find("::{") {
+        text = text[..pos].trim().to_string();
+    }
     // 统一分隔符为 '.'
     text = text.replace("::", ".").replace('\\', ".");
     // python 多名字导入取首个；from X import y 只留来源 X
@@ -641,6 +660,20 @@ fn clean_import_text(raw: &str) -> String {
     if let Some(pos) = text.find(" import ") {
         text = text[..pos].trim().to_string();
     }
+    // 相对路径段（./ ../ / 根路径 /）对路径比较无贡献，统一剥掉。
+    while text
+        .strip_prefix('.')
+        .or_else(|| text.strip_prefix('/'))
+        .is_some_and(|stripped| stripped != text)
+    {
+        if let Some(stripped) = text.strip_prefix('.') {
+            text = stripped.trim_start().to_string();
+        } else if let Some(stripped) = text.strip_prefix('/') {
+            text = stripped.trim_start().to_string();
+        } else {
+            break;
+        }
+    }
     text.trim_matches('.').trim().to_string()
 }
 
@@ -649,8 +682,7 @@ fn clean_identifier(text: &str) -> String {
     let trimmed = text.split('<').next().unwrap_or(text);
     trimmed
         .split(['.', ':', '>'])
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .unwrap_or(trimmed)
         .trim()
         .to_string()

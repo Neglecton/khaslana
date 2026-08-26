@@ -14,8 +14,8 @@ use crate::ui::{
     theme::{self as ui_theme, rgb},
 };
 use crate::{
-    CodeIndexTaskState, DialogState, FieldId, RepositoryView, SettingsCategory, UiEvent,
-    normalize_repo_path, send_ui_event,
+    CodeIndexTaskState, DialogState, FieldId, RepositoryView, UiEvent, normalize_repo_path,
+    send_ui_event,
 };
 use khaslana::code_index::{
     IndexRunStats, PipelineOptions, RunOutcome, open_index_db_path, read_index_stats, run_index,
@@ -366,6 +366,7 @@ impl RepositoryView {
         if let Some(task) = self.code_index_task.take() {
             task.cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.code_index_progress_message.clear();
             self.status = "代码索引已取消".into();
         }
     }
@@ -510,10 +511,9 @@ impl RepositoryView {
                         cx,
                     );
                 }
-                // 设置页若开着，顺手刷新统计。
-                if self.settings_center == Some(SettingsCategory::CodeIndex) {
-                    self.request_code_index_stats(&repo_path);
-                }
+                // 完成即后台重读库统计：to_cached_stats 无 db_bytes/时间/分支
+                // （这些只在库里），先粗填避免空窗，读库回来覆盖为精确值。
+                self.request_code_index_stats(&repo_path);
             }
             None => {
                 if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {

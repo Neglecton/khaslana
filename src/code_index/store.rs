@@ -338,9 +338,7 @@ impl CodeIndexStore {
             })
             .map_err(|e| err(format!("查询节点失败：{e}")))?;
         let raw_nodes: Vec<_> = rows.filter_map(|r| r.ok()).collect();
-        for (_index, (old_id, label, name, qn, file_path, sl, el, props)) in
-            raw_nodes.into_iter().enumerate()
-        {
+        for (old_id, label, name, qn, file_path, sl, el, props) in raw_nodes.into_iter() {
             let new_id = graph.upsert_node(
                 parse_label(&label),
                 name,

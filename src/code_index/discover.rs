@@ -207,7 +207,7 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        if is_ignored_suffix(&name) || is_ignored_filename(&name) || name.starts_with(".git") {
+        if is_ignored_suffix(name) || is_ignored_filename(name) || name.starts_with(".git") {
             outcome.excluded_count += 1;
             continue;
         }

@@ -5909,6 +5909,10 @@ impl RepositoryView {
                 self.ai_thinking_overlay = None;
                 self.global_busy_tab = None;
                 self.update_downloading = false;
+                // 代码索引任务无法区分是否 panic 来源：置空全局单任务守卫，
+                // 否则卡死的守卫会永久挡掉手动/自动索引入口与设置页状态卡。
+                self.code_index_task = None;
+                self.code_index_progress_message.clear();
                 self.reset_ai_loading_after_panic();
                 self.status = "后台任务异常".into();
                 self.notify_toast(

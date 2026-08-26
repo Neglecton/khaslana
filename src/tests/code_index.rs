@@ -15,7 +15,6 @@ fn extract_defs(lang: LangId, source: &str) -> FileExtractResult {
 }
 
 #[test]
-#[test]
 fn extract_python_symbols() {
     let result = extract_defs(
         LangId::Python,
@@ -730,4 +729,171 @@ fn smoke_index_khaslana() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 回归测试：审查修复的三个缺陷（import_map 失效 / 孤儿 Module / 导入清洗）
+// ---------------------------------------------------------------------------
+
+/// 回归①：Rust `use crate::git::service` 必须经 import_map 命中
+/// `src/git/service.rs` 的同名函数。修复前 crate 根段永不匹配 src 段，
+/// 该策略在 Rust 项目上产出 0 条边（实测 khaslana 自索引 6781 条 CALLS
+/// 边中 import_map 占 0）。
+#[test]
+fn import_map_resolves_rust_crate_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("importmap");
+    std::fs::create_dir_all(&root).unwrap();
+    let _ = git2::Repository::init(&root);
+    write_repo_file(&root, "src/git/service.rs", "pub fn shared_helper() {}\n");
+    write_repo_file(&root, "src/git/other.rs", "pub fn shared_helper() {}\n");
+    write_repo_file(
+        &root,
+        "src/main.rs",
+        "use crate::git::service;
+fn caller() {
+    shared_helper();
+}
+",
+    );
+    let db_path = tmp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    let graph = store.load_graph().unwrap();
+    let caller = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "caller")
+        .expect("caller");
+    let call_edges: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| e.source == caller.id && e.etype == EdgeType::Calls)
+        .collect();
+    assert!(
+        call_edges
+            .iter()
+            .any(|e| graph.get(e.target).file_path == "src/git/service.rs"
+                && e.properties.contains("\"import_map\"")),
+        "use crate::git::service 应经 import_map 命中 src/git/service.rs，实际边: {:?}",
+        call_edges
+            .iter()
+            .map(|e| (
+                graph.get(e.target).qualified_name.clone(),
+                e.properties.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 回归②：增量删除「引用某 Module 的最后一个导入」后，孤儿 Module 节点
+/// 必须被清扫（Module 的 file_path 为空串，purge_files 清不到）。
+#[test]
+fn incremental_prunes_orphan_module_nodes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("orphan");
+    std::fs::create_dir_all(&root).unwrap();
+    let _ = git2::Repository::init(&root);
+    write_repo_file(
+        &root,
+        "a.rs",
+        "use crate::git::service;
+fn alpha() {}
+",
+    );
+    let db_path = tmp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+
+    // 重写 a.rs 去掉 use：mtime 变化触发增量。
+    write_repo_file(&root, "a.rs", "fn alpha() {}\n");
+    run_incremental_if_stale(&root, &db_path, &mut no_cancel_options()).unwrap();
+
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    let graph = store.load_graph().unwrap();
+    let orphan = graph
+        .nodes
+        .iter()
+        .filter(|n| n.label == NodeLabel::Module && n.name.contains("service"))
+        .count();
+    assert_eq!(orphan, 0, "孤儿 Module 节点残留");
+}
+
+/// 回归③：JS 命名导入的 Module 名必须来自 source 字段，不混入
+/// `{ alpha } from` 等噪声（修复前 Module 名是 `{ alpha } from "./lib`）。
+#[test]
+fn js_import_module_names_are_clean() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("imp");
+    std::fs::create_dir_all(&root).unwrap();
+    let _ = git2::Repository::init(&root);
+    std::fs::write(root.join("lib.js"), "export function alpha() {}\n").unwrap();
+    std::fs::write(root.join("util.h"), "int util_fn(void);\n").unwrap();
+    std::fs::write(
+        root.join("app.js"),
+        "import { alpha } from \"./lib\";\nfunction app() { alpha(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.c"),
+        "#include \"util.h\"\nint main() { return util_fn(); }\n",
+    )
+    .unwrap();
+    let db_path = tmp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    let graph = store.load_graph().unwrap();
+    let modules: Vec<String> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.label == NodeLabel::Module)
+        .map(|n| n.name.clone())
+        .collect();
+    // JS 相对导入剥 ./ 后为 lib；C 头文件导入为 util.h。
+    assert!(
+        modules.iter().any(|m| m == "lib"),
+        "JS 导入应产出干净的模块名 lib，实际: {modules:?}"
+    );
+    assert!(
+        modules.iter().any(|m| m == "util.h"),
+        "C include 应产出 util.h，实际: {modules:?}"
+    );
+    assert!(
+        modules
+            .iter()
+            .all(|m| !m.contains('{') && !m.contains('"') && !m.contains(" from ")),
+        "模块名混入花括号/引号/from 噪声: {modules:?}"
+    );
+}
+
+/// 回归①补充：策略分布统计（临时挂 --ignored 验证 import_map 真实生效）。
+#[test]
+#[ignore = "验证用：策略分布统计（cargo test --lib code_index::tests::strategy_distribution -- --ignored --nocapture）"]
+fn strategy_distribution() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("self.db");
+    let mut options = no_cancel_options();
+    run_index(repo_root, &db_path, true, &mut options).unwrap();
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    let graph = store.load_graph().unwrap();
+    let mut strategy_count: std::collections::HashMap<String, usize> = Default::default();
+    for e in &graph.edges {
+        if e.etype == EdgeType::Calls {
+            let s = serde_json::from_str::<serde_json::Value>(&e.properties)
+                .ok()
+                .and_then(|v| v.get("strategy").cloned())
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            *strategy_count.entry(s).or_default() += 1;
+        }
+    }
+    println!("CALLS 策略分布: {strategy_count:?}");
+    assert!(
+        strategy_distribution_helper(&strategy_count, "import_map"),
+        "import_map 应在真实 Rust 仓库上生效，实际: {strategy_count:?}"
+    );
+}
+
+fn strategy_distribution_helper(map: &std::collections::HashMap<String, usize>, key: &str) -> bool {
+    map.get(key).is_some_and(|v| *v > 0)
 }

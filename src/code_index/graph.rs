@@ -160,6 +160,8 @@ impl GraphBuffer {
     }
 
     /// 插入结构类节点（Project/Folder/File/Branch），QN 相同视为同一节点（幂等）。
+    /// 参数列与 GraphNode 字段一一对应（对齐参考项目图缓冲 API），不聚合结构体。
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_node(
         &mut self,
         label: NodeLabel,
@@ -191,6 +193,7 @@ impl GraphBuffer {
 
     /// 插入定义类符号节点。与结构节点不同：同 QN 的后续插入追加 `#2`/`#3`…
     /// 消歧后缀生成新节点（Java/C++ 重载、同名嵌套函数），不合并。
+    #[allow(clippy::too_many_arguments)]
     pub fn add_symbol(
         &mut self,
         label: NodeLabel,
@@ -253,11 +256,34 @@ impl GraphBuffer {
         let before = self.nodes.len();
         self.nodes
             .retain(|n| n.file_path.is_empty() || !rel_paths.contains(&n.file_path));
-        let removed = before - self.nodes.len();
-        if removed == 0 {
-            return 0;
+        self.rebuild_after_removal();
+        before - self.nodes.len()
+    }
+
+    /// 清扫孤儿 Module 节点：没有任何 IMPORTS 入边的 Module（删除导入语句后
+    /// 残留的幽灵模块；Module 的 file_path 为空串，purge_files 清不到它们）。
+    /// 返回被删节点数。
+    pub fn prune_orphan_modules(&mut self) -> usize {
+        let imported: HashSet<NodeId> = self
+            .edges
+            .iter()
+            .filter(|e| e.etype == EdgeType::Imports)
+            .map(|e| e.target)
+            .collect();
+        let before = self.nodes.len();
+        self.nodes
+            .retain(|n| n.label != NodeLabel::Module || imported.contains(&n.id));
+        self.rebuild_after_removal();
+        before - self.nodes.len()
+    }
+
+    /// 删除节点后重建索引：id 重排维持「id == nodes 下标」不变量，
+    /// 引用了已删节点的边一并清除。
+    fn rebuild_after_removal(&mut self) {
+        if self.nodes.len() == self.qn_index.len() {
+            // 无删除发生，id 未变（purge_files 的快路径）。
+            return;
         }
-        // 重排 id 并重建索引；引用了已删节点的边一并清除。
         for (index, node) in self.nodes.iter_mut().enumerate() {
             node.id = index as NodeId;
         }
@@ -274,7 +300,6 @@ impl GraphBuffer {
             .iter()
             .map(|e| (e.source, e.target, e.etype))
             .collect();
-        removed
     }
 }
 

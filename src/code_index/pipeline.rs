@@ -207,6 +207,8 @@ fn run_full_inner(
     }
 
     options.report(IndexPhase::Write, 0, 0);
+    // 全量图为全新构建，Module 恒有 IMPORTS 入边；清扫仅作防御（零成本）。
+    graph.prune_orphan_modules();
     write_store(
         store,
         repo_name,
@@ -335,7 +337,7 @@ fn run_incremental_inner(
     graph.purge_files(&purge_set);
 
     // 4. 只解析变更文件。
-    let parse_jobs: Vec<&DiscoveredFile> = changed.iter().copied().collect();
+    let parse_jobs: Vec<&DiscoveredFile> = changed.to_vec();
     let parsed = run_extraction_pass(&parse_jobs, options)?;
     if options.cancelled() {
         return Ok(InnerOutcome::Cancelled);
@@ -358,7 +360,12 @@ fn run_incremental_inner(
         }
     }
 
-    // 7. 整库重写。
+    // 7. 清扫孤儿 Module：删除/改写导入语句后不再被任何文件 IMPORTS 的
+    //    模块（Module 无 file_path，purge_files 清不到；参考项目靠整图
+    //    重建播种 registry 天然无此残留）。
+    graph.prune_orphan_modules();
+
+    // 8. 整库重写。
     options.report(IndexPhase::Write, 0, 0);
     let mut hashes = unchanged_hashes;
     hashes.extend(files_hash_rows(&changed));
