@@ -2129,6 +2129,17 @@ impl RepositoryView {
                 );
             }
         }
+        // 改名保存：快捷键绑定（键位 + 后台执行标志）跟随模板迁移到新文件名；
+        // 复制为副本（editing_path 为 None）不会产生 stale_path，天然不迁移。
+        if let Some(stale) = &stale_path {
+            if let Some(old_name) = stale.file_name().map(|n| n.to_string_lossy().to_string()) {
+                let new_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.migrate_workflow_shortcut_binding(&old_name, &new_name, cx);
+            }
+        }
 
         // 成功：关闭编辑器、刷新模板目录、选中并加载新模板。
         self.pending_workflow_edit = None;

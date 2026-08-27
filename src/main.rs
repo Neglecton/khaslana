@@ -160,6 +160,19 @@ actions!(
     ]
 );
 
+/// 工作流快捷键的载荷动作：一条绑定自带模板文件名与执行模式，分发时
+/// `on_action` 监听器直接读到载荷（gpui-ce 的 `KeyBinding` 携带 action 实例，
+/// 故动态模板数量无需静态槽位）。`no_json`：不经 keymap JSON 构建——
+/// 绑定只由本应用在运行时注册。
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = app_action, no_json)]
+pub(crate) struct RunWorkflowShortcut {
+    /// 模板文件名（如 "sync.json5"），绑定与触发的稳定标识。
+    pub(crate) file: String,
+    /// 「后台执行」勾选结果：true = 触发时不切换到工作流页。
+    pub(crate) background: bool,
+}
+
 /// 可配置快捷键的功能枚举，用于持久化与设置中心 UI。
 /// action_id 是序列化键（存入 ShortcutBindings），default_keystroke 是内置默认组合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,16 +292,91 @@ pub(crate) fn default_shortcut_bindings() -> ShortcutBindings {
     ShortcutBindings { bindings }
 }
 
-/// 查找快捷键冲突：返回已占用该 keystroke 的其它动作（排除 target 自身）。
-pub(crate) fn find_shortcut_conflict(
-    bindings: &ShortcutBindings,
-    target: ShortcutAction,
+/// 快捷键录制目标：静态应用动作或某个工作流模板。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutRecordingTarget {
+    App(ShortcutAction),
+    Workflow { file: String },
+}
+
+/// 快捷键冲突来源：静态应用动作或某个工作流模板绑定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutConflict {
+    App(ShortcutAction),
+    Workflow(String),
+}
+
+impl ShortcutConflict {
+    /// 冲突占用的功能描述（静态动作用中文标签，工作流用文件名）。
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            ShortcutConflict::App(action) => action.label().to_string(),
+            ShortcutConflict::Workflow(file) => format!("工作流 {file}"),
+        }
+    }
+}
+
+/// 统一冲突检查：静态动作与工作流绑定共用一个键位空间，
+/// 双向覆盖 静态↔工作流、工作流↔工作流，排除录制目标自身。
+pub(crate) fn find_keystroke_conflict(
+    app_bindings: &ShortcutBindings,
+    workflow_bindings: &khaslana::WorkflowShortcutBindings,
+    target: &ShortcutRecordingTarget,
     keystroke: &str,
-) -> Option<ShortcutAction> {
-    ShortcutAction::ALL
+) -> Option<ShortcutConflict> {
+    for action in ShortcutAction::ALL {
+        if matches!(target, ShortcutRecordingTarget::App(target_action) if *target_action == action)
+        {
+            continue;
+        }
+        if action.keystroke(app_bindings) == keystroke {
+            return Some(ShortcutConflict::App(action));
+        }
+    }
+    for (file, binding) in &workflow_bindings.bindings {
+        if matches!(target, ShortcutRecordingTarget::Workflow { file: target_file } if target_file == file)
+        {
+            continue;
+        }
+        if binding.keystroke == keystroke {
+            return Some(ShortcutConflict::Workflow(file.clone()));
+        }
+    }
+    None
+}
+
+/// 加载防御剪枝：keystroke 为空/不可解析、撞任一静态动作有效键、或同键位
+/// 重复的工作流绑定丢弃（手改 DB / 异常数据兜底）；返回 (剪枝结果, 是否有变化)。
+pub(crate) fn prune_workflow_shortcut_bindings(
+    bindings: &khaslana::WorkflowShortcutBindings,
+    app_bindings: &ShortcutBindings,
+) -> (khaslana::WorkflowShortcutBindings, bool) {
+    let static_keystrokes: Vec<&str> = ShortcutAction::ALL
         .iter()
-        .find(|action| **action != target && action.keystroke(bindings) == keystroke)
-        .copied()
+        .map(|action| action.keystroke(app_bindings))
+        .collect();
+    let mut pruned = khaslana::WorkflowShortcutBindings::default();
+    let mut seen_keystrokes: Vec<String> = Vec::new();
+    for (file, binding) in &bindings.bindings {
+        let keystroke = binding.keystroke.trim();
+        if keystroke.is_empty()
+            || gpui::Keystroke::parse(keystroke).is_err()
+            || static_keystrokes.contains(&keystroke)
+            || seen_keystrokes.iter().any(|seen| seen == keystroke)
+        {
+            continue;
+        }
+        seen_keystrokes.push(keystroke.to_string());
+        pruned.bindings.insert(
+            file.clone(),
+            khaslana::WorkflowShortcutBinding {
+                keystroke: keystroke.to_string(),
+                background: binding.background,
+            },
+        );
+    }
+    let changed = pruned != *bindings;
+    (pruned, changed)
 }
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
@@ -339,7 +427,7 @@ pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
 pub(crate) const WORKFLOW_TEMPLATE_MENU_WIDTH: f32 = 150.0;
-pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 76.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 102.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
 const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
@@ -655,6 +743,10 @@ pub(crate) enum DialogState {
     ConfirmPopStash {
         index: usize,
         message: String,
+    },
+    /// 工作流模板快捷键绑定弹窗（录制键位 + 后台执行开关）。
+    WorkflowShortcutBinding {
+        file: String,
     },
     RemoteBranchOperation {
         kind: RemoteBranchOperationKind,
@@ -3008,10 +3100,14 @@ pub(crate) struct RepositoryView {
     pub(crate) settings_center: Option<SettingsCategory>,
     /// 用户自定义快捷键绑定（action_id → keystroke）。
     pub(crate) shortcut_bindings: ShortcutBindings,
-    /// 快捷键设置页中正在录制的动作；None 表示非录制态。
-    pub(crate) recording_shortcut: Option<ShortcutAction>,
+    /// 工作流模板快捷键绑定（模板文件名 → 键位 + 后台执行），机器本地全局单份。
+    pub(crate) workflow_shortcut_bindings: khaslana::WorkflowShortcutBindings,
+    /// 正在录制的快捷键目标（静态动作或工作流模板）；None 表示非录制态。
+    pub(crate) recording_shortcut: Option<ShortcutRecordingTarget>,
     /// 设置中心面板的焦点句柄，录制态时夺取焦点使 keydown dispatch_path 进入 overlay。
     settings_center_focus: FocusHandle,
+    /// 工作流快捷键绑定弹窗的焦点句柄，录制态夺取焦点使按键先到根捕获层。
+    pub(crate) workflow_shortcut_binding_focus: FocusHandle,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -3304,8 +3400,10 @@ impl RepositoryView {
             active_dialog: None,
             settings_center: None,
             shortcut_bindings: Self::load_shortcut_bindings(&storage),
+            workflow_shortcut_bindings: Self::load_workflow_shortcut_bindings(&storage),
             recording_shortcut: None,
             settings_center_focus: cx.focus_handle(),
+            workflow_shortcut_binding_focus: cx.focus_handle(),
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -3885,6 +3983,46 @@ impl RepositoryView {
         if let Err(err) = self.storage.save_shortcut_bindings(&self.shortcut_bindings) {
             tracing::warn!("shortcut bindings write skipped: {err}");
         }
+    }
+
+    /// 加载工作流快捷键绑定；存储为空或出错时回退空表。加载时做防御剪枝
+    /// （撞静态键/同键重复/坏键位丢弃），有变化则把剪枝结果写回存储。
+    fn load_workflow_shortcut_bindings(
+        storage: &khaslana::AppStorage,
+    ) -> khaslana::WorkflowShortcutBindings {
+        let stored = storage
+            .load_workflow_shortcut_bindings()
+            .inspect_err(|err| tracing::warn!("workflow shortcut bindings load skipped: {err}"))
+            .unwrap_or_default();
+        let app_bindings = Self::load_shortcut_bindings(storage);
+        let (pruned, changed) = prune_workflow_shortcut_bindings(&stored, &app_bindings);
+        if changed {
+            tracing::warn!("workflow shortcut bindings pruned on load");
+            let _ = storage.save_workflow_shortcut_bindings(&pruned);
+        }
+        pruned
+    }
+
+    /// 保存工作流快捷键绑定到数据库（整体覆盖）。
+    pub(crate) fn save_workflow_shortcut_bindings(&self) {
+        if let Err(err) = self
+            .storage
+            .save_workflow_shortcut_bindings(&self.workflow_shortcut_bindings)
+        {
+            tracing::warn!("workflow shortcut bindings write skipped: {err}");
+        }
+    }
+
+    /// 保存工作流绑定并全量重注册键位（写入后的统一出口，保证绑定即刻生效）。
+    pub(crate) fn persist_workflow_shortcut_bindings(&mut self, cx: &mut Context<Self>) {
+        self.save_workflow_shortcut_bindings();
+        crate::register_all_key_bindings(
+            &mut cx.deref_mut(),
+            &self.shortcut_bindings,
+            &self.workflow_shortcut_bindings,
+            false,
+        );
+        cx.notify();
     }
 
     /// 加载布局偏好；存储为空或出错时回退全部默认值。
@@ -5448,7 +5586,7 @@ impl RepositoryView {
                 });
             }
             UiEvent::WorkflowTemplatesLoaded { result } => {
-                self.apply_workflow_templates(result);
+                self.apply_workflow_templates(result, cx);
             }
             UiEvent::WorkflowFinished {
                 tab_id,
@@ -13067,6 +13205,7 @@ impl RepositoryView {
         };
         let edit_path = menu.path.clone();
         let copy_path = menu.path.clone();
+        let bind_path = menu.path.clone();
         // 删除确认弹窗展示用名称：优先解析出的显示名不可得（坏模板也允许删），退回文件名主干
         let delete_path = menu.path.clone();
         let delete_display_name = menu
@@ -13098,6 +13237,16 @@ impl RepositoryView {
                     this.workflow_template_context_menu = None;
                     let path = copy_path.clone();
                     this.open_workflow_editor_for_path(path, true, cx);
+                },
+                cx,
+            ))
+            .child(context_menu_item_with_context(
+                "绑定快捷键...",
+                !self.busy,
+                move |this, _cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = bind_path.clone();
+                    this.open_workflow_shortcut_binding_dialog(path);
                 },
                 cx,
             ))
@@ -13140,6 +13289,8 @@ impl RepositoryView {
                     self.clear_workflow_file();
                     self.workflow_state.selected_template_path = None;
                 }
+                // 模板删除后同步移除其快捷键绑定，键位当场释放。
+                self.remove_workflow_shortcut_binding(&file_name, cx);
                 self.refresh_workflow_templates();
                 self.status = format!("工作流模板已删除：{file_name}");
                 self.notify_success(format!("工作流模板已删除：{file_name}"), cx);
@@ -13147,6 +13298,52 @@ impl RepositoryView {
             Err(err) => {
                 self.last_error = Some(format!("工作流模板删除失败：{err}"));
             }
+        }
+    }
+
+    /// 按模板文件名移除工作流快捷键绑定（大小写不敏感匹配键）；存在且有
+    /// 变化时保存并重注册。删除模板与设置页「清除」共用。
+    pub(crate) fn remove_workflow_shortcut_binding(&mut self, file: &str, cx: &mut Context<Self>) {
+        let stale_key = self
+            .workflow_shortcut_bindings
+            .bindings
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(file))
+            .cloned();
+        if let Some(key) = stale_key {
+            self.workflow_shortcut_bindings.bindings.remove(&key);
+            self.persist_workflow_shortcut_bindings(cx);
+        }
+    }
+
+    /// 模板改名保存后把快捷键绑定迁移到新文件名（键位 + 后台标志保留）。
+    /// 「复制为副本」不走这里（副本是新文件、无绑定可迁）；目标名已有
+    /// 陈旧孤儿绑定时直接覆盖。
+    pub(crate) fn migrate_workflow_shortcut_binding(
+        &mut self,
+        old_file: &str,
+        new_file: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if new_file.is_empty() || old_file.eq_ignore_ascii_case(new_file) {
+            return;
+        }
+        let old_key = self
+            .workflow_shortcut_bindings
+            .bindings
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(old_file))
+            .cloned();
+        if let Some(old_key) = old_key {
+            let binding = self
+                .workflow_shortcut_bindings
+                .bindings
+                .remove(&old_key)
+                .expect("binding key was just found");
+            self.workflow_shortcut_bindings
+                .bindings
+                .insert(new_file.to_string(), binding);
+            self.persist_workflow_shortcut_bindings(cx);
         }
     }
 
@@ -14640,6 +14837,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ConfirmPopStash { index, message } => self
                 .render_confirm_pop_stash_dialog(index, message, cx)
+                .into_any_element(),
+            DialogState::WorkflowShortcutBinding { file } => self
+                .render_workflow_shortcut_binding_dialog(file.as_str(), cx)
                 .into_any_element(),
             DialogState::RemoteBranchOperation { kind } => self
                 .render_remote_branch_operation_dialog(kind, window, cx)
@@ -17301,34 +17501,82 @@ impl Render for RepositoryView {
                         cx.stop_propagation();
                         return;
                     }
-                    if let Some(action) = this.recording_shortcut {
+                    // 防御：工作流录制目标依赖绑定弹窗持有焦点，若弹窗已被
+                    // 其它路径关闭（理论路径），取消录制避免快捷键长期失效。
+                    if let Some(ShortcutRecordingTarget::Workflow { file }) =
+                        this.recording_shortcut.as_ref()
+                    {
+                        let dialog_open = matches!(
+                            &this.active_dialog,
+                            Some(DialogState::WorkflowShortcutBinding { file: open }) if open == file
+                        );
+                        if !dialog_open {
+                            this.recording_shortcut = None;
+                            crate::register_all_key_bindings(
+                                &mut cx.deref_mut(),
+                                &this.shortcut_bindings,
+                                &this.workflow_shortcut_bindings,
+                                false,
+                            );
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                    if let Some(target) = this.recording_shortcut.clone() {
                         let ks = shortcuts_view::keystroke_to_string(event);
-                        // 冲突检查：若已被其它动作占用则拒绝并提示。
-                        if let Some(conflict) =
-                            find_shortcut_conflict(&this.shortcut_bindings, action, &ks)
-                        {
+                        // 统一冲突检查：静态动作与工作流绑定共用键位空间。
+                        if let Some(conflict) = find_keystroke_conflict(
+                            &this.shortcut_bindings,
+                            &this.workflow_shortcut_bindings,
+                            &target,
+                            &ks,
+                        ) {
                             this.recording_shortcut = None;
                             this.notify_warning(
                                 format!(
                                     "快捷键 {} 已被「{}」占用",
                                     shortcuts_view::format_keystroke(&ks),
-                                    conflict.label()
+                                    conflict.describe()
                                 ),
                                 cx,
                             );
                         } else {
-                            // 通过检查，更新绑定。
-                            this.shortcut_bindings
-                                .bindings
-                                .insert(action.action_id().to_string(), ks);
-                            this.recording_shortcut = None;
-                            this.save_shortcut_bindings();
-                            crate::register_all_key_bindings(
-                                &mut cx.deref_mut(),
-                                &this.shortcut_bindings,
-                                false,
-                            );
-                            cx.notify();
+                            // 通过检查，按录制目标写入对应绑定表。
+                            match &target {
+                                ShortcutRecordingTarget::App(action) => {
+                                    this.shortcut_bindings
+                                        .bindings
+                                        .insert(action.action_id().to_string(), ks);
+                                    this.recording_shortcut = None;
+                                    this.save_shortcut_bindings();
+                                    crate::register_all_key_bindings(
+                                        &mut cx.deref_mut(),
+                                        &this.shortcut_bindings,
+                                        &this.workflow_shortcut_bindings,
+                                        false,
+                                    );
+                                    cx.notify();
+                                }
+                                ShortcutRecordingTarget::Workflow { file } => {
+                                    // 保留已有的后台执行标志，仅更新键位。
+                                    let background = this
+                                        .workflow_shortcut_bindings
+                                        .bindings
+                                        .get(file)
+                                        .map(|binding| binding.background)
+                                        .unwrap_or(false);
+                                    this.workflow_shortcut_bindings.bindings.insert(
+                                        file.clone(),
+                                        khaslana::WorkflowShortcutBinding {
+                                            keystroke: ks,
+                                            background,
+                                        },
+                                    );
+                                    this.recording_shortcut = None;
+                                    this.persist_workflow_shortcut_bindings(cx);
+                                }
+                            }
                         }
                     }
                     cx.stop_propagation();
@@ -18015,12 +18263,15 @@ pub(crate) fn filter_repo_switcher_sections(
 #[path = "tests/main.rs"]
 mod app_tests;
 
-/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
-/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
-/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
-/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
+/// 全量注册键盘绑定：先清空再重新注册全部（TextInput 基础键位 + 工作流快捷键 + 应用级快捷键）。
+/// 在启动时和用户修改快捷键/工作流绑定后调用，保证绑定始终与持久化状态一致。
 /// `skip_shortcuts` 为 true 时仅注册基础键位（录制态避免按键匹配到 action 导致 keydown 被吞）。
-fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_shortcuts: bool) {
+fn register_all_key_bindings(
+    cx: &mut App,
+    bindings: &ShortcutBindings,
+    workflow_bindings: &khaslana::WorkflowShortcutBindings,
+    skip_shortcuts: bool,
+) {
     cx.clear_key_bindings();
     // 基础键位：文本输入框和浏览内容区。
     cx.bind_keys([
@@ -18049,6 +18300,23 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_sho
     ]);
     // 应用级快捷键：全局生效（无 context 谓词）。
     if !skip_shortcuts {
+        // 工作流绑定先于静态快捷键注册：同键位意外撞车时后注册的静态键胜出
+        //（正常路径由统一冲突检查在写入前拦截，这只是防御顺序）。
+        for (file, binding) in &workflow_bindings.bindings {
+            // KeyBinding::new 对不可解析键位会 panic；加载层已剪枝，此处再防一次。
+            if gpui::Keystroke::parse(&binding.keystroke).is_err() {
+                tracing::warn!("skip unparseable workflow shortcut: {file}");
+                continue;
+            }
+            cx.bind_keys([KeyBinding::new(
+                &binding.keystroke,
+                RunWorkflowShortcut {
+                    file: file.clone(),
+                    background: binding.background,
+                },
+                None,
+            )]);
+        }
         for action in ShortcutAction::ALL {
             let keystroke = action.keystroke(bindings);
             let binding = match action {
@@ -18232,6 +18500,20 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
             });
         }
     });
+    // 工作流快捷键：绑定携带模板文件名与后台执行标志（载荷 action）。
+    // 设置中心或任意模态对话框打开时不触发（后台启动长任务不应躲在遮罩后）。
+    cx.on_action({
+        let weak = weak.clone();
+        move |a: &RunWorkflowShortcut, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() || this.active_dialog.is_some() {
+                    return;
+                }
+                this.trigger_workflow_shortcut(a.file.clone(), a.background, cx);
+                cx.notify();
+            });
+        }
+    });
 }
 
 fn main() {
@@ -18260,12 +18542,16 @@ fn main() {
                 Locale::new("zh-CN").expect("zh-CN locale is valid"),
             ));
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
-            // 注册全部键盘绑定：基础键位（TextInput/BrowseContent）+ 应用级快捷键（从持久化加载）。
+            // 注册全部键盘绑定：基础键位（TextInput）+ 工作流快捷键 + 应用级快捷键（从持久化加载）。
             let shortcut_bindings = khaslana::AppStorage::open_default()
                 .ok()
                 .map(|storage| RepositoryView::load_shortcut_bindings(&storage))
                 .unwrap_or_else(default_shortcut_bindings);
-            register_all_key_bindings(cx, &shortcut_bindings, false);
+            let workflow_shortcut_bindings = khaslana::AppStorage::open_default()
+                .ok()
+                .map(|storage| RepositoryView::load_workflow_shortcut_bindings(&storage))
+                .unwrap_or_default();
+            register_all_key_bindings(cx, &shortcut_bindings, &workflow_shortcut_bindings, false);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),

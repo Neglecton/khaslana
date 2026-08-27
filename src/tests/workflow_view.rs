@@ -225,3 +225,65 @@ fn workflow_template_selection_requires_loaded_path_match() {
         Some(template)
     ));
 }
+
+#[test]
+fn workflow_shortcut_trigger_decision_matrix() {
+    use WorkflowShortcutTrigger::*;
+
+    // 必填变量缺失：无论前台后台都跳页提示填写，不盲目运行。
+    assert_eq!(
+        workflow_shortcut_trigger_decision(true, false),
+        JumpToFillInputs
+    );
+    assert_eq!(
+        workflow_shortcut_trigger_decision(true, true),
+        JumpToFillInputs
+    );
+    // 默认（不勾后台执行）：跳到工作流页并运行。
+    assert_eq!(workflow_shortcut_trigger_decision(false, false), JumpAndRun);
+    // 勾选后台执行：留在当前页后台运行。
+    assert_eq!(
+        workflow_shortcut_trigger_decision(false, true),
+        RunInBackground
+    );
+}
+
+#[test]
+fn merged_workflow_input_value_keeps_typed_values_over_defaults() {
+    // 旧值非空：保留用户已填文本。
+    assert_eq!(
+        merged_workflow_input_value(Some("release-1.2"), "v1.0"),
+        "release-1.2"
+    );
+    // 旧值为空：不覆盖重载后的新默认值。
+    assert_eq!(merged_workflow_input_value(Some("   "), "v1.0"), "v1.0");
+    assert_eq!(merged_workflow_input_value(Some(""), "v1.0"), "v1.0");
+    // 旧值缺失（新变量）：使用新默认值。
+    assert_eq!(merged_workflow_input_value(None, "v1.0"), "v1.0");
+}
+
+#[test]
+fn workflow_display_name_for_file_matches_templates_case_insensitively() {
+    let templates = vec![WorkflowTemplateItem {
+        path: Path::new(r"C:\data\workflows\sync.json5").to_path_buf(),
+        display_name: "同步主干".to_string(),
+        file_name: "sync.json5".to_string(),
+        modified_label: "今天".to_string(),
+        error: None,
+    }];
+
+    assert_eq!(
+        workflow_display_name_for_file(&templates, "sync.json5"),
+        "同步主干"
+    );
+    // 键按绑定时的大小写可能不同：匹配不区分 ASCII 大小写。
+    assert_eq!(
+        workflow_display_name_for_file(&templates, "Sync.JSON5"),
+        "同步主干"
+    );
+    // 列表查不到（外部删除或尚未加载）：回退文件主干。
+    assert_eq!(
+        workflow_display_name_for_file(&templates, "release.json5"),
+        "release"
+    );
+}

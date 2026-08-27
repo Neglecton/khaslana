@@ -5,7 +5,9 @@ use std::ops::DerefMut;
 use gpui::{Context, IntoElement, KeyDownEvent, div, prelude::*, px};
 
 use crate::ui::{components::tooltip_text, theme::rgb};
-use crate::{RepositoryView, ShortcutAction, ui::theme as ui_theme};
+use crate::{
+    RepositoryView, ShortcutAction, ShortcutRecordingTarget, ui::theme as ui_theme, workflow_view,
+};
 
 /// 把 GPUI keystroke 字符串格式化为用户可读的显示文本。
 /// 例如 "ctrl-shift-f" → "Ctrl+Shift+F"，"f5" → "F5"，"ctrl-," → "Ctrl+,"
@@ -70,23 +72,31 @@ pub(crate) fn keystroke_to_string(event: &KeyDownEvent) -> String {
     parts.join("-")
 }
 
-fn shortcut_row_is_recording(recording: Option<ShortcutAction>, action: ShortcutAction) -> bool {
-    recording == Some(action)
+fn shortcut_row_is_recording(
+    recording: Option<&ShortcutRecordingTarget>,
+    action: ShortcutAction,
+) -> bool {
+    matches!(
+        recording,
+        Some(ShortcutRecordingTarget::App(recording_action)) if *recording_action == action
+    )
 }
 
 /// 快捷键设置按钮只在录制期间禁用“恢复默认”，避免录入中的状态被旁路修改。
-fn shortcut_reset_enabled(recording: Option<ShortcutAction>) -> bool {
+fn shortcut_reset_enabled(recording: Option<&ShortcutRecordingTarget>) -> bool {
     recording.is_none()
 }
 
-fn shortcut_reset_disabled_reason(recording: Option<ShortcutAction>) -> Option<&'static str> {
+fn shortcut_reset_disabled_reason(
+    recording: Option<&ShortcutRecordingTarget>,
+) -> Option<&'static str> {
     (!shortcut_reset_enabled(recording)).then_some("请先结束快捷键录制")
 }
 
 impl RepositoryView {
     /// 快捷键设置页 body。
     pub(crate) fn render_shortcuts_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let recording = self.recording_shortcut;
+        let recording = self.recording_shortcut.as_ref();
 
         div()
             .flex()
@@ -187,22 +197,28 @@ impl RepositoryView {
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                                     .on_click(cx.listener(move |this, _event, window, cx| {
-                                        if this.recording_shortcut == Some(action_val) {
+                                        if shortcut_row_is_recording(
+                                            this.recording_shortcut.as_ref(),
+                                            action_val,
+                                        ) {
                                             // 取消录制，恢复正常绑定。
                                             this.recording_shortcut = None;
                                             crate::register_all_key_bindings(
                                                 &mut cx.deref_mut(),
                                                 &this.shortcut_bindings,
+                                                &this.workflow_shortcut_bindings,
                                                 false,
                                             );
                                         } else {
                                             // 进入录制态：夺取焦点到设置中心面板（使 keydown dispatch_path 进入 overlay），
                                             // 跳过快捷键绑定（使按键不匹配 action，keydown 能正常到达 capture_key_down）。
-                                            this.recording_shortcut = Some(action_val);
+                                            this.recording_shortcut =
+                                                Some(ShortcutRecordingTarget::App(action_val));
                                             window.focus(&this.settings_center_focus);
                                             crate::register_all_key_bindings(
                                                 &mut cx.deref_mut(),
                                                 &this.shortcut_bindings,
+                                                &this.workflow_shortcut_bindings,
                                                 true,
                                             );
                                         }
@@ -242,14 +258,41 @@ impl RepositoryView {
                                         })
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             if reset_enabled {
+                                                // 恢复默认与录制走同一条统一冲突检查：
+                                                // 默认键位可能已被其它动作的自定义键或
+                                                // 某个工作流绑定占用，占用时拒绝并提示。
+                                                let default_keystroke =
+                                                    action_val.default_keystroke();
+                                                let target = ShortcutRecordingTarget::App(
+                                                    action_val,
+                                                );
+                                                if let Some(conflict) =
+                                                    crate::find_keystroke_conflict(
+                                                        &this.shortcut_bindings,
+                                                        &this.workflow_shortcut_bindings,
+                                                        &target,
+                                                        default_keystroke,
+                                                    )
+                                                {
+                                                    this.notify_warning(
+                                                        format!(
+                                                            "快捷键 {} 已被「{}」占用，无法恢复默认",
+                                                            format_keystroke(default_keystroke),
+                                                            conflict.describe()
+                                                        ),
+                                                        cx,
+                                                    );
+                                                    return;
+                                                }
                                                 this.shortcut_bindings.bindings.insert(
                                                     action_val.action_id().to_string(),
-                                                    action_val.default_keystroke().to_string(),
+                                                    default_keystroke.to_string(),
                                                 );
                                                 this.save_shortcut_bindings();
                                                 crate::register_all_key_bindings(
                                                     &mut cx.deref_mut(),
                                                     &this.shortcut_bindings,
+                                                    &this.workflow_shortcut_bindings,
                                                     false,
                                                 );
                                                 cx.notify();
@@ -261,6 +304,151 @@ impl RepositoryView {
                     )
                             .into_any_element()
                     })))
+            // 工作流快捷键分区：绑定入口在工作流页模板右键菜单，此处展示与清除。
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .mt_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("工作流快捷键"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(
+                                "在工作流页右键模板行选择「绑定快捷键...」录制；此处可查看与清除。",
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .children(if self.workflow_shortcut_bindings.bindings.is_empty() {
+                        vec![
+                            div()
+                                .py_2()
+                                .text_size(px(12.0))
+                                .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                                .child("暂无工作流快捷键")
+                                .into_any_element(),
+                        ]
+                    } else {
+                        self.workflow_shortcut_bindings
+                            .bindings
+                            .iter()
+                            .map(|(file, binding)| {
+                                        let file = file.clone();
+                                        let display = format_keystroke(&binding.keystroke);
+                                        let background = binding.background;
+                                        let template_name = workflow_view::workflow_display_name_for_file(
+                                            &self.workflow_templates,
+                                            &file,
+                                        );
+                                        let clear_enabled =
+                                            shortcut_reset_enabled(self.recording_shortcut.as_ref());
+
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .py_2()
+                                            .border_b_1()
+                                            .border_color(rgb(ui_theme::BORDER_MUTED))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .min_w(px(0.0))
+                                                            .truncate()
+                                                            .text_size(px(12.0))
+                                                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                                            .child(template_name),
+                                                    )
+                                                    .when(background, |this| {
+                                                        this.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .px(px(6.0))
+                                                                .py(px(1.0))
+                                                                .rounded(px(ui_theme::RADIUS_PILL))
+                                                                .bg(rgb(ui_theme::SECONDARY))
+                                                                .text_size(px(10.0))
+                                                                .text_color(rgb(ui_theme::SECONDARY_FOREGROUND))
+                                                                .child("后台"),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(120.0))
+                                                    .text_size(px(11.0))
+                                                    .font_family("Consolas, monospace")
+                                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                                    .text_align(gpui::TextAlign::Center)
+                                                    .child(display),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(format!("workflow-shortcut-clear-{file}"))
+                                                    .flex()
+                                                    .flex_none()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .min_h(px(28.0))
+                                                    .px_3()
+                                                    .py_1()
+                                                    .border_1()
+                                                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                                                    .rounded(px(ui_theme::RADIUS_XS))
+                                                    .bg(rgb(ui_theme::SURFACE_RAISED))
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(if clear_enabled {
+                                                        ui_theme::CONTENT_PRIMARY
+                                                    } else {
+                                                        ui_theme::CONTENT_TERTIARY
+                                                    }))
+                                                    .when(clear_enabled, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                                                    })
+                                                    .when(!clear_enabled, |this| {
+                                                        this.cursor_not_allowed().opacity(0.62)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |this, _event, _window, cx| {
+                                                            if clear_enabled {
+                                                                this.workflow_shortcut_bindings
+                                                                    .bindings
+                                                                    .remove(&file);
+                                                                this.persist_workflow_shortcut_bindings(cx);
+                                                            }
+                                                        },
+                                                    ))
+                                                    .child("清除"),
+                                            )
+                                            .into_any_element()
+                                    })
+                                    .collect::<Vec<_>>()
+                                    }),
+            )
     }
 }
 
