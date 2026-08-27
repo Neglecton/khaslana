@@ -3572,14 +3572,17 @@ impl RepositoryView {
     }
 
     fn scroll_local_branch_to_current(&self) {
-        // 旧实现用的是 Stateful<Div> 列表的 bounds_for_item /
-        // scroll_to_top_of_item——侧边栏改为单一 uniform_list 后这两个 API
-        // 静默 no-op，手算几何也按旧模型的行高/间隙估算（现模型 36px 定高
-        // 无间隙，且行号需包含分组标题/搜索框占位）。改为重建展平模型定位
-        // 行号，交给 uniform_list 的滚动目标机制。
+        // 分组标题钉住后，本地分支是独立虚拟列表：在过滤后的条目模型里定位
+        // HEAD 行号，交给该列表的滚动目标机制。分组折叠时不渲染列表，跳过定位。
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
+        if !self
+            .sidebar_sections
+            .is_expanded(SidebarSection::LocalBranches)
+        {
+            return;
+        }
         let Some(head_branch_index) = snapshot
             .branches
             .iter()
@@ -3592,30 +3595,16 @@ impl RepositoryView {
         } else {
             ""
         };
-        let remote_query = if self.sidebar_remote_branch_search_open {
-            self.sidebar_remote_branch_search.value.trim()
-        } else {
-            ""
-        };
-        let items = sidebar_view::sidebar_navigation_items(
-            &snapshot.branches,
-            snapshot.remotes.len(),
-            snapshot.tags.len(),
-            snapshot.stashes.len(),
-            self.sidebar_sections,
-            self.sidebar_local_branch_search_open,
-            local_query,
-            self.sidebar_remote_branch_search_open,
-            remote_query,
-            self.loading.remote(),
-        );
-        let Some(row) = items.iter().position(|item| {
+        let entries = sidebar_view::sidebar_local_branch_entries(&snapshot.branches, local_query);
+        let Some(row) = entries.iter().position(|item| {
             matches!(item, sidebar_view::SidebarNavItem::Branch(index) if *index == head_branch_index)
         }) else {
             return;
         };
-        self.uniform_scroll_handle("local-branch-list")
-            .scroll_to_item(row, ScrollStrategy::Center);
+        self.uniform_scroll_handle(sidebar_view::sidebar_section_scroll_id(
+            SidebarSection::LocalBranches,
+        ))
+        .scroll_to_item(row, ScrollStrategy::Center);
     }
 
     pub(crate) fn uniform_scroll_handle(&self, id: &'static str) -> UniformListScrollHandle {
