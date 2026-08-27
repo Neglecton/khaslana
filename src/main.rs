@@ -651,6 +651,11 @@ pub(crate) enum DialogState {
         index: usize,
         message: String,
     },
+    /// 弹出贮藏的确认弹窗（应用改动到工作区并从贮藏列表移除）。
+    ConfirmPopStash {
+        index: usize,
+        message: String,
+    },
     RemoteBranchOperation {
         kind: RemoteBranchOperationKind,
     },
@@ -14632,6 +14637,9 @@ impl RepositoryView {
                 .into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
+                .into_any_element(),
+            DialogState::ConfirmPopStash { index, message } => self
+                .render_confirm_pop_stash_dialog(index, message, cx)
                 .into_any_element(),
             DialogState::RemoteBranchOperation { kind } => self
                 .render_remote_branch_operation_dialog(kind, window, cx)

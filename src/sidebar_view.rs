@@ -962,6 +962,8 @@ impl RepositoryView {
 
     fn stash_row(&self, stash: StashInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let index = stash.index;
+        // 左键条目直接查看贮藏（右键菜单的「查看贮藏」保留同一路径）。
+        let click_index = stash.index;
         let label = format!("stash@{{{}}} {}", stash.index, stash.message);
 
         // 设计图：与分支行一致的样式
@@ -987,6 +989,12 @@ impl RepositoryView {
                     .whitespace_nowrap()
                     .child(label),
             )
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if !this.busy {
+                    this.view_stash(click_index);
+                }
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
