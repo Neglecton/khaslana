@@ -97,10 +97,10 @@ use text_input::{
 use ui::theme::rgb;
 use ui::{
     components::{
-        AppToastKind, FeedbackMessage, InputFrameSize, app_shell_surface, bottom_progress_bar,
-        danger_callout, dialog_actions, dialog_overlay, dialog_panel as ui_dialog_panel,
-        feedback_bubble, feedback_stack, glass_menu, input_frame, segmented_button, toggle_box,
-        tooltip_text,
+        AppToastKind, FeedbackMessage, InputFrameSize, ToastAction, app_shell_surface,
+        bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
+        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, input_frame,
+        segmented_button, toggle_box, tooltip_text,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
@@ -2352,12 +2352,13 @@ pub(crate) enum UiEvent {
     UpdateCheckFinished {
         manifest: Arc<UpdateManifest>,
         asset: UpdatePlatformAsset,
+        trigger: UpdateCheckTrigger,
     },
     UpdateCheckFailed {
         error: String,
-        /// 手动检查（设置页「立即检查」）：结果弹气泡；自动检查保持安静
-        ///（每次启动都弹「已是最新」会打扰）。
-        manual: bool,
+        /// 触发来源，决定结果反馈方式：手动（设置页「立即检查」）弹气泡、
+        /// 启动自动仅状态栏、周期静默完全无反馈（发现新版本走可点击气泡）。
+        trigger: UpdateCheckTrigger,
     },
     UpdateDownloadProgress {
         downloaded: u64,
@@ -3257,6 +3258,9 @@ pub(crate) struct RepositoryView {
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
+    /// 下一次周期静默更新检查的时刻（UiTick 到期触发；构造时 = 启动后 12h，
+    /// 启动检查不重复计入）。
+    next_periodic_update_check: Instant,
     pub(crate) update_downloading: bool,
     pub(crate) available_update: Option<Arc<UpdateManifest>>,
     pub(crate) update_download_progress: Option<String>,
@@ -3508,6 +3512,7 @@ impl RepositoryView {
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
+            next_periodic_update_check: Instant::now() + PERIODIC_UPDATE_CHECK_INTERVAL,
             update_downloading: false,
             available_update: None,
             update_download_progress: None,
@@ -3536,10 +3541,10 @@ impl RepositoryView {
     fn new_with_session(cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.restore_session();
-        // 启动时自动检查更新（manual=false：结果不弹气泡，仅状态栏；
-        // 发现新版本仍会弹窗）
+        // 启动时自动检查更新（Startup：结果不弹气泡，仅状态栏；
+        // 发现新版本仍会弹窗——既有行为不变）
         if view.update_preferences.auto_check {
-            view.start_update_check(false);
+            view.start_update_check(UpdateCheckTrigger::Startup);
         }
         // 老用户首次进入便携版本时，提示把数据从 C 盘迁移到程序同级目录。
         view.maybe_prompt_portable_migration();
@@ -4417,6 +4422,15 @@ impl RepositoryView {
                 let feedbacks_expired = self.feedbacks.len() != feedbacks_before;
                 self.sync_conflict_editor_into_state();
                 self.handle_tray_action(cx);
+                // 周期静默更新检查（12 小时一次）：到期才触发；fire 时读取
+                // auto_check 开关（会话中切换设置即时生效）；重排下次时刻
+                // 无条件执行，开关关闭也不堆积错过的检查。
+                if now >= self.next_periodic_update_check {
+                    self.next_periodic_update_check = now + PERIODIC_UPDATE_CHECK_INTERVAL;
+                    if self.update_preferences.auto_check {
+                        self.start_update_check(UpdateCheckTrigger::Periodic);
+                    }
+                }
                 // 空闲期不做全窗口重绘（UiTick 每 420ms 一次，无条件 notify 会让
                 // 应用常驻 2.4Hz 重绘并触发渲染路径里的重复计算）：只在时态内容
                 // 变化时通知——底部进度线在动画（有加载中操作）、操作遮罩到延迟
@@ -5867,26 +5881,54 @@ impl RepositoryView {
                 self.notify_completion(&message, cx);
             }
             // ── 更新事件 ──
-            UiEvent::UpdateCheckFinished { manifest, asset } => {
+            UiEvent::UpdateCheckFinished {
+                manifest,
+                asset,
+                trigger,
+            } => {
                 self.update_checking = false;
+                let known_version = self
+                    .available_update
+                    .as_ref()
+                    .map(|known| known.version.clone());
                 self.available_update = Some(manifest.clone());
                 self.status = format!("发现新版本 v{}", manifest.version);
                 self.last_error = None;
-                self.active_dialog = Some(DialogState::NewVersionAvailable {
-                    version: manifest.version.clone(),
-                    notes: manifest.notes.clone(),
-                    published_at: manifest.published_at.clone(),
-                    size: asset.size,
-                });
+                if trigger == UpdateCheckTrigger::Periodic {
+                    // 周期静默检查：不弹模态框，只弹可点击气泡直达更新设置；
+                    // 同版本已提示过（点 ✕ / 超时消失 = 稍后）不再重复打扰，
+                    // 设置页常驻「发现新版本」卡片仍可查。
+                    if let Some(message) =
+                        periodic_update_found_toast(known_version.as_deref(), &manifest.version)
+                    {
+                        self.notify_toast_with_action(
+                            AppToastKind::Info,
+                            message,
+                            ToastAction::OpenUpdateSettings,
+                            cx,
+                        );
+                    }
+                } else {
+                    self.active_dialog = Some(DialogState::NewVersionAvailable {
+                        version: manifest.version.clone(),
+                        notes: manifest.notes.clone(),
+                        published_at: manifest.published_at.clone(),
+                        size: asset.size,
+                    });
+                }
             }
-            UiEvent::UpdateCheckFailed { error, manual } => {
+            UiEvent::UpdateCheckFailed { error, trigger } => {
                 self.update_checking = false;
+                // 周期静默检查：无新版本 / 网络失败等完全无反馈。
+                if trigger == UpdateCheckTrigger::Periodic {
+                    return;
+                }
                 if !error.is_empty() {
                     self.update_error = Some(error.clone());
                     self.status = error.clone();
                     // 手动检查弹气泡反馈（成功发现最新=成功气泡、真失败=
-                    // 错误气泡）；自动检查保持安静，仅状态栏与设置页错误条。
-                    if let Some((kind, message)) = update_check_toast(&error, manual) {
+                    // 错误气泡）；启动自动检查保持安静，仅状态栏与设置页错误条。
+                    if let Some((kind, message)) = update_check_feedback(&error, trigger) {
                         self.notify_toast(kind, message, cx);
                     }
                 }
@@ -6970,6 +7012,12 @@ impl RepositoryView {
         self.reload_credential_records("凭据列表已加载");
     }
 
+    /// 通知气泡「点击查看更新」的直达入口：打开设置中心并定位到更新设置页。
+    pub(crate) fn open_update_settings_center(&mut self) {
+        self.close_popups();
+        self.settings_center = Some(SettingsCategory::Update);
+    }
+
     /// 切换设置中心的分类。
     pub(crate) fn select_settings_category(&mut self, category: SettingsCategory) {
         self.settings_center = Some(category);
@@ -7122,13 +7170,17 @@ impl RepositoryView {
 
     // ── 更新方法 ──────────────────────────────────────────────────────────
 
-    pub(crate) fn start_update_check(&mut self, manual: bool) {
+    pub(crate) fn start_update_check(&mut self, trigger: UpdateCheckTrigger) {
         if self.update_checking {
             return;
         }
         self.update_checking = true;
-        self.update_error = None;
-        self.status = "检查更新中".into();
+        // 周期静默检查不写任何可见状态（无新版本/失败就静默）；
+        // 启动/手动检查维持状态栏反馈与错误复位。
+        if trigger != UpdateCheckTrigger::Periodic {
+            self.update_error = None;
+            self.status = "检查更新中".into();
+        }
 
         let tx = self.tx.clone();
         let preferences = self.update_preferences.clone();
@@ -7142,6 +7194,7 @@ impl RepositoryView {
                         UiEvent::UpdateCheckFinished {
                             manifest: Arc::new(manifest),
                             asset,
+                            trigger,
                         },
                     );
                 }
@@ -7150,7 +7203,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: "当前已是最新版本".into(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -7160,7 +7213,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: String::new(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -7169,7 +7222,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: err.to_string(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -15947,7 +16000,7 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "立即检查",
                         !self.update_checking && !self.busy,
-                        |this, _, _| this.start_update_check(true),
+                        |this, _, _| this.start_update_check(UpdateCheckTrigger::Manual),
                         cx,
                     ))
                     .child(self.button(
@@ -18083,11 +18136,33 @@ fn operation_affects_commit_history(message: &str) -> bool {
     )
 }
 
+/// 更新检查的触发来源，决定结果反馈方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckTrigger {
+    /// 应用启动时的自动检查：结果仅状态栏；发现新版本弹模态框（既有行为）。
+    Startup,
+    /// 设置页「立即检查」：结果即时气泡反馈；发现新版本弹模态框。
+    Manual,
+    /// 运行期周期检查（`PERIODIC_UPDATE_CHECK_INTERVAL`）：无新版本/失败
+    /// 完全静默；发现新版本只弹可点击气泡直达更新设置，不弹模态框。
+    Periodic,
+}
+
+/// 周期静默检查间隔：写死为常量、不暴露为设置。清单获取是一次约 1KB 的
+/// HTTPS GET（CNB 主源 + GitHub 兜底、15s 分相超时、走全局代理），12 小时
+/// 对天/周级发版节奏足够且最不打扰；首拍 = 启动后 12 小时（启动检查不重复
+/// 计入）。系统睡眠期间 UiTick 线程暂停、单调钟照走，唤醒后到期即查。
+const PERIODIC_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// 检查更新结果的气泡决策（纯函数，可单测）：手动检查需要即时反馈——
-/// 「已是最新」弹成功气泡、真失败弹错误气泡；自动检查每次启动都跑，
-/// 弹气泡会打扰，保持安静（发现新版本走弹窗不受此影响）。
-fn update_check_toast(error: &str, manual: bool) -> Option<(AppToastKind, String)> {
-    if !manual || error.is_empty() {
+/// 「已是最新」弹成功气泡、真失败弹错误气泡；启动自动检查每次都跑，
+/// 弹气泡会打扰，保持安静（发现新版本走弹窗不受此影响）；周期静默检查
+/// 同样安静（发现新版本走可点击气泡，不在此决策）。
+fn update_check_feedback(
+    error: &str,
+    trigger: UpdateCheckTrigger,
+) -> Option<(AppToastKind, String)> {
+    if trigger != UpdateCheckTrigger::Manual || error.is_empty() {
         return None;
     }
     if error == "当前已是最新版本" {
@@ -18095,6 +18170,16 @@ fn update_check_toast(error: &str, manual: bool) -> Option<(AppToastKind, String
     } else {
         Some((AppToastKind::Error, format!("检查更新失败：{error}")))
     }
+}
+
+/// 周期检查发现新版本的气泡文案（纯函数，可单测）：发现版本与已知
+/// `available_update` 版本相同（用户已看过提示，点 ✕ 或超时消失视为
+/// 「稍后」）时不再重复打扰，返回 None；设置页常驻卡片仍可查。
+fn periodic_update_found_toast(known_version: Option<&str>, found_version: &str) -> Option<String> {
+    if known_version == Some(found_version) {
+        return None;
+    }
+    Some(format!("发现新版本 v{found_version}，点击查看更新"))
 }
 
 fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {

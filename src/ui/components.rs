@@ -22,6 +22,13 @@ pub(crate) enum AppToastKind {
     Error,
 }
 
+/// 通知气泡的可选点击动作：点击气泡体触发；点 ✕ 只关闭不触发
+///（关闭按钮处理器已 `stop_propagation`，事件不会落入气泡体的点击）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastAction {
+    OpenUpdateSettings,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FeedbackMessage {
     pub(crate) id: u64,
@@ -29,6 +36,8 @@ pub(crate) struct FeedbackMessage {
     pub(crate) title: &'static str,
     pub(crate) message: String,
     pub(crate) expires_at: Instant,
+    /// 点击气泡体时执行的动作；None = 纯文本气泡（既有全部路径）。
+    pub(crate) action: Option<ToastAction>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +119,13 @@ impl FeedbackMessage {
             title: kind.label(),
             message,
             expires_at: Instant::now() + ttl,
+            action: None,
         }
+    }
+
+    pub(crate) fn with_toast_action(mut self, action: ToastAction) -> Self {
+        self.action = Some(action);
+        self
     }
 
     pub(crate) fn is_expired(&self, now: Instant) -> bool {
@@ -798,6 +813,18 @@ pub(crate) fn feedback_bubble(
         .border_color(rgb(border))
         .bg(rgb(theme::CARD))
         .shadow_lg()
+        .when_some(feedback.action, |this, action| {
+            // 可点击气泡：点击气泡体直达对应页面；点 ✕ 只关闭不触发。
+            this.cursor_pointer()
+                .hover(|this| this.border_color(rgb(theme::ACCENT)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    match action {
+                        ToastAction::OpenUpdateSettings => this.open_update_settings_center(),
+                    }
+                    this.feedbacks.retain(|feedback| feedback.id != feedback_id);
+                    cx.notify();
+                }))
+        })
         .flex()
         .gap_3()
         .child(feedback_icon(dot, soft_bg, text))
@@ -965,6 +992,29 @@ impl RepositoryView {
         self.next_feedback_id = self.next_feedback_id.wrapping_add(1).max(1);
         self.feedbacks
             .push_back(FeedbackMessage::new(self.next_feedback_id, kind, message));
+        while self.feedbacks.len() > 5 {
+            self.feedbacks.pop_front();
+        }
+        cx.notify();
+    }
+
+    /// 带点击动作的通知气泡：点击气泡体执行动作后移除气泡；寿命与普通
+    /// 气泡一致（按类别 4s / 7s 自动消失），点 ✕ 视为「稍后」仅关闭。
+    pub(crate) fn notify_toast_with_action(
+        &mut self,
+        kind: AppToastKind,
+        message: impl Into<gpui::SharedString>,
+        action: ToastAction,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into().to_string();
+        if message.trim().is_empty() {
+            return;
+        }
+        self.next_feedback_id = self.next_feedback_id.wrapping_add(1).max(1);
+        self.feedbacks.push_back(
+            FeedbackMessage::new(self.next_feedback_id, kind, message).with_toast_action(action),
+        );
         while self.feedbacks.len() > 5 {
             self.feedbacks.pop_front();
         }

@@ -170,7 +170,7 @@ UI 线程通过 `async-channel` 接收后台线程发回的 `UiEvent`。重型 G
 
 - `MAX_CONCURRENT_REPO_LOADS = 2`
 
-后台阻塞任务统一通过 `src/tasks.rs` 的 `TaskExecutor` 调度：短任务池（2-4 线程）用于打开、刷新、状态、历史和 diff 等本地查询，长任务池（2 线程）用于 clone、fetch、pull、push、子模块远端检查和工作流等可能阻塞网络或凭据回调的操作，ai 池专供分钟级评审 agent——它若复用 long 池，两个并发评审就会把网络 Git 操作饿死在队列里；线程数直接引用 `MAX_CONCURRENT_AI_REVIEWS` 常量（不双写，脱钩会让任务在 rayon 队列排队）。评审任务体自带第二层 `catch_unwind`：panic 补发该代际 `AiReviewFailed` 精确归位并发计数与加载标志（全局 `BackgroundTaskPanicked` 无法区分任务种类，不碰评审状态）。任务体统一包一层 `catch_unwind`：rayon 会静默吞掉任务 panic，若不兜底，对应 tab 的 busy/加载标志和仓库加载槽位会永久卡死；panic 时发 `UiEvent::BackgroundTaskPanicked` 由 UI 统一复位并提示。新增后台 Git / IO 任务不要直接散落 `thread::spawn`，文件选择对话框、UI tick 和测试线程除外。
+后台阻塞任务统一通过 `src/tasks.rs` 的 `TaskExecutor` 调度：短任务池（2-4 线程）用于打开、刷新、状态、历史和 diff 等本地查询，长任务池（2 线程）用于 clone、fetch、pull、push、子模块远端检查和工作流等可能阻塞网络或凭据回调的操作，ai 池专供分钟级评审 agent——它若复用 long 池，两个并发评审就会把网络 Git 操作饿死在队列里；线程数直接引用 `MAX_CONCURRENT_AI_REVIEWS` 常量（不双写，脱钩会让任务在 rayon 队列排队）。评审任务体自带第二层 `catch_unwind`：panic 补发该代际 `AiReviewFailed` 精确归位并发计数与加载标志（全局 `BackgroundTaskPanicked` 无法区分任务种类，不碰评审状态）。任务体统一包一层 `catch_unwind`：rayon 会静默吞掉任务 panic，若不兜底，对应 tab 的 busy/加载标志和仓库加载槽位会永久卡死；panic 时发 `UiEvent::BackgroundTaskPanicked` 由 UI 统一复位并提示。新增后台 Git / IO 任务不要直接散落 `thread::spawn`，文件选择对话框、UI tick 和测试线程除外。UI tick（`spawn_ui_tick`，420ms 专用线程 → `UiEvent::UiTick`）承担四项职责：进度动画相位、通知气泡过期回收、托盘动作轮询、周期静默更新检查到期触发（12 小时，见 §5.9）——新的周期性工作优先挂进 tick 臂的时间戳比较，不要另起常驻线程。
 
 历史分页大小：
 
@@ -374,6 +374,7 @@ C 盘已有旧数据的老用户首次进入便携版本时，会在启动就绪
 - 保存按钮统一逻辑：只保存当前分类页内容，按 `last_error` 经 `notify_settings_save` 提示成功/失败（失败 toast 带具体错误信息），成功后不关闭页面。基础 save 方法（如 `save_network_proxy_settings`）同时被输入框回车静默自动保存复用，提示逻辑只放在保存按钮闭包里。
 - 外观、更新、快捷键页为即时生效（无保存按钮），凭据管理为列表页（顶部「添加凭据/刷新」），均只靠「×」关闭。「关于」页无设置项：展示当前版本号、发布渠道徽标（按 semver 预发布段推断 正式版/测试版）与版本说明（`update::current_release_notes()`，发版流水线经 `KHASLANA_RELEASE_NOTES` 环境变量编译期嵌入，本地构建为空时显示占位）。
 - 更新设置页：自动检查开关、「接收测试版（Beta）更新」开关（`update_preferences.include_beta`，默认关——勾选后 `manifest_sources_for` 先取 CNB 根 `khaslana-update-beta.json` 再滑落正式清单）、已跳过版本、检测到新版本时页内常驻「发现新版本」卡片（版本/发布时间/包大小/版本说明滚动区 + 立即更新）；新版本弹窗的版本说明为多行可滚动。
+- **运行期周期静默更新检查**：检查触发分三态 `UpdateCheckTrigger::{Startup, Manual, Periodic}`——启动自动检查（仅状态栏、发现新版本弹模态框，既有行为）与设置页手动检查（气泡反馈）不变；周期检查由 UiTick 到期触发（`PERIODIC_UPDATE_CHECK_INTERVAL` 写死 12 小时、不暴露为设置；首拍 = 启动后 12 小时；fire 时读 `auto_check` 开关，会话中切换即时生效；重排下次时刻无条件执行），无新版本/网络失败**完全静默**（不写状态栏与 update_error、不弹气泡），发现新版本只弹**可点击气泡**（`ToastAction::OpenUpdateSettings`，点击气泡体直达更新设置页并移除气泡；点 ✕ 仅关闭——关闭按钮处理器已 `stop_propagation` 不会落入气泡体点击，✕/超时消失视为「稍后」：同版本本会话不再重复提示，`periodic_update_found_toast` 按 `available_update` 已知版本去重）+ 填充 `available_update`（常驻卡片随之可查），不弹模态框；跳过版本沿用空 error 全静默路径。
 - 关闭设置中心时清掉可能残留的外部合并「保存并继续」待处理冲突路径（`external_merge_view::clear_pending_external_merge_path`）。
 - 凭据管理的子弹窗（详情/表单/删除确认）经 `active_dialog` 分发，可叠加在设置中心之上；关闭子弹窗后回到设置中心。
 - 原工具栏的 6 个独立设置分类按钮已移除，各分类统一由设置中心承载；设置中心通过 titlebar 右侧「设置」按钮或 Ctrl+, 快捷键打开。
