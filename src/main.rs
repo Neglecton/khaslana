@@ -403,8 +403,8 @@ enum FieldId {
     AiApiKey,
     AiModel,
     ExternalMergeIntellijPath,
-    /// 设置中心「代码索引」页的符号搜索框。
-    CodeIndexSearch,
+    /// 设置中心「代码索引」页的仓库列表过滤框。
+    CodeIndexFilter,
     /// 全局符号搜索面板（Ctrl+P）的输入框。
     CodePaletteSearch,
     StashMessage,
@@ -513,8 +513,8 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
         FieldId::ExternalMergeIntellijPath,
         |view: &RepositoryView| &view.external_merge_intellij_path,
     ),
-    (FieldId::CodeIndexSearch, |view: &RepositoryView| {
-        &view.code_index_search_input
+    (FieldId::CodeIndexFilter, |view: &RepositoryView| {
+        &view.code_index_filter
     }),
     (FieldId::CodePaletteSearch, |view: &RepositoryView| {
         &view.code_palette_search
@@ -556,7 +556,7 @@ pub(crate) const ALL_FIELD_IDS: &[FieldId] = &[
     FieldId::AiApiKey,
     FieldId::AiModel,
     FieldId::ExternalMergeIntellijPath,
-    FieldId::CodeIndexSearch,
+    FieldId::CodeIndexFilter,
     FieldId::CodePaletteSearch,
     FieldId::StashMessage,
 ];
@@ -707,8 +707,12 @@ pub(crate) enum DialogState {
         path: PathBuf,
         display_name: String,
     },
-    /// 删除仓库索引数据目录的确认弹窗（设置中心「代码索引」页）。
-    ConfirmDeleteCodeIndex,
+    /// 删除仓库索引数据目录的确认弹窗（设置中心「代码索引」页；多仓库列表中
+    /// 每个仓库都可发起删除，弹窗与删除动作按 repo_key 寻址，不再限定活动仓库）。
+    ConfirmDeleteCodeIndex {
+        repo_key: String,
+        display_name: String,
+    },
     ConfirmDropStash {
         index: usize,
         message: String,
@@ -1429,6 +1433,14 @@ pub(crate) struct CodeIndexTaskState {
     pub repo_path: String,
     /// 置位后任务在文件/阶段边界退出，不落盘。
     pub cancel: Arc<AtomicBool>,
+}
+
+/// 设置中心「代码索引」页的仓库列表条目。`repo_key` 为规范化小写路径，
+/// `name` 取自显示路径末段（保留原大小写，仅作展示）。
+pub(crate) struct CodeIndexListEntry {
+    pub repo_key: String,
+    pub name: String,
+    pub path: String,
 }
 
 /// 全局符号搜索面板（Ctrl+P）的会话状态；None = 关闭。
@@ -2269,10 +2281,6 @@ pub(crate) enum UiEvent {
     CodeIndexFailed {
         repo_path: String,
         error: String,
-    },
-    /// 设置页符号搜索结果回填。
-    CodeIndexSearchFinished {
-        hits: Vec<khaslana::code_index::SearchHit>,
     },
     /// 全局符号搜索面板：查询结果（seq 守卫防乱序）。
     CodePaletteSearchFinished {
@@ -3274,8 +3282,13 @@ pub(crate) struct RepositoryView {
     pub(crate) code_index_task: Option<CodeIndexTaskState>,
     /// 各仓库最近一次索引统计缓存（事件回填；设置页打开时也会后台查库刷新）。
     pub(crate) code_index_stats: HashMap<String, khaslana::code_index::IndexStats>,
-    /// 设置页符号搜索框（验证卡输入框）。
-    pub(crate) code_index_search_input: TextFieldState,
+    /// 设置页仓库列表过滤框（按仓库名称或路径过滤）。
+    pub(crate) code_index_filter: TextFieldState,
+    /// 设置页仓库列表（打开设置页时构建：已打开 tabs + 最近仓库 + 索引偏好记录）。
+    pub(crate) code_index_list_entries: Vec<CodeIndexListEntry>,
+    /// 在途索引任务的进度计数（进度条渲染；无任务时无意义）。
+    pub(crate) code_index_progress_done: usize,
+    pub(crate) code_index_progress_total: usize,
     /// 在途任务的最新进度文案（状态卡显示）。
     pub(crate) code_index_progress_message: String,
     /// 已启用索引的仓库键缓存（启动与设置页打开时从主库加载）。
@@ -3288,9 +3301,6 @@ pub(crate) struct RepositoryView {
     pub(crate) code_palette_search_seq: u64,
     /// 面板详情请求序号（随选中变化 +1）。
     pub(crate) code_palette_detail_seq: u64,
-    /// 最近一次符号搜索结果；None = 尚未搜索。
-    pub(crate) code_index_search_hits: Option<Vec<khaslana::code_index::SearchHit>>,
-    pub(crate) code_index_searching: bool,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -3542,9 +3552,10 @@ impl RepositoryView {
             }),
             code_index_task: None,
             code_index_stats: HashMap::new(),
-            code_index_search_input: TextFieldState::new(cx, "搜索符号（如 pushBranch）"),
-            code_index_search_hits: None,
-            code_index_searching: false,
+            code_index_filter: TextFieldState::new(cx, "按名称或路径过滤"),
+            code_index_list_entries: Vec::new(),
+            code_index_progress_done: 0,
+            code_index_progress_total: 0,
             code_index_progress_message: String::new(),
             code_search_palette: None,
             code_palette_search: TextFieldState::new(cx, "搜索符号或类型名…"),
@@ -5640,9 +5651,6 @@ impl RepositoryView {
                 self.handle_code_index_stats_loaded(repo_path, stats);
                 cx.notify();
             }
-            UiEvent::CodeIndexSearchFinished { hits } => {
-                self.handle_code_index_search_finished(hits, cx);
-            }
             UiEvent::CodePaletteSearchFinished { seq, hits } => {
                 self.handle_code_palette_search_finished(seq, hits);
             }
@@ -6761,7 +6769,7 @@ impl RepositoryView {
             FieldId::RemoteBranchName => &mut self.remote_branch_name,
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
-            FieldId::CodeIndexSearch => &mut self.code_index_search_input,
+            FieldId::CodeIndexFilter => &mut self.code_index_filter,
             FieldId::CodePaletteSearch => &mut self.code_palette_search,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
@@ -14856,9 +14864,12 @@ impl RepositoryView {
             DialogState::ConfirmDeleteWorkflowTemplate { path, display_name } => self
                 .render_confirm_delete_workflow_template_dialog(path, display_name, cx)
                 .into_any_element(),
-            DialogState::ConfirmDeleteCodeIndex => {
-                self.render_code_index_delete_confirm(cx).into_any_element()
-            }
+            DialogState::ConfirmDeleteCodeIndex {
+                repo_key,
+                display_name,
+            } => self
+                .render_code_index_delete_confirm(&repo_key, &display_name, cx)
+                .into_any_element(),
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
                 .into_any_element(),
