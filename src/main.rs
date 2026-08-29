@@ -516,6 +516,49 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     (FieldId::CodeIndexSearch, |view: &RepositoryView| {
         &view.code_index_search_input
     }),
+    (FieldId::CodePaletteSearch, |view: &RepositoryView| {
+        &view.code_palette_search
+    }),
+];
+
+/// 全部 FieldId 变体（与枚举同步维护；tests 断言 DEDICATED_FIELDS 全覆盖，
+/// 防止「新增变体漏注册 → field() expect panic / 输入被静默丢弃」回归）。
+#[cfg(test)]
+pub(crate) const ALL_FIELD_IDS: &[FieldId] = &[
+    FieldId::CloneUrl,
+    FieldId::ClonePath,
+    FieldId::BranchName,
+    FieldId::BranchRename,
+    FieldId::RemoteName,
+    FieldId::RemoteUrl,
+    FieldId::CommitMessage,
+    FieldId::TagName,
+    FieldId::TagMessage,
+    FieldId::CredentialUsername,
+    FieldId::CredentialSecret,
+    FieldId::CredentialKeyPath,
+    FieldId::CredentialPassphrase,
+    FieldId::CredentialRemoteUrl,
+    FieldId::CredentialDisplayName,
+    FieldId::CredentialTestUrl,
+    FieldId::ConflictEditor,
+    FieldId::RemoteBranchName,
+    FieldId::RemoteBranchSearch,
+    FieldId::RepoSwitcherSearch,
+    FieldId::CommitGraphSearch,
+    FieldId::CommitGraphBranchSearch,
+    FieldId::SidebarLocalBranchSearch,
+    FieldId::SidebarRemoteBranchSearch,
+    FieldId::ProxyHttpUrl,
+    FieldId::ProxyHttpsUrl,
+    FieldId::ProxySocks5Url,
+    FieldId::AiBaseUrl,
+    FieldId::AiApiKey,
+    FieldId::AiModel,
+    FieldId::ExternalMergeIntellijPath,
+    FieldId::CodeIndexSearch,
+    FieldId::CodePaletteSearch,
+    FieldId::StashMessage,
 ];
 
 #[derive(Clone, Debug)]
@@ -1396,6 +1439,8 @@ pub(crate) struct CodeSearchPaletteState {
     /// 选中符号的详情（直接调用关系 + 源码片段），随选中变化异步刷新。
     pub detail: Option<khaslana::code_index::SymbolDetail>,
     pub searching: bool,
+    /// 详情请求在途（右栏展示「详情加载中」而非回落到提示文案）。
+    pub detail_loading: bool,
 }
 
 /// AI 思考弹窗状态：一次性 AI 请求（commit message / 冲突合并建议 /
@@ -6789,6 +6834,8 @@ impl RepositoryView {
     }
 
     pub(crate) fn close_popups(&mut self) {
+        // 全局符号搜索面板与其他弹层互斥：任何新弹层打开前都要关掉它。
+        self.code_search_palette = None;
         self.active_dialog = None;
         self.ai_review_history = None;
         self.remote_branch_operation.branch_dropdown_open = false;
@@ -12706,7 +12753,6 @@ impl RepositoryView {
                 "克隆仓库…",
                 |this, window, _cx| {
                     this.close_repo_switcher();
-                    this.code_search_palette = None;
                     this.open_clone_dialog(window);
                 },
                 cx,
@@ -18423,17 +18469,15 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
 }
 
 fn main() {
-    // MCP 无头模式：`khaslana mcp <仓库路径>` 供外部 AI 工具（Claude Code /
-    // Cursor / ZCode 等）挂载，查询本仓库的代码索引。必须先于 GUI 启动判断；
-    // 此分支不初始化 stdout 版日志（tracing 默认写 stdout 会污染协议流），
-    // MCP 内部进度一律走 stderr。
+    // MCP 无头模式：`khaslana mcp [仓库路径]` 供外部 AI 工具（Claude Code /
+    // Cursor / ZCode 等）挂载，查询本机已索引仓库的代码知识图谱。仓库路径
+    // 可选：带=单仓库模式；不带=多仓库模式（工具按 repo 参数解析目标仓库）。
+    // 必须先于 GUI 启动判断；此分支不初始化 stdout 版日志（tracing 默认写
+    // stdout 会污染协议流），MCP 内部进度一律走 stderr。
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some("mcp") {
-        let Some(repo) = args.next() else {
-            eprintln!("用法: khaslana mcp <仓库路径>");
-            std::process::exit(2);
-        };
-        let code = khaslana::code_index::mcp::run(std::path::Path::new(&repo));
+        let repo = args.next();
+        let code = khaslana::code_index::mcp::run(repo.as_deref().map(std::path::Path::new));
         std::process::exit(code);
     }
 

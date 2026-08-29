@@ -1782,3 +1782,24 @@ fn validate_credential_test_url_matrix() {
         .is_err()
     );
 }
+
+/// DEDICATED_FIELDS 注册表完整性：每个 FieldId 变体都必须注册——漏注册的
+/// 字段经 field() 查找会 expect panic，即使侥幸渲染聚焦也会让
+/// focused_field 扫不到、EntityInputHandler 静默丢弃全部输入。
+#[test]
+fn dedicated_fields_cover_all_field_ids() {
+    use super::ALL_FIELD_IDS;
+    assert_eq!(
+        ALL_FIELD_IDS.len(),
+        DEDICATED_FIELDS.len(),
+        "ALL_FIELD_IDS 与 DEDICATED_FIELDS 数量不一致：新增 FieldId 时两处都要同步"
+    );
+    for id in ALL_FIELD_IDS {
+        assert!(
+            DEDICATED_FIELDS
+                .iter()
+                .any(|(registered, _)| registered == id),
+            "FieldId {id:?} 未注册到 DEDICATED_FIELDS（渲染即 panic / 输入静默丢失）"
+        );
+    }
+}

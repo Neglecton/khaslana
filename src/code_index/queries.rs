@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use super::err;
 use super::graph::{EdgeType, GraphBuffer, NodeId, NodeLabel};
-use super::store::CodeIndexStore;
+use super::store::{CodeIndexStore, open_read_only_if_exists};
 use crate::types::Result;
 
 /// 单条符号候选（精确名查找结果）。
@@ -29,14 +29,6 @@ pub struct SymbolCandidate {
     pub end_line: u32,
 }
 
-/// 名称解析结果：唯一命中 / 多个同级候选（歧义，需调用方选择）/ 无。
-#[derive(Debug)]
-pub enum SymbolResolution {
-    Resolved(SymbolCandidate),
-    Ambiguous(Vec<SymbolCandidate>),
-    NotFound,
-}
-
 /// 一跳调用关系。
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceHop {
@@ -48,6 +40,7 @@ pub struct TraceHop {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TraceDirection {
     Inbound,
     Outbound,
@@ -188,65 +181,25 @@ fn candidate_of(node: &super::graph::GraphNode) -> SymbolCandidate {
 
 /// 精确名（name 或 qualified_name）查找，返回全部候选。
 pub fn find_symbol_candidates(db_path: &Path, name: &str) -> Result<Vec<SymbolCandidate>> {
-    let store = CodeIndexStore::open(db_path)?;
-    let graph = store.load_graph()?;
-    let candidates: Vec<SymbolCandidate> = graph
+    let graph = load_graph(db_path)?;
+    Ok(graph
         .nodes
         .iter()
         .filter(|n| n.name == name || n.qualified_name == name)
         .map(candidate_of)
-        .collect();
-    Ok(candidates)
+        .collect())
 }
 
-/// 解析名称到唯一符号：取最高优先级层级的候选；同层多个 → 歧义。
-fn resolve_candidates(candidates: Vec<SymbolCandidate>) -> SymbolResolution {
-    if candidates.is_empty() {
-        return SymbolResolution::NotFound;
-    }
-    let mut best: Option<(u8, Vec<&SymbolCandidate>)> = None;
-    for candidate in &candidates {
-        let priority = label_priority(parse_label_str(&candidate.label));
-        match &mut best {
-            Some((top, group)) if *top == priority => group.push(candidate),
-            Some((top, _)) if *top > priority => {}
-            _ => best = Some((priority, vec![candidate])),
-        }
-    }
-    let (_, group) = best.expect("候选非空");
-    if group.len() == 1 {
-        SymbolResolution::Resolved(group[0].clone())
-    } else {
-        // 按发现顺序稳定输出。
-        let mut group = group.into_iter().cloned().collect::<Vec<_>>();
-        group.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
-        SymbolResolution::Ambiguous(group)
-    }
+/// 内部便捷：只读打开已存在的索引库并载入全图。未索引（文件不存在 /
+/// 非本引擎库 / schema 版本不符）时返回中文错误——绝不创建幽灵空库。
+fn open_query_store(db_path: &Path) -> Result<CodeIndexStore> {
+    open_read_only_if_exists(db_path)?.ok_or_else(|| {
+        err("代码索引不存在或尚未建立，请先在 Khaslana 设置中心启用代码索引或调用 refresh_index")
+    })
 }
 
-fn parse_label_str(text: &str) -> NodeLabel {
-    match text {
-        "Function" => NodeLabel::Function,
-        "Method" => NodeLabel::Method,
-        "Class" => NodeLabel::Class,
-        "Struct" => NodeLabel::Struct,
-        "Interface" => NodeLabel::Interface,
-        "Enum" => NodeLabel::Enum,
-        "Trait" => NodeLabel::Trait,
-        "Type" => NodeLabel::Type,
-        "Field" => NodeLabel::Field,
-        "Module" => NodeLabel::Module,
-        "Folder" => NodeLabel::Folder,
-        "Project" => NodeLabel::Project,
-        "Branch" => NodeLabel::Branch,
-        _ => NodeLabel::File,
-    }
-}
-
-/// 内部便捷：打开库并载入全图。
 fn load_graph(db_path: &Path) -> Result<GraphBuffer> {
-    let store = CodeIndexStore::open(db_path)?;
-    store.load_graph()
+    open_query_store(db_path)?.load_graph()
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +298,49 @@ fn bfs_hops(
     hops
 }
 
+/// 在已载入的图内做精确名解析（避免调用方二次开库载图）。
+/// `callable_only` 限定 Function/Method（trace 语义）；歧义取最高
+/// label 优先级层级，同层多个 → Ambiguous。
+enum GraphResolution<'a> {
+    One(&'a super::graph::GraphNode),
+    Ambiguous(Vec<SymbolCandidate>),
+    NotFound,
+}
+
+fn resolve_in_graph<'a>(
+    graph: &'a GraphBuffer,
+    name: &str,
+    callable_only: bool,
+) -> GraphResolution<'a> {
+    let candidates: Vec<&super::graph::GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            (n.name == name || n.qualified_name == name)
+                && (!callable_only || matches!(n.label, NodeLabel::Function | NodeLabel::Method))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return GraphResolution::NotFound;
+    }
+    let top_priority = candidates
+        .iter()
+        .map(|n| label_priority(n.label))
+        .max()
+        .expect("候选非空");
+    let group: Vec<&super::graph::GraphNode> = candidates
+        .into_iter()
+        .filter(|n| label_priority(n.label) == top_priority)
+        .collect();
+    if group.len() == 1 {
+        GraphResolution::One(group[0])
+    } else {
+        let mut candidates: Vec<SymbolCandidate> = group.iter().map(|n| candidate_of(n)).collect();
+        candidates.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
+        GraphResolution::Ambiguous(candidates)
+    }
+}
+
 /// 调用链追踪：名称 → 唯一解析 → CALLS 边 BFS。
 pub fn trace_calls(
     db_path: &Path,
@@ -353,29 +349,15 @@ pub fn trace_calls(
     depth: u32,
     max_nodes: usize,
 ) -> Result<TraceOutcome> {
-    let candidates = find_symbol_candidates(db_path, function_name)?;
-    // trace 只关心可调用目标。
-    let callable: Vec<SymbolCandidate> = candidates
-        .iter()
-        .filter(|c| {
-            matches!(
-                parse_label_str(&c.label),
-                NodeLabel::Function | NodeLabel::Method
-            )
-        })
-        .cloned()
-        .collect();
-    let resolved = match resolve_candidates(callable) {
-        SymbolResolution::Resolved(c) => c,
-        SymbolResolution::Ambiguous(c) => return Ok(TraceOutcome::Ambiguous(c)),
-        SymbolResolution::NotFound => return Ok(TraceOutcome::NotFound),
+    let graph = load_graph(db_path)?;
+    let resolved = match resolve_in_graph(&graph, function_name, true) {
+        GraphResolution::One(node) => node,
+        GraphResolution::Ambiguous(c) => return Ok(TraceOutcome::Ambiguous(c)),
+        GraphResolution::NotFound => return Ok(TraceOutcome::NotFound),
     };
 
-    let graph = load_graph(db_path)?;
     let adjacency = CallAdjacency::build(&graph);
-    let Some(start) = graph.find_by_qn(&resolved.qualified_name) else {
-        return Ok(TraceOutcome::NotFound);
-    };
+    let start = resolved.id;
     let starts = vec![start];
     let result = TraceResult {
         function: resolved.name.clone(),
@@ -404,23 +386,20 @@ pub fn symbol_detail(
     repo_root: Option<&Path>,
     name: &str,
 ) -> Result<DetailOutcome> {
-    let candidates = find_symbol_candidates(db_path, name)?;
-    let resolved = match resolve_candidates(candidates) {
-        SymbolResolution::Resolved(c) => c,
-        SymbolResolution::Ambiguous(c) => return Ok(DetailOutcome::Ambiguous(c)),
-        SymbolResolution::NotFound => return Ok(DetailOutcome::NotFound),
+    let graph = load_graph(db_path)?;
+    let resolved = match resolve_in_graph(&graph, name, false) {
+        GraphResolution::One(node) => node,
+        GraphResolution::Ambiguous(c) => return Ok(DetailOutcome::Ambiguous(c)),
+        GraphResolution::NotFound => return Ok(DetailOutcome::NotFound),
     };
 
-    let graph = load_graph(db_path)?;
     let adjacency = CallAdjacency::build(&graph);
-    let Some(node_id) = graph.find_by_qn(&resolved.qualified_name) else {
-        return Ok(DetailOutcome::NotFound);
-    };
-    let starts = vec![node_id];
-    let source = repo_root.and_then(|root| read_source_snippet(root, &resolved));
+    let starts = vec![resolved.id];
+    let candidate = candidate_of(resolved);
+    let source = repo_root.and_then(|root| read_source_snippet(root, &candidate));
     Ok(DetailOutcome::Found(Box::new(SymbolDetail {
         name: resolved.name.clone(),
-        label: resolved.label.clone(),
+        label: resolved.label.as_str().to_string(),
         qualified_name: resolved.qualified_name.clone(),
         file_path: resolved.file_path.clone(),
         start_line: resolved.start_line,
@@ -431,7 +410,8 @@ pub fn symbol_detail(
     })))
 }
 
-/// 读取定义处源码片段（行区间 1-based，钳 200 行）。
+/// 读取定义处源码片段（行区间 1-based，钳 200 行）。行号对文件实际行数
+/// 双向钳制——索引过期（文件被改短而增量未跑）时不 panic，直接返回 None。
 fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<SourceSnippet> {
     if candidate.file_path.is_empty() || candidate.start_line == 0 {
         return None;
@@ -448,7 +428,10 @@ fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<
     };
     let text = String::from_utf8_lossy(&bytes);
     let all_lines: Vec<&str> = text.lines().collect();
-    let start = (candidate.start_line as usize).max(1);
+    if all_lines.is_empty() {
+        return None;
+    }
+    let start = (candidate.start_line as usize).clamp(1, all_lines.len());
     let end = (candidate.end_line as usize)
         .min(all_lines.len())
         .max(start);

@@ -69,13 +69,14 @@ impl RepositoryView {
                 .as_ref()
                 .is_some_and(|task| &task.repo_path == key)
         });
+        // 配置片段为多仓库形态（零仓库耦合，一条配置服务所有已索引仓库）。
+        // 单仓库高级用法可在 args 末尾追加 "<仓库路径>"。
         let mcp_config = {
             let exe = std::env::current_exe()
                 .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
                 .unwrap_or_else(|_| "khaslana.exe".to_string());
-            let repo = repo_key.clone().unwrap_or_default();
             format!(
-                r#"{{"mcpServers":{{"khaslana-code-index":{{"command":"{exe}","args":["mcp","{repo}"]}}}}}}"#
+                r#"{{"mcpServers":{{"khaslana-code-index":{{"command":"{exe}","args":["mcp"]}}}}}}"#
             )
         };
 
@@ -224,7 +225,7 @@ impl RepositoryView {
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child("把本仓库的代码索引以 MCP 工具暴露给外部 AI 工具（Claude Code / Cursor / ZCode 等）。命令：khaslana mcp <仓库路径>；启动时自动建立或增量刷新索引。以下配置可直接粘贴到 AI 工具的 MCP 设置中："),
+                            .child("把代码索引以 MCP 工具暴露给外部 AI 工具（Claude Code / Cursor / ZCode 等）。命令：khaslana mcp（多仓库模式，一条配置服务所有已索引仓库，工具按 repo 参数选择目标；也可写 khaslana mcp <仓库路径> 固定单仓库）；启动后首次使用仓库时自动建立或增量刷新索引。以下配置可直接粘贴到 AI 工具的 MCP 设置中："),
                     )
                     .child(
                         div()

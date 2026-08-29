@@ -1019,6 +1019,67 @@ mod queries_tests {
         let changed = changed_files_via_git(&root, None).unwrap();
         assert!(changed.iter().any(|f| f == "src/helper.rs"));
     }
+
+    #[test]
+    fn symbol_detail_on_shrunk_file_does_not_panic() {
+        // 索引后把文件改短（行数少于已记录的 start_line）——源码片段读取必须
+        // 钳制而非越界 panic（MCP 会话长驻时这是真实可达路径）。
+        let (tmp, db_path) = build_query_fixture();
+        let repo_root = tmp.path().join("queryrepo");
+        // 先建索引。
+        let mut options = no_cancel_options();
+        let RunOutcome::Completed(_) = run_index(&repo_root, &db_path, true, &mut options).unwrap()
+        else {
+            panic!("应完成");
+        };
+        // 改短 helper.rs（原 1 行代码；清空后索引里的 start_line 超过文件行数）。
+        std::fs::write(repo_root.join("src/helper.rs"), "").unwrap();
+
+        let outcome = symbol_detail(&db_path, Some(&repo_root), "helper").unwrap();
+        match outcome {
+            DetailOutcome::Found(detail) => {
+                // 片段被钳制为 None 或行区间合法，不 panic 即通过。
+                if let Some(snippet) = detail.source {
+                    assert!(!snippet.lines.is_empty() || !snippet.truncated);
+                }
+            }
+            DetailOutcome::Ambiguous(_) => {}
+            DetailOutcome::NotFound => {}
+        }
+    }
+
+    #[test]
+    fn queries_on_missing_index_do_not_create_ghost_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("not-built").join("index.db");
+        let err = find_symbol_candidates(&db_path, "anything").unwrap_err();
+        assert!(err.to_string().contains("代码索引不存在"), "{err}");
+        // 只读打开不创建任何文件/目录。
+        assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn search_symbols_filtered_reports_real_total() {
+        let (root, db_path) = build_query_fixture();
+        let _ = root;
+        // fixture：free_fn 在 a/b 两个目录各一个（同名歧义），run_task/helper 唯一。
+        let (_, total) = CodeIndexStore::open(&db_path)
+            .unwrap()
+            .search_symbols_filtered("free fn", None, 50)
+            .unwrap();
+        assert_eq!(total, 2, "total 应为过滤后真实总数而非本页条数");
+        let (hits, total) = CodeIndexStore::open(&db_path)
+            .unwrap()
+            .search_symbols_filtered("free fn", Some("Function"), 1)
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(hits.len(), 1, "limit 截断不影响 total");
+        let (_, total) = CodeIndexStore::open(&db_path)
+            .unwrap()
+            .search_symbols_filtered("free fn", Some("Class"), 50)
+            .unwrap();
+        assert_eq!(total, 0, "label 过滤在 SQL 内完成");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,7 +1176,7 @@ mod mcp_tests {
     }
 
     #[test]
-    fn tools_list_exposes_seven_tools() {
+    fn tools_list_exposes_all_tools() {
         let (_tmp, server) = server();
         let response: Value = serde_json::from_str(
             &server
@@ -1124,9 +1185,10 @@ mod mcp_tests {
         )
         .unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in [
+            "list_projects",
             "search_symbols",
             "get_symbol_detail",
             "trace_path",
@@ -1137,6 +1199,12 @@ mod mcp_tests {
         ] {
             assert!(names.contains(&expected), "{names:?}");
         }
+        // 多仓库模式：查询类工具的 schema 都带可选 repo 参数。
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "search_symbols")
+            .unwrap();
+        assert!(search["inputSchema"]["properties"]["repo"].is_object());
     }
 
     #[test]
@@ -1215,5 +1283,170 @@ mod mcp_tests {
                 .iter()
                 .any(|s| s["name"] == "worker")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 多仓库模式（khaslana mcp 无参数启动）
+    // ------------------------------------------------------------------
+
+    /// 建一个带 N 个已索引仓库的临时数据目录（code-index/<repo键>/index.db）。
+    fn multi_server(repos: usize) -> (tempfile::TempDir, McpServer, Vec<std::path::PathBuf>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let mut roots = Vec::new();
+        for i in 0..repos {
+            let root = tmp.path().join(format!("repo{i}"));
+            std::fs::create_dir_all(&root).unwrap();
+            let _ = git2::Repository::init(&root);
+            write_repo_file(
+                &root,
+                "src/lib.rs",
+                &format!("fn entry_point_{i}() {{\n    worker_{i}();\n}}\n"),
+            );
+            write_repo_file(&root, "src/worker.rs", &format!("fn worker_{i}() {{}}\n"));
+            {
+                let repo = git2::Repository::open(&root).unwrap();
+                crate::git::test_support::git_test_support::commit_all(&repo, "init");
+            }
+            // 与 GUI 侧 normalize_repo_path 一致：canonicalize（Windows 产生
+            // \\?\ 前缀）+ repo_key 内部小写折叠；MCP context_from_root 按
+            // canonicalize 后路径算键，两边必须同源。
+            let canonical = std::fs::canonicalize(&root).unwrap();
+            let key = crate::ai::review_store::repo_key(&canonical.to_string_lossy());
+            let db_path = crate::code_index::open_index_db_path(&data_dir, &key).unwrap();
+            match run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap() {
+                RunOutcome::Completed(_) => {}
+                other => panic!("{other:?}"),
+            }
+            roots.push(root);
+        }
+        let server = McpServer::for_multi_test(data_dir);
+        (tmp, server, roots)
+    }
+
+    #[test]
+    fn list_projects_lists_all_indexed_repos_with_paths() {
+        let (_tmp, server, roots) = multi_server(2);
+        let result = call_tool(&server, "list_projects", serde_json::json!({}));
+        assert_eq!(result["isError"], Value::Null);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["total"], 2);
+        let projects = payload["projects"].as_array().unwrap();
+        for root in &roots {
+            let canonical = std::fs::canonicalize(root).unwrap();
+            let key = crate::ai::review_store::repo_key(&canonical.to_string_lossy());
+            let entry = projects.iter().find(|p| p["repo"] == key.as_str()).unwrap();
+            assert_eq!(entry["repo_path"], root.to_string_lossy().as_ref());
+            assert!(entry["symbols"].as_u64().unwrap() > 0);
+        }
+    }
+
+    #[test]
+    fn multi_mode_without_repo_arg_auto_selects_single_project() {
+        let (_tmp, server, roots) = multi_server(1);
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker_0" }),
+        );
+        assert_eq!(result["isError"], Value::Null);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            payload["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["name"] == "worker_0")
+        );
+        assert_eq!(roots.len(), 1);
+    }
+
+    #[test]
+    fn multi_mode_without_repo_arg_with_multiple_projects_lists_them() {
+        let (_tmp, server, _roots) = multi_server(2);
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker_0" }),
+        );
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(text.contains("repo 参数"));
+        assert_eq!(payload["projects"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn multi_mode_repo_arg_accepts_path_and_key() {
+        let (_tmp, server, roots) = multi_server(2);
+        // 按仓库绝对路径。
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker_1", "repo": roots[1].to_string_lossy() }),
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        let results = payload["results"].as_array().unwrap();
+        assert!(results.iter().any(|r| r["name"] == "worker_1"));
+        assert!(!results.iter().any(|r| r["name"] == "worker_0"));
+        // 按 repo 键（list_projects 返回的哈希）。
+        let canonical = std::fs::canonicalize(&roots[0]).unwrap();
+        let key = crate::ai::review_store::repo_key(&canonical.to_string_lossy());
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker_0", "repo": key }),
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        let results = payload["results"].as_array().unwrap();
+        assert!(results.iter().any(|r| r["name"] == "worker_0"));
+        assert!(!results.iter().any(|r| r["name"] == "worker_1"));
+    }
+
+    #[test]
+    fn multi_mode_hash_key_context_reads_repo_path_from_meta() {
+        // repo 键解析的上下文根目录来自 meta repo_path：detect_changes /
+        // refresh_index 等需要根目录的工具应照常工作。
+        let (tmp, server, roots) = multi_server(2);
+        let canonical = std::fs::canonicalize(&roots[0]).unwrap();
+        let key = crate::ai::review_store::repo_key(&canonical.to_string_lossy());
+        write_repo_file(
+            &roots[0],
+            "src/worker.rs",
+            "fn worker_0() {\n    2 + 2;\n}\n",
+        );
+        let result = call_tool(
+            &server,
+            "detect_changes",
+            serde_json::json!({ "scope": "files", "repo": key }),
+        );
+        assert_eq!(result["isError"], Value::Null);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            payload["changed_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "src/worker.rs")
+        );
+        drop(tmp);
+    }
+
+    #[test]
+    fn multi_mode_unknown_repo_arg_is_business_error() {
+        let (_tmp, server, _roots) = multi_server(1);
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker_0", "repo": "D:/不存在的仓库" }),
+        );
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo 参数"));
     }
 }

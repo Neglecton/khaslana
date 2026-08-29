@@ -94,6 +94,7 @@ impl RepositoryView {
             return;
         }
         palette.detail = detail.map(|boxed| *boxed);
+        palette.detail_loading = false;
     }
 
     fn palette_move_selection(&mut self, delta: isize) {
@@ -106,6 +107,7 @@ impl RepositoryView {
         let len = palette.results.len() as isize;
         let next = (palette.selected_index as isize + delta).clamp(0, len - 1);
         palette.selected_index = next as usize;
+        self.scroll_selection_into_view();
         self.request_code_palette_detail();
     }
 
@@ -117,7 +119,31 @@ impl RepositoryView {
             return;
         }
         palette.selected_index = index;
+        self.scroll_selection_into_view();
         self.request_code_palette_detail();
+    }
+
+    /// 把选中行滚入可视窗口（↑↓ 越过可见范围时跟随；行高为固定估算值，
+    /// 与渲染行的 px 尺寸保持一致）。列高按面板 520 - 标题/输入/操作行
+    /// 估算，取保守的 10 行视口。
+    fn scroll_selection_into_view(&mut self) {
+        const ROW_HEIGHT: f32 = 26.0;
+        const VISIBLE_ROWS: f32 = 10.0;
+        let Some(palette) = self.code_search_palette.as_ref() else {
+            return;
+        };
+        let selected = palette.selected_index as f32;
+        let total = palette.results.len() as f32;
+        let handle = self.scroll_handle("code-palette-results");
+        let mut offset = f32::from(handle.offset().y);
+        let sel_top = selected * ROW_HEIGHT;
+        if sel_top < offset {
+            offset = sel_top;
+        } else if sel_top + ROW_HEIGHT > offset + VISIBLE_ROWS * ROW_HEIGHT {
+            offset = sel_top + ROW_HEIGHT - VISIBLE_ROWS * ROW_HEIGHT;
+        }
+        let max_offset = (total * ROW_HEIGHT - VISIBLE_ROWS * ROW_HEIGHT).max(0.0);
+        handle.set_offset(gpui::point(gpui::px(0.0), gpui::px(offset.min(max_offset))));
     }
 
     /// 请求选中符号的详情（qualified_name 精确查，无歧义）。
@@ -141,6 +167,9 @@ impl RepositoryView {
         };
         let name = hit.qualified_name.clone();
         let tx = self.tx.clone();
+        if let Some(palette) = self.code_search_palette.as_mut() {
+            palette.detail_loading = true;
+        }
         self.tasks.spawn(TaskKind::Short, move || {
             let detail = match symbol_detail(&db_path, Some(&repo_root), &name) {
                 Ok(DetailOutcome::Found(detail)) => Some(detail),
@@ -176,6 +205,8 @@ impl RepositoryView {
         let selected = palette.selected_index;
         let searching = palette.searching;
         let has_repo = self.active_repo_key().is_some();
+
+        let has_results = !palette.results.is_empty();
 
         // 结果列表行。
         let rows: Vec<gpui::AnyElement> = palette
@@ -309,7 +340,9 @@ impl RepositoryView {
                 .justify_center()
                 .text_size(px(12.0))
                 .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                .child(if searching {
+                .child(if palette.detail_loading {
+                    "详情加载中…".to_string()
+                } else if searching {
                     "查询中…".to_string()
                 } else if !has_repo {
                     "当前没有打开的仓库".to_string()
@@ -465,7 +498,20 @@ impl RepositoryView {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .children(rows),
+                                    .when(has_results, |this| this.children(rows))
+                                    .when(!has_results && !searching, |this| {
+                                        this.child(
+                                            div()
+                                                .pt_2()
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .child(if has_repo {
+                                                    "无匹配符号。改用更短的词（如 push 代替 pushBranch）"
+                                                } else {
+                                                    "当前没有打开的仓库"
+                                                }),
+                                        )
+                                    }),
                             )
                             .child(div().w(px(1.0)).h_full().bg(rgb(ui_theme::BORDER_MUTED)))
                             .child(

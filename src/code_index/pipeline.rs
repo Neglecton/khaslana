@@ -182,7 +182,7 @@ fn detect_branch(repo_root: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 fn run_full_inner(
-    _repo_root: &Path,
+    repo_root: &Path,
     repo_name: &str,
     branch: &str,
     files: &[&DiscoveredFile],
@@ -211,6 +211,7 @@ fn run_full_inner(
     graph.prune_orphan_modules();
     write_store(
         store,
+        repo_root,
         repo_name,
         branch,
         "full",
@@ -233,6 +234,7 @@ fn files_hash_rows(files: &[&DiscoveredFile]) -> Vec<FileHashRow> {
 
 fn write_store(
     store: &mut CodeIndexStore,
+    repo_root: &Path,
     repo_name: &str,
     branch: &str,
     mode: &str,
@@ -241,6 +243,7 @@ fn write_store(
 ) -> Result<()> {
     let meta = CodeIndexMeta {
         repo_name: repo_name.to_string(),
+        repo_path: repo_root.to_string_lossy().to_string(),
         branch: branch.to_string(),
         indexed_at: now_millis(),
         duration_ms: 0,
@@ -370,7 +373,15 @@ fn run_incremental_inner(
     let mut hashes = unchanged_hashes;
     hashes.extend(files_hash_rows(&changed));
     hashes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    write_store(store, repo_name, branch, "incremental", &graph, hashes)?;
+    write_store(
+        store,
+        repo_root,
+        repo_name,
+        branch,
+        "incremental",
+        &graph,
+        hashes,
+    )?;
     Ok(InnerOutcome::Done)
 }
 

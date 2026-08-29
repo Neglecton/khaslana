@@ -17,7 +17,7 @@ use super::graph::{EdgeType, GraphBuffer, NodeId};
 use crate::types::Result;
 
 /// 索引库 schema 版本：建库时写入 meta，打开时不匹配则整库删除重建。
-pub const CODE_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const CODE_INDEX_SCHEMA_VERSION: u32 = 2;
 
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
@@ -38,6 +38,9 @@ pub struct FileHashRow {
 #[derive(Clone, Debug, Default)]
 pub struct CodeIndexMeta {
     pub repo_name: String,
+    /// 仓库根目录绝对路径（MCP 多仓库模式的 list_projects / 按哈希解析反查用；
+    /// 旧库无此键则留空，下次索引落盘时补写）。
+    pub repo_path: String,
     pub branch: String,
     /// Unix 毫秒。
     pub indexed_at: u64,
@@ -57,6 +60,8 @@ pub struct IndexStats {
     pub duration_ms: u64,
     pub branch: String,
     pub mode: String,
+    /// 仓库根目录绝对路径（meta 缺失时为空串，见 CodeIndexMeta::repo_path）。
+    pub repo_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -296,6 +301,7 @@ impl CodeIndexStore {
             .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
         for (key, value) in [
             ("repo_name", meta.repo_name.as_str()),
+            ("repo_path", meta.repo_path.as_str()),
             ("branch", meta.branch.as_str()),
             ("indexed_at", &meta.indexed_at.to_string()),
             ("duration_ms", &meta.duration_ms.to_string()),
@@ -450,55 +456,87 @@ impl CodeIndexStore {
             duration_ms: meta_of("duration_ms").parse().unwrap_or(0),
             branch: meta_of("branch"),
             mode: meta_of("mode"),
+            repo_path: meta_of("repo_path"),
         }))
     }
 
     /// 符号搜索（FTS5 BM25，camelCase 感知）。设置页验证卡与 Phase 2 共用入口。
     pub fn search_symbols(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_symbols_filtered(query, None, limit)
+            .map(|(hits, _)| hits)
+    }
+
+    /// 带标签过滤的符号搜索：过滤在 SQL 内完成（JOIN nodes），返回
+    /// (命中列表, 过滤后真实总数)——总数不受 limit 截断影响，供 MCP 的
+    /// total/has_more 语义使用。rowid 与 nodes.id 相等（落盘时都按缓冲序号 +1）。
+    pub fn search_symbols_filtered(
+        &self,
+        query: &str,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, usize)> {
         let tokens: Vec<String> = camel_split(query)
             .split_whitespace()
             .filter(|t| !t.is_empty())
             .map(|t| format!("\"{}\"*", t.replace('"', "")))
             .collect();
         if tokens.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let match_expr = tokens.join(" ");
-        let mut stmt = self
-            .conn
-            .prepare("SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY rank LIMIT ?2")
-            .map_err(|e| err(format!("全文检索失败：{e}")))?;
-        let ids: Vec<i64> = stmt
-            .query_map(params![match_expr, limit as i64], |r| r.get(0))
-            .map_err(|e| err(format!("全文检索失败：{e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut hits = Vec::with_capacity(ids.len());
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT name, label, qualified_name, file_path, start_line
-                 FROM nodes WHERE id = ?1",
+        let join = "FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.rowid WHERE nodes_fts MATCH ?1";
+        let (count_sql, rows_sql) = if label.is_some() {
+            (
+                format!("SELECT count(*) {join} AND n.label = ?2"),
+                format!(
+                    "SELECT n.name, n.label, n.qualified_name, n.file_path, n.start_line {join} AND n.label = ?2 ORDER BY bm25(nodes_fts) LIMIT ?3"
+                ),
             )
-            .map_err(|e| err(format!("读取符号失败：{e}")))?;
-        for id in ids {
-            let row = stmt.query_row(params![id], |row| {
-                Ok(SearchHit {
-                    name: row.get(0)?,
-                    label: row.get(1)?,
-                    qualified_name: row.get(2)?,
-                    file_path: row.get(3)?,
-                    start_line: row.get::<_, i64>(4)?.max(0) as u32,
+        } else {
+            (
+                format!("SELECT count(*) {join}"),
+                format!(
+                    "SELECT n.name, n.label, n.qualified_name, n.file_path, n.start_line {join} ORDER BY bm25(nodes_fts) LIMIT ?2"
+                ),
+            )
+        };
+
+        let total: usize = if let Some(label) = label {
+            self.conn
+                .query_row(&count_sql, params![match_expr, label], |r| {
+                    r.get::<_, i64>(0)
                 })
-            });
-            if let Ok(hit) = row {
-                hits.push(hit);
-            }
+                .map_err(|e| err(format!("全文检索失败：{e}")))? as usize
+        } else {
+            self.conn
+                .query_row(&count_sql, params![match_expr], |r| r.get::<_, i64>(0))
+                .map_err(|e| err(format!("全文检索失败：{e}")))? as usize
+        };
+        if total == 0 {
+            return Ok((Vec::new(), 0));
         }
-        Ok(hits)
+
+        let mut stmt = self
+            .conn
+            .prepare(&rows_sql)
+            .map_err(|e| err(format!("全文检索失败：{e}")))?;
+        let map_row = |row: &rusqlite::Row| {
+            Ok(SearchHit {
+                name: row.get(0)?,
+                label: row.get(1)?,
+                qualified_name: row.get(2)?,
+                file_path: row.get(3)?,
+                start_line: row.get::<_, i64>(4)?.max(0) as u32,
+            })
+        };
+        let rows = if let Some(label) = label {
+            stmt.query_map(params![match_expr, label, limit as i64], map_row)
+        } else {
+            stmt.query_map(params![match_expr, limit as i64], map_row)
+        }
+        .map_err(|e| err(format!("全文检索失败：{e}")))?;
+        let hits: Vec<SearchHit> = rows.filter_map(|r| r.ok()).collect();
+        Ok((hits, total))
     }
 }
 
@@ -517,13 +555,44 @@ pub fn read_index_stats(db_path: &Path) -> Result<Option<IndexStats>> {
     Ok(stats)
 }
 
-/// 只读符号搜索入口（设置页验证卡与 Phase 2 搜索共用）。
+/// 只读符号搜索入口（设置页验证卡与全局面板共用；无标签过滤）。
 pub fn search_symbols(db_path: &Path, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    search_symbols_filtered(db_path, query, None, limit).map(|(hits, _)| hits)
+}
+
+/// 只读符号搜索（标签过滤 + 真实总数；MCP search_symbols 工具专用）。
+pub fn search_symbols_filtered(
+    db_path: &Path,
+    query: &str,
+    label: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<SearchHit>, usize)> {
     if !db_path.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let conn = open_read_only(db_path)?;
-    CodeIndexStore { conn }.search_symbols(query, limit)
+    CodeIndexStore { conn }.search_symbols_filtered(query, label, limit)
+}
+
+/// 只读打开一个已存在的索引库（查询层专用）。文件不存在、不是本引擎的
+/// 索引库或 schema 版本不符时返回 `Ok(None)`——**绝不创建/重建**（幽灵库
+/// 防护，对齐参考项目只读打开语义）；损坏库由 GUI 侧的全量重建路径处理。
+pub fn open_read_only_if_exists(db_path: &Path) -> Result<Option<CodeIndexStore>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = open_read_only(db_path)?;
+    let store = CodeIndexStore { conn };
+    let version_ok = store
+        .conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| v == CODE_INDEX_SCHEMA_VERSION.to_string())
+        .unwrap_or(false);
+    Ok(version_ok.then_some(store))
 }
 
 fn open_read_only(db_path: &Path) -> Result<Connection> {

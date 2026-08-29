@@ -43,9 +43,9 @@ pub use pipeline::{
 };
 pub use queries::{
     DetailOutcome, Hotspot, ImpactReport, IndexOverview, SourceSnippet, SymbolCandidate,
-    SymbolDetail, SymbolResolution, TraceDirection, TraceHop, TraceOutcome, TraceResult,
-    changed_files_via_git, find_symbol_candidates, impacted_symbols, impacted_symbols_for_files,
-    index_overview, symbol_detail, trace_calls,
+    SymbolDetail, TraceDirection, TraceHop, TraceOutcome, TraceResult, changed_files_via_git,
+    find_symbol_candidates, impacted_symbols, impacted_symbols_for_files, index_overview,
+    symbol_detail, trace_calls,
 };
 pub use resolve::Registry;
 pub use store::{
