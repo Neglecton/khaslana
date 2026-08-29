@@ -897,3 +897,323 @@ fn strategy_distribution() {
 fn strategy_distribution_helper(map: &std::collections::HashMap<String, usize>, key: &str) -> bool {
     map.get(key).is_some_and(|v| *v > 0)
 }
+
+// ---------------------------------------------------------------------------
+// 查询 API（queries.rs）：trace / detail / overview / detect_changes
+// ---------------------------------------------------------------------------
+
+mod queries_tests {
+    use super::*;
+    use {DetailOutcome, TraceDirection, TraceOutcome};
+
+    /// 构建一个带调用关系的临时仓库索引：main -> run_task -> helper，
+    /// 以及两个同名 free_fn 分布在不同文件（歧义用例）。
+    fn build_query_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("queryrepo");
+        std::fs::create_dir_all(&root).unwrap();
+        let _ = git2::Repository::init(&root);
+        write_repo_file(&root, "src/main.rs", "fn main() {\n    run_task();\n}\n");
+        write_repo_file(&root, "src/tasks.rs", "fn run_task() {\n    helper();\n}\n");
+        write_repo_file(&root, "src/helper.rs", "fn helper() {}\n");
+        write_repo_file(&root, "src/a/free.rs", "fn free_fn() {}\n");
+        write_repo_file(&root, "src/b/free.rs", "fn free_fn() {}\n");
+        // 提交基线：让 detect_changes 用例的「修改 helper.rs」成为唯一变更。
+        {
+            let repo = git2::Repository::open(&root).unwrap();
+            crate::git::test_support::git_test_support::commit_all(&repo, "init");
+        }
+        let db_path = tmp.path().join("query.db");
+        match run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap() {
+            RunOutcome::Completed(_) => {}
+            other => panic!("{other:?}"),
+        }
+        (tmp, db_path)
+    }
+
+    #[test]
+    fn trace_calls_reports_both_directions_with_risk() {
+        let (_tmp, db_path) = build_query_fixture();
+        match trace_calls(&db_path, "run_task", TraceDirection::Both, 3, 100).unwrap() {
+            TraceOutcome::Found(result) => {
+                // 上游：main 调 run_task（hop1 CRITICAL）。
+                assert!(
+                    result
+                        .callers
+                        .iter()
+                        .any(|h| h.name == "main" && h.risk == "CRITICAL")
+                );
+                // 下游：run_task 调 helper（hop1 CRITICAL）。
+                assert!(result.callees.iter().any(|h| h.name == "helper"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_calls_multi_hop_risk_decays() {
+        let (_tmp, db_path) = build_query_fixture();
+        // 从 helper 向上游追踪两跳：main 在 hop2，风险应为 HIGH。
+        match trace_calls(&db_path, "helper", TraceDirection::Inbound, 2, 100).unwrap() {
+            TraceOutcome::Found(result) => {
+                let main = result
+                    .callers
+                    .iter()
+                    .find(|h| h.name == "main")
+                    .expect("main 应出现在两跳内");
+                assert_eq!(main.hop, 2);
+                assert_eq!(main.risk, "HIGH");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn symbol_detail_reports_ambiguous_for_same_name() {
+        let (_tmp, db_path) = build_query_fixture();
+        match symbol_detail(&db_path, None, "free_fn").unwrap() {
+            DetailOutcome::Ambiguous(candidates) => {
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn symbol_detail_includes_source_snippet() {
+        let (tmp, db_path) = build_query_fixture();
+        let root = tmp.path().join("queryrepo");
+        match symbol_detail(&db_path, Some(&root), "run_task").unwrap() {
+            DetailOutcome::Found(detail) => {
+                assert_eq!(detail.name, "run_task");
+                let source = detail.source.expect("应读取到源码片段");
+                assert!(source.lines.iter().any(|l| l.contains("helper();")));
+                assert!(detail.callees.iter().any(|h| h.name == "helper"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn overview_lists_hotspots_and_dirs() {
+        let (_tmp, db_path) = build_query_fixture();
+        let overview = index_overview(&db_path).unwrap();
+        assert!(overview.hotspots.iter().any(|h| h.name == "helper"));
+        assert!(overview.top_dirs.iter().any(|(dir, _)| dir == "src"));
+    }
+
+    #[test]
+    fn detect_changes_maps_worktree_to_impacted_symbols() {
+        let (tmp, db_path) = build_query_fixture();
+        let root = tmp.path().join("queryrepo");
+        // 修改 helper.rs（工作区未提交）→ helper 符号受影响 → 上游 run_task。
+        write_repo_file(
+            &root,
+            "src/helper.rs",
+            "fn helper() {\n    println!(\"x\");\n}\n",
+        );
+        let report = impacted_symbols(&db_path, &root, 1).unwrap();
+        assert!(report.changed_files.iter().any(|f| f == "src/helper.rs"));
+        assert!(report.impacted_symbols.iter().any(|s| s.name == "helper"));
+        // git 变更收集独立可用。
+        let changed = changed_files_via_git(&root, None).unwrap();
+        assert!(changed.iter().any(|f| f == "src/helper.rs"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MCP 协议（mcp.rs::handle_message 纯函数式单测）
+// ---------------------------------------------------------------------------
+
+mod mcp_tests {
+    use super::super::mcp::McpServer;
+    use super::*;
+    use serde_json::Value;
+
+    fn server() -> (tempfile::TempDir, McpServer) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("mcprepo");
+        std::fs::create_dir_all(&root).unwrap();
+        let _ = git2::Repository::init(&root);
+        write_repo_file(
+            &root,
+            "src/lib.rs",
+            "fn entry_point() {\n    worker();\n}\n",
+        );
+        write_repo_file(&root, "src/worker.rs", "fn worker() {}\n");
+        {
+            let repo = git2::Repository::open(&root).unwrap();
+            crate::git::test_support::git_test_support::commit_all(&repo, "init");
+        }
+        let db_path = tmp.path().join("mcp.db");
+        match run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap() {
+            RunOutcome::Completed(_) => {}
+            other => panic!("{other:?}"),
+        }
+        let server = McpServer::for_test(&root, db_path);
+        (tmp, server)
+    }
+
+    fn call_tool(server: &McpServer, name: &str, args: Value) -> Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": "req-1", "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        });
+        let response = server
+            .handle_message(&request.to_string())
+            .expect("应有响应");
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        parsed["result"].clone()
+    }
+
+    #[test]
+    fn initialize_negotiates_known_and_falls_back_to_latest() {
+        let (_tmp, server) = server();
+        // 已知版本回显。
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" }
+        });
+        let response: Value =
+            serde_json::from_str(&server.handle_message(&request.to_string()).unwrap()).unwrap();
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(
+            response["result"]["serverInfo"]["name"],
+            "khaslana-code-index"
+        );
+        // 未知版本回最新。
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 8, "method": "initialize",
+            "params": { "protocolVersion": "1999-01-01" }
+        });
+        let response: Value =
+            serde_json::from_str(&server.handle_message(&request.to_string()).unwrap()).unwrap();
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn notifications_silent_and_unknown_method_is_error() {
+        let (_tmp, server) = server();
+        assert!(
+            server
+                .handle_message(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                .is_none()
+        );
+        let response: Value = serde_json::from_str(
+            &server
+                .handle_message(r#"{"jsonrpc":"2.0","id":"x","method":"resources/list"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+        assert_eq!(response["id"], "x");
+        // 解析失败 → -32700。
+        let response: Value =
+            serde_json::from_str(&server.handle_message("not-json").unwrap()).unwrap();
+        assert_eq!(response["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn tools_list_exposes_seven_tools() {
+        let (_tmp, server) = server();
+        let response: Value = serde_json::from_str(
+            &server
+                .handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 7);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for expected in [
+            "search_symbols",
+            "get_symbol_detail",
+            "trace_path",
+            "get_architecture",
+            "detect_changes",
+            "index_status",
+            "refresh_index",
+        ] {
+            assert!(names.contains(&expected), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn tool_call_returns_text_and_structured_content() {
+        let (_tmp, server) = server();
+        let result = call_tool(
+            &server,
+            "search_symbols",
+            serde_json::json!({ "query": "worker" }),
+        );
+        assert_eq!(result["isError"], Value::Null);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            payload["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["name"] == "worker")
+        );
+        // structuredContent 双通道。
+        assert!(result["structuredContent"]["results"].is_array());
+    }
+
+    #[test]
+    fn tool_call_missing_argument_is_business_error() {
+        let (_tmp, server) = server();
+        let result = call_tool(&server, "search_symbols", serde_json::json!({}));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("query"));
+    }
+
+    #[test]
+    fn trace_path_tool_reports_risk() {
+        let (_tmp, server) = server();
+        let result = call_tool(
+            &server,
+            "trace_path",
+            serde_json::json!({ "function_name": "worker", "direction": "inbound" }),
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            payload["callers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| { c["name"] == "entry_point" && c["risk"] == "CRITICAL" })
+        );
+    }
+
+    #[test]
+    fn detect_changes_tool_lists_worktree_changes() {
+        let (tmp, server) = server();
+        let root = tmp.path().join("mcprepo");
+        write_repo_file(&root, "src/worker.rs", "fn worker() {\n    1 + 1;\n}\n");
+        let result = call_tool(
+            &server,
+            "detect_changes",
+            serde_json::json!({ "scope": "symbols" }),
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            payload["changed_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "src/worker.rs")
+        );
+        assert!(
+            payload["impacted_symbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "worker")
+        );
+    }
+}

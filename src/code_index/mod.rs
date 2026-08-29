@@ -23,7 +23,9 @@ mod discover;
 mod extract;
 mod graph;
 mod lang_spec;
+pub mod mcp;
 mod pipeline;
+mod queries;
 mod resolve;
 mod store;
 
@@ -38,6 +40,12 @@ pub use graph::{
 pub use pipeline::{
     IncrementalOutcome, IndexRunStats, PipelineOptions, RunOutcome, run_incremental_if_stale,
     run_index,
+};
+pub use queries::{
+    DetailOutcome, Hotspot, ImpactReport, IndexOverview, SourceSnippet, SymbolCandidate,
+    SymbolDetail, SymbolResolution, TraceDirection, TraceHop, TraceOutcome, TraceResult,
+    changed_files_via_git, find_symbol_candidates, impacted_symbols, impacted_symbols_for_files,
+    index_overview, symbol_detail, trace_calls,
 };
 pub use resolve::Registry;
 pub use store::{

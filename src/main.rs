@@ -7,6 +7,7 @@ mod browse_compare_view;
 mod browse_view;
 mod chrome_view;
 mod code_index_view;
+mod code_palette_view;
 mod commit_graph_view;
 mod conflicts;
 mod diff_view;
@@ -158,6 +159,7 @@ actions!(
         ShortcutSwitchToWorkflow,    // 工作流
         ShortcutOpenInExplorer,      // 资源管理器打开仓库
         ShortcutOpenRemoteInBrowser, // 浏览器打开远端
+        ShortcutOpenCodeSearch,      // 符号搜索面板
     ]
 );
 
@@ -177,11 +179,12 @@ pub(crate) enum ShortcutAction {
     SwitchToWorkflow,
     OpenInExplorer,
     OpenRemoteInBrowser,
+    OpenCodeSearch,
 }
 
 impl ShortcutAction {
     /// 全部动作，按设置中心显示顺序。
-    pub(crate) const ALL: [ShortcutAction; 12] = [
+    pub(crate) const ALL: [ShortcutAction; 13] = [
         ShortcutAction::Refresh,
         ShortcutAction::Fetch,
         ShortcutAction::Pull,
@@ -194,6 +197,7 @@ impl ShortcutAction {
         ShortcutAction::SwitchToWorkflow,
         ShortcutAction::OpenInExplorer,
         ShortcutAction::OpenRemoteInBrowser,
+        ShortcutAction::OpenCodeSearch,
     ];
 
     /// 序列化键，存入 ShortcutBindings 的 BTreeMap key。
@@ -211,6 +215,7 @@ impl ShortcutAction {
             ShortcutAction::SwitchToWorkflow => "switch_to_workflow",
             ShortcutAction::OpenInExplorer => "open_in_explorer",
             ShortcutAction::OpenRemoteInBrowser => "open_remote_in_browser",
+            ShortcutAction::OpenCodeSearch => "open_code_search",
         }
     }
 
@@ -229,6 +234,7 @@ impl ShortcutAction {
             ShortcutAction::SwitchToWorkflow => "工作流",
             ShortcutAction::OpenInExplorer => "在资源管理器中打开仓库",
             ShortcutAction::OpenRemoteInBrowser => "以浏览器打开当前远端",
+            ShortcutAction::OpenCodeSearch => "符号搜索",
         }
     }
 
@@ -247,6 +253,7 @@ impl ShortcutAction {
             ShortcutAction::SwitchToWorkflow => "ctrl-3",
             ShortcutAction::OpenInExplorer => "ctrl-shift-o",
             ShortcutAction::OpenRemoteInBrowser => "ctrl-shift-b",
+            ShortcutAction::OpenCodeSearch => "ctrl-p",
         }
     }
 
@@ -398,6 +405,8 @@ enum FieldId {
     ExternalMergeIntellijPath,
     /// 设置中心「代码索引」页的符号搜索框。
     CodeIndexSearch,
+    /// 全局符号搜索面板（Ctrl+P）的输入框。
+    CodePaletteSearch,
     StashMessage,
     WorkflowInput(usize),
     /// 工作流模板编辑器的动态字段（模板名/文件名/步骤参数/变量行），
@@ -1379,6 +1388,16 @@ pub(crate) struct CodeIndexTaskState {
     pub cancel: Arc<AtomicBool>,
 }
 
+/// 全局符号搜索面板（Ctrl+P）的会话状态；None = 关闭。
+#[derive(Default)]
+pub(crate) struct CodeSearchPaletteState {
+    pub selected_index: usize,
+    pub results: Vec<khaslana::code_index::SearchHit>,
+    /// 选中符号的详情（直接调用关系 + 源码片段），随选中变化异步刷新。
+    pub detail: Option<khaslana::code_index::SymbolDetail>,
+    pub searching: bool,
+}
+
 /// AI 思考弹窗状态：一次性 AI 请求（commit message / 冲突合并建议 /
 /// 工作流模板生成）进行中的流式展示。思维链与正文增量实时追加，
 /// 任务完成或失败后由对应事件处理关闭弹窗。
@@ -2209,6 +2228,16 @@ pub(crate) enum UiEvent {
     /// 设置页符号搜索结果回填。
     CodeIndexSearchFinished {
         hits: Vec<khaslana::code_index::SearchHit>,
+    },
+    /// 全局符号搜索面板：查询结果（seq 守卫防乱序）。
+    CodePaletteSearchFinished {
+        seq: u64,
+        hits: Vec<khaslana::code_index::SearchHit>,
+    },
+    /// 全局符号搜索面板：选中符号详情。
+    CodePaletteDetailFinished {
+        seq: u64,
+        detail: Option<Box<khaslana::code_index::SymbolDetail>>,
     },
     /// 设置页打开/刷新时后台读库回填的索引统计。
     CodeIndexStatsLoaded {
@@ -3206,6 +3235,14 @@ pub(crate) struct RepositoryView {
     pub(crate) code_index_progress_message: String,
     /// 已启用索引的仓库键缓存（启动与设置页打开时从主库加载）。
     pub(crate) code_index_enabled_cache: std::collections::HashSet<String>,
+    /// 全局符号搜索面板（Ctrl+P）；None = 关闭。
+    pub(crate) code_search_palette: Option<CodeSearchPaletteState>,
+    /// 面板输入框（面板关闭后保留输入内容，重开可续用）。
+    pub(crate) code_palette_search: TextFieldState,
+    /// 面板查询请求序号（每按键 +1，事件携带，乱序丢弃）。
+    pub(crate) code_palette_search_seq: u64,
+    /// 面板详情请求序号（随选中变化 +1）。
+    pub(crate) code_palette_detail_seq: u64,
     /// 最近一次符号搜索结果；None = 尚未搜索。
     pub(crate) code_index_search_hits: Option<Vec<khaslana::code_index::SearchHit>>,
     pub(crate) code_index_searching: bool,
@@ -3464,6 +3501,10 @@ impl RepositoryView {
             code_index_search_hits: None,
             code_index_searching: false,
             code_index_progress_message: String::new(),
+            code_search_palette: None,
+            code_palette_search: TextFieldState::new(cx, "搜索符号或类型名…"),
+            code_palette_search_seq: 0,
+            code_palette_detail_seq: 0,
             code_index_enabled_cache: {
                 let mut cache = std::collections::HashSet::new();
                 if let Ok(prefs) = storage.load_code_index_preferences() {
@@ -5557,6 +5598,12 @@ impl RepositoryView {
             UiEvent::CodeIndexSearchFinished { hits } => {
                 self.handle_code_index_search_finished(hits, cx);
             }
+            UiEvent::CodePaletteSearchFinished { seq, hits } => {
+                self.handle_code_palette_search_finished(seq, hits);
+            }
+            UiEvent::CodePaletteDetailFinished { seq, detail } => {
+                self.handle_code_palette_detail_finished(seq, detail);
+            }
             UiEvent::WorkflowTemplatesLoaded { result } => {
                 self.apply_workflow_templates(result);
             }
@@ -6395,6 +6442,10 @@ impl RepositoryView {
     }
 
     fn notify_text_field_changed(&mut self, field: FieldId) {
+        // 全局符号搜索面板：输入即查（seq 守卫防乱序）。
+        if field == FieldId::CodePaletteSearch {
+            self.on_code_palette_input_changed();
+        }
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
         }
@@ -6666,6 +6717,7 @@ impl RepositoryView {
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
             FieldId::CodeIndexSearch => &mut self.code_index_search_input,
+            FieldId::CodePaletteSearch => &mut self.code_palette_search,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
@@ -12654,6 +12706,7 @@ impl RepositoryView {
                 "克隆仓库…",
                 |this, window, _cx| {
                     this.close_repo_switcher();
+                    this.code_search_palette = None;
                     this.open_clone_dialog(window);
                 },
                 cx,
@@ -17372,6 +17425,15 @@ impl Render for RepositoryView {
             .flex()
             .flex_col()
             .text_color(rgb(ui_theme::FOREGROUND))
+            // 全局符号搜索面板的入口监听：元素级（区别于其他快捷键的
+            // App::on_action），回调带 Window 以便聚焦面板输入框。
+            .on_action(cx.listener(|this, _: &ShortcutOpenCodeSearch, window, cx| {
+                if this.active_dialog.is_some() || this.settings_center.is_some() {
+                    return;
+                }
+                this.toggle_code_search_palette(window, cx);
+                cx.notify();
+            }))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 this.encoding_menu_closed_by_capture = None;
                 this.commit_graph_branch_menu_closed_by_capture = false;
@@ -17521,6 +17583,7 @@ impl Render for RepositoryView {
             .child(self.render_dialogs(window, cx))
             // AI 思考弹窗：一次性生成类请求的思维链流式展示，层级在
             // 普通对话框之上（工作流编辑器弹窗内触发时覆盖其上）。
+            .child(self.render_code_search_palette(window, cx))
             .child(self.render_ai_thinking_overlay(cx))
             .child(self.render_credential_context_menu(cx))
             .child(self.render_operation_blocker())
@@ -18200,6 +18263,9 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_sho
                 ShortcutAction::OpenRemoteInBrowser => {
                     KeyBinding::new(keystroke, ShortcutOpenRemoteInBrowser, None)
                 }
+                ShortcutAction::OpenCodeSearch => {
+                    KeyBinding::new(keystroke, ShortcutOpenCodeSearch, None)
+                }
             };
             cx.bind_keys([binding]);
         }
@@ -18357,6 +18423,20 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
 }
 
 fn main() {
+    // MCP 无头模式：`khaslana mcp <仓库路径>` 供外部 AI 工具（Claude Code /
+    // Cursor / ZCode 等）挂载，查询本仓库的代码索引。必须先于 GUI 启动判断；
+    // 此分支不初始化 stdout 版日志（tracing 默认写 stdout 会污染协议流），
+    // MCP 内部进度一律走 stderr。
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("mcp") {
+        let Some(repo) = args.next() else {
+            eprintln!("用法: khaslana mcp <仓库路径>");
+            std::process::exit(2);
+        };
+        let code = khaslana::code_index::mcp::run(std::path::Path::new(&repo));
+        std::process::exit(code);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init()

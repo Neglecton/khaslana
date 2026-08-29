@@ -27,8 +27,8 @@ impl RepositoryView {
     // 路径与偏好
     // ------------------------------------------------------------------
 
-    /// 当前活动仓库的规范化路径（设置页作用对象）。
-    fn active_repo_key(&self) -> Option<String> {
+    /// 当前活动仓库的规范化路径（设置页/全局符号搜索面板作用对象）。
+    pub(crate) fn active_repo_key(&self) -> Option<String> {
         let tab = self.active_tab()?;
         let path = tab.repo_path.as_ref()?;
         Some(normalize_repo_path(path))
@@ -42,7 +42,7 @@ impl RepositoryView {
     }
 
     /// 某仓库的索引库文件路径（数据目录不可用时 None）。
-    fn index_db_path(repo_key: &str) -> Option<PathBuf> {
+    pub(crate) fn index_db_path(repo_key: &str) -> Option<PathBuf> {
         let data_dir = khaslana::storage::active_data_dir()?;
         open_index_db_path(&data_dir, &khaslana::ai::review_store::repo_key(repo_key)).ok()
     }
@@ -69,6 +69,15 @@ impl RepositoryView {
                 .as_ref()
                 .is_some_and(|task| &task.repo_path == key)
         });
+        let mcp_config = {
+            let exe = std::env::current_exe()
+                .map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                .unwrap_or_else(|_| "khaslana.exe".to_string());
+            let repo = repo_key.clone().unwrap_or_default();
+            format!(
+                r#"{{"mcpServers":{{"khaslana-code-index":{{"command":"{exe}","args":["mcp","{repo}"]}}}}}}"#
+            )
+        };
 
         div()
             .flex()
@@ -193,6 +202,53 @@ impl RepositoryView {
                     .when_some(self.code_index_search_hits.clone(), |this, hits| {
                         this.child(render_search_hits(&hits))
                     }),
+            )
+            // MCP 服务器接入卡：把索引暴露给外部 AI 工具。
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("MCP 服务器"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("把本仓库的代码索引以 MCP 工具暴露给外部 AI 工具（Claude Code / Cursor / ZCode 等）。命令：khaslana mcp <仓库路径>；启动时自动建立或增量刷新索引。以下配置可直接粘贴到 AI 工具的 MCP 设置中："),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(mcp_config.clone()),
+                    )
+                    .child(self.button(
+                        "复制 MCP 配置",
+                        true,
+                        move |this, _, cx| {
+                            let config = mcp_config.clone();
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(config));
+                            this.notify_success("已复制 MCP 配置", cx);
+                        },
+                        cx,
+                    )),
             )
             // 说明文案。
             .child(
