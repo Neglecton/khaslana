@@ -99,10 +99,10 @@ use text_input::{
 use ui::theme::rgb;
 use ui::{
     components::{
-        AppToastKind, FeedbackMessage, InputFrameSize, app_shell_surface, bottom_progress_bar,
-        danger_callout, dialog_actions, dialog_overlay, dialog_panel as ui_dialog_panel,
-        feedback_bubble, feedback_stack, glass_menu, input_frame, segmented_button, toggle_box,
-        tooltip_text,
+        AppToastKind, FeedbackMessage, InputFrameSize, ToastAction, app_shell_surface,
+        bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
+        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, input_frame,
+        segmented_button, toggle_box, tooltip_text,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
@@ -162,6 +162,19 @@ actions!(
         ShortcutOpenCodeSearch,      // 符号搜索面板
     ]
 );
+
+/// 工作流快捷键的载荷动作：一条绑定自带模板文件名与执行模式，分发时
+/// `on_action` 监听器直接读到载荷（gpui-ce 的 `KeyBinding` 携带 action 实例，
+/// 故动态模板数量无需静态槽位）。`no_json`：不经 keymap JSON 构建——
+/// 绑定只由本应用在运行时注册。
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = app_action, no_json)]
+pub(crate) struct RunWorkflowShortcut {
+    /// 模板文件名（如 "sync.json5"），绑定与触发的稳定标识。
+    pub(crate) file: String,
+    /// 「后台执行」勾选结果：true = 触发时不切换到工作流页。
+    pub(crate) background: bool,
+}
 
 /// 可配置快捷键的功能枚举，用于持久化与设置中心 UI。
 /// action_id 是序列化键（存入 ShortcutBindings），default_keystroke 是内置默认组合。
@@ -287,16 +300,91 @@ pub(crate) fn default_shortcut_bindings() -> ShortcutBindings {
     ShortcutBindings { bindings }
 }
 
-/// 查找快捷键冲突：返回已占用该 keystroke 的其它动作（排除 target 自身）。
-pub(crate) fn find_shortcut_conflict(
-    bindings: &ShortcutBindings,
-    target: ShortcutAction,
+/// 快捷键录制目标：静态应用动作或某个工作流模板。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutRecordingTarget {
+    App(ShortcutAction),
+    Workflow { file: String },
+}
+
+/// 快捷键冲突来源：静态应用动作或某个工作流模板绑定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutConflict {
+    App(ShortcutAction),
+    Workflow(String),
+}
+
+impl ShortcutConflict {
+    /// 冲突占用的功能描述（静态动作用中文标签，工作流用文件名）。
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            ShortcutConflict::App(action) => action.label().to_string(),
+            ShortcutConflict::Workflow(file) => format!("工作流 {file}"),
+        }
+    }
+}
+
+/// 统一冲突检查：静态动作与工作流绑定共用一个键位空间，
+/// 双向覆盖 静态↔工作流、工作流↔工作流，排除录制目标自身。
+pub(crate) fn find_keystroke_conflict(
+    app_bindings: &ShortcutBindings,
+    workflow_bindings: &khaslana::WorkflowShortcutBindings,
+    target: &ShortcutRecordingTarget,
     keystroke: &str,
-) -> Option<ShortcutAction> {
-    ShortcutAction::ALL
+) -> Option<ShortcutConflict> {
+    for action in ShortcutAction::ALL {
+        if matches!(target, ShortcutRecordingTarget::App(target_action) if *target_action == action)
+        {
+            continue;
+        }
+        if action.keystroke(app_bindings) == keystroke {
+            return Some(ShortcutConflict::App(action));
+        }
+    }
+    for (file, binding) in &workflow_bindings.bindings {
+        if matches!(target, ShortcutRecordingTarget::Workflow { file: target_file } if target_file == file)
+        {
+            continue;
+        }
+        if binding.keystroke == keystroke {
+            return Some(ShortcutConflict::Workflow(file.clone()));
+        }
+    }
+    None
+}
+
+/// 加载防御剪枝：keystroke 为空/不可解析、撞任一静态动作有效键、或同键位
+/// 重复的工作流绑定丢弃（手改 DB / 异常数据兜底）；返回 (剪枝结果, 是否有变化)。
+pub(crate) fn prune_workflow_shortcut_bindings(
+    bindings: &khaslana::WorkflowShortcutBindings,
+    app_bindings: &ShortcutBindings,
+) -> (khaslana::WorkflowShortcutBindings, bool) {
+    let static_keystrokes: Vec<&str> = ShortcutAction::ALL
         .iter()
-        .find(|action| **action != target && action.keystroke(bindings) == keystroke)
-        .copied()
+        .map(|action| action.keystroke(app_bindings))
+        .collect();
+    let mut pruned = khaslana::WorkflowShortcutBindings::default();
+    let mut seen_keystrokes: Vec<String> = Vec::new();
+    for (file, binding) in &bindings.bindings {
+        let keystroke = binding.keystroke.trim();
+        if keystroke.is_empty()
+            || gpui::Keystroke::parse(keystroke).is_err()
+            || static_keystrokes.contains(&keystroke)
+            || seen_keystrokes.iter().any(|seen| seen == keystroke)
+        {
+            continue;
+        }
+        seen_keystrokes.push(keystroke.to_string());
+        pruned.bindings.insert(
+            file.clone(),
+            khaslana::WorkflowShortcutBinding {
+                keystroke: keystroke.to_string(),
+                background: binding.background,
+            },
+        );
+    }
+    let changed = pruned != *bindings;
+    (pruned, changed)
 }
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
@@ -347,7 +435,7 @@ pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
 pub(crate) const WORKFLOW_TEMPLATE_MENU_WIDTH: f32 = 150.0;
-pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 76.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 102.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
 const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
@@ -716,6 +804,15 @@ pub(crate) enum DialogState {
     ConfirmDropStash {
         index: usize,
         message: String,
+    },
+    /// 弹出贮藏的确认弹窗（应用改动到工作区并从贮藏列表移除）。
+    ConfirmPopStash {
+        index: usize,
+        message: String,
+    },
+    /// 工作流模板快捷键绑定弹窗（录制键位 + 后台执行开关）。
+    WorkflowShortcutBinding {
+        file: String,
     },
     RemoteBranchOperation {
         kind: RemoteBranchOperationKind,
@@ -2379,12 +2476,13 @@ pub(crate) enum UiEvent {
     UpdateCheckFinished {
         manifest: Arc<UpdateManifest>,
         asset: UpdatePlatformAsset,
+        trigger: UpdateCheckTrigger,
     },
     UpdateCheckFailed {
         error: String,
-        /// 手动检查（设置页「立即检查」）：结果弹气泡；自动检查保持安静
-        ///（每次启动都弹「已是最新」会打扰）。
-        manual: bool,
+        /// 触发来源，决定结果反馈方式：手动（设置页「立即检查」）弹气泡、
+        /// 启动自动仅状态栏、周期静默完全无反馈（发现新版本走可点击气泡）。
+        trigger: UpdateCheckTrigger,
     },
     UpdateDownloadProgress {
         downloaded: u64,
@@ -3127,10 +3225,14 @@ pub(crate) struct RepositoryView {
     pub(crate) settings_center: Option<SettingsCategory>,
     /// 用户自定义快捷键绑定（action_id → keystroke）。
     pub(crate) shortcut_bindings: ShortcutBindings,
-    /// 快捷键设置页中正在录制的动作；None 表示非录制态。
-    pub(crate) recording_shortcut: Option<ShortcutAction>,
+    /// 工作流模板快捷键绑定（模板文件名 → 键位 + 后台执行），机器本地全局单份。
+    pub(crate) workflow_shortcut_bindings: khaslana::WorkflowShortcutBindings,
+    /// 正在录制的快捷键目标（静态动作或工作流模板）；None 表示非录制态。
+    pub(crate) recording_shortcut: Option<ShortcutRecordingTarget>,
     /// 设置中心面板的焦点句柄，录制态时夺取焦点使 keydown dispatch_path 进入 overlay。
     settings_center_focus: FocusHandle,
+    /// 工作流快捷键绑定弹窗的焦点句柄，录制态夺取焦点使按键先到根捕获层。
+    pub(crate) workflow_shortcut_binding_focus: FocusHandle,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -3304,6 +3406,9 @@ pub(crate) struct RepositoryView {
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
+    /// 下一次周期静默更新检查的时刻（UiTick 到期触发；构造时 = 启动后 12h，
+    /// 启动检查不重复计入）。
+    next_periodic_update_check: Instant,
     pub(crate) update_downloading: bool,
     pub(crate) available_update: Option<Arc<UpdateManifest>>,
     pub(crate) update_download_progress: Option<String>,
@@ -3447,8 +3552,10 @@ impl RepositoryView {
             active_dialog: None,
             settings_center: None,
             shortcut_bindings: Self::load_shortcut_bindings(&storage),
+            workflow_shortcut_bindings: Self::load_workflow_shortcut_bindings(&storage),
             recording_shortcut: None,
             settings_center_focus: cx.focus_handle(),
+            workflow_shortcut_binding_focus: cx.focus_handle(),
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -3577,6 +3684,7 @@ impl RepositoryView {
             // ── 更新状态 ──
             update_preferences: Self::load_update_preferences(&storage),
             update_checking: false,
+            next_periodic_update_check: Instant::now() + PERIODIC_UPDATE_CHECK_INTERVAL,
             update_downloading: false,
             available_update: None,
             update_download_progress: None,
@@ -3605,10 +3713,10 @@ impl RepositoryView {
     fn new_with_session(cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.restore_session();
-        // 启动时自动检查更新（manual=false：结果不弹气泡，仅状态栏；
-        // 发现新版本仍会弹窗）
+        // 启动时自动检查更新（Startup：结果不弹气泡，仅状态栏；
+        // 发现新版本仍会弹窗——既有行为不变）
         if view.update_preferences.auto_check {
-            view.start_update_check(false);
+            view.start_update_check(UpdateCheckTrigger::Startup);
         }
         // 老用户首次进入便携版本时，提示把数据从 C 盘迁移到程序同级目录。
         view.maybe_prompt_portable_migration();
@@ -3744,14 +3852,17 @@ impl RepositoryView {
     }
 
     fn scroll_local_branch_to_current(&self) {
-        // 旧实现用的是 Stateful<Div> 列表的 bounds_for_item /
-        // scroll_to_top_of_item——侧边栏改为单一 uniform_list 后这两个 API
-        // 静默 no-op，手算几何也按旧模型的行高/间隙估算（现模型 36px 定高
-        // 无间隙，且行号需包含分组标题/搜索框占位）。改为重建展平模型定位
-        // 行号，交给 uniform_list 的滚动目标机制。
+        // 分组标题钉住后，本地分支是独立虚拟列表：在过滤后的条目模型里定位
+        // HEAD 行号，交给该列表的滚动目标机制。分组折叠时不渲染列表，跳过定位。
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
+        if !self
+            .sidebar_sections
+            .is_expanded(SidebarSection::LocalBranches)
+        {
+            return;
+        }
         let Some(head_branch_index) = snapshot
             .branches
             .iter()
@@ -3764,30 +3875,16 @@ impl RepositoryView {
         } else {
             ""
         };
-        let remote_query = if self.sidebar_remote_branch_search_open {
-            self.sidebar_remote_branch_search.value.trim()
-        } else {
-            ""
-        };
-        let items = sidebar_view::sidebar_navigation_items(
-            &snapshot.branches,
-            snapshot.remotes.len(),
-            snapshot.tags.len(),
-            snapshot.stashes.len(),
-            self.sidebar_sections,
-            self.sidebar_local_branch_search_open,
-            local_query,
-            self.sidebar_remote_branch_search_open,
-            remote_query,
-            self.loading.remote(),
-        );
-        let Some(row) = items.iter().position(|item| {
+        let entries = sidebar_view::sidebar_local_branch_entries(&snapshot.branches, local_query);
+        let Some(row) = entries.iter().position(|item| {
             matches!(item, sidebar_view::SidebarNavItem::Branch(index) if *index == head_branch_index)
         }) else {
             return;
         };
-        self.uniform_scroll_handle("local-branch-list")
-            .scroll_to_item(row, ScrollStrategy::Center);
+        self.uniform_scroll_handle(sidebar_view::sidebar_section_scroll_id(
+            SidebarSection::LocalBranches,
+        ))
+        .scroll_to_item(row, ScrollStrategy::Center);
     }
 
     pub(crate) fn uniform_scroll_handle(&self, id: &'static str) -> UniformListScrollHandle {
@@ -4063,6 +4160,46 @@ impl RepositoryView {
         if let Err(err) = self.storage.save_shortcut_bindings(&self.shortcut_bindings) {
             tracing::warn!("shortcut bindings write skipped: {err}");
         }
+    }
+
+    /// 加载工作流快捷键绑定；存储为空或出错时回退空表。加载时做防御剪枝
+    /// （撞静态键/同键重复/坏键位丢弃），有变化则把剪枝结果写回存储。
+    fn load_workflow_shortcut_bindings(
+        storage: &khaslana::AppStorage,
+    ) -> khaslana::WorkflowShortcutBindings {
+        let stored = storage
+            .load_workflow_shortcut_bindings()
+            .inspect_err(|err| tracing::warn!("workflow shortcut bindings load skipped: {err}"))
+            .unwrap_or_default();
+        let app_bindings = Self::load_shortcut_bindings(storage);
+        let (pruned, changed) = prune_workflow_shortcut_bindings(&stored, &app_bindings);
+        if changed {
+            tracing::warn!("workflow shortcut bindings pruned on load");
+            let _ = storage.save_workflow_shortcut_bindings(&pruned);
+        }
+        pruned
+    }
+
+    /// 保存工作流快捷键绑定到数据库（整体覆盖）。
+    pub(crate) fn save_workflow_shortcut_bindings(&self) {
+        if let Err(err) = self
+            .storage
+            .save_workflow_shortcut_bindings(&self.workflow_shortcut_bindings)
+        {
+            tracing::warn!("workflow shortcut bindings write skipped: {err}");
+        }
+    }
+
+    /// 保存工作流绑定并全量重注册键位（写入后的统一出口，保证绑定即刻生效）。
+    pub(crate) fn persist_workflow_shortcut_bindings(&mut self, cx: &mut Context<Self>) {
+        self.save_workflow_shortcut_bindings();
+        crate::register_all_key_bindings(
+            &mut cx.deref_mut(),
+            &self.shortcut_bindings,
+            &self.workflow_shortcut_bindings,
+            false,
+        );
+        cx.notify();
     }
 
     /// 加载布局偏好；存储为空或出错时回退全部默认值。
@@ -4457,6 +4594,15 @@ impl RepositoryView {
                 let feedbacks_expired = self.feedbacks.len() != feedbacks_before;
                 self.sync_conflict_editor_into_state();
                 self.handle_tray_action(cx);
+                // 周期静默更新检查（12 小时一次）：到期才触发；fire 时读取
+                // auto_check 开关（会话中切换设置即时生效）；重排下次时刻
+                // 无条件执行，开关关闭也不堆积错过的检查。
+                if now >= self.next_periodic_update_check {
+                    self.next_periodic_update_check = now + PERIODIC_UPDATE_CHECK_INTERVAL;
+                    if self.update_preferences.auto_check {
+                        self.start_update_check(UpdateCheckTrigger::Periodic);
+                    }
+                }
                 // 空闲期不做全窗口重绘（UiTick 每 420ms 一次，无条件 notify 会让
                 // 应用常驻 2.4Hz 重绘并触发渲染路径里的重复计算）：只在时态内容
                 // 变化时通知——底部进度线在动画（有加载中操作）、操作遮罩到延迟
@@ -5658,7 +5804,7 @@ impl RepositoryView {
                 self.handle_code_palette_detail_finished(seq, detail);
             }
             UiEvent::WorkflowTemplatesLoaded { result } => {
-                self.apply_workflow_templates(result);
+                self.apply_workflow_templates(result, cx);
             }
             UiEvent::WorkflowFinished {
                 tab_id,
@@ -5939,26 +6085,54 @@ impl RepositoryView {
                 self.notify_completion(&message, cx);
             }
             // ── 更新事件 ──
-            UiEvent::UpdateCheckFinished { manifest, asset } => {
+            UiEvent::UpdateCheckFinished {
+                manifest,
+                asset,
+                trigger,
+            } => {
                 self.update_checking = false;
+                let known_version = self
+                    .available_update
+                    .as_ref()
+                    .map(|known| known.version.clone());
                 self.available_update = Some(manifest.clone());
                 self.status = format!("发现新版本 v{}", manifest.version);
                 self.last_error = None;
-                self.active_dialog = Some(DialogState::NewVersionAvailable {
-                    version: manifest.version.clone(),
-                    notes: manifest.notes.clone(),
-                    published_at: manifest.published_at.clone(),
-                    size: asset.size,
-                });
+                if trigger == UpdateCheckTrigger::Periodic {
+                    // 周期静默检查：不弹模态框，只弹可点击气泡直达更新设置；
+                    // 同版本已提示过（点 ✕ / 超时消失 = 稍后）不再重复打扰，
+                    // 设置页常驻「发现新版本」卡片仍可查。
+                    if let Some(message) =
+                        periodic_update_found_toast(known_version.as_deref(), &manifest.version)
+                    {
+                        self.notify_toast_with_action(
+                            AppToastKind::Info,
+                            message,
+                            ToastAction::OpenUpdateSettings,
+                            cx,
+                        );
+                    }
+                } else {
+                    self.active_dialog = Some(DialogState::NewVersionAvailable {
+                        version: manifest.version.clone(),
+                        notes: manifest.notes.clone(),
+                        published_at: manifest.published_at.clone(),
+                        size: asset.size,
+                    });
+                }
             }
-            UiEvent::UpdateCheckFailed { error, manual } => {
+            UiEvent::UpdateCheckFailed { error, trigger } => {
                 self.update_checking = false;
+                // 周期静默检查：无新版本 / 网络失败等完全无反馈。
+                if trigger == UpdateCheckTrigger::Periodic {
+                    return;
+                }
                 if !error.is_empty() {
                     self.update_error = Some(error.clone());
                     self.status = error.clone();
                     // 手动检查弹气泡反馈（成功发现最新=成功气泡、真失败=
-                    // 错误气泡）；自动检查保持安静，仅状态栏与设置页错误条。
-                    if let Some((kind, message)) = update_check_toast(&error, manual) {
+                    // 错误气泡）；启动自动检查保持安静，仅状态栏与设置页错误条。
+                    if let Some((kind, message)) = update_check_feedback(&error, trigger) {
                         self.notify_toast(kind, message, cx);
                     }
                 }
@@ -7054,6 +7228,12 @@ impl RepositoryView {
         self.reload_credential_records("凭据列表已加载");
     }
 
+    /// 通知气泡「点击查看更新」的直达入口：打开设置中心并定位到更新设置页。
+    pub(crate) fn open_update_settings_center(&mut self) {
+        self.close_popups();
+        self.settings_center = Some(SettingsCategory::Update);
+    }
+
     /// 切换设置中心的分类。
     pub(crate) fn select_settings_category(&mut self, category: SettingsCategory) {
         self.settings_center = Some(category);
@@ -7209,13 +7389,17 @@ impl RepositoryView {
 
     // ── 更新方法 ──────────────────────────────────────────────────────────
 
-    pub(crate) fn start_update_check(&mut self, manual: bool) {
+    pub(crate) fn start_update_check(&mut self, trigger: UpdateCheckTrigger) {
         if self.update_checking {
             return;
         }
         self.update_checking = true;
-        self.update_error = None;
-        self.status = "检查更新中".into();
+        // 周期静默检查不写任何可见状态（无新版本/失败就静默）；
+        // 启动/手动检查维持状态栏反馈与错误复位。
+        if trigger != UpdateCheckTrigger::Periodic {
+            self.update_error = None;
+            self.status = "检查更新中".into();
+        }
 
         let tx = self.tx.clone();
         let preferences = self.update_preferences.clone();
@@ -7229,6 +7413,7 @@ impl RepositoryView {
                         UiEvent::UpdateCheckFinished {
                             manifest: Arc::new(manifest),
                             asset,
+                            trigger,
                         },
                     );
                 }
@@ -7237,7 +7422,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: "当前已是最新版本".into(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -7247,7 +7432,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: String::new(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -7256,7 +7441,7 @@ impl RepositoryView {
                         &tx,
                         UiEvent::UpdateCheckFailed {
                             error: err.to_string(),
-                            manual,
+                            trigger,
                         },
                     );
                 }
@@ -13296,6 +13481,7 @@ impl RepositoryView {
         };
         let edit_path = menu.path.clone();
         let copy_path = menu.path.clone();
+        let bind_path = menu.path.clone();
         // 删除确认弹窗展示用名称：优先解析出的显示名不可得（坏模板也允许删），退回文件名主干
         let delete_path = menu.path.clone();
         let delete_display_name = menu
@@ -13327,6 +13513,16 @@ impl RepositoryView {
                     this.workflow_template_context_menu = None;
                     let path = copy_path.clone();
                     this.open_workflow_editor_for_path(path, true, cx);
+                },
+                cx,
+            ))
+            .child(context_menu_item_with_context(
+                "绑定快捷键...",
+                !self.busy,
+                move |this, _cx| {
+                    this.workflow_template_context_menu = None;
+                    let path = bind_path.clone();
+                    this.open_workflow_shortcut_binding_dialog(path);
                 },
                 cx,
             ))
@@ -13369,6 +13565,8 @@ impl RepositoryView {
                     self.clear_workflow_file();
                     self.workflow_state.selected_template_path = None;
                 }
+                // 模板删除后同步移除其快捷键绑定，键位当场释放。
+                self.remove_workflow_shortcut_binding(&file_name, cx);
                 self.refresh_workflow_templates();
                 self.status = format!("工作流模板已删除：{file_name}");
                 self.notify_success(format!("工作流模板已删除：{file_name}"), cx);
@@ -13376,6 +13574,52 @@ impl RepositoryView {
             Err(err) => {
                 self.last_error = Some(format!("工作流模板删除失败：{err}"));
             }
+        }
+    }
+
+    /// 按模板文件名移除工作流快捷键绑定（大小写不敏感匹配键）；存在且有
+    /// 变化时保存并重注册。删除模板与设置页「清除」共用。
+    pub(crate) fn remove_workflow_shortcut_binding(&mut self, file: &str, cx: &mut Context<Self>) {
+        let stale_key = self
+            .workflow_shortcut_bindings
+            .bindings
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(file))
+            .cloned();
+        if let Some(key) = stale_key {
+            self.workflow_shortcut_bindings.bindings.remove(&key);
+            self.persist_workflow_shortcut_bindings(cx);
+        }
+    }
+
+    /// 模板改名保存后把快捷键绑定迁移到新文件名（键位 + 后台标志保留）。
+    /// 「复制为副本」不走这里（副本是新文件、无绑定可迁）；目标名已有
+    /// 陈旧孤儿绑定时直接覆盖。
+    pub(crate) fn migrate_workflow_shortcut_binding(
+        &mut self,
+        old_file: &str,
+        new_file: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if new_file.is_empty() || old_file.eq_ignore_ascii_case(new_file) {
+            return;
+        }
+        let old_key = self
+            .workflow_shortcut_bindings
+            .bindings
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(old_file))
+            .cloned();
+        if let Some(old_key) = old_key {
+            let binding = self
+                .workflow_shortcut_bindings
+                .bindings
+                .remove(&old_key)
+                .expect("binding key was just found");
+            self.workflow_shortcut_bindings
+                .bindings
+                .insert(new_file.to_string(), binding);
+            self.persist_workflow_shortcut_bindings(cx);
         }
     }
 
@@ -14873,6 +15117,12 @@ impl RepositoryView {
             DialogState::ConfirmDropStash { index, message } => self
                 .render_confirm_drop_stash_dialog(index, message, cx)
                 .into_any_element(),
+            DialogState::ConfirmPopStash { index, message } => self
+                .render_confirm_pop_stash_dialog(index, message, cx)
+                .into_any_element(),
+            DialogState::WorkflowShortcutBinding { file } => self
+                .render_workflow_shortcut_binding_dialog(file.as_str(), cx)
+                .into_any_element(),
             DialogState::RemoteBranchOperation { kind } => self
                 .render_remote_branch_operation_dialog(kind, window, cx)
                 .into_any_element(),
@@ -15979,7 +16229,7 @@ impl RepositoryView {
                     .child(self.primary_button(
                         "立即检查",
                         !self.update_checking && !self.busy,
-                        |this, _, _| this.start_update_check(true),
+                        |this, _, _| this.start_update_check(UpdateCheckTrigger::Manual),
                         cx,
                     ))
                     .child(self.button(
@@ -17542,34 +17792,82 @@ impl Render for RepositoryView {
                         cx.stop_propagation();
                         return;
                     }
-                    if let Some(action) = this.recording_shortcut {
+                    // 防御：工作流录制目标依赖绑定弹窗持有焦点，若弹窗已被
+                    // 其它路径关闭（理论路径），取消录制避免快捷键长期失效。
+                    if let Some(ShortcutRecordingTarget::Workflow { file }) =
+                        this.recording_shortcut.as_ref()
+                    {
+                        let dialog_open = matches!(
+                            &this.active_dialog,
+                            Some(DialogState::WorkflowShortcutBinding { file: open }) if open == file
+                        );
+                        if !dialog_open {
+                            this.recording_shortcut = None;
+                            crate::register_all_key_bindings(
+                                &mut cx.deref_mut(),
+                                &this.shortcut_bindings,
+                                &this.workflow_shortcut_bindings,
+                                false,
+                            );
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                    if let Some(target) = this.recording_shortcut.clone() {
                         let ks = shortcuts_view::keystroke_to_string(event);
-                        // 冲突检查：若已被其它动作占用则拒绝并提示。
-                        if let Some(conflict) =
-                            find_shortcut_conflict(&this.shortcut_bindings, action, &ks)
-                        {
+                        // 统一冲突检查：静态动作与工作流绑定共用键位空间。
+                        if let Some(conflict) = find_keystroke_conflict(
+                            &this.shortcut_bindings,
+                            &this.workflow_shortcut_bindings,
+                            &target,
+                            &ks,
+                        ) {
                             this.recording_shortcut = None;
                             this.notify_warning(
                                 format!(
                                     "快捷键 {} 已被「{}」占用",
                                     shortcuts_view::format_keystroke(&ks),
-                                    conflict.label()
+                                    conflict.describe()
                                 ),
                                 cx,
                             );
                         } else {
-                            // 通过检查，更新绑定。
-                            this.shortcut_bindings
-                                .bindings
-                                .insert(action.action_id().to_string(), ks);
-                            this.recording_shortcut = None;
-                            this.save_shortcut_bindings();
-                            crate::register_all_key_bindings(
-                                &mut cx.deref_mut(),
-                                &this.shortcut_bindings,
-                                false,
-                            );
-                            cx.notify();
+                            // 通过检查，按录制目标写入对应绑定表。
+                            match &target {
+                                ShortcutRecordingTarget::App(action) => {
+                                    this.shortcut_bindings
+                                        .bindings
+                                        .insert(action.action_id().to_string(), ks);
+                                    this.recording_shortcut = None;
+                                    this.save_shortcut_bindings();
+                                    crate::register_all_key_bindings(
+                                        &mut cx.deref_mut(),
+                                        &this.shortcut_bindings,
+                                        &this.workflow_shortcut_bindings,
+                                        false,
+                                    );
+                                    cx.notify();
+                                }
+                                ShortcutRecordingTarget::Workflow { file } => {
+                                    // 保留已有的后台执行标志，仅更新键位。
+                                    let background = this
+                                        .workflow_shortcut_bindings
+                                        .bindings
+                                        .get(file)
+                                        .map(|binding| binding.background)
+                                        .unwrap_or(false);
+                                    this.workflow_shortcut_bindings.bindings.insert(
+                                        file.clone(),
+                                        khaslana::WorkflowShortcutBinding {
+                                            keystroke: ks,
+                                            background,
+                                        },
+                                    );
+                                    this.recording_shortcut = None;
+                                    this.persist_workflow_shortcut_bindings(cx);
+                                }
+                            }
                         }
                     }
                     cx.stop_propagation();
@@ -18077,11 +18375,33 @@ fn operation_affects_commit_history(message: &str) -> bool {
     )
 }
 
+/// 更新检查的触发来源，决定结果反馈方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckTrigger {
+    /// 应用启动时的自动检查：结果仅状态栏；发现新版本弹模态框（既有行为）。
+    Startup,
+    /// 设置页「立即检查」：结果即时气泡反馈；发现新版本弹模态框。
+    Manual,
+    /// 运行期周期检查（`PERIODIC_UPDATE_CHECK_INTERVAL`）：无新版本/失败
+    /// 完全静默；发现新版本只弹可点击气泡直达更新设置，不弹模态框。
+    Periodic,
+}
+
+/// 周期静默检查间隔：写死为常量、不暴露为设置。清单获取是一次约 1KB 的
+/// HTTPS GET（CNB 主源 + GitHub 兜底、15s 分相超时、走全局代理），12 小时
+/// 对天/周级发版节奏足够且最不打扰；首拍 = 启动后 12 小时（启动检查不重复
+/// 计入）。系统睡眠期间 UiTick 线程暂停、单调钟照走，唤醒后到期即查。
+const PERIODIC_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// 检查更新结果的气泡决策（纯函数，可单测）：手动检查需要即时反馈——
-/// 「已是最新」弹成功气泡、真失败弹错误气泡；自动检查每次启动都跑，
-/// 弹气泡会打扰，保持安静（发现新版本走弹窗不受此影响）。
-fn update_check_toast(error: &str, manual: bool) -> Option<(AppToastKind, String)> {
-    if !manual || error.is_empty() {
+/// 「已是最新」弹成功气泡、真失败弹错误气泡；启动自动检查每次都跑，
+/// 弹气泡会打扰，保持安静（发现新版本走弹窗不受此影响）；周期静默检查
+/// 同样安静（发现新版本走可点击气泡，不在此决策）。
+fn update_check_feedback(
+    error: &str,
+    trigger: UpdateCheckTrigger,
+) -> Option<(AppToastKind, String)> {
+    if trigger != UpdateCheckTrigger::Manual || error.is_empty() {
         return None;
     }
     if error == "当前已是最新版本" {
@@ -18089,6 +18409,16 @@ fn update_check_toast(error: &str, manual: bool) -> Option<(AppToastKind, String
     } else {
         Some((AppToastKind::Error, format!("检查更新失败：{error}")))
     }
+}
+
+/// 周期检查发现新版本的气泡文案（纯函数，可单测）：发现版本与已知
+/// `available_update` 版本相同（用户已看过提示，点 ✕ 或超时消失视为
+/// 「稍后」）时不再重复打扰，返回 None；设置页常驻卡片仍可查。
+fn periodic_update_found_toast(known_version: Option<&str>, found_version: &str) -> Option<String> {
+    if known_version == Some(found_version) {
+        return None;
+    }
+    Some(format!("发现新版本 v{found_version}，点击查看更新"))
 }
 
 fn dedupe_repo_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -18257,12 +18587,15 @@ pub(crate) fn filter_repo_switcher_sections(
 #[path = "tests/main.rs"]
 mod app_tests;
 
-/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
-/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
-/// 全量注册键盘绑定：先清空再重新注册全部（TextInput/BrowseContent 基础键位 + 应用级快捷键）。
-/// 在启动时和用户修改快捷键后调用，保证绑定始终与 self.shortcut_bindings 一致。
+/// 全量注册键盘绑定：先清空再重新注册全部（TextInput 基础键位 + 工作流快捷键 + 应用级快捷键）。
+/// 在启动时和用户修改快捷键/工作流绑定后调用，保证绑定始终与持久化状态一致。
 /// `skip_shortcuts` 为 true 时仅注册基础键位（录制态避免按键匹配到 action 导致 keydown 被吞）。
-fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_shortcuts: bool) {
+fn register_all_key_bindings(
+    cx: &mut App,
+    bindings: &ShortcutBindings,
+    workflow_bindings: &khaslana::WorkflowShortcutBindings,
+    skip_shortcuts: bool,
+) {
     cx.clear_key_bindings();
     // 基础键位：文本输入框和浏览内容区。
     cx.bind_keys([
@@ -18291,6 +18624,23 @@ fn register_all_key_bindings(cx: &mut App, bindings: &ShortcutBindings, skip_sho
     ]);
     // 应用级快捷键：全局生效（无 context 谓词）。
     if !skip_shortcuts {
+        // 工作流绑定先于静态快捷键注册：同键位意外撞车时后注册的静态键胜出
+        //（正常路径由统一冲突检查在写入前拦截，这只是防御顺序）。
+        for (file, binding) in &workflow_bindings.bindings {
+            // KeyBinding::new 对不可解析键位会 panic；加载层已剪枝，此处再防一次。
+            if gpui::Keystroke::parse(&binding.keystroke).is_err() {
+                tracing::warn!("skip unparseable workflow shortcut: {file}");
+                continue;
+            }
+            cx.bind_keys([KeyBinding::new(
+                &binding.keystroke,
+                RunWorkflowShortcut {
+                    file: file.clone(),
+                    background: binding.background,
+                },
+                None,
+            )]);
+        }
         for action in ShortcutAction::ALL {
             let keystroke = action.keystroke(bindings);
             let binding = match action {
@@ -18477,6 +18827,20 @@ fn register_shortcut_listeners(cx: &mut App, weak: WeakEntity<RepositoryView>) {
             });
         }
     });
+    // 工作流快捷键：绑定携带模板文件名与后台执行标志（载荷 action）。
+    // 设置中心或任意模态对话框打开时不触发（后台启动长任务不应躲在遮罩后）。
+    cx.on_action({
+        let weak = weak.clone();
+        move |a: &RunWorkflowShortcut, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.settings_center.is_some() || this.active_dialog.is_some() {
+                    return;
+                }
+                this.trigger_workflow_shortcut(a.file.clone(), a.background, cx);
+                cx.notify();
+            });
+        }
+    });
 }
 
 fn main() {
@@ -18517,12 +18881,16 @@ fn main() {
                 Locale::new("zh-CN").expect("zh-CN locale is valid"),
             ));
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
-            // 注册全部键盘绑定：基础键位（TextInput/BrowseContent）+ 应用级快捷键（从持久化加载）。
+            // 注册全部键盘绑定：基础键位（TextInput）+ 工作流快捷键 + 应用级快捷键（从持久化加载）。
             let shortcut_bindings = khaslana::AppStorage::open_default()
                 .ok()
                 .map(|storage| RepositoryView::load_shortcut_bindings(&storage))
                 .unwrap_or_else(default_shortcut_bindings);
-            register_all_key_bindings(cx, &shortcut_bindings, false);
+            let workflow_shortcut_bindings = khaslana::AppStorage::open_default()
+                .ok()
+                .map(|storage| RepositoryView::load_workflow_shortcut_bindings(&storage))
+                .unwrap_or_default();
+            register_all_key_bindings(cx, &shortcut_bindings, &workflow_shortcut_bindings, false);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),

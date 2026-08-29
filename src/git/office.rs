@@ -61,7 +61,7 @@ fn read_entry(
     archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
     name: &str,
 ) -> Option<Vec<u8>> {
-    let mut entry = archive.by_name(name).ok()?;
+    let entry = archive.by_name(name).ok()?;
     if entry.size() > OFFICE_EXTRACT_MAX_ENTRY_BYTES {
         return None;
     }

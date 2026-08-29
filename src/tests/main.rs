@@ -530,24 +530,63 @@ fn worktree_diff_load_completion_does_not_emit_toast() {
 }
 
 #[test]
-fn update_check_toast_only_for_manual_checks() {
+fn update_check_feedback_only_for_manual_checks() {
     // 手动检查：已是最新 → 成功气泡；真失败 → 错误气泡（带前缀）
     assert_eq!(
-        update_check_toast("当前已是最新版本", true),
+        update_check_feedback("当前已是最新版本", UpdateCheckTrigger::Manual),
         Some((AppToastKind::Success, "当前已是最新版本".to_string()))
     );
     assert_eq!(
-        update_check_toast("清单下载失败", true),
+        update_check_feedback("清单下载失败", UpdateCheckTrigger::Manual),
         Some((
             AppToastKind::Error,
             "检查更新失败：清单下载失败".to_string()
         ))
     );
     // 手动但静默：跳过版本（空 error）
-    assert_eq!(update_check_toast("", true), None);
-    // 自动检查：一律不弹（每次启动都弹会打扰）
-    assert_eq!(update_check_toast("当前已是最新版本", false), None);
-    assert_eq!(update_check_toast("清单下载失败", false), None);
+    assert_eq!(update_check_feedback("", UpdateCheckTrigger::Manual), None);
+    // 启动自动检查：一律不弹（每次启动都弹会打扰；发现新版本走弹窗）
+    assert_eq!(
+        update_check_feedback("当前已是最新版本", UpdateCheckTrigger::Startup),
+        None
+    );
+    assert_eq!(
+        update_check_feedback("清单下载失败", UpdateCheckTrigger::Startup),
+        None
+    );
+    // 周期静默检查：无新版本/失败同样安静（发现新版本走可点击气泡）
+    assert_eq!(
+        update_check_feedback("当前已是最新版本", UpdateCheckTrigger::Periodic),
+        None
+    );
+    assert_eq!(
+        update_check_feedback("清单下载失败", UpdateCheckTrigger::Periodic),
+        None
+    );
+}
+
+#[test]
+fn periodic_update_found_toast_dedupes_known_version() {
+    // 未知版本 → 提示文案
+    assert_eq!(
+        periodic_update_found_toast(None, "2.0.2"),
+        Some("发现新版本 v2.0.2，点击查看更新".to_string())
+    );
+    assert_eq!(
+        periodic_update_found_toast(Some("2.0.1"), "2.0.2"),
+        Some("发现新版本 v2.0.2，点击查看更新".to_string())
+    );
+    // 同版本已提示过（点 ✕ / 超时消失 = 稍后）→ 不再重复打扰
+    assert_eq!(periodic_update_found_toast(Some("2.0.2"), "2.0.2"), None);
+}
+
+#[test]
+fn periodic_update_check_interval_is_twelve_hours() {
+    // 常量守护：间隔写死 12 小时、不暴露为设置；改动此值需同步文档与评审。
+    assert_eq!(
+        PERIODIC_UPDATE_CHECK_INTERVAL,
+        Duration::from_secs(12 * 60 * 60)
+    );
 }
 
 #[test]

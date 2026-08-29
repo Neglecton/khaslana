@@ -139,6 +139,22 @@ impl RepositoryView {
         self.last_error = None;
     }
 
+    pub(crate) fn open_pop_stash_confirm_dialog(&mut self, index: usize) {
+        let Some(message) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.stashes.iter().find(|stash| stash.index == index))
+            .map(|stash| stash.message.clone())
+        else {
+            self.last_error = Some(format!("贮藏不存在：stash@{{{index}}}"));
+            self.stash_context_menu = None;
+            return;
+        };
+        self.close_popups();
+        self.active_dialog = Some(DialogState::ConfirmPopStash { index, message });
+        self.last_error = None;
+    }
+
     pub(crate) fn drop_stash(&mut self, index: usize) {
         self.close_dialog();
         self.stash_context_menu = None;
@@ -598,6 +614,43 @@ impl RepositoryView {
             )
     }
 
+    pub(crate) fn render_confirm_pop_stash_dialog(
+        &self,
+        index: usize,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.dialog_panel("弹出贮藏", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .child(format!("确认弹出 stash@{{{index}}}？")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child(message),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child("弹出会把贮藏的改动应用到工作区，成功后从贮藏列表移除该条目。"),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", !self.busy, |this, _, _| this.close_dialog(), cx))
+                    .child(self.button(
+                        "确认弹出",
+                        !self.busy,
+                        move |this, _, _| this.pop_stash(index),
+                        cx,
+                    )),
+            )
+    }
+
     pub(crate) fn render_stash_context_menu_content(
         &self,
         index: usize,
@@ -620,7 +673,7 @@ impl RepositoryView {
             .child(crate::context_menu_item(
                 "弹出贮藏",
                 can_apply,
-                move |this| this.pop_stash(index),
+                move |this| this.open_pop_stash_confirm_dialog(index),
                 cx,
             ))
             .child(menu_separator())

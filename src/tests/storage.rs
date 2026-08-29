@@ -43,6 +43,52 @@ fn layout_preferences_default_and_round_trip() {
     assert_eq!(storage.load_layout_preferences().unwrap(), preferences);
 }
 
+// 工作流快捷键绑定：空库返回空 map；save→load 恒等；旧 payload 只有 keystroke
+// 字段（无 background）经 serde(default) 回 false。
+#[test]
+fn workflow_shortcut_bindings_default_and_round_trip() {
+    let (_temp, storage) = temp_storage();
+    assert_eq!(
+        storage.load_workflow_shortcut_bindings().unwrap(),
+        WorkflowShortcutBindings::default()
+    );
+
+    let bindings = WorkflowShortcutBindings {
+        bindings: BTreeMap::from([
+            (
+                "sync.json5".to_string(),
+                WorkflowShortcutBinding {
+                    keystroke: "ctrl-alt-1".to_string(),
+                    background: false,
+                },
+            ),
+            (
+                "release.json5".to_string(),
+                WorkflowShortcutBinding {
+                    keystroke: "ctrl-alt-2".to_string(),
+                    background: true,
+                },
+            ),
+        ]),
+    };
+    storage.save_workflow_shortcut_bindings(&bindings).unwrap();
+    assert_eq!(storage.load_workflow_shortcut_bindings().unwrap(), bindings);
+
+    // 旧 payload（仅有 keystroke 的字符串值形态不兼容，这里模拟缺 background
+    // 字段的对象形态）回退 background=false 而不报错。
+    let conn = storage.lock_conn().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO workflow_shortcut_bindings (id, payload, updated_at) VALUES (1, ?1, 0)",
+        params![r#"{"bindings":{"sync.json5":{"keystroke":"ctrl-alt-1"}}}"#],
+    )
+    .unwrap();
+    drop(conn);
+    let loaded = storage.load_workflow_shortcut_bindings().unwrap();
+    let binding = loaded.bindings.get("sync.json5").unwrap();
+    assert_eq!(binding.keystroke, "ctrl-alt-1");
+    assert!(!binding.background);
+}
+
 #[test]
 fn layout_preferences_tolerates_partial_legacy_payload() {
     let (_temp, storage) = temp_storage();

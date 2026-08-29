@@ -67,6 +67,23 @@ pub struct ShortcutBindings {
     pub bindings: BTreeMap<String, String>,
 }
 
+/// 单条工作流快捷键绑定：键位 + 是否后台执行（触发时不切换到工作流页）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowShortcutBinding {
+    pub keystroke: String,
+    /// 默认 false = 跳转到工作流页并运行。
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// 工作流模板快捷键绑定：模板文件名（如 "sync.json5"）→ 绑定。
+/// 机器本地偏好（不写入可分享的模板 JSON5），空 map 即无绑定。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowShortcutBindings {
+    #[serde(default)]
+    pub bindings: BTreeMap<String, WorkflowShortcutBinding>,
+}
+
 /// 布局偏好：Context Navigator 展开状态与全部分割线位置（全局单份，
 /// 跨仓库共享）。所有字段 `#[serde(default)]`——旧 payload / 空库自动回
 /// 默认（None = 使用 UI 层内置默认常量），后续增删字段不需要迁移。
@@ -346,6 +363,23 @@ impl AppStorage {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction().map_err(storage_error)?;
         save_shortcut_bindings_tx(&tx, bindings)?;
+        tx.commit().map_err(storage_error)
+    }
+
+    /// 读取工作流快捷键绑定；表为空时返回默认（空 map）。
+    pub fn load_workflow_shortcut_bindings(&self) -> Result<WorkflowShortcutBindings> {
+        let conn = self.lock_conn()?;
+        load_workflow_shortcut_bindings_from_conn(&conn)
+    }
+
+    /// 保存工作流快捷键绑定（整体覆盖）。
+    pub fn save_workflow_shortcut_bindings(
+        &self,
+        bindings: &WorkflowShortcutBindings,
+    ) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        save_workflow_shortcut_bindings_tx(&tx, bindings)?;
         tx.commit().map_err(storage_error)
     }
 
@@ -956,6 +990,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS workflow_shortcut_bindings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS recent_repositories (
             path TEXT PRIMARY KEY,
             last_opened_at INTEGER NOT NULL
@@ -1428,6 +1468,45 @@ fn save_shortcut_bindings_tx(tx: &Transaction<'_>, bindings: &ShortcutBindings) 
         .map_err(|err| GitError::Message(format!("快捷键配置序列化失败：{err}")))?;
     tx.execute(
         "INSERT OR REPLACE INTO shortcut_bindings (id, payload, updated_at) VALUES (1, ?1, ?2)",
+        params![payload, now_seconds()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_workflow_shortcut_bindings_from_conn(
+    conn: &Connection,
+) -> Result<WorkflowShortcutBindings> {
+    // 工作流快捷键映射整体存为 JSON payload（单行单份），与 shortcut_bindings 同构。
+    conn.query_row(
+        "SELECT payload FROM workflow_shortcut_bindings WHERE id = 1",
+        [],
+        |row| {
+            let payload: String = row.get(0)?;
+            serde_json::from_str::<WorkflowShortcutBindings>(&payload).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageConversionError(format!(
+                        "工作流快捷键配置解析失败：{err}"
+                    ))),
+                )
+            })
+        },
+    )
+    .optional()
+    .map_err(storage_error)
+    .map(|bindings| bindings.unwrap_or_default())
+}
+
+fn save_workflow_shortcut_bindings_tx(
+    tx: &Transaction<'_>,
+    bindings: &WorkflowShortcutBindings,
+) -> Result<()> {
+    let payload = serde_json::to_string(bindings)
+        .map_err(|err| GitError::Message(format!("工作流快捷键配置序列化失败：{err}")))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO workflow_shortcut_bindings (id, payload, updated_at) VALUES (1, ?1, ?2)",
         params![payload, now_seconds()],
     )
     .map_err(storage_error)?;

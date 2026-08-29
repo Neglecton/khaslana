@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -18,10 +19,11 @@ use khaslana::{
 };
 
 use crate::{
-    FieldId, OperationBlocker, RepositoryLoading, RepositorySnapshot, RepositoryView, ResizeTarget,
-    ScrollbarMode, TextFieldState, UiEvent, WORKFLOW_TEMPLATE_MENU_HEIGHT,
-    WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu, clamped_menu_position,
-    scrollable_frame_when, scrollable_uniform_frame, send_ui_event,
+    DialogState, FieldId, MainMode, OperationBlocker, RepositoryLoading, RepositorySnapshot,
+    RepositoryView, ResizeTarget, ScrollbarMode, TextFieldState, UiEvent,
+    WORKFLOW_TEMPLATE_MENU_HEIGHT, WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu,
+    clamped_menu_position, dialog_actions, scrollable_frame_when, scrollable_uniform_frame,
+    send_ui_event,
     system::open_directory,
     tasks::TaskKind,
     ui::{
@@ -156,6 +158,72 @@ pub(crate) fn workflow_console_state(busy: bool, log_count: usize) -> WorkflowCo
     }
 }
 
+/// 按绑定文件名取模板显示名（设置页 / 绑定弹窗 / 触发提示共用）；
+/// 列表查不到（外部删除或尚未加载）时回退文件主干。
+pub(crate) fn workflow_display_name_for_file(
+    templates: &[WorkflowTemplateItem],
+    file: &str,
+) -> String {
+    templates
+        .iter()
+        .find(|template| template.file_name.eq_ignore_ascii_case(file))
+        .map(|template| template.display_name.clone())
+        .unwrap_or_else(|| {
+            Path::new(file)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| file.to_string())
+        })
+}
+
+/// 快捷键触发的执行方式决策（纯函数，可单测）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkflowShortcutTrigger {
+    /// 必填变量未填：跳到工作流页提示填写，不运行（前台后台一致）。
+    JumpToFillInputs,
+    /// 跳到工作流页并立即运行（默认）。
+    JumpAndRun,
+    /// 留在当前页后台运行（绑定弹窗勾选「后台执行」）。
+    RunInBackground,
+}
+
+pub(crate) fn workflow_shortcut_trigger_decision(
+    missing_required_inputs: bool,
+    background: bool,
+) -> WorkflowShortcutTrigger {
+    if missing_required_inputs {
+        WorkflowShortcutTrigger::JumpToFillInputs
+    } else if background {
+        WorkflowShortcutTrigger::RunInBackground
+    } else {
+        WorkflowShortcutTrigger::JumpAndRun
+    }
+}
+
+/// 合并决策：旧输入值非空则保留（模板被修改后重载仍不丢已填变量），
+/// 否则维持重载后的新值（默认值）。
+pub(crate) fn merged_workflow_input_value(previous: Option<&str>, current_value: &str) -> String {
+    match previous {
+        Some(value) if !value.trim().is_empty() => value.to_string(),
+        _ => current_value.to_string(),
+    }
+}
+
+/// 重载模板后按 key 合并回填旧输入值：模板在磁盘上被修改时触发仍运行最新
+/// 内容，但用户已填的非空变量值不丢（空值不覆盖新默认，被删变量自然丢弃）。
+pub(crate) fn merge_workflow_input_values(
+    previous: &BTreeMap<String, String>,
+    inputs: &mut [WorkflowInputFieldState],
+) {
+    for input in inputs.iter_mut() {
+        let merged = merged_workflow_input_value(
+            previous.get(&input.key).map(String::as_str),
+            &input.field.value,
+        );
+        input.field.set_value(merged);
+    }
+}
+
 /// 模板行的标准点击直接加载；忙碌期间不重复启动加载。
 pub(crate) fn workflow_template_click_loads(standard_click: bool, busy: bool) -> bool {
     standard_click && !busy
@@ -241,6 +309,7 @@ impl RepositoryView {
     pub(crate) fn apply_workflow_templates(
         &mut self,
         result: Result<Vec<WorkflowTemplateItem>, String>,
+        cx: &mut Context<Self>,
     ) {
         match result {
             Ok(templates) => {
@@ -251,6 +320,9 @@ impl RepositoryView {
                     self.workflow_state.file_path.as_deref(),
                     &self.workflow_templates,
                 );
+                // 剪枝文件已不存在的工作流快捷键绑定（兜底应用外删除/改名）。
+                // 仅在 Ok 分支执行：目录读取失败不代表文件已删除。
+                self.prune_workflow_shortcut_bindings_against_templates(cx);
                 self.last_error = None;
                 self.status = format!("已刷新，共 {count} 个工作流模板");
             }
@@ -261,6 +333,23 @@ impl RepositoryView {
                 // 用户可通过"打开目录"验证目录是否可用
                 self.status = err;
             }
+        }
+    }
+
+    /// 列表刷新后剪枝模板文件已不存在的工作流快捷键绑定；有变化则保存并重注册。
+    fn prune_workflow_shortcut_bindings_against_templates(&mut self, cx: &mut Context<Self>) {
+        let template_files: Vec<String> = self
+            .workflow_templates
+            .iter()
+            .map(|template| template.file_name.clone())
+            .collect();
+        let before = self.workflow_shortcut_bindings.bindings.len();
+        self.workflow_shortcut_bindings
+            .bindings
+            .retain(|file, _| template_files.iter().any(|name| name == file));
+        if self.workflow_shortcut_bindings.bindings.len() != before {
+            tracing::warn!("workflow shortcut bindings pruned against template list");
+            self.persist_workflow_shortcut_bindings(cx);
         }
     }
 
@@ -422,6 +511,306 @@ impl RepositoryView {
                 }
             }
         });
+    }
+
+    /// 必填变量缺失检测：必填且当前文本为空（有默认值的必填项在构建输入时已预填）。
+    fn workflow_missing_required_input(inputs: &[WorkflowInputFieldState]) -> bool {
+        inputs
+            .iter()
+            .any(|input| input.required && input.field.value.trim().is_empty())
+    }
+
+    /// 工作流快捷键触发入口：按文件名解析模板 → 重读磁盘最新内容（模板被
+    /// 修改后运行的一定是最新版本）→ 按 key 合并回填已填变量 → 依「后台执行」
+    /// 配置跳页运行或后台运行。守卫顺序与 `run_workflow` 一致，执行闭环保留在
+    /// `run_workflow` 内（busy/合并/净树检查与事件闭环全部复用）。
+    pub(crate) fn trigger_workflow_shortcut(
+        &mut self,
+        file: String,
+        background: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ensure_no_merge_in_progress("运行工作流") {
+            return;
+        }
+        if self.active_tab_id().is_none() || self.repo_path.is_none() {
+            self.notify_error("请先打开一个仓库", cx);
+            return;
+        }
+        // 解析模板路径：优先模板列表（file_name 大小写不敏感匹配），回退模板
+        // 目录直接探盘（本会话尚未进入工作流页、列表未加载时绑定仍可触发）。
+        let path = self
+            .workflow_templates
+            .iter()
+            .find(|template| template.file_name.eq_ignore_ascii_case(&file))
+            .map(|template| template.path.clone())
+            .or_else(|| {
+                workflow_templates_dir()
+                    .map(|dir| dir.join(&file))
+                    .filter(|path| path.is_file())
+            });
+        let Some(path) = path else {
+            // 模板已不存在：自愈移除失效绑定，不留死键位。
+            self.remove_workflow_shortcut_binding(&file, cx);
+            self.notify_warning(format!("工作流模板不存在或已被移动：{file}"), cx);
+            return;
+        };
+        // 快照旧输入值，重载后按 key 合并回填（后台重复触发不丢已填变量）。
+        let previous_inputs: BTreeMap<String, String> = self.workflow_input_values();
+        self.load_workflow_file(path, cx);
+        if self.workflow_state.definition.is_none() {
+            // load_workflow_file 已把读取/解析错误写入 last_error（模板损坏时不拿
+            // 内存旧定义运行），转成 toast。
+            let message = self
+                .last_error
+                .take()
+                .unwrap_or_else(|| "工作流文件加载失败".into());
+            self.notify_error(message, cx);
+            return;
+        }
+        merge_workflow_input_values(&previous_inputs, &mut self.workflow_state.inputs);
+        let missing_required = Self::workflow_missing_required_input(&self.workflow_state.inputs);
+        match workflow_shortcut_trigger_decision(missing_required, background) {
+            WorkflowShortcutTrigger::JumpToFillInputs => {
+                self.set_main_mode(MainMode::Workflow);
+                self.notify_warning("请先填写运行变量后再运行", cx);
+            }
+            WorkflowShortcutTrigger::JumpAndRun => {
+                self.set_main_mode(MainMode::Workflow);
+                self.run_workflow();
+            }
+            WorkflowShortcutTrigger::RunInBackground => {
+                self.run_workflow();
+            }
+        }
+    }
+
+    /// 打开「绑定工作流快捷键」弹窗（模板行右键菜单入口）。
+    pub(crate) fn open_workflow_shortcut_binding_dialog(&mut self, path: PathBuf) {
+        let Some(file) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        else {
+            return;
+        };
+        self.close_popups();
+        self.active_dialog = Some(DialogState::WorkflowShortcutBinding { file });
+        self.last_error = None;
+    }
+
+    /// 绑定弹窗 body：当前键位、「后台执行」开关（默认不勾选 = 跳页运行）、
+    /// 录制（复用根捕获 + skip_shortcuts 机制）与清除。
+    pub(crate) fn render_workflow_shortcut_binding_dialog(
+        &self,
+        file: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let binding = self.workflow_shortcut_bindings.bindings.get(file).cloned();
+        let is_recording = matches!(
+            &self.recording_shortcut,
+            Some(crate::ShortcutRecordingTarget::Workflow { file: target }) if target == file
+        );
+        let display_name = workflow_display_name_for_file(&self.workflow_templates, file);
+        let current_binding_text = binding
+            .as_ref()
+            .map(|binding| crate::shortcuts_view::format_keystroke(&binding.keystroke))
+            .unwrap_or_else(|| "未绑定".to_string());
+        let background_checked = binding.as_ref().is_some_and(|b| b.background);
+
+        self.dialog_panel("绑定工作流快捷键", cx)
+            .track_focus(&self.workflow_shortcut_binding_focus)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .child(display_name),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child(format!("当前绑定：{current_binding_text}")),
+            )
+            // 「后台执行」勾选框：默认不勾选（触发时跳转到工作流页并运行）；
+            // 勾选后留在当前页后台运行（进度走状态栏，完成/失败走 toast）。
+            // 未绑定键位时不可勾选（无绑定即无触发语义）。
+            .child(
+                div()
+                    .id("workflow-shortcut-background-toggle")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .when(binding.is_some(), |this| {
+                        this.cursor_pointer()
+                            .on_click(cx.listener({
+                                let file = file.to_string();
+                                move |this, _event, _window, cx| {
+                                    if let Some(binding) = this
+                                        .workflow_shortcut_bindings
+                                        .bindings
+                                        .get_mut(&file)
+                                    {
+                                        binding.background = !binding.background;
+                                        this.persist_workflow_shortcut_bindings(cx);
+                                    }
+                                }
+                            }))
+                    })
+                    .when(binding.is_none(), |this| {
+                        this.opacity(0.62).cursor_not_allowed()
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .border_1()
+                            .border_color(rgb(if background_checked {
+                                ui_theme::PRIMARY
+                            } else {
+                                ui_theme::BORDER
+                            }))
+                            .bg(rgb(if background_checked {
+                                ui_theme::PRIMARY
+                            } else {
+                                ui_theme::SURFACE_BASE
+                            }))
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                            .when(background_checked, |this| this.child("✓")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child("后台执行（触发时不切换到工作流页）"),
+                    ),
+            )
+            .child(
+                dialog_actions()
+                    .child(
+                        div()
+                            .id("workflow-shortcut-record")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_h(px(28.0))
+                            .px(px(10.0))
+                            .py_1()
+                            .border_1()
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::SURFACE_RAISED))
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                            .on_click(cx.listener({
+                                let file = file.to_string();
+                                move |this, _event, window, cx| {
+                                    let target = crate::ShortcutRecordingTarget::Workflow {
+                                        file: file.clone(),
+                                    };
+                                    if this.recording_shortcut.as_ref() == Some(&target) {
+                                        // 再次点击取消录制，恢复正常绑定。
+                                        this.recording_shortcut = None;
+                                        crate::register_all_key_bindings(
+                                            &mut cx.deref_mut(),
+                                            &this.shortcut_bindings,
+                                            &this.workflow_shortcut_bindings,
+                                            false,
+                                        );
+                                    } else {
+                                        // 进入录制态：夺取焦点到弹窗面板（使 keydown
+                                        // dispatch_path 经过 overlay），跳过全部快捷键
+                                        // 绑定，按键直达根捕获层。
+                                        this.recording_shortcut = Some(target.clone());
+                                        window.focus(&this.workflow_shortcut_binding_focus);
+                                        crate::register_all_key_bindings(
+                                            &mut cx.deref_mut(),
+                                            &this.shortcut_bindings,
+                                            &this.workflow_shortcut_bindings,
+                                            true,
+                                        );
+                                    }
+                                    cx.notify();
+                                }
+                            }))
+                            .child(if is_recording {
+                                "取消录制（Esc）"
+                            } else {
+                                "开始录制"
+                            }),
+                    )
+                    .when(binding.is_some(), |this| {
+                        this.child(
+                            div()
+                                .id("workflow-shortcut-clear")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_h(px(28.0))
+                                .px(px(10.0))
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(ui_theme::BORDER_MUTED))
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .bg(rgb(ui_theme::SURFACE_RAISED))
+                                .text_size(px(12.0))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                                .on_click(cx.listener({
+                                    let file = file.to_string();
+                                    move |this, _event, _window, cx| {
+                                        this.remove_workflow_shortcut_binding(&file, cx);
+                                        cx.notify();
+                                    }
+                                }))
+                                .child("清除快捷键"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("workflow-shortcut-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_h(px(28.0))
+                            .px(px(10.0))
+                            .py_1()
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY))
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                            .cursor_pointer()
+                            .hover(|this| this.opacity(0.9))
+                            .on_click(cx.listener({
+                                let file = file.to_string();
+                                move |this, _event, _window, cx| {
+                                    // 关闭前若本模板仍在录制，取消录制并恢复正常绑定。
+                                    if matches!(
+                                        &this.recording_shortcut,
+                                        Some(crate::ShortcutRecordingTarget::Workflow { file: target }) if target == &file
+                                    ) {
+                                        this.recording_shortcut = None;
+                                        crate::register_all_key_bindings(
+                                            &mut cx.deref_mut(),
+                                            &this.shortcut_bindings,
+                                            &this.workflow_shortcut_bindings,
+                                            false,
+                                        );
+                                    }
+                                    this.close_dialog();
+                                    cx.notify();
+                                }
+                            }))
+                            .child("关闭"),
+                    ),
+            )
     }
 
     pub(crate) fn render_workflow_view(
@@ -758,6 +1147,14 @@ impl RepositoryView {
         let enabled = !self.busy;
         let right_click_path = template.path.clone();
         let has_error = template.error.is_some();
+        // 已绑定快捷键的模板在行右缘显示键位 chip（后台执行的加「后台」标记）；
+        // 文本行同步留出右内边距，避免与 chip 重叠。
+        let shortcut_binding = self
+            .workflow_shortcut_bindings
+            .bindings
+            .get(&template.file_name)
+            .map(|binding| (binding.keystroke.clone(), binding.background));
+        let has_shortcut = shortcut_binding.is_some();
         let selected = workflow_template_selection_matches(
             self.workflow_state.selected_template_path.as_deref(),
             self.workflow_state.file_path.as_deref(),
@@ -836,6 +1233,7 @@ impl RepositoryView {
                 } else {
                     rgb(ui_theme::CONTENT_PRIMARY)
                 })
+                .when(has_shortcut, |this| this.pr(px(72.0)))
                 .child(template.display_name.clone()),
         )
         .child(
@@ -845,6 +1243,7 @@ impl RepositoryView {
                 .whitespace_nowrap()
                 .text_size(px(10.0))
                 .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                .when(has_shortcut, |this| this.pr(px(72.0)))
                 .child(format!(
                     "{} · {}{}",
                     template.file_name,
@@ -856,6 +1255,43 @@ impl RepositoryView {
                         .unwrap_or_default()
                 )),
         )
+        .when_some(shortcut_binding, |this, (keystroke, background)| {
+            this.relative().child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .right(px(ui_theme::SPACE_2))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(5.0))
+                            .py(px(1.0))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::STATE_HOVER))
+                            .text_size(px(10.0))
+                            .font_family("Consolas, monospace")
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(crate::shortcuts_view::format_keystroke(&keystroke)),
+                    )
+                    .when(background, |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .px(px(5.0))
+                                .py(px(1.0))
+                                .rounded(px(ui_theme::RADIUS_PILL))
+                                .bg(rgb(ui_theme::SECONDARY))
+                                .text_size(px(10.0))
+                                .text_color(rgb(ui_theme::SECONDARY_FOREGROUND))
+                                .child("后台"),
+                        )
+                    }),
+            )
+        })
     }
 
     pub(crate) fn workflow_input_field(&self, index: usize) -> &TextFieldState {

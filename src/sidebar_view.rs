@@ -78,6 +78,31 @@ fn sidebar_full_width_row() -> gpui::Div {
     div().w_full()
 }
 
+/// 钉在滚动区外的固定行（分组标题/搜索框），与列表条目共用 36px 槽位保持视觉节奏。
+fn sidebar_pinned_row(element: gpui::AnyElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .w_full()
+        .h(px(SIDEBAR_NAV_ITEM_HEIGHT))
+        .min_h(px(SIDEBAR_NAV_ITEM_HEIGHT))
+        .child(element)
+        .into_any_element()
+}
+
+/// 分组搜索框打开时返回其输入字段；标题与搜索框都钉在分组列表之外。
+fn sidebar_section_search_field(
+    section: SidebarSection,
+    local_open: bool,
+    remote_open: bool,
+) -> Option<FieldId> {
+    match section {
+        SidebarSection::LocalBranches if local_open => Some(FieldId::SidebarLocalBranchSearch),
+        SidebarSection::RemoteBranches if remote_open => Some(FieldId::SidebarRemoteBranchSearch),
+        _ => None,
+    }
+}
+
 fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
     // 图标按钮不显示文字，必须用分组专属 id，避免本地/远端搜索入口点击命中冲突。
     match section {
@@ -87,12 +112,13 @@ fn sidebar_branch_search_button_id(section: SidebarSection) -> &'static str {
     }
 }
 
-/// 统一导航器只按声明顺序排列 section；折叠只影响本 section 的自然高度。
+/// 统一导航器只按声明顺序排列 section；分组标题钉在滚动区外常驻，
+/// 折叠只影响本 section 的条目列表是否渲染。
 fn sidebar_section_is_visible(section: SidebarSection, has_stashes: bool) -> bool {
     !matches!(section, SidebarSection::Stashes) || has_stashes
 }
 
-/// 单一滚动区中的分组只在可见且展开时产生行内容，避免恢复旧的嵌套滚动高度。
+/// 钉住标题布局中，分组只在可见且展开时渲染条目列表；标题本身常驻不滚动。
 fn sidebar_section_should_render_rows(
     section: SidebarSection,
     state: SidebarSectionState,
@@ -115,12 +141,11 @@ fn sidebar_remote_manage_disabled_reason(repo_available: bool, busy: bool) -> Op
     }
 }
 
-/// 统一导航器的轻量可见项。这里故意只保存快照数组下标和静态分组信息，不能保存
+/// 分组条目列表的轻量可见项。这里故意只保存快照数组下标和静态分组信息，不能保存
 /// `AnyElement`：`uniform_list` 会在可视范围内才把该模型转换成实际行元素。
+/// 分组标题与搜索框钉在各分组列表之外，不属于任何滚动模型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SidebarNavItem {
-    SectionHeader(SidebarSection),
-    BranchFilter(SidebarSection),
     Branch(usize),
     Remote(usize),
     Tag(usize),
@@ -131,130 +156,112 @@ pub(crate) enum SidebarNavItem {
     LoadingRemoteBranches,
 }
 
-fn append_sidebar_branch_items(
-    items: &mut Vec<SidebarNavItem>,
-    branches: &[BranchInfo],
-    sections: SidebarSectionState,
-    has_stashes: bool,
-    section: SidebarSection,
-    kind: BranchKind,
-    search_open: bool,
-    query: &str,
-) {
-    items.push(SidebarNavItem::SectionHeader(section));
-    if !sidebar_section_should_render_rows(section, sections, has_stashes) {
-        return;
-    }
-    if search_open {
-        items.push(SidebarNavItem::BranchFilter(section));
-    }
-    let start_len = items.len();
-    let normalized_query = query.trim().to_lowercase();
-    items.extend(
-        branches
-            .iter()
-            .enumerate()
-            .filter(|(_, branch)| branch.kind == kind)
-            .filter(|(_, branch)| {
-                sidebar_branch_matches_normalized_query(branch, &normalized_query)
-            })
-            .map(|(index, _)| SidebarNavItem::Branch(index)),
-    );
-    if start_len == items.len() && !query.trim().is_empty() {
-        items.push(match section {
-            SidebarSection::LocalBranches => SidebarNavItem::EmptyLocalBranches,
-            SidebarSection::RemoteBranches => SidebarNavItem::EmptyRemoteBranches,
-            _ => unreachable!("only branch sections use branch filters"),
-        });
+/// 每个分组独立滚动区的固定 id；`uniform_scroll_handle` 按 tab 键控，
+/// 切换仓库后各分组滚动位置自然保留。
+pub(crate) fn sidebar_section_scroll_id(section: SidebarSection) -> &'static str {
+    match section {
+        SidebarSection::LocalBranches => "sidebar-section-local-branches",
+        SidebarSection::Remotes => "sidebar-section-remotes",
+        SidebarSection::RemoteBranches => "sidebar-section-remote-branches",
+        SidebarSection::Tags => "sidebar-section-tags",
+        SidebarSection::Stashes => "sidebar-section-stashes",
     }
 }
 
-/// 将所有导航分组扁平化成单一列表的可见项索引。
-///
-/// 搜索阶段只产生匹配分支的下标，不复制 `BranchInfo`，更不会创建 UI 元素；渲染阶段
-/// 由虚拟列表回调按当前可视 range 读取对应快照项。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn sidebar_navigation_items(
+/// 分组列表高度策略：条目少的分组按内容定高（≤上限行数），条目多的分组平分
+/// 剩余空间。定高盒允许被压缩，空间不足时内部列表自行滚动兜底，
+/// 保证分组标题永不被推出视口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarSectionHeight {
+    Fill,
+    Content(usize),
+}
+
+const SIDEBAR_SECTION_CONTENT_ROW_LIMIT: usize = 8;
+
+fn sidebar_section_height(entry_count: usize) -> SidebarSectionHeight {
+    if entry_count > SIDEBAR_SECTION_CONTENT_ROW_LIMIT {
+        SidebarSectionHeight::Fill
+    } else {
+        SidebarSectionHeight::Content(entry_count)
+    }
+}
+
+/// 分支分组条目的公共过滤：只产生匹配分支的快照下标，不复制 `BranchInfo`。
+fn sidebar_branch_indices(branches: &[BranchInfo], kind: BranchKind, query: &str) -> Vec<usize> {
+    let normalized_query = query.trim().to_lowercase();
+    branches
+        .iter()
+        .enumerate()
+        .filter(|(_, branch)| branch.kind == kind)
+        .filter(|(_, branch)| sidebar_branch_matches_normalized_query(branch, &normalized_query))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 本地分支分组条目；搜索激活且无命中时返回单个占位项。
+pub(crate) fn sidebar_local_branch_entries(
     branches: &[BranchInfo],
-    remote_count: usize,
-    tag_count: usize,
-    stash_count: usize,
-    sections: SidebarSectionState,
-    local_search_open: bool,
-    local_query: &str,
-    remote_branch_search_open: bool,
-    remote_branch_query: &str,
+    query: &str,
+) -> Vec<SidebarNavItem> {
+    let mut items: Vec<SidebarNavItem> = sidebar_branch_indices(branches, BranchKind::Local, query)
+        .into_iter()
+        .map(SidebarNavItem::Branch)
+        .collect();
+    if items.is_empty() && !query.trim().is_empty() {
+        items.push(SidebarNavItem::EmptyLocalBranches);
+    }
+    items
+}
+
+/// 远端分支分组条目；远端列表加载中且尚无任何远端分支时显示加载占位。
+pub(crate) fn sidebar_remote_branch_entries(
+    branches: &[BranchInfo],
+    query: &str,
     remote_loading: bool,
 ) -> Vec<SidebarNavItem> {
-    let has_stashes = stash_count > 0;
-    let mut items = Vec::with_capacity(branches.len() + remote_count + tag_count + stash_count + 7);
-    append_sidebar_branch_items(
-        &mut items,
-        branches,
-        sections,
-        has_stashes,
-        SidebarSection::LocalBranches,
-        BranchKind::Local,
-        local_search_open,
-        local_query,
-    );
-
-    items.push(SidebarNavItem::SectionHeader(SidebarSection::Remotes));
-    if sidebar_section_should_render_rows(SidebarSection::Remotes, sections, has_stashes) {
-        if remote_loading {
-            items.push(SidebarNavItem::LoadingRemotes);
-        } else {
-            items.extend((0..remote_count).map(SidebarNavItem::Remote));
-        }
-    }
-
     if remote_loading
         && branches
             .iter()
             .all(|branch| branch.kind != BranchKind::Remote)
     {
-        items.push(SidebarNavItem::SectionHeader(
-            SidebarSection::RemoteBranches,
-        ));
-        if sidebar_section_should_render_rows(SidebarSection::RemoteBranches, sections, has_stashes)
-        {
-            if remote_branch_search_open {
-                items.push(SidebarNavItem::BranchFilter(SidebarSection::RemoteBranches));
-            }
-            items.push(SidebarNavItem::LoadingRemoteBranches);
-        }
-    } else {
-        append_sidebar_branch_items(
-            &mut items,
-            branches,
-            sections,
-            has_stashes,
-            SidebarSection::RemoteBranches,
-            BranchKind::Remote,
-            remote_branch_search_open,
-            remote_branch_query,
-        );
+        return vec![SidebarNavItem::LoadingRemoteBranches];
     }
-
-    items.push(SidebarNavItem::SectionHeader(SidebarSection::Tags));
-    if sidebar_section_should_render_rows(SidebarSection::Tags, sections, has_stashes) {
-        items.extend((0..tag_count).map(SidebarNavItem::Tag));
+    let mut items: Vec<SidebarNavItem> =
+        sidebar_branch_indices(branches, BranchKind::Remote, query)
+            .into_iter()
+            .map(SidebarNavItem::Branch)
+            .collect();
+    if items.is_empty() && !query.trim().is_empty() {
+        items.push(SidebarNavItem::EmptyRemoteBranches);
     }
-
-    if has_stashes {
-        items.push(SidebarNavItem::SectionHeader(SidebarSection::Stashes));
-        if sidebar_section_should_render_rows(SidebarSection::Stashes, sections, true) {
-            items.extend((0..stash_count).map(SidebarNavItem::Stash));
-        }
-    }
-
     items
+}
+
+/// 远端分组条目；刷新远端期间显示加载占位。
+pub(crate) fn sidebar_remote_entries(
+    remote_count: usize,
+    remote_loading: bool,
+) -> Vec<SidebarNavItem> {
+    if remote_loading {
+        vec![SidebarNavItem::LoadingRemotes]
+    } else {
+        (0..remote_count).map(SidebarNavItem::Remote).collect()
+    }
+}
+
+pub(crate) fn sidebar_tag_entries(tag_count: usize) -> Vec<SidebarNavItem> {
+    (0..tag_count).map(SidebarNavItem::Tag).collect()
+}
+
+pub(crate) fn sidebar_stash_entries(stash_count: usize) -> Vec<SidebarNavItem> {
+    (0..stash_count).map(SidebarNavItem::Stash).collect()
 }
 
 impl RepositoryView {
     pub(crate) fn render_sidebar(
         &self,
-        _window: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let snapshot = self.snapshot.as_ref();
@@ -263,12 +270,12 @@ impl RepositoryView {
         let branches = snapshot
             .map(|snapshot| snapshot.branches.as_slice())
             .unwrap_or(&[]);
-        let local_search = if self.sidebar_local_branch_search_open {
+        let local_query = if self.sidebar_local_branch_search_open {
             self.sidebar_local_branch_search.value.trim()
         } else {
             ""
         };
-        let remote_branch_search = if self.sidebar_remote_branch_search_open {
+        let remote_branch_query = if self.sidebar_remote_branch_search_open {
             self.sidebar_remote_branch_search.value.trim()
         } else {
             ""
@@ -282,28 +289,92 @@ impl RepositoryView {
                 )
             })
             .unwrap_or_default();
-        let items = Arc::new(sidebar_navigation_items(
-            branches,
-            remote_count,
-            tag_count,
-            stash_count,
-            self.sidebar_sections,
-            self.sidebar_local_branch_search_open,
-            local_search,
-            self.sidebar_remote_branch_search_open,
-            remote_branch_search,
-            self.loading.remote(),
-        ));
-        // `uniform_list` 使用自己的句柄；保留原 ID 使现有切换仓库后的定位语义仍落在
-        // 这个唯一导航滚动区。模型仅保留索引，20,000 条远端分支不会预建 20,000 行。
-        let scroll_id = "local-branch-list";
-        let legacy_handle = self.scroll_handle(scroll_id);
+        let remote_loading = self.loading.remote();
+        let has_stashes = stash_count > 0;
+
+        // 分组标题钉在滚动区外常驻：条目再多也只滚动条目列表本身，
+        // 后续分组标题依次固定显示在区域下方。每个展开分组各自一个虚拟列表
+        //（索引模型，可视回调才建行），20,000 条远端分支不会预建 20,000 行。
+        let sections = [
+            SidebarSection::LocalBranches,
+            SidebarSection::Remotes,
+            SidebarSection::RemoteBranches,
+            SidebarSection::Tags,
+            SidebarSection::Stashes,
+        ];
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        for section in sections {
+            if !sidebar_section_is_visible(section, has_stashes) {
+                continue;
+            }
+            children.push(sidebar_pinned_row(
+                self.nav_section_header(section, cx).into_any_element(),
+            ));
+            if !sidebar_section_should_render_rows(section, self.sidebar_sections, has_stashes) {
+                continue;
+            }
+            if let Some(field) = sidebar_section_search_field(
+                section,
+                self.sidebar_local_branch_search_open,
+                self.sidebar_remote_branch_search_open,
+            ) {
+                // 搜索框钉在标题下方，不随条目列表滚动。
+                children.push(sidebar_pinned_row(
+                    self.sidebar_branch_search_input(field, window, cx)
+                        .into_any_element(),
+                ));
+            }
+            let entries = Arc::new(match section {
+                SidebarSection::LocalBranches => {
+                    sidebar_local_branch_entries(branches, local_query)
+                }
+                SidebarSection::Remotes => sidebar_remote_entries(remote_count, remote_loading),
+                SidebarSection::RemoteBranches => {
+                    sidebar_remote_branch_entries(branches, remote_branch_query, remote_loading)
+                }
+                SidebarSection::Tags => sidebar_tag_entries(tag_count),
+                SidebarSection::Stashes => sidebar_stash_entries(stash_count),
+            });
+            if entries.is_empty() {
+                // 空分组（无过滤词）与折叠态视觉一致：只显示标题行。
+                continue;
+            }
+            children.push(
+                self.sidebar_section_list(section, entries, cx)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            // 纯鼠标区域：不再承载 R/B/T/S/M 字母快捷键与键盘焦点
+            //（键盘白名单见 AGENTS.md §8；分组折叠均由鼠标点击完成）。
+            .overflow_hidden()
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .pt(px(8.0))
+            .pb(px(12.0))
+            .children(children)
+    }
+
+    /// 单个分组的条目虚拟列表。条目少的分组按内容定高（Content），条目多的
+    /// 分组平分剩余空间（Fill）；定高盒不加 flex_none，被压缩时列表内部
+    /// 滚动兜底，分组标题永不被推出视口。
+    fn sidebar_section_list(
+        &self,
+        section: SidebarSection,
+        entries: Arc<Vec<SidebarNavItem>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let scroll_id = sidebar_section_scroll_id(section);
         let scroll_handle = self.uniform_scroll_handle(scroll_id);
-        // 复用旧句柄的底层滚动状态，保留切换仓库和滚动条已有的句柄语义。
-        scroll_handle.0.borrow_mut().base_handle = legacy_handle;
         let list_handle = scroll_handle.clone();
-        let item_count = items.len().max(1);
-        let items_for_rows = Arc::clone(&items);
+        let item_count = entries.len();
+        let entries_for_rows = Arc::clone(&entries);
         let content = div()
             .id(scroll_id)
             .flex()
@@ -311,8 +382,6 @@ impl RepositoryView {
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .pt(px(8.0))
-            .pb(px(12.0))
             .child(
                 uniform_list(
                     scroll_id,
@@ -320,7 +389,7 @@ impl RepositoryView {
                     cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                         range
                             .map(|index| {
-                                items_for_rows
+                                entries_for_rows
                                     .get(index)
                                     .copied()
                                     .map(|item| {
@@ -336,46 +405,35 @@ impl RepositoryView {
                 .flex_1()
                 .min_h(px(0.0)),
             );
-
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            // 纯鼠标区域：不再承载 R/B/T/S/M 字母快捷键与键盘焦点
-            //（键盘白名单见 AGENTS.md §8；分组折叠均由鼠标点击完成）。
-            .overflow_hidden()
-            .bg(rgb(ui_theme::SURFACE_BASE))
-            .child(scrollable_uniform_frame(
-                scroll_id,
-                ScrollbarMode::Vertical,
-                content.into_any_element(),
-                scroll_handle,
-                !items.is_empty(),
-                cx,
-            ))
+        let frame = scrollable_uniform_frame(
+            scroll_id,
+            ScrollbarMode::Vertical,
+            content.into_any_element(),
+            scroll_handle,
+            !entries.is_empty(),
+            cx,
+        );
+        match sidebar_section_height(item_count) {
+            SidebarSectionHeight::Fill => frame.into_any_element(),
+            SidebarSectionHeight::Content(rows) => div()
+                .flex()
+                .flex_col()
+                .h(px(rows as f32 * SIDEBAR_NAV_ITEM_HEIGHT))
+                .min_h(px(0.0))
+                .child(frame)
+                .into_any_element(),
+        }
     }
 
-    /// 只为 `uniform_list` 当前请求的可见 range 创建实际元素。
+    /// 只为 `uniform_list` 当前请求的可见 range 创建实际元素；分组标题与
+    /// 搜索框钉在列表外，不经此分发。
     fn render_sidebar_navigation_item(
         &self,
         item: SidebarNavItem,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let element = match item {
-            SidebarNavItem::SectionHeader(section) => {
-                self.nav_section_header(section, cx).into_any_element()
-            }
-            SidebarNavItem::BranchFilter(SidebarSection::LocalBranches) => self
-                .sidebar_branch_search_input(FieldId::SidebarLocalBranchSearch, window, cx)
-                .into_any_element(),
-            SidebarNavItem::BranchFilter(SidebarSection::RemoteBranches) => self
-                .sidebar_branch_search_input(FieldId::SidebarRemoteBranchSearch, window, cx)
-                .into_any_element(),
-            SidebarNavItem::BranchFilter(_) => placeholder_row("").into_any_element(),
             SidebarNavItem::Branch(index) => self
                 .snapshot
                 .as_ref()
@@ -794,7 +852,8 @@ impl RepositoryView {
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(rgb(name_color))
-                    .truncate()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(remote.name),
             )
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -876,7 +935,8 @@ impl RepositoryView {
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                    .truncate()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(name),
             )
             .on_mouse_down(
@@ -902,6 +962,8 @@ impl RepositoryView {
 
     fn stash_row(&self, stash: StashInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let index = stash.index;
+        // 左键条目直接查看贮藏（右键菜单的「查看贮藏」保留同一路径）。
+        let click_index = stash.index;
         let label = format!("stash@{{{}}} {}", stash.index, stash.message);
 
         // 设计图：与分支行一致的样式
@@ -923,9 +985,16 @@ impl RepositoryView {
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                    .truncate()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(label),
             )
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if !this.busy {
+                    this.view_stash(click_index);
+                }
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1005,7 +1074,10 @@ impl RepositoryView {
             .text_size(px(12.0))
             .font_weight(name_weight)
             .text_color(rgb(name_color))
-            .truncate()
+            // 各分组列表的第 0 项是数据行：uniform_list 以 MinContent 测量第 0 项
+            // 宽度，truncate 的省略号会被坍缩宽度固化，必须用硬裁剪。
+            .overflow_hidden()
+            .whitespace_nowrap()
             .child(branch.name.clone());
 
         // upstream 改为 hover tooltip，不再内联显示，避免遮挡分支名
