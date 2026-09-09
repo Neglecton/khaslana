@@ -1,0 +1,1145 @@
+{
+  "suite": "java",
+  "grammar_baseline": "tree-sitter-java 0.23.5（升级须重跑 cargo test --lib java_grammar_probe）",
+  "question_bank_ids": [
+    "JQ01",
+    "JQ02",
+    "JQ03",
+    "JQ04",
+    "JQ05",
+    "JQ06",
+    "JQ07",
+    "JQ08",
+    "JQ09",
+    "JQ10",
+    "JQ11",
+    "JQ12",
+    "JQ13",
+    "JQ14",
+    "JQ15",
+    "JQ16",
+    "JQ17",
+    "JQ18",
+    "JQ19",
+    "JQ20"
+  ],
+  "groups": [
+    {
+      "id": "J01",
+      "scenario": "包/同名类/嵌套类/跨文件调用",
+      "files": [
+        "J01/com/example/alpha/Util.java",
+        "J01/com/example/beta/Util.java",
+        "J01/com/example/alpha/Runner.java"
+      ],
+      "symbols": [
+        "com.example.alpha.Util#format(String)",
+        "com.example.beta.Util#print(String)",
+        "com.example.alpha.Runner#run(String)",
+        "com.example.alpha.Runner.Inner#label()",
+        "com.example.alpha.Runner#innerLabel()"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.alpha.Runner#run(String) 调用 Util.format(a)",
+          "target": "com.example.alpha.Util#format(String)",
+          "certainty": "syntactic",
+          "note": "同包优先解析；不得错连 com.example.beta.Util",
+          "source": {
+            "owner": "com.example.alpha.Runner#run(String)",
+            "path": "J01/com/example/alpha/Runner.java",
+            "callee": "Util.format(a)",
+            "occurrence": 1,
+            "anchor": "Util.format(raw)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.alpha.Runner#run(String) 调用 Util.print(a)",
+          "target": "com.example.beta.Util#print(String)",
+          "certainty": "syntactic",
+          "note": "显式 import com.example.beta.Util",
+          "source": {
+            "owner": "com.example.alpha.Runner#run(String)",
+            "path": "J01/com/example/alpha/Runner.java",
+            "callee": "Util.print(a)",
+            "occurrence": 1,
+            "anchor": "Util.print(a)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.alpha.Runner#innerLabel() 调用 new Inner().label()",
+          "target": "com.example.alpha.Runner.Inner#label()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.alpha.Runner#innerLabel()",
+            "path": "J01/com/example/alpha/Runner.java",
+            "callee": "new Inner().label()",
+            "occurrence": 1,
+            "anchor": "new Inner().label()"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ01"
+        }
+      ],
+      "question_ids": [
+        "JQ01",
+        "JQ02"
+      ]
+    },
+    {
+      "id": "J02",
+      "scenario": "overload(int/String/null)、varargs/装箱选择",
+      "files": [
+        "J02/com/example/overload/Overloads.java",
+        "J02/com/example/overload/Caller.java"
+      ],
+      "symbols": [
+        "com.example.overload.Overloads#f(int)",
+        "com.example.overload.Overloads#f(String)",
+        "com.example.overload.Overloads#f(long,int...)",
+        "com.example.overload.Overloads#g(Integer)",
+        "com.example.overload.Overloads#g(long)"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.overload.Caller#callAll() 调用 o.f(1)",
+          "source": {
+            "owner": "com.example.overload.Caller#callAll()",
+            "path": "J02/com/example/overload/Caller.java",
+            "callee": "o.f(1)",
+            "occurrence": 1,
+            "anchor": "o.f(1)"
+          },
+          "target": "com.example.overload.Overloads#f(int)",
+          "certainty": "syntactic"
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.overload.Caller#callAll() 调用 o.f(\"x\")",
+          "source": {
+            "owner": "com.example.overload.Caller#callAll()",
+            "path": "J02/com/example/overload/Caller.java",
+            "callee": "o.f(\"x\")",
+            "occurrence": 1,
+            "anchor": "o.f(\"x\")"
+          },
+          "target": "com.example.overload.Overloads#f(String)",
+          "certainty": "syntactic"
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.overload.Caller#callAll() 调用 o.f(2L, 3, 4)",
+          "source": {
+            "owner": "com.example.overload.Caller#callAll()",
+            "path": "J02/com/example/overload/Caller.java",
+            "callee": "o.f(2L, 3, 4)",
+            "occurrence": 1,
+            "anchor": "o.f(2L, 3, 4)"
+          },
+          "target": "com.example.overload.Overloads#f(long,int...)",
+          "certainty": "syntactic"
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.overload.Caller#callAll() 调用 o.f(null)",
+          "source": {
+            "owner": "com.example.overload.Caller#callAll()",
+            "path": "J02/com/example/overload/Caller.java",
+            "callee": "o.f(null)",
+            "occurrence": 1,
+            "anchor": "o.f(null)"
+          },
+          "target": "com.example.overload.Overloads#f(String)",
+          "certainty": "syntactic",
+          "note": "null 不能转换为基本类型；在适用的引用类型重载中唯一选择 f(String)"
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.overload.Caller#callAll() 调用 o.g(5)",
+          "source": {
+            "owner": "com.example.overload.Caller#callAll()",
+            "path": "J02/com/example/overload/Caller.java",
+            "callee": "o.g(5)",
+            "occurrence": 1,
+            "anchor": "o.g(5)"
+          },
+          "target": "com.example.overload.Overloads#g(long)",
+          "certainty": "syntactic",
+          "note": "方法选择的严格调用阶段允许 int 到 long 的扩展，优先于装箱到 Integer"
+        }
+      ],
+      "diagnostics": [
+        "o.f(null) 解析为 f(String)，o.g(5) 解析为 g(long)；两者均不得错误标为歧义"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ13"
+        },
+        {
+          "id": "JQ14"
+        }
+      ],
+      "question_ids": [
+        "JQ13",
+        "JQ14"
+      ]
+    },
+    {
+      "id": "J03",
+      "scenario": "接口多实现、abstract/final/private、继承覆写",
+      "files": [
+        "J03/com/example/repo/Repository.java",
+        "J03/com/example/repo/AbstractBase.java",
+        "J03/com/example/repo/UserRepository.java",
+        "J03/com/example/repo/OrderRepository.java",
+        "J03/com/example/app/Service.java"
+      ],
+      "symbols": [
+        "com.example.repo.Repository#findById(int)",
+        "com.example.repo.AbstractBase#saveAll()",
+        "com.example.repo.UserRepository#findById(int)",
+        "com.example.repo.OrderRepository#findById(int)",
+        "com.example.app.Service#load(int)"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.app.Service#load(int) 调用 repo.findById(id)",
+          "target": "com.example.repo.Repository#findById(int)",
+          "certainty": "syntactic",
+          "note": "CALLS 指声明（接口方法），不指任何实现",
+          "source": {
+            "owner": "com.example.app.Service#load(int)",
+            "path": "J03/com/example/app/Service.java",
+            "callee": "repo.findById(id)",
+            "occurrence": 1,
+            "anchor": "repo.findById(id)"
+          }
+        },
+        {
+          "kind": "dispatch_candidates",
+          "call_site": "com.example.app.Service#load(int) 调用 repo.findById(id)",
+          "candidates": [
+            "com.example.repo.UserRepository#findById(int)",
+            "com.example.repo.OrderRepository#findById(int)"
+          ],
+          "certainty": "inferred",
+          "rule": "java.local_implementations",
+          "note": "开放世界：仓库外可能仍有实现",
+          "source": {
+            "owner": "com.example.app.Service#load(int)",
+            "path": "J03/com/example/app/Service.java",
+            "callee": "repo.findById(id)",
+            "occurrence": 1,
+            "anchor": "repo.findById(id)"
+          }
+        },
+        {
+          "kind": "overrides",
+          "call_site": "com.example.repo.UserRepository#findById(int) 覆写 Repository#findById(int)",
+          "target": "com.example.repo.Repository#findById(int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.repo.UserRepository#findById(int)",
+            "path": "J03/com/example/repo/UserRepository.java",
+            "callee": "com.example.repo.UserRepository#findById(int) 覆写 Repository#findById(int)",
+            "occurrence": 1,
+            "anchor": "findById(int id)"
+          }
+        },
+        {
+          "kind": "overrides",
+          "call_site": "com.example.repo.UserRepository#saveAll() 覆写 AbstractBase#saveAll()",
+          "target": "com.example.repo.AbstractBase#saveAll()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.repo.UserRepository#saveAll()",
+            "path": "J03/com/example/repo/UserRepository.java",
+            "callee": "com.example.repo.UserRepository#saveAll() 覆写 AbstractBase#saveAll()",
+            "occurrence": 1,
+            "anchor": "saveAll()"
+          }
+        },
+        {
+          "kind": "implements",
+          "call_site": "com.example.repo.UserRepository implements Repository",
+          "target": "com.example.repo.Repository",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.repo.UserRepository",
+            "path": "J03/com/example/repo/UserRepository.java",
+            "callee": "com.example.repo.UserRepository implements Repository",
+            "occurrence": 1,
+            "anchor": "implements Repository"
+          }
+        },
+        {
+          "kind": "inherits",
+          "call_site": "com.example.repo.UserRepository extends AbstractBase",
+          "target": "com.example.repo.AbstractBase",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.repo.UserRepository",
+            "path": "J03/com/example/repo/UserRepository.java",
+            "callee": "com.example.repo.UserRepository extends AbstractBase",
+            "occurrence": 1,
+            "anchor": "extends AbstractBase"
+          }
+        }
+      ],
+      "diagnostics": [
+        "AbstractBase#lock() 为 final、audit() 为 private：不得为其生成分派候选边"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ09"
+        }
+      ],
+      "question_ids": [
+        "JQ09"
+      ]
+    },
+    {
+      "id": "J04",
+      "scenario": "this/super/静态导入/通配导入/构造器",
+      "files": [
+        "J04/com/example/inherit/Base.java",
+        "J04/com/example/inherit/Child.java",
+        "J04/com/example/imports/StaticUser.java"
+      ],
+      "symbols": [
+        "com.example.inherit.Base#<init>(int)",
+        "com.example.inherit.Base#greet()",
+        "com.example.inherit.Base#log(String)",
+        "com.example.inherit.Child#<init>(int)",
+        "com.example.inherit.Child#greet()",
+        "com.example.imports.StaticUser#pick(int,int)",
+        "com.example.imports.StaticUser#emptyNames()"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.inherit.Child#<init>(int) 调用 super(seed)",
+          "target": "com.example.inherit.Base#<init>(int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.inherit.Child#<init>(int)",
+            "path": "J04/com/example/inherit/Child.java",
+            "callee": "super(seed)",
+            "occurrence": 1,
+            "anchor": "super(seed)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.inherit.Child#greet() 调用 super.greet()",
+          "target": "com.example.inherit.Base#greet()",
+          "certainty": "syntactic",
+          "note": "super 调用直接绑定父类声明，不生成本类 override 的候选",
+          "source": {
+            "owner": "com.example.inherit.Child#greet()",
+            "path": "J04/com/example/inherit/Child.java",
+            "callee": "super.greet()",
+            "occurrence": 1,
+            "anchor": "super.greet()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.inherit.Child#greet() 调用 this.log(\"hello\")",
+          "target": "com.example.inherit.Base#log(String)",
+          "certainty": "syntactic",
+          "note": "this.log 解析到继承的声明",
+          "source": {
+            "owner": "com.example.inherit.Child#greet()",
+            "path": "J04/com/example/inherit/Child.java",
+            "callee": "this.log(\"hello\")",
+            "occurrence": 1,
+            "anchor": "this.log(\"hello\")"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.imports.StaticUser#pick(int,int) 调用 max(a, b)",
+          "target": "?java.lang.Math#max(int,int)",
+          "certainty": "syntactic",
+          "note": "静态导入解析到外部类型，标外部边界；不得因短名唯一误连仓库内同名",
+          "source": {
+            "owner": "com.example.imports.StaticUser#pick(int,int)",
+            "path": "J04/com/example/imports/StaticUser.java",
+            "callee": "max(a, b)",
+            "occurrence": 1,
+            "anchor": "max(a, b)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.imports.StaticUser#emptyNames() 调用 new ArrayList<>()",
+          "target": "?java.util.ArrayList#<init>()",
+          "certainty": "syntactic",
+          "note": "通配导入 java.util.* 命中外部类型；构造器不与同名方法混淆",
+          "source": {
+            "owner": "com.example.imports.StaticUser#emptyNames()",
+            "path": "J04/com/example/imports/StaticUser.java",
+            "callee": "new ArrayList<>()",
+            "occurrence": 1,
+            "anchor": "new ArrayList<>()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.imports.StaticUser#emptyNames() 调用 emptyList()",
+          "target": "?java.util.Collections#emptyList()",
+          "certainty": "syntactic",
+          "note": "静态导入",
+          "source": {
+            "owner": "com.example.imports.StaticUser#emptyNames()",
+            "path": "J04/com/example/imports/StaticUser.java",
+            "callee": "emptyList()",
+            "occurrence": 1,
+            "anchor": "emptyList()"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ10"
+        },
+        {
+          "id": "JQ17"
+        }
+      ],
+      "question_ids": [
+        "JQ10",
+        "JQ17"
+      ]
+    },
+    {
+      "id": "J05",
+      "scenario": "参数/字段/局部变量、遮蔽、显式 new、有限 var",
+      "files": [
+        "J05/com/example/scope/Shadowing.java"
+      ],
+      "symbols": [
+        "com.example.scope.Shadowing#rename(String)",
+        "com.example.scope.Shadowing#fieldAccess()",
+        "com.example.scope.Shadowing.Item"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.scope.Shadowing#rename(String) 调用 name.trim()",
+          "target": "?java.lang.String#trim()",
+          "certainty": "syntactic",
+          "note": "receiver 是参数（遮蔽同名字段），按最近作用域解析",
+          "source": {
+            "owner": "com.example.scope.Shadowing#rename(String)",
+            "path": "J05/com/example/scope/Shadowing.java",
+            "callee": "name.trim()",
+            "occurrence": 1,
+            "anchor": "name.trim()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.scope.Shadowing#rename(String) 调用 list.add(upper)",
+          "target": "?java.util.ArrayList#add(Object)",
+          "certainty": "syntactic",
+          "note": "var list = new ArrayList<String>() 有限 var 推断",
+          "source": {
+            "owner": "com.example.scope.Shadowing#rename(String)",
+            "path": "J05/com/example/scope/Shadowing.java",
+            "callee": "list.add(upper)",
+            "occurrence": 1,
+            "anchor": "list.add(upper)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.scope.Shadowing#fieldAccess() 调用 self.name 字段读取",
+          "target": "com.example.scope.Shadowing.name",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.scope.Shadowing#fieldAccess()",
+            "path": "J05/com/example/scope/Shadowing.java",
+            "callee": "self.name 字段读取",
+            "occurrence": 1,
+            "anchor": "self.name"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ15"
+        }
+      ],
+      "question_ids": [
+        "JQ15"
+      ]
+    },
+    {
+      "id": "J06",
+      "scenario": "链式返回类型、泛型集合、外部库",
+      "files": [
+        "J06/com/example/chain/Builder.java",
+        "J06/com/example/chain/Use.java"
+      ],
+      "symbols": [
+        "com.example.chain.Builder#setName(String)",
+        "com.example.chain.Builder#setCount(int)",
+        "com.example.chain.Builder#build()",
+        "com.example.chain.Use#chained()",
+        "com.example.chain.Use#upperNames(List<String>)"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.chain.Use#chained() 链式 new Builder().setName(...).setCount(...)",
+          "target": "com.example.chain.Builder#setName(String)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.chain.Use#chained()",
+            "path": "J06/com/example/chain/Use.java",
+            "callee": "com.example.chain.Use#chained() 链式 new Builder().setName(...).setCount(...)",
+            "occurrence": 1,
+            "anchor": "setName(\"order\")"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.chain.Use#chained() 链式 .setCount(2)",
+          "target": "com.example.chain.Builder#setCount(int)",
+          "certainty": "syntactic",
+          "note": "receiver 来自上一环已证明的返回类型 Builder",
+          "source": {
+            "owner": "com.example.chain.Use#chained()",
+            "path": "J06/com/example/chain/Use.java",
+            "callee": "com.example.chain.Use#chained() 链式 .setCount(2)",
+            "occurrence": 1,
+            "anchor": "setCount(2)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.chain.Use#chained() 链式 .build()",
+          "target": "com.example.chain.Builder#build()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.chain.Use#chained()",
+            "path": "J06/com/example/chain/Use.java",
+            "callee": "com.example.chain.Use#chained() 链式 .build()",
+            "occurrence": 1,
+            "anchor": "build()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.chain.Use#upperNames(List<String>) 调用 names.stream()",
+          "target": "?java.util.Collection#stream()",
+          "certainty": "syntactic",
+          "note": "List 声明类型，外部边界",
+          "source": {
+            "owner": "com.example.chain.Use#upperNames(List<String>)",
+            "path": "J06/com/example/chain/Use.java",
+            "callee": "names.stream()",
+            "occurrence": 1,
+            "anchor": "names.stream()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.chain.Use#upperNames(List<String>) 调用 .filter(...).map(String::toUpperCase).collect(...)",
+          "certainty": "unknown",
+          "candidates": [],
+          "note": "receiver 类型来自外部泛型 API（Stream），呈现边界；不虚构 Stream 链语义",
+          "source": {
+            "owner": "com.example.chain.Use#upperNames(List<String>)",
+            "path": "J06/com/example/chain/Use.java",
+            "callee": ".filter(...).map(String::toUpperCase).collect(...)",
+            "occurrence": 1,
+            "anchor": "filter(n -> !n.isEmpty())"
+          }
+        }
+      ],
+      "diagnostics": [
+        "filter/map/collect 的目标在外部库且泛型复杂：允许 unresolved/external，不得伪造仓库内符号"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ03"
+        },
+        {
+          "id": "JQ12"
+        }
+      ],
+      "question_ids": [
+        "JQ03",
+        "JQ12"
+      ]
+    },
+    {
+      "id": "J07",
+      "scenario": "lambda/方法引用/匿名类/局部类",
+      "files": [
+        "J07/com/example/func/CallbackUser.java"
+      ],
+      "symbols": [
+        "com.example.func.CallbackUser#run()",
+        "com.example.func.CallbackUser#wire()",
+        "com.example.func.CallbackUser.wire.LocalHelper#help()"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.func.CallbackUser#wire() lambda () -> run() 体内调用 run()",
+          "target": "com.example.func.CallbackUser#run()",
+          "certainty": "syntactic",
+          "note": "lambda 体内调用点归属 wire() 所在词法范围（或标注 lambda 宿主），包含范围准确",
+          "source": {
+            "owner": "com.example.func.CallbackUser#wire()",
+            "path": "J07/com/example/func/CallbackUser.java",
+            "callee": "com.example.func.CallbackUser#wire() lambda () -> run() 体内调用 run()",
+            "occurrence": 1,
+            "anchor": "() -> run()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.func.CallbackUser#wire() 方法引用 this::run",
+          "target": "com.example.func.CallbackUser#run()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.func.CallbackUser#wire()",
+            "path": "J07/com/example/func/CallbackUser.java",
+            "callee": "com.example.func.CallbackUser#wire() 方法引用 this::run",
+            "occurrence": 1,
+            "anchor": "this::run"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.func.CallbackUser#wire() 匿名 Runnable.run 体内调用 run()",
+          "target": "com.example.func.CallbackUser#run()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.func.CallbackUser#wire()",
+            "path": "J07/com/example/func/CallbackUser.java",
+            "callee": "com.example.func.CallbackUser#wire() 匿名 Runnable.run 体内调用 run()",
+            "occurrence": 1,
+            "anchor": "public void run()"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.func.CallbackUser#wire() 局部类 LocalHelper#help() 内调用 run()",
+          "target": "com.example.func.CallbackUser#run()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.func.CallbackUser#wire()",
+            "path": "J07/com/example/func/CallbackUser.java",
+            "callee": "com.example.func.CallbackUser#wire() 局部类 LocalHelper#help() 内调用 run()",
+            "occurrence": 1,
+            "anchor": "void help()"
+          }
+        }
+      ],
+      "diagnostics": [
+        "不假设 callback 执行时机：lambda.run()/reference.run() 对 java.lang.Runnable#run 的接口分派保留候选，不声明回调调度顺序"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ11"
+        }
+      ],
+      "question_ids": [
+        "JQ11"
+      ]
+    },
+    {
+      "id": "J08",
+      "scenario": "enum/record、Java 8/11/17/21 非预览语法",
+      "files": [
+        "J08/com/example/modern/Order.java"
+      ],
+      "symbols": [
+        "com.example.modern.Order.Status",
+        "com.example.modern.Order.Item",
+        "com.example.modern.Order#describe(Status)",
+        "com.example.modern.Order#render()",
+        "com.example.modern.Order#itemLabel(Reply)",
+        "com.example.modern.Order.Ok",
+        "com.example.modern.Order.Err"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.modern.Order#itemLabel(Reply) 中 instanceof Ok(Item item) 模式与 item.sku()",
+          "target": "com.example.modern.Order.Item#sku()",
+          "certainty": "syntactic",
+          "note": "record accessor 由声明生成（record 头），按声明符号解析",
+          "source": {
+            "owner": "com.example.modern.Order#itemLabel(Reply)",
+            "path": "J08/com/example/modern/Order.java",
+            "callee": "com.example.modern.Order#itemLabel(Reply) 中 instanceof Ok(Item item) 模式与 item.sku()",
+            "occurrence": 1,
+            "anchor": "item.sku()"
+          }
+        }
+      ],
+      "diagnostics": [
+        "sealed interface permits 结构应被识别；若语法 crate 不支持 record pattern（Java 21），对应位置产生覆盖诊断而非整文件 ERROR"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ04"
+        },
+        {
+          "id": "JQ16"
+        }
+      ],
+      "question_ids": [
+        "JQ04",
+        "JQ16"
+      ]
+    },
+    {
+      "id": "J09",
+      "scenario": "Maven 多模块/同名源集，测试源集默认不进生产业务链",
+      "modules": [
+        "app-core",
+        "app-web"
+      ],
+      "source_sets": [
+        "main",
+        "test"
+      ],
+      "files": [
+        "J09/pom.xml",
+        "J09/app-core/pom.xml",
+        "J09/app-web/pom.xml",
+        "J09/app-core/src/main/java/com/example/core/Named.java",
+        "J09/app-core/src/main/java/com/example/core/CoreRunner.java",
+        "J09/app-core/src/test/java/com/example/core/CoreRunnerTest.java",
+        "J09/app-web/src/main/java/com/example/core/Named.java",
+        "J09/app-web/src/main/java/com/example/core/WebRunner.java"
+      ],
+      "symbols": [
+        "module:app-core com.example.core.Named#name()",
+        "module:app-web com.example.core.Named#label()",
+        "module:app-core com.example.core.CoreRunner#name()",
+        "module:app-web com.example.core.WebRunner#label()"
+      ],
+      "assertions": [
+        {
+          "kind": "implements",
+          "call_site": "module:app-core com.example.core.CoreRunner implements Named",
+          "target": "module:app-core com.example.core.Named",
+          "certainty": "syntactic",
+          "note": "同 FQN 的 Named 在两个模块中是不同符号，不得跨模块串并",
+          "source": {
+            "owner": "module:app-core com.example.core.CoreRunner",
+            "path": "J09/app-core/src/main/java/com/example/core/CoreRunner.java",
+            "callee": "module:app-core com.example.core.CoreRunner implements Named",
+            "occurrence": 1,
+            "anchor": "implements Named"
+          }
+        },
+        {
+          "kind": "implements",
+          "call_site": "module:app-web com.example.core.WebRunner implements Named",
+          "target": "module:app-web com.example.core.Named",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "module:app-web com.example.core.WebRunner",
+            "path": "J09/app-web/src/main/java/com/example/core/WebRunner.java",
+            "callee": "module:app-web com.example.core.WebRunner implements Named",
+            "occurrence": 1,
+            "anchor": "implements Named"
+          }
+        }
+      ],
+      "diagnostics": [
+        "CoreRunnerTest 位于 app-core 的 src/test 源集：source_set=test 标注存在；生产业务链默认不含测试"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ05"
+        },
+        {
+          "id": "JQ18"
+        }
+      ],
+      "question_ids": [
+        "JQ05",
+        "JQ18"
+      ]
+    },
+    {
+      "id": "J10",
+      "scenario": "条件/循环/try-catch/提前 return",
+      "files": [
+        "J10/com/example/flow/Flow.java"
+      ],
+      "symbols": [
+        "com.example.flow.Flow#process(int)"
+      ],
+      "assertions": [
+        {
+          "kind": "statements",
+          "call_site": "com.example.flow.Flow#process(int) 内语句结构",
+          "certainty": "syntactic",
+          "note": "if/for/while/try-catch/return 各语句保留源码范围（行区间），供解释引用；不生成虚假确定执行顺序，不构建完整 CFG",
+          "source": {
+            "owner": "com.example.flow.Flow#process(int)",
+            "path": "J10/com/example/flow/Flow.java",
+            "callee": "com.example.flow.Flow#process(int) 内语句结构",
+            "occurrence": 1,
+            "anchor": "if (n < 0)"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ08"
+        }
+      ],
+      "question_ids": [
+        "JQ08"
+      ]
+    },
+    {
+      "id": "J11",
+      "scenario": "无构建文件、无 .git 的普通 Java 目录",
+      "files": [
+        "J11/Plain.java",
+        "J11/util/Helper.java"
+      ],
+      "symbols": [
+        "(default package) Plain#greet()",
+        "(default package) Plain#helper()",
+        "util.Helper#join()"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "Plain#greet() 调用 helper().join()",
+          "target": "util.Helper#join()",
+          "certainty": "syntactic",
+          "note": "Plain 在默认包，helper() 返回 util.Helper 已证明；发现→索引→查询→源码闭环不触发 Git",
+          "source": {
+            "owner": "Plain#greet()",
+            "path": "J11/Plain.java",
+            "callee": "helper().join()",
+            "occurrence": 1,
+            "anchor": "helper().join()"
+          }
+        }
+      ],
+      "diagnostics": [
+        "Plain.java 无 package 声明：默认包归属应显式呈现，不伪造包名"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ06"
+        },
+        {
+          "id": "JQ19"
+        }
+      ],
+      "question_ids": [
+        "JQ06",
+        "JQ19"
+      ]
+    },
+    {
+      "id": "J12",
+      "scenario": "同一方法重复调用、递归/互递归",
+      "files": [
+        "J12/com/example/rec/Recursor.java"
+      ],
+      "symbols": [
+        "com.example.rec.Recursor#twice(int)",
+        "com.example.rec.Recursor#step(int)",
+        "com.example.rec.Recursor#fact(int)",
+        "com.example.rec.Recursor#isEven(int)",
+        "com.example.rec.Recursor#isOdd(int)"
+      ],
+      "assertions": [
+        {
+          "kind": "calls",
+          "call_site": "com.example.rec.Recursor#twice(int) 调用 step(n)（第一处）",
+          "target": "com.example.rec.Recursor#step(int)",
+          "certainty": "syntactic",
+          "note": "同一方法两次调用必须保存为两个调用点，图上可聚合为一条边但证据不丢",
+          "source": {
+            "owner": "com.example.rec.Recursor#twice(int)",
+            "path": "J12/com/example/rec/Recursor.java",
+            "callee": "step(n)（第一处）",
+            "occurrence": 1,
+            "anchor": "step(n)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.rec.Recursor#twice(int) 调用 step(n)（第二处）",
+          "target": "com.example.rec.Recursor#step(int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.rec.Recursor#twice(int)",
+            "path": "J12/com/example/rec/Recursor.java",
+            "callee": "step(n)（第二处）",
+            "occurrence": 2,
+            "anchor": "step(n)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.rec.Recursor#fact(int) 调用 fact(n - 1)",
+          "target": "com.example.rec.Recursor#fact(int)",
+          "certainty": "syntactic",
+          "note": "自递归成环，图可展开且不死循环",
+          "source": {
+            "owner": "com.example.rec.Recursor#fact(int)",
+            "path": "J12/com/example/rec/Recursor.java",
+            "callee": "fact(n - 1)",
+            "occurrence": 1,
+            "anchor": "fact(n - 1)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.rec.Recursor#isEven(int) 调用 isOdd(n - 1)",
+          "target": "com.example.rec.Recursor#isOdd(int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.rec.Recursor#isEven(int)",
+            "path": "J12/com/example/rec/Recursor.java",
+            "callee": "isOdd(n - 1)",
+            "occurrence": 1,
+            "anchor": "isOdd(n - 1)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.rec.Recursor#isOdd(int) 调用 isEven(n - 1)",
+          "target": "com.example.rec.Recursor#isEven(int)",
+          "certainty": "syntactic",
+          "note": "互递归成环",
+          "source": {
+            "owner": "com.example.rec.Recursor#isOdd(int)",
+            "path": "J12/com/example/rec/Recursor.java",
+            "callee": "isEven(n - 1)",
+            "occurrence": 1,
+            "anchor": "isEven(n - 1)"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "JQ07"
+        },
+        {
+          "id": "JQ20"
+        }
+      ],
+      "question_ids": [
+        "JQ07",
+        "JQ20"
+      ]
+    }
+  ],
+  "question_bank": [
+    {
+      "id": "JQ01",
+      "group": "J01",
+      "q": "Runner 运行时用的 format 工具类在哪里？",
+      "allowed_points": [
+        "com.example.alpha.Util#format(String)"
+      ]
+    },
+    {
+      "id": "JQ02",
+      "group": "J01",
+      "q": "这个项目里叫 Util 的类有几个？分别在哪？",
+      "allowed_points": [
+        "alpha.Util",
+        "beta.Util"
+      ]
+    },
+    {
+      "id": "JQ03",
+      "group": "J06",
+      "q": "找一下把字符串拼成订单编号的构造器构建逻辑。",
+      "allowed_points": [
+        "Builder#build()",
+        "Use#chained()"
+      ]
+    },
+    {
+      "id": "JQ04",
+      "group": "J08",
+      "q": "现代订单模块里订单状态有哪些？",
+      "allowed_points": [
+        "Order.Status"
+      ]
+    },
+    {
+      "id": "JQ05",
+      "group": "J09",
+      "q": "多模块项目里核心模块的入口类是什么？",
+      "allowed_points": [
+        "module:app-core CoreRunner"
+      ]
+    },
+    {
+      "id": "JQ06",
+      "group": "J11",
+      "q": "Plain 程序的问候逻辑在哪里实现？",
+      "allowed_points": [
+        "Plain#greet()",
+        "util.Helper#join()"
+      ]
+    },
+    {
+      "id": "JQ07",
+      "group": "J12",
+      "q": "有没有会自己调用自己的计算逻辑？",
+      "allowed_points": [
+        "Recursor#fact(int)",
+        "isEven/isOdd"
+      ]
+    },
+    {
+      "id": "JQ08",
+      "group": "J10",
+      "q": "数字拆解的处理流程方法在哪，里面有哪些分支？",
+      "allowed_points": [
+        "Flow#process(int)"
+      ]
+    },
+    {
+      "id": "JQ09",
+      "group": "J03",
+      "q": "Service.load 会调用哪个 findById？实现可能有几个？",
+      "allowed_points": [
+        "CALLS 指接口声明；候选 2 个实现"
+      ]
+    },
+    {
+      "id": "JQ10",
+      "group": "J04",
+      "q": "Child 构造时发生了什么调用？",
+      "allowed_points": [
+        "Base#<init>(int)",
+        "super.greet()",
+        "this.log"
+      ]
+    },
+    {
+      "id": "JQ11",
+      "group": "J07",
+      "q": "wire 方法里 run() 被哪些结构引用？",
+      "allowed_points": [
+        "lambda/方法引用/匿名类/局部类 4 处，不假设执行时机"
+      ]
+    },
+    {
+      "id": "JQ12",
+      "group": "J06",
+      "q": "upperNames 的流式链每一步的目标是什么？",
+      "allowed_points": [
+        "stream() 外部边界；filter/map/collect 呈现边界，不虚构"
+      ]
+    },
+    {
+      "id": "JQ13",
+      "group": "J02",
+      "q": "f(null) 走哪个重载？",
+      "allowed_points": [
+        "唯一选择 f(String)",
+        "null 不适用于基本类型重载"
+      ]
+    },
+    {
+      "id": "JQ14",
+      "group": "J02",
+      "q": "o.g(5) 传 int 会进入 g(Integer) 还是 g(long)？",
+      "allowed_points": [
+        "选择 g(long)",
+        "primitive widening 优先于 boxing"
+      ]
+    },
+    {
+      "id": "JQ15",
+      "group": "J05",
+      "q": "rename 里 name.trim 用的是哪个 name？",
+      "allowed_points": [
+        "参数遮蔽字段，最近作用域"
+      ]
+    },
+    {
+      "id": "JQ16",
+      "group": "J08",
+      "q": "itemLabel 里 item.sku() 定义在哪？",
+      "allowed_points": [
+        "record 头声明的 accessor Order.Item#sku()"
+      ]
+    },
+    {
+      "id": "JQ17",
+      "group": "J04",
+      "q": "max(a,b) 是本项目的方法吗？",
+      "allowed_points": [
+        "静态导入外部 ?java.lang.Math#max(int,int)，外部边界"
+      ]
+    },
+    {
+      "id": "JQ18",
+      "group": "J09",
+      "q": "CoreRunnerTest 属于生产代码吗？",
+      "allowed_points": [
+        "source_set=test，默认不入业务链"
+      ]
+    },
+    {
+      "id": "JQ19",
+      "group": "J11",
+      "q": "项目里没有订单支付模块吗？",
+      "allowed_points": [
+        "零命中呈现检索范围，不说“项目不存在该功能”"
+      ]
+    },
+    {
+      "id": "JQ20",
+      "group": "J12",
+      "q": "twice 调 step 几次？图上是一条边还是两条？",
+      "allowed_points": [
+        "2 个调用点，图聚合为一条边但证据不丢"
+      ]
+    }
+  ]
+}

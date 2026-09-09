@@ -181,6 +181,270 @@ public class Main extends Base implements Runnable, Closeable {
     );
     let calls: Vec<&str> = result.calls.iter().map(|c| c.name.as_str()).collect();
     assert!(calls.contains(&"of"), "{calls:?}");
+    let list_of = result
+        .calls
+        .iter()
+        .find(|call| call.name == "of")
+        .expect("List.of");
+    assert_eq!(list_of.receiver_expr, "List");
+    assert_eq!(list_of.argument_exprs, vec!["1"]);
+}
+
+#[test]
+fn dev04_extracts_java_signatures_import_kinds_nested_types_and_scopes() {
+    let result = extract_defs(
+        LangId::Java,
+        r#"
+package com.example.demo;
+
+import static java.lang.Math.max;
+import java.util.*;
+import java.util.ArrayList;
+
+public class Outer {
+    private String name;
+
+    public String f(int value) { return String.valueOf(value); }
+    public String f(String value) { return value; }
+    public String f(long base, int... extras) { return name; }
+
+    class Inner {
+        void use(String name) {
+            var values = new ArrayList<String>();
+            values.add(name);
+        }
+    }
+}
+"#,
+    );
+    let java = result.java.as_ref().expect("Java 专用事实");
+    assert_eq!(java.package, "com.example.demo");
+    assert!(java.imports.iter().any(|import| {
+        import.path == "java.lang.Math.max" && import.is_static && !import.is_wildcard
+    }));
+    assert!(
+        java.imports.iter().any(|import| {
+            import.path == "java.util" && !import.is_static && import.is_wildcard
+        })
+    );
+
+    let signatures: Vec<&str> = java
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name == "f")
+        .map(|symbol| symbol.signature.as_str())
+        .collect();
+    assert_eq!(
+        signatures,
+        vec!["(int)", "(java.lang.String)", "(long,int...)"]
+    );
+    let inner = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Inner")
+        .expect("Inner");
+    assert_eq!(inner.owner_chain, vec!["Outer"]);
+    let use_method = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "use")
+        .expect("use");
+    assert_eq!(use_method.owner_chain, vec!["Outer", "Inner"]);
+    assert!(java.variables.iter().any(|variable| {
+        variable.name == "name"
+            && variable.kind == "parameter"
+            && variable.type_name == "java.lang.String"
+    }));
+    assert!(java.variables.iter().any(|variable| {
+        variable.name == "values"
+            && variable.kind == "local"
+            && variable.type_name == "java.util.ArrayList<java.lang.String>"
+            && variable.scope_end_byte > variable.scope_start_byte
+    }));
+}
+
+#[test]
+fn dev04_extracts_java_heritage_and_record_components() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/fixtures/code_understanding/java/J08/com/example/modern/Order.java"),
+    )
+    .unwrap();
+    let result = extract_defs(LangId::Java, &source);
+    let java = result.java.as_ref().expect("Java 专用事实");
+
+    let item = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == "record" && symbol.name == "Item")
+        .expect("Item record");
+    assert_eq!(item.owner_chain, vec!["Order"]);
+    let sku = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == "record_accessor" && symbol.name == "sku")
+        .expect("record accessor sku()");
+    assert_eq!(sku.owner_chain, vec!["Order", "Item"]);
+    assert_eq!(sku.signature, "()");
+    assert_eq!(sku.return_type.as_deref(), Some("java.lang.String"));
+    assert!(java.variables.iter().any(|variable| {
+        variable.kind == "record_component"
+            && variable.name == "sku"
+            && variable.owner_chain == ["Order", "Item"]
+    }));
+
+    let reply = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == "interface" && symbol.name == "Reply")
+        .expect("Reply interface");
+    assert_eq!(
+        reply.permits,
+        vec![
+            "com.example.modern.Order.Ok",
+            "com.example.modern.Order.Err"
+        ]
+    );
+    let ok = java
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == "record" && symbol.name == "Ok")
+        .expect("Ok record");
+    assert_eq!(ok.implements, vec!["com.example.modern.Order.Reply"]);
+}
+
+#[test]
+fn dev04_persists_overloads_and_maven_module_source_set_isolation() {
+    fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_tree(&source_path, &target_path);
+            } else {
+                std::fs::copy(source_path, target_path).unwrap();
+            }
+        }
+    }
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tests/fixtures/code_understanding/java");
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("java-project");
+    copy_tree(&fixtures.join("J09"), &root);
+    let test_named = root.join("app-core/src/test/java/com/example/core/Named.java");
+    std::fs::create_dir_all(test_named.parent().unwrap()).unwrap();
+    std::fs::copy(
+        root.join("app-core/src/main/java/com/example/core/Named.java"),
+        &test_named,
+    )
+    .unwrap();
+    let overloads = fixtures.join("J02/com/example/overload/Overloads.java");
+    let overload_target = root.join("app-core/src/main/java/com/example/overload/Overloads.java");
+    std::fs::create_dir_all(overload_target.parent().unwrap()).unwrap();
+    std::fs::copy(overloads, &overload_target).unwrap();
+
+    let db_path = temp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+
+    let mut named = connection
+        .prepare(
+            "SELECT s.module_key,s.source_set,s.package,s.signature,s.type_metadata_json \
+             FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key \
+             WHERE n.name='Named' ORDER BY s.module_key,s.source_set",
+        )
+        .unwrap();
+    let named_rows: Vec<(String, String, String)> = named
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        named_rows,
+        vec![
+            ("app-core".into(), "main".into(), "com.example.core".into()),
+            ("app-core".into(), "test".into(), "com.example.core".into()),
+            ("app-web".into(), "main".into(), "com.example.core".into()),
+        ]
+    );
+    let test_source_set: String = connection
+        .query_row(
+            "SELECT s.source_set FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key WHERE n.name='CoreRunnerTest'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(test_source_set, "test");
+
+    let overload_signatures: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT s.signature FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key WHERE n.file_path LIKE '%Overloads.java' AND n.name IN ('f','g') ORDER BY n.start_line",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        overload_signatures,
+        vec![
+            "(int)",
+            "(java.lang.String)",
+            "(long,int...)",
+            "(java.lang.Integer)",
+            "(long)",
+        ]
+    );
+    let distinct_keys: i64 = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT n.symbol_key) FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key WHERE n.file_path LIKE '%Overloads.java' AND n.name IN ('f','g')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(distinct_keys, 5);
+    let overload_keys_before: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT n.symbol_key FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key WHERE n.file_path LIKE '%Overloads.java' ORDER BY n.name,s.signature",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    drop(named);
+    drop(connection);
+
+    let moved_dir = root.join("app-core/src/main/java/relocated");
+    std::fs::create_dir_all(&moved_dir).unwrap();
+    std::fs::rename(&overload_target, moved_dir.join("Overloads.java")).unwrap();
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let overload_keys_after: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT n.symbol_key FROM symbol_semantics s JOIN nodes n ON n.symbol_key=s.symbol_key WHERE n.file_path LIKE '%Overloads.java' ORDER BY n.name,s.signature",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        overload_keys_after, overload_keys_before,
+        "Java 稳定身份不应因源根内文件移动而变化"
+    );
 }
 
 #[test]
@@ -523,6 +787,7 @@ fn store_roundtrip_and_fts_search() {
         let mut store = CodeIndexStore::open(&db_path).unwrap();
         let hashes = vec![FileHashRow {
             rel_path: "svc.rs".to_string(),
+            sha256: crate::code_index::content_fingerprint(b"fn pushBranch() {}"),
             mtime_ns: 1,
             size: 2,
         }];
@@ -538,6 +803,397 @@ fn store_roundtrip_and_fts_search() {
     assert_eq!(stats.nodes, 4);
     assert_eq!(stats.calls, 1);
     assert_eq!(stats.files, 1);
+}
+
+#[test]
+fn v3_schema_enforces_facts_constraints_and_indexes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("index.db");
+    drop(CodeIndexStore::open(&db_path).unwrap());
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let hex = "0".repeat(64);
+
+    assert!(
+        conn.execute(
+            "INSERT INTO entities(entity_key,entity_kind) VALUES(?1,'symbol')",
+            rusqlite::params![format!("sk1:{}", "A".repeat(64))],
+        )
+        .is_err()
+    );
+
+    assert!(conn.execute(
+        "INSERT INTO call_sites(callsite_key,owner_key,rel_path,start_byte,end_byte,start_line,end_line,content_sha256,callee_expr,resolution) VALUES(?1,'owner','path.rs',-1,0,1,1,?2,'call','{}')",
+        rusqlite::params![format!("cs1:{hex}"), hex],
+    ).is_err());
+    assert!(conn.execute(
+        "INSERT INTO call_sites(callsite_key,owner_key,rel_path,start_byte,end_byte,start_line,end_line,content_sha256,callee_expr,resolution) VALUES(?1,'owner','path.rs',0,0,0,1,?2,'call','{}')",
+        rusqlite::params![format!("cs1:{}", "1".repeat(64)), "0".repeat(64)],
+    ).is_err());
+    assert!(conn.execute(
+        "INSERT INTO call_sites(callsite_key,owner_key,rel_path,start_byte,end_byte,start_line,end_line,content_sha256,callee_expr,resolution) VALUES(?1,'owner','path.rs',0,0,1,1,'bad','call','{}')",
+        rusqlite::params![format!("cs1:{}", "2".repeat(64))],
+    ).is_err());
+    assert!(conn.execute(
+        "INSERT INTO relations(relation_id,source_key,kind,certainty,resolution_state) VALUES(?1,'source','calls','syntactic','unresolved')",
+        rusqlite::params![format!("r1:{}", "A".repeat(64))],
+    ).is_err());
+    assert!(conn.execute(
+        "INSERT INTO evidence(evidence_id,kind,excerpt_digest,refs_json) VALUES(?1,'unknown','digest','[]')",
+        rusqlite::params![format!("e1:{hex}")],
+    ).is_err());
+    assert!(
+        conn.execute(
+            "INSERT INTO evidence(evidence_id,kind,excerpt_digest,refs_json) VALUES(?1,'declaration','digest','[]')",
+            rusqlite::params![format!("e1:{}", "A".repeat(64))],
+        )
+        .is_err()
+    );
+
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_index_list('relations')")
+        .unwrap();
+    let relation_indexes: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert!(
+        relation_indexes
+            .iter()
+            .any(|name| name == "idx_relations_source")
+    );
+    assert!(
+        relation_indexes
+            .iter()
+            .any(|name| name == "idx_relations_target")
+    );
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_index_list('call_sites')")
+        .unwrap();
+    let callsite_indexes: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert!(
+        callsite_indexes
+            .iter()
+            .any(|name| name == "idx_callsites_owner")
+    );
+    assert!(
+        callsite_indexes
+            .iter()
+            .any(|name| name == "idx_callsites_path")
+    );
+}
+
+#[test]
+fn v3_meta_uses_dev01_coverage_wire_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("index.db");
+    let mut graph = GraphBuffer::new();
+    let caller = graph.add_symbol(
+        NodeLabel::Function,
+        "caller",
+        "demo.caller".to_string(),
+        "src.rs",
+        1,
+        1,
+        "{}".to_string(),
+    );
+    let target = graph.add_symbol(
+        NodeLabel::Function,
+        "target",
+        "demo.target".to_string(),
+        "src.rs",
+        2,
+        2,
+        "{}".to_string(),
+    );
+    graph.add_edge(caller, target, EdgeType::Calls, "{}".to_string());
+    let hashes = vec![FileHashRow {
+        rel_path: "src.rs".to_string(),
+        sha256: content_fingerprint(b"fn caller() { target() }"),
+        mtime_ns: 1,
+        size: 24,
+    }];
+    let mut store = CodeIndexStore::open(&db_path).unwrap();
+    store
+        .replace_all(&graph, &hashes, &CodeIndexMeta::default())
+        .unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let coverage_json: String = conn
+        .query_row("SELECT value FROM meta WHERE key='coverage'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let coverage: CoverageSummary = serde_json::from_str(&coverage_json).unwrap();
+    assert_eq!(coverage.files_discovered, 1);
+    assert_eq!(coverage.files_parsed, 1);
+    assert_eq!(coverage.calls_total, 1);
+    assert_eq!(coverage.calls_resolved, 1);
+    assert_eq!(
+        coverage.calls_ambiguous + coverage.calls_unresolved + coverage.calls_external,
+        0
+    );
+    let adapters_json: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='adapter_versions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let adapters: Vec<(String, String)> = serde_json::from_str(&adapters_json).unwrap();
+    assert_eq!(adapters, vec![("generic".to_string(), "1".to_string())]);
+}
+
+#[test]
+fn stored_symbol_key_normalizes_the_project_identity() {
+    fn key_for(db_path: &std::path::Path, repo_path: &str) -> String {
+        let mut graph = GraphBuffer::new();
+        graph.add_symbol(
+            NodeLabel::Function,
+            "work",
+            "demo.work".to_string(),
+            "src/work.rs",
+            1,
+            1,
+            "{}".to_string(),
+        );
+        let hashes = vec![FileHashRow {
+            rel_path: "src/work.rs".to_string(),
+            sha256: content_fingerprint(b"fn work() {}"),
+            mtime_ns: 1,
+            size: 12,
+        }];
+        let mut store = CodeIndexStore::open(db_path).unwrap();
+        store
+            .replace_all(
+                &graph,
+                &hashes,
+                &CodeIndexMeta {
+                    repo_path: repo_path.to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        drop(store);
+        rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT symbol_key FROM nodes WHERE symbol_key IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let first = key_for(&tmp.path().join("first.db"), r"D:\Demo\Repo\");
+    let second = key_for(&tmp.path().join("second.db"), r"d:\demo\repo");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn read_only_v2_or_corrupt_database_requires_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v2 = tmp.path().join("v2.db");
+    let conn = rusqlite::Connection::open(&v2).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2');").unwrap();
+    drop(conn);
+    let open_error = match open_read_only_if_exists(&v2) {
+        Ok(_) => panic!("v2 库不得被当作兼容只读库打开"),
+        Err(error) => error.to_string(),
+    };
+    for error in [
+        open_error,
+        read_index_stats(&v2).unwrap_err().to_string(),
+        search_symbols(&v2, "anything", 10).unwrap_err().to_string(),
+    ] {
+        assert!(error.contains("NeedsRebuild"), "{error}");
+    }
+    let corrupt = tmp.path().join("corrupt.db");
+    std::fs::write(&corrupt, b"not sqlite").unwrap();
+    assert!(
+        read_index_stats(&corrupt)
+            .unwrap_err()
+            .to_string()
+            .contains("NeedsRebuild")
+    );
+    let missing = tmp.path().join("missing.db");
+    assert!(open_read_only_if_exists(&missing).unwrap().is_none());
+    assert!(read_index_stats(&missing).unwrap().is_none());
+}
+
+#[test]
+fn v2_store_is_not_deleted_and_reports_needs_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("v2.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2'); CREATE TABLE preserved(value TEXT);").unwrap();
+    drop(conn);
+    let error = match CodeIndexStore::open(&db_path) {
+        Ok(_) => panic!("v2 库不得被当作 v3 打开"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("NeedsRebuild"), "{error}");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM preserved", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn v2_rebuild_publishes_v3_in_one_transaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("v2-rebuild.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2');").unwrap();
+    drop(conn);
+    let mut graph = GraphBuffer::new();
+    graph.add_symbol(
+        NodeLabel::Function,
+        "work",
+        "demo.work".to_string(),
+        "work.rs",
+        1,
+        1,
+        "{}".to_string(),
+    );
+    let hashes = vec![FileHashRow {
+        rel_path: "work.rs".to_string(),
+        sha256: crate::code_index::content_fingerprint(b"fn work() {}"),
+        mtime_ns: 1,
+        size: 12,
+    }];
+    CodeIndexStore::rebuild_incompatible(
+        &db_path,
+        &graph,
+        &hashes,
+        &CodeIndexMeta {
+            repo_path: "demo".to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    assert_eq!(store.generation().unwrap(), 1);
+    assert_eq!(
+        store.load_file_hashes().unwrap()[0].sha256,
+        hashes[0].sha256
+    );
+}
+
+#[test]
+fn pipeline_v2_rebuild_publishes_once_at_generation_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_repo_file(&root, "src/main.rs", "fn main() {}\n");
+    let db_path = tmp.path().join("v2.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2');").unwrap();
+    drop(conn);
+    assert!(matches!(
+        run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let store = CodeIndexStore::open(&db_path).unwrap();
+    assert_eq!(store.generation().unwrap(), 1);
+    assert_eq!(store.read_stats().unwrap().unwrap().mode, "rebuild");
+}
+
+#[test]
+fn stale_generation_publish_rolls_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("index.db");
+    let mut first = CodeIndexStore::open(&db).unwrap();
+    let mut second = CodeIndexStore::open(&db).unwrap();
+    let graph = GraphBuffer::new();
+    second
+        .replace_all_at_generation(&graph, &[], &CodeIndexMeta::default(), 0)
+        .unwrap();
+    assert!(
+        first
+            .replace_all_at_generation(&graph, &[], &CodeIndexMeta::default(), 0)
+            .is_err()
+    );
+    assert_eq!(CodeIndexStore::open(&db).unwrap().generation().unwrap(), 1);
+}
+
+#[test]
+fn cancelled_v2_rebuild_preserves_old_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    write_repo_file(&root, "src/main.rs", "fn main() {}\n");
+    let db_path = tmp.path().join("old.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2'); CREATE TABLE keep_me(value TEXT);").unwrap();
+    drop(conn);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut options = PipelineOptions::new(cancel, Box::new(|_| {}));
+    assert!(matches!(
+        run_index(&root, &db_path, true, &mut options).unwrap(),
+        RunOutcome::Cancelled
+    ));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "2"
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM keep_me", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn failed_v2_rebuild_rolls_back_old_schema() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("failed-rebuild.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','2'); CREATE TABLE keep_me(value TEXT);").unwrap();
+    drop(conn);
+    let graph = GraphBuffer::new();
+    let invalid_hash = vec![FileHashRow {
+        rel_path: "bad.rs".to_string(),
+        sha256: "not-a-sha".to_string(),
+        mtime_ns: 0,
+        size: 0,
+    }];
+    assert!(
+        CodeIndexStore::rebuild_incompatible(
+            &db_path,
+            &graph,
+            &invalid_hash,
+            &CodeIndexMeta::default()
+        )
+        .is_err()
+    );
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "2"
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM keep_me", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +1226,7 @@ fn pipeline_full_then_incremental() {
         "fn alpha() {
     beta();
 }
+
 ",
     );
     write_repo_file(
@@ -678,6 +1335,58 @@ fn pipeline_full_then_incremental() {
 }
 
 #[test]
+fn dev03_incremental_modify_delete_matches_fresh_full_snapshot() {
+    fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("equivalent");
+    std::fs::create_dir_all(&root).unwrap();
+    write_repo_file(&root, "src/a.rs", "fn a() { b(); }\n");
+    write_repo_file(&root, "src/b.rs", "fn b() {}\n");
+    let incremental_db = tmp.path().join("incremental.db");
+    run_index(&root, &incremental_db, true, &mut no_cancel_options()).unwrap();
+
+    write_repo_file(&root, "src/a.rs", "fn a() { c(); missing(); }\n");
+    std::fs::remove_file(root.join("src/b.rs")).unwrap();
+    write_repo_file(&root, "src/c.rs", "fn c() {}\n");
+    assert!(matches!(
+        run_incremental_if_stale(&root, &incremental_db, &mut no_cancel_options()).unwrap(),
+        IncrementalOutcome::Updated(_)
+    ));
+
+    let full_db = tmp.path().join("full.db");
+    run_index(&root, &full_db, true, &mut no_cancel_options()).unwrap();
+    let incremental = rusqlite::Connection::open(&incremental_db).unwrap();
+    let full = rusqlite::Connection::open(&full_db).unwrap();
+    for sql in [
+        "SELECT label||char(31)||name||char(31)||qualified_name||char(31)||file_path||char(31)||start_line||char(31)||end_line||char(31)||properties FROM nodes ORDER BY qualified_name,label,start_line,end_line",
+        "SELECT s.qualified_name||char(31)||t.qualified_name||char(31)||e.type||char(31)||e.properties FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id ORDER BY 1",
+        "SELECT rel_path||char(31)||sha256||char(31)||size FROM file_hashes ORDER BY rel_path",
+        "SELECT rel_path||char(31)||sha256||char(31)||parse_status||char(31)||facts_json FROM file_facts ORDER BY rel_path",
+        "SELECT callsite_key||char(31)||owner_key||char(31)||rel_path||char(31)||start_byte||char(31)||end_byte||char(31)||callee_expr||char(31)||resolution FROM call_sites ORDER BY callsite_key",
+        "SELECT relation_id||char(31)||source_key||char(31)||COALESCE(target_key,'')||char(31)||kind||char(31)||certainty||char(31)||resolution_state||char(31)||COALESCE(rule_id,'')||char(31)||COALESCE(heuristic_score,'') FROM relations ORDER BY relation_id",
+        "SELECT rel_path||char(31)||adapter||char(31)||code||char(31)||detail||char(31)||range_json FROM diagnostics ORDER BY rel_path,adapter,code,detail",
+        "SELECT value FROM meta WHERE key='coverage'",
+    ] {
+        assert_eq!(rows(&incremental, sql), rows(&full, sql), "SQL: {sql}");
+    }
+    for table in ["evidence", "relation_evidence"] {
+        let sql = format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}");
+        assert_eq!(
+            rows(&incremental, &sql),
+            rows(&full, &sql),
+            "table: {table}"
+        );
+    }
+}
+
+#[test]
 fn pipeline_cancel_discards_result() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("cancelrepo");
@@ -701,6 +1410,196 @@ fn pipeline_cancel_discards_result() {
             assert_eq!(stats.nodes, 0, "取消后不应有数据");
         }
     }
+}
+
+#[test]
+fn dev03_persists_each_callsite_and_closes_unresolved_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("facts");
+    std::fs::create_dir_all(&root).unwrap();
+    write_repo_file(
+        &root,
+        "src/lib.rs",
+        "fn target() {}\nfn caller() { target(); target(); missing(); }\n",
+    );
+    let db_path = tmp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM call_sites", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM evidence WHERE kind='call_site'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3
+    );
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM relations WHERE kind='calls' AND target_key IS NULL AND resolution_state='unresolved'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM relation_evidence re JOIN relations r ON r.relation_id=re.relation_id WHERE r.target_key IS NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        conn.query_row(
+            "SELECT certainty FROM relations WHERE kind='calls' AND target_key IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "inferred"
+    );
+    assert_eq!(conn.query_row("SELECT rule_id FROM relations WHERE kind='calls' AND source_key LIKE 'cs1:%' AND target_key IS NOT NULL LIMIT 1", [], |row| row.get::<_, String>(0)).unwrap(), "legacy:local");
+    let facts_json: String = conn
+        .query_row(
+            "SELECT facts_json FROM file_facts WHERE rel_path='src/lib.rs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let facts: serde_json::Value = serde_json::from_str(&facts_json).unwrap();
+    assert!(
+        facts["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|call| call["owner"].as_str() == Some("facts.src.lib.rs.caller"))
+    );
+}
+
+#[test]
+fn dev03_coverage_persists_excluded_and_parse_diagnostics_across_incremental() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("coverage");
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    write_repo_file(&root, "src/good.rs", "fn good() {}\n");
+    write_repo_file(&root, "src/partial.rs", "fn partial(\n");
+    std::fs::write(root.join("src/binary.rs"), b"fn binary() {}\0").unwrap();
+    std::fs::write(
+        root.join("src/too_big.rs"),
+        vec![b' '; PARSE_MAX_BYTES as usize + 1],
+    )
+    .unwrap();
+    write_repo_file(&root, "README.md", "# unsupported\n");
+    std::fs::write(root.join("ignored.png"), b"not indexed").unwrap();
+    std::fs::write(root.join("target/generated.rs"), b"fn generated() {}\n").unwrap();
+
+    let db_path = tmp.path().join("index.db");
+    run_index(&root, &db_path, true, &mut no_cancel_options()).unwrap();
+
+    let assert_snapshot = || {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let coverage_json: String = conn
+            .query_row("SELECT value FROM meta WHERE key='coverage'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let coverage: CoverageSummary = serde_json::from_str(&coverage_json).unwrap();
+        assert_eq!(coverage.files_parsed, 1);
+        assert_eq!(coverage.files_partial, 1);
+        assert_eq!(coverage.files_unreadable, 0);
+        assert!(coverage.files_skipped >= 5, "{coverage:?}");
+        assert_eq!(
+            coverage.files_discovered,
+            coverage.files_parsed
+                + coverage.files_partial
+                + coverage.files_skipped
+                + coverage.files_unreadable
+        );
+        for code in [
+            "excluded",
+            "parse_partial",
+            "binary",
+            "budget_exceeded",
+            "unsupported_language",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM diagnostics WHERE code=?1",
+                    [code],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(count > 0, "缺少诊断 {code}");
+        }
+    };
+    assert_snapshot();
+
+    write_repo_file(&root, "src/good.rs", "fn good_changed() {}\n");
+    assert!(matches!(
+        run_incremental_if_stale(&root, &db_path, &mut no_cancel_options()).unwrap(),
+        IncrementalOutcome::Updated(_)
+    ));
+    assert_snapshot();
+}
+
+#[test]
+fn dev03_unreadable_coverage_and_failed_publish_are_atomic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("index.db");
+    let graph = GraphBuffer::new();
+    let valid = facts::SnapshotFacts {
+        files_discovered: 1,
+        diagnostics: vec![facts::DiagnosticFact {
+            rel_path: "unreadable.rs".into(),
+            adapter: "source_reader".into(),
+            code: "unreadable".into(),
+            detail: "permission denied".into(),
+            range_json: "{}".into(),
+        }],
+        ..Default::default()
+    };
+    let mut store = CodeIndexStore::open(&db_path).unwrap();
+    store
+        .replace_all_with_facts_at_generation(&graph, &[], &valid, &CodeIndexMeta::default(), 0)
+        .unwrap();
+
+    let invalid = facts::SnapshotFacts {
+        files_discovered: 1,
+        ..Default::default()
+    };
+    assert!(
+        store
+            .replace_all_with_facts_at_generation(
+                &graph,
+                &[],
+                &invalid,
+                &CodeIndexMeta::default(),
+                1,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("覆盖文件计数不闭合")
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT value FROM meta WHERE key='generation'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM diagnostics WHERE code='unreadable'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let coverage_json: String = conn
+        .query_row("SELECT value FROM meta WHERE key='coverage'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let coverage: CoverageSummary = serde_json::from_str(&coverage_json).unwrap();
+    assert_eq!(coverage.files_discovered, 1);
+    assert_eq!(coverage.files_unreadable, 1);
 }
 
 #[test]
@@ -1448,5 +2347,463 @@ mod mcp_tests {
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("repo 参数"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Java 语法探针（DEV-00）：锁定 tree-sitter-java 0.23.5 的实际节点名与字段名，
+// 为后续 Java 语义提取（DEV-04/05）提供语法基线；升级语法 crate 版本时须重跑本组。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod java_grammar_probe {
+    use tree_sitter::Parser;
+
+    const JAVA_PROBE_SAMPLE: &str = r#"
+package com.example.app;
+
+import java.util.List;
+import java.util.Map.Entry;
+import static java.util.Collections.emptyList;
+import static com.example.app.Constants.*;
+
+public abstract class PaymentService implements AutoCloseable {
+    private final List<String> log = new java.util.ArrayList<>();
+
+    public PaymentService(int initial) { log.add(String.valueOf(initial)); }
+
+    public void charge(int amount) { log(amount); }
+    public void charge(String orderId) { log(orderId); }
+
+    @Override
+    public void close() { }
+
+    @SuppressWarnings("unused")
+    protected record Receipt(String id, int cents) { }
+
+    public enum Status { OK, FAILED }
+
+    private void log(Object msg) {
+        Runnable r = () -> log(msg);
+        this.log(msg);
+        List<String> copy = List.copyOf(log);
+        switch (msg) {
+            case Integer i -> charge(i);
+            default -> charge(String.valueOf(msg));
+        }
+    }
+
+    interface Callback { void onDone(boolean ok); }
+}
+"#;
+
+    fn probe_kinds_and_fields(source: &str) -> (Vec<String>, Vec<(String, Vec<String>)>) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("Java 语法加载失败");
+        let tree = parser.parse(source, None).expect("解析器初始化失败");
+        let root = tree.root_node();
+        assert!(!root.has_error(), "探针样例不应产生解析错误");
+        let mut kinds: Vec<String> = Vec::new();
+        let mut fields: Vec<(String, Vec<String>)> = Vec::new();
+        let mut cursor = root.walk();
+        loop {
+            let node = cursor.node();
+            if node.is_named() {
+                let kind = node.kind().to_string();
+                if !kinds.contains(&kind) {
+                    kinds.push(kind.clone());
+                }
+                if cursor.goto_first_child() {
+                    let mut seen: Vec<String> = Vec::new();
+                    loop {
+                        if let Some(f) = cursor.field_name() {
+                            let f = f.to_string();
+                            if !seen.contains(&f) {
+                                seen.push(f);
+                            }
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                    cursor.goto_parent();
+                    fields.push((kind, seen));
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return (kinds, fields);
+                }
+            }
+        }
+    }
+
+    fn kind_field(kind: &str, fields: &[(String, Vec<String>)]) -> Vec<String> {
+        // 同名节点可能出现多次（如多个 import_declaration），合并全部字段名。
+        let mut merged: Vec<String> = Vec::new();
+        for (k, fs) in fields {
+            if k == kind {
+                for f in fs {
+                    if !merged.contains(f) {
+                        merged.push(f.clone());
+                    }
+                }
+            }
+        }
+        merged
+    }
+
+    #[test]
+    fn java_probe_expected_node_kinds_exist() {
+        let (kinds, _) = probe_kinds_and_fields(JAVA_PROBE_SAMPLE);
+        for expected in [
+            "program",
+            "package_declaration",
+            "import_declaration",
+            "class_declaration",
+            "interface_declaration",
+            "record_declaration",
+            "enum_declaration",
+            "method_declaration",
+            "constructor_declaration",
+            "formal_parameters",
+            "method_invocation",
+            "object_creation_expression",
+            "annotation",
+            "marker_annotation",
+            "lambda_expression",
+            "switch_expression",
+        ] {
+            assert!(
+                kinds.contains(&expected.to_string()),
+                "缺少预期节点类型 {expected}；实际包含：{:?}",
+                kinds
+            );
+        }
+    }
+
+    #[test]
+    fn java_probe_declaration_and_invocation_fields() {
+        let (_, fields) = probe_kinds_and_fields(JAVA_PROBE_SAMPLE);
+        let method = kind_field("method_declaration", &fields);
+        for expected in ["type", "name", "parameters", "body"] {
+            assert!(
+                method.contains(&expected.to_string()),
+                "method_declaration 缺字段 {expected}；实际：{:?}",
+                method
+            );
+        }
+        let ctor = kind_field("constructor_declaration", &fields);
+        for expected in ["name", "parameters", "body"] {
+            assert!(
+                ctor.contains(&expected.to_string()),
+                "constructor_declaration 缺字段 {expected}；实际：{:?}",
+                ctor
+            );
+        }
+        let invocation = kind_field("method_invocation", &fields);
+        for expected in ["object", "name", "arguments"] {
+            assert!(
+                invocation.contains(&expected.to_string()),
+                "method_invocation 缺字段 {expected}（receiver 字段名为 object）；实际：{:?}",
+                invocation
+            );
+        }
+        let creation = kind_field("object_creation_expression", &fields);
+        for expected in ["type", "arguments"] {
+            assert!(
+                creation.contains(&expected.to_string()),
+                "object_creation_expression 缺字段 {expected}；实际：{:?}",
+                creation
+            );
+        }
+    }
+
+    #[test]
+    fn java_probe_import_forms() {
+        // 通配导入是 import_declaration 下名为 asterisk 的 named 子节点（无字段名）；
+        // static 导入没有独立节点类型。
+        let (kinds, _) = probe_kinds_and_fields(JAVA_PROBE_SAMPLE);
+        assert!(
+            !kinds.contains(&"static_import_declaration".to_string()),
+            "static 导入不应有独立节点类型"
+        );
+        assert!(
+            kinds.contains(&"asterisk".to_string()),
+            "通配导入应产出 asterisk named 子节点；实际包含：{:?}",
+            kinds
+        );
+    }
+}
+
+// DEV-00 fixture manifest 守卫：只验证人工标注协议和文件闭合，不运行索引。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod code_understanding_fixture_manifest {
+    use serde_json::Value;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const ALLOWED_KINDS: &[&str] = &[
+        "calls",
+        "dispatch_candidates",
+        "overrides",
+        "inherits",
+        "implements",
+        "injects_candidate",
+        "handles",
+        "maps_to",
+        "annotations",
+        "statements",
+        "selects_constructor",
+    ];
+
+    fn fixture_root(suite: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/fixtures/code_understanding")
+            .join(suite)
+    }
+
+    fn check_suite(suite: &str, prefix: &str) {
+        let root = fixture_root(suite);
+        let json_path = root.join("expected.json");
+        let content = fs::read_to_string(&json_path).expect("fixture expected.json 应可读取");
+        let document: Value =
+            serde_json::from_str(&content).expect("fixture expected.json 应是合法 JSON");
+        assert_eq!(document["suite"], suite);
+
+        let ids = document["question_bank_ids"]
+            .as_array()
+            .expect("question_bank_ids 必须是数组");
+        assert_eq!(ids.len(), 20, "每套题库必须声明 20 个稳定题号");
+        let unique_ids: HashSet<&str> = ids.iter().filter_map(Value::as_str).collect();
+        assert_eq!(unique_ids.len(), 20, "题号不得重复");
+        assert!(unique_ids.iter().all(|id| id.starts_with(prefix)));
+        let expected_ids: HashSet<String> = (1..=20).map(|n| format!("{prefix}{n:02}")).collect();
+        let actual_ids: HashSet<String> = unique_ids.iter().map(|id| (*id).to_owned()).collect();
+        assert_eq!(
+            actual_ids, expected_ids,
+            "题号必须覆盖 {prefix}01 到 {prefix}20"
+        );
+
+        let groups = document["groups"].as_array().expect("groups 必须是数组");
+        assert_eq!(groups.len(), 12, "每套 fixture 必须有 12 个分组");
+        let mut group_ids = HashSet::new();
+        let mut referenced_question_ids = HashSet::new();
+        let group_prefix = prefix.strip_suffix('Q').unwrap_or(prefix);
+        let expected_group_ids: HashSet<String> =
+            (1..=12).map(|n| format!("{group_prefix}{n:02}")).collect();
+        let canonical_questions = document["question_bank"]
+            .as_array()
+            .expect("question_bank 必须是数组");
+        assert_eq!(
+            canonical_questions.len(),
+            20,
+            "question_bank 必须完整包含 20 题"
+        );
+        for question in canonical_questions {
+            let id = question["id"]
+                .as_str()
+                .expect("canonical question.id 必须是字符串");
+            assert!(
+                expected_ids.contains(id),
+                "canonical question.id 必须严格使用稳定题号: {id}"
+            );
+            let group = question["group"]
+                .as_str()
+                .expect("canonical question.group 必须是字符串");
+            assert!(
+                expected_group_ids.contains(group),
+                "canonical question.group 必须引用已知分组: {group}"
+            );
+            assert!(
+                !question["q"].as_str().unwrap_or("").trim().is_empty(),
+                "canonical question.q 必须是非空字符串"
+            );
+            let allowed_points = question["allowed_points"]
+                .as_array()
+                .expect("canonical question.allowed_points 必须是数组");
+            assert!(
+                !allowed_points.is_empty(),
+                "canonical question.allowed_points 不得为空"
+            );
+            assert!(
+                allowed_points
+                    .iter()
+                    .all(|point| point.as_str().is_some_and(|value| !value.trim().is_empty())),
+                "canonical question.allowed_points 项必须是非空字符串"
+            );
+        }
+        let canonical_by_id: std::collections::HashMap<&str, &Value> = canonical_questions
+            .iter()
+            .map(|question| {
+                (
+                    question["id"].as_str().expect("canonical question.id 必填"),
+                    question,
+                )
+            })
+            .collect();
+        assert_eq!(canonical_by_id.len(), 20, "canonical question.id 不得重复");
+        let mut covered_files = HashSet::new();
+        for group in groups {
+            let id = group["id"].as_str().expect("group.id 必填");
+            assert!(group_ids.insert(id), "group.id 不得重复: {id}");
+            let group_files: HashSet<&str> = group["files"]
+                .as_array()
+                .expect("group.files 必须是数组")
+                .iter()
+                .map(|file| file.as_str().expect("group.files 项必须是字符串"))
+                .collect();
+            for file in group["files"].as_array().expect("group.files 必须是数组") {
+                let rel = file.as_str().expect("group.files 项必须是字符串");
+                assert!(
+                    root.join(rel).is_file(),
+                    "fixture 文件不存在: {suite}/{rel}"
+                );
+                assert!(
+                    covered_files.insert(rel),
+                    "同一 fixture 文件不得重复列入分组: {suite}/{rel}"
+                );
+            }
+            for question_id in group["question_ids"]
+                .as_array()
+                .expect("group.question_ids 必须是数组")
+            {
+                let question_id = question_id.as_str().expect("question_ids 项必须是字符串");
+                let canonical = canonical_by_id
+                    .get(question_id)
+                    .expect("group.question_ids 必须引用 canonical question");
+                assert_eq!(canonical["group"], id, "question 必须引用所属 group");
+                assert!(
+                    referenced_question_ids.insert(question_id.to_owned()),
+                    "question_ids 不得重复引用: {question_id}"
+                );
+            }
+            for assertion in group["assertions"]
+                .as_array()
+                .expect("assertions 必须是数组")
+            {
+                let kind = assertion["kind"].as_str().expect("assertion.kind 必填");
+                assert!(ALLOWED_KINDS.contains(&kind), "未知 assertion.kind: {kind}");
+                let certainty = assertion["certainty"]
+                    .as_str()
+                    .expect("assertion.certainty 必填");
+                assert!(
+                    ["syntactic", "inferred", "unknown"].contains(&certainty),
+                    "未知 certainty: {certainty}"
+                );
+                assert!(
+                    assertion["call_site"].is_string(),
+                    "legacy call_site 仍须保留可读定位"
+                );
+                let source = assertion["source"]
+                    .as_object()
+                    .expect("assertion.source 必填");
+                assert!(
+                    source.get("owner").is_some_and(Value::is_string),
+                    "source.owner 必填"
+                );
+                let path = source["path"].as_str().expect("source.path 必填");
+                assert!(
+                    root.join(path).is_file(),
+                    "source.path 文件不存在: {suite}/{path}"
+                );
+                assert!(
+                    group_files.contains(path),
+                    "source.path 必须属于当前 group.files: {suite}/{path}"
+                );
+                assert!(
+                    source.get("callee").is_some_and(Value::is_string)
+                        || source.get("expression").is_some_and(Value::is_string),
+                    "source.callee 或 source.expression 至少一个必填"
+                );
+                let anchor = source["anchor"].as_str().expect("source.anchor 必填");
+                assert!(!anchor.is_empty(), "source.anchor 不得为空");
+                let occurrence = source["occurrence"]
+                    .as_u64()
+                    .expect("source.occurrence 必须是正整数");
+                assert!(occurrence > 0, "occurrence 必须从 1 开始");
+                let source_text =
+                    fs::read_to_string(root.join(path)).expect("source.path 文件应可按 UTF-8 读取");
+                let mut found_count = 0;
+                let mut offset = 0;
+                while let Some(found) = source_text[offset..].find(anchor) {
+                    found_count += 1;
+                    offset += found + anchor.len();
+                }
+                assert!(
+                    found_count >= occurrence,
+                    "source.anchor 在 {suite}/{path} 中出现次数不足: expected >= {occurrence}, actual {found_count}"
+                );
+                if certainty == "syntactic" {
+                    assert!(
+                        assertion["target"].is_string()
+                            || kind == "statements"
+                            || kind == "annotations",
+                        "syntactic assertion 必须有 target 或语句/注解证据"
+                    );
+                }
+                if certainty == "inferred" {
+                    assert!(
+                        assertion["rule"].is_string(),
+                        "inferred assertion 必须带 rule"
+                    );
+                }
+                if certainty == "unknown" {
+                    assert!(
+                        assertion["candidates"].is_array() || assertion["unresolved"].is_boolean(),
+                        "unknown assertion 必须带 candidates 或 unresolved"
+                    );
+                }
+            }
+        }
+        let canonical_id_set: HashSet<&str> = canonical_by_id.keys().copied().collect();
+        let referenced_id_set: HashSet<&str> =
+            referenced_question_ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            referenced_id_set, canonical_id_set,
+            "20 个 canonical 题目必须都被 group.question_ids 引用"
+        );
+        let mut disk_files = HashSet::new();
+        fn collect_files(root: &Path, dir: &Path, out: &mut HashSet<String>) {
+            for entry in fs::read_dir(dir).expect("fixture 子目录应可读取").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_files(root, &path, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("fixture 路径应位于 suite 根内")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if rel != "expected.json" {
+                        out.insert(rel);
+                    }
+                }
+            }
+        }
+        collect_files(&root, &root, &mut disk_files);
+        let listed: HashSet<String> = covered_files
+            .into_iter()
+            .filter(|file| *file != "expected.json")
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            listed, disk_files,
+            "实际 fixture 文件必须与 files 清单恰好一致"
+        );
+    }
+
+    #[test]
+    fn code_understanding_fixture_manifests_are_closed() {
+        check_suite("java", "JQ");
+        check_suite("spring", "SQ");
     }
 }

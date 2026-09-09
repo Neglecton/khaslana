@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.shop.mapper.InventoryMapper">
+    <update id="release">
+        update t_inventory
+        set locked_qty = locked_qty - #{qty}
+        where order_id = #{orderId}
+        <if test="qty > 0">
+            and locked_qty >= #{qty}
+        </if>
+    </update>
+    <select id="lockedQty" resultType="int">
+        select locked_qty from t_inventory where order_id = #{orderId}
+    </select>
+</mapper>

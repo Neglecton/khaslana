@@ -1,0 +1,1136 @@
+{
+  "suite": "spring",
+  "grammar_baseline": "tree-sitter-java 0.23.5（升级须重跑 cargo test --lib java_grammar_probe）",
+  "question_bank_ids": [
+    "SQ01",
+    "SQ02",
+    "SQ03",
+    "SQ04",
+    "SQ05",
+    "SQ06",
+    "SQ07",
+    "SQ08",
+    "SQ09",
+    "SQ10",
+    "SQ11",
+    "SQ12",
+    "SQ13",
+    "SQ14",
+    "SQ15",
+    "SQ16",
+    "SQ17",
+    "SQ18",
+    "SQ19",
+    "SQ20"
+  ],
+  "groups": [
+    {
+      "id": "S01",
+      "scenario": "类+方法路由、多 path/method、常量/占位符",
+      "files": [
+        "S01/com/example/web/OrderController.java"
+      ],
+      "symbols": [
+        "com.example.web.OrderController#detail(String)",
+        "com.example.web.OrderController#batch()",
+        "com.example.web.OrderController#legacy()"
+      ],
+      "assertions": [
+        {
+          "kind": "handles",
+          "call_site": "HTTP GET /api/orders/{id} + GET /api/orders/detail/{id}",
+          "target": "com.example.web.OrderController#detail(String)",
+          "certainty": "syntactic",
+          "note": "类级 /api/orders 与方法级双路径组合",
+          "source": {
+            "owner": "com.example.web.OrderController#detail(String)",
+            "path": "S01/com/example/web/OrderController.java",
+            "callee": "HTTP GET /api/orders/{id} + GET /api/orders/detail/{id}",
+            "occurrence": 1,
+            "anchor": "@GetMapping({\"/{id}\", DETAIL_PATH + \"/{id}\"})"
+          }
+        },
+        {
+          "kind": "handles",
+          "call_site": "HTTP POST /api/orders/batch",
+          "target": "com.example.web.OrderController#batch()",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.web.OrderController#batch()",
+            "path": "S01/com/example/web/OrderController.java",
+            "callee": "HTTP POST /api/orders/batch",
+            "occurrence": 1,
+            "anchor": "@PostMapping(path = \"/batch\")"
+          }
+        },
+        {
+          "kind": "handles",
+          "call_site": "HTTP ${legacy.base}/old（占位符 + 类级前缀）",
+          "target": "com.example.web.OrderController#legacy()",
+          "certainty": "syntactic",
+          "rule": "spring.request_mapping",
+          "note": "占位符 ${legacy.base} 不展开为假路径，表达式原样保留",
+          "source": {
+            "owner": "com.example.web.OrderController#legacy()",
+            "path": "S01/com/example/web/OrderController.java",
+            "callee": "HTTP ${legacy.base}/old（占位符 + 类级前缀）",
+            "occurrence": 1,
+            "anchor": "@RequestMapping(\"${legacy.base}/old\")"
+          }
+        }
+      ],
+      "diagnostics": [
+        "DETAIL_PATH 常量拼接可求值；占位符 ${legacy.base} 未解析，路由呈现保留表达式"
+      ],
+      "entry_points": [
+        "HTTP GET /api/orders/{id}",
+        "HTTP GET /api/orders/detail/{id}",
+        "HTTP POST /api/orders/batch",
+        "HTTP ${legacy.base}/old"
+      ],
+      "questions": [
+        {
+          "id": "SQ01"
+        },
+        {
+          "id": "SQ02"
+        },
+        {
+          "id": "SQ20"
+        }
+      ],
+      "question_ids": [
+        "SQ01",
+        "SQ02",
+        "SQ20"
+      ]
+    },
+    {
+      "id": "S02",
+      "scenario": "同名自定义注解、合法组合注解、接口继承映射、FQN 校验",
+      "files": [
+        "S02/com/example/legacy/annotations/Service.java",
+        "S02/com/example/legacy/web/LegacyController.java",
+        "S02/com/example/web/ApiGet.java",
+        "S02/com/example/web/CombinedController.java",
+        "S02/com/example/web/CombinedContract.java"
+      ],
+      "symbols": [
+        "com.example.legacy.annotations.Service",
+        "com.example.legacy.web.LegacyController#ping()",
+        "com.example.web.ApiGet",
+        "com.example.web.CombinedController#ping()",
+        "com.example.web.CombinedContract#inherited()",
+        "com.example.web.CombinedController#inherited()"
+      ],
+      "assertions": [
+        {
+          "kind": "handles",
+          "call_site": "HTTP GET /legacy/ping",
+          "target": "com.example.legacy.web.LegacyController#ping()",
+          "certainty": "syntactic",
+          "note": "识别依据是 org.springframework.web.bind.annotation.RestController 的 FQN；用户自定义 @Service（包不符）不得当 Spring Bean 注解",
+          "source": {
+            "owner": "com.example.legacy.web.LegacyController#ping()",
+            "path": "S02/com/example/legacy/web/LegacyController.java",
+            "callee": "HTTP GET /legacy/ping",
+            "occurrence": 1,
+            "anchor": "@GetMapping(\"/legacy/ping\")"
+          }
+        },
+        {
+          "kind": "handles",
+          "call_site": "HTTP GET /combined/ping",
+          "target": "com.example.web.CombinedController#ping()",
+          "certainty": "inferred",
+          "rule": "spring.composed_mapping",
+          "note": "ApiGet 基于允许元注解的 @RequestMapping(method=GET)，可静态识别 GET 路由",
+          "source": {
+            "owner": "com.example.web.CombinedController#ping()",
+            "path": "S02/com/example/web/CombinedController.java",
+            "callee": "HTTP GET /combined/ping",
+            "occurrence": 1,
+            "anchor": "@ApiGet(\"/combined/ping\")"
+          }
+        },
+        {
+          "kind": "handles",
+          "call_site": "HTTP GET /combined/inherited",
+          "source": {
+            "owner": "com.example.web.CombinedContract#inherited()",
+            "path": "S02/com/example/web/CombinedContract.java",
+            "callee": "@GetMapping(\"/combined/inherited\")",
+            "occurrence": 1,
+            "anchor": "@GetMapping(\"/combined/inherited\")"
+          },
+          "target": "com.example.web.CombinedController#inherited()",
+          "certainty": "inferred",
+          "rule": "spring.interface_mapping_inheritance",
+          "note": "路由声明位于 CombinedContract 接口方法，Controller 实现方法继承该映射"
+        }
+      ],
+      "diagnostics": [
+        "com.example.legacy.annotations.Service 与 org.springframework.stereotype.Service 同名不同 FQN：不识别为 Bean 注解",
+        "组合注解 ApiGet 只覆盖 RequestMapping 的固定 GET 语义，未声明 AliasFor 的属性传播不在样例范围"
+      ],
+      "entry_points": [
+        "HTTP GET /legacy/ping",
+        "HTTP GET /combined/ping",
+        "HTTP GET /combined/inherited"
+      ],
+      "questions": [
+        {
+          "id": "SQ17"
+        },
+        {
+          "id": "SQ18"
+        }
+      ],
+      "question_ids": [
+        "SQ17",
+        "SQ18"
+      ]
+    },
+    {
+      "id": "S03",
+      "scenario": "单构造器、Autowired 字段/setter、required 构造器与依赖诊断",
+      "files": [
+        "S03/com/example/web/ProfileService.java",
+        "S03/com/example/web/ProfileController.java",
+        "S03/com/example/web/AmbiguousCtorController.java"
+      ],
+      "symbols": [
+        "com.example.web.ProfileService#describe()",
+        "com.example.web.ProfileController#<init>(ProfileService)",
+        "com.example.web.ProfileController#setSetterInjected(ProfileService)",
+        "com.example.web.AmbiguousCtorController"
+      ],
+      "assertions": [
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.ProfileController#<init>(ProfileService) 单构造器注入",
+          "candidates": [
+            "com.example.web.ProfileService"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.single_constructor",
+          "note": "无 @Autowired 注解的单构造器也纳入候选",
+          "source": {
+            "owner": "com.example.web.ProfileController#<init>(ProfileService)",
+            "path": "S03/com/example/web/ProfileController.java",
+            "callee": "com.example.web.ProfileController#<init>(ProfileService) 单构造器注入",
+            "occurrence": 1,
+            "anchor": "public ProfileController(ProfileService singleCtor)"
+          }
+        },
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.ProfileController#setSetterInjected(ProfileService) setter 注入",
+          "candidates": [
+            "com.example.web.ProfileService"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.autowired",
+          "source": {
+            "owner": "com.example.web.ProfileController#setSetterInjected(ProfileService)",
+            "path": "S03/com/example/web/ProfileController.java",
+            "callee": "com.example.web.ProfileController#setSetterInjected(ProfileService) setter 注入",
+            "occurrence": 1,
+            "anchor": "public void setSetterInjected(ProfileService setterInjected)"
+          }
+        },
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.ProfileController.fieldInjected 字段注入",
+          "source": {
+            "owner": "com.example.web.ProfileController",
+            "path": "S03/com/example/web/ProfileController.java",
+            "callee": "@Autowired fieldInjected",
+            "occurrence": 1,
+            "anchor": "ProfileService fieldInjected;"
+          },
+          "candidates": [
+            "com.example.web.ProfileService"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.autowired_field"
+        },
+        {
+          "kind": "selects_constructor",
+          "call_site": "com.example.web.AmbiguousCtorController#<init>(ProfileService,int) @Autowired(required=true)",
+          "source": {
+            "owner": "com.example.web.AmbiguousCtorController",
+            "path": "S03/com/example/web/AmbiguousCtorController.java",
+            "callee": "@Autowired(required=true) constructor",
+            "occurrence": 1,
+            "anchor": "public AmbiguousCtorController(ProfileService service, int flag)"
+          },
+          "target": "com.example.web.AmbiguousCtorController#<init>(ProfileService,int)",
+          "certainty": "inferred",
+          "note": "单个 required=true 的 @Autowired 构造器是唯一选择；不是构造器选择歧义",
+          "rule": "spring.autowired_required_constructor"
+        }
+      ],
+      "diagnostics": [
+        "AmbiguousCtorController 的 int flag 没有可见 Bean 依赖，构造器选择确定但依赖可满足性未知/不可满足"
+      ],
+      "entry_points": [
+        "HTTP GET /profile/view"
+      ],
+      "questions": [
+        {
+          "id": "SQ10"
+        },
+        {
+          "id": "SQ14"
+        }
+      ],
+      "question_ids": [
+        "SQ10",
+        "SQ14"
+      ]
+    },
+    {
+      "id": "S04",
+      "scenario": "多 Bean、Qualifier/Primary、集合注入",
+      "files": [
+        "S04/com/example/svc/PriceCalculator.java",
+        "S04/com/example/svc/VipPriceCalculator.java",
+        "S04/com/example/svc/NormalPriceCalculator.java",
+        "S04/com/example/web/PriceController.java"
+      ],
+      "symbols": [
+        "com.example.svc.PriceCalculator#price(int)",
+        "com.example.svc.VipPriceCalculator#price(int)",
+        "com.example.svc.NormalPriceCalculator#price(int)",
+        "com.example.web.PriceController#vip(int)",
+        "com.example.web.PriceController#total(int)"
+      ],
+      "assertions": [
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.PriceController#<init>(...) 中 @Qualifier(\"vip\") PriceCalculator vip",
+          "candidates": [
+            "com.example.svc.VipPriceCalculator"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.qualifier",
+          "note": "Qualifier 明确缩小到显式 bean 名 vip",
+          "source": {
+            "owner": "com.example.web.PriceController#<init>(...)",
+            "path": "S04/com/example/web/PriceController.java",
+            "callee": "com.example.web.PriceController#<init>(...) 中 @Qualifier(\"vip\") PriceCalculator vip",
+            "occurrence": 1,
+            "anchor": "@Qualifier(\"vip\") PriceCalculator vip"
+          }
+        },
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.PriceController#<init>(...) 中 List<PriceCalculator> all",
+          "candidates": [
+            "com.example.svc.VipPriceCalculator",
+            "com.example.svc.NormalPriceCalculator"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.collection_injection",
+          "note": "集合注入保留全部匹配，不因 @Primary 强选一项",
+          "source": {
+            "owner": "com.example.web.PriceController#<init>(...)",
+            "path": "S04/com/example/web/PriceController.java",
+            "callee": "com.example.web.PriceController#<init>(...) 中 List<PriceCalculator> all",
+            "occurrence": 1,
+            "anchor": "List<PriceCalculator> all"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.web.PriceController#vip(int) 调用 vip.price(base)",
+          "target": "com.example.svc.PriceCalculator#price(int)",
+          "certainty": "syntactic",
+          "note": "CALLS 指声明；实现候选随注入事实缩小为 Vip",
+          "source": {
+            "owner": "com.example.web.PriceController#vip(int)",
+            "path": "S04/com/example/web/PriceController.java",
+            "callee": "vip.price(base)",
+            "occurrence": 1,
+            "anchor": "vip.price(base)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.web.PriceController#total(int) 调用 calculator.price(base)",
+          "target": "com.example.svc.PriceCalculator#price(int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.web.PriceController#total(int)",
+            "path": "S04/com/example/web/PriceController.java",
+            "callee": "calculator.price(base)",
+            "occurrence": 1,
+            "anchor": "calculator.price(base)"
+          }
+        }
+      ],
+      "diagnostics": [
+        "NormalPriceCalculator 标 @Primary 但集合注入不强选；分派候选集合为两个实现"
+      ],
+      "entry_points": [
+        "HTTP GET /price/vip",
+        "HTTP GET /price/all"
+      ],
+      "questions": [
+        {
+          "id": "SQ03"
+        },
+        {
+          "id": "SQ13"
+        }
+      ],
+      "question_ids": [
+        "SQ03",
+        "SQ13"
+      ]
+    },
+    {
+      "id": "S05",
+      "scenario": "Resource(name)、Bean 别名/返回接口",
+      "files": [
+        "S05/com/example/svc/CacheStore.java",
+        "S05/com/example/svc/RedisCacheStore.java",
+        "S05/com/example/web/CacheController.java",
+        "S05/com/example/web/CacheConfig.java"
+      ],
+      "symbols": [
+        "com.example.svc.CacheStore#get(String)",
+        "com.example.svc.RedisCacheStore#get(String)",
+        "com.example.web.CacheController#get(String)",
+        "com.example.web.CacheConfig#backupCache()"
+      ],
+      "assertions": [
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.CacheController 字段 @Resource(name = \"redisCache\") store",
+          "candidates": [
+            "com.example.svc.RedisCacheStore"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.resource_by_name",
+          "note": "@Resource 按名称独立规则，不套用 Qualifier 语义",
+          "source": {
+            "owner": "com.example.web.CacheController",
+            "path": "S05/com/example/web/CacheController.java",
+            "callee": "com.example.web.CacheController 字段 @Resource(name = \"redisCache\") store",
+            "occurrence": 1,
+            "anchor": "@Resource(name = \"redisCache\")"
+          }
+        },
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.web.CacheConfig#backupCache() @Bean 方法返回接口类型 CacheStore",
+          "candidates": [
+            "com.example.svc.RedisCacheStore"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.bean_method",
+          "note": "返回类型为接口，工厂实现按可证明的 new 表达式关联；别名/运行时激活不可证明时保留推断",
+          "source": {
+            "owner": "com.example.web.CacheConfig#backupCache()",
+            "path": "S05/com/example/web/CacheConfig.java",
+            "callee": "com.example.web.CacheConfig#backupCache() @Bean 方法返回接口类型 CacheStore",
+            "occurrence": 1,
+            "anchor": "backupCache()"
+          }
+        }
+      ],
+      "diagnostics": [
+        "backupCache 的 Bean 名与 redisCache 是两个注册名指向同一实现类：别名关系呈现为候选，不合并为唯一"
+      ],
+      "entry_points": [
+        "HTTP GET /cache/get"
+      ],
+      "questions": [
+        {
+          "id": "SQ04"
+        },
+        {
+          "id": "SQ15"
+        }
+      ],
+      "question_ids": [
+        "SQ04",
+        "SQ15"
+      ]
+    },
+    {
+      "id": "S06",
+      "scenario": "Profile/Conditional、未知运行条件",
+      "files": [
+        "S06/com/example/svc/NotifyService.java",
+        "S06/com/example/svc/EmailNotifyService.java",
+        "S06/com/example/svc/SmsNotifyService.java",
+        "S06/com/example/svc/SmsEnabledCondition.java"
+      ],
+      "symbols": [
+        "com.example.svc.NotifyService#channel()",
+        "com.example.svc.EmailNotifyService#channel()",
+        "com.example.svc.SmsNotifyService#channel()"
+      ],
+      "assertions": [
+        {
+          "kind": "injects_candidate",
+          "call_site": "任意 NotifyService 注入点",
+          "candidates": [
+            "com.example.svc.EmailNotifyService",
+            "com.example.svc.SmsNotifyService"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.conditional_candidates",
+          "note": "@Profile(\"prod\") 与 @Conditional 的激活条件不可静态判定，不得产生唯一『确定实现』",
+          "source": {
+            "owner": "com.example.svc.NotifyService#channel()",
+            "path": "S06/com/example/svc/EmailNotifyService.java",
+            "callee": "任意 NotifyService 注入点",
+            "occurrence": 1,
+            "anchor": "implements NotifyService"
+          }
+        }
+      ],
+      "diagnostics": [
+        "EmailNotifyService 声明 @Profile(\"prod\")；SmsNotifyService 的条件类 matches 返回 false 仅为样例代码，静态分析不执行条件类"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "SQ05"
+        },
+        {
+          "id": "SQ16"
+        }
+      ],
+      "question_ids": [
+        "SQ05",
+        "SQ16"
+      ]
+    },
+    {
+      "id": "S07",
+      "scenario": "Mapper + XML namespace/id、同名方法重载",
+      "files": [
+        "S07/com/example/shop/mapper/UserMapper.java",
+        "S07/resources/mapper/UserMapper.xml"
+      ],
+      "symbols": [
+        "com.example.shop.mapper.UserMapper#selectById(int)",
+        "com.example.shop.mapper.UserMapper#selectByName(String)",
+        "com.example.shop.mapper.UserMapper#selectByName(String,int)",
+        "com.example.shop.mapper.UserMapper#selectById",
+        "com.example.shop.mapper.UserMapper#selectByName",
+        "com.example.shop.mapper.UserMapper#selectByEmail"
+      ],
+      "assertions": [
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.UserMapper#selectById(int)",
+          "target": "com.example.shop.mapper.UserMapper#selectById",
+          "certainty": "syntactic",
+          "note": "namespace FQN + statement id 精确关联",
+          "source": {
+            "owner": "com.example.shop.mapper.UserMapper#selectById(int)",
+            "path": "S07/com/example/shop/mapper/UserMapper.java",
+            "callee": "com.example.shop.mapper.UserMapper#selectById(int)",
+            "occurrence": 1,
+            "anchor": "selectById(int id)"
+          }
+        },
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.UserMapper#selectByName(String) 与 #selectByName(String,int)",
+          "target": "com.example.shop.mapper.UserMapper#selectByName",
+          "certainty": "inferred",
+          "rule": "mybatis.overload_ambiguous",
+          "note": "重载方法与单一 statement 的关联呈候选，不静默一对一",
+          "source": {
+            "owner": "com.example.shop.mapper.UserMapper#selectByName(String)",
+            "path": "S07/com/example/shop/mapper/UserMapper.java",
+            "callee": "com.example.shop.mapper.UserMapper#selectByName(String) 与 #selectByName(String,int)",
+            "occurrence": 1,
+            "anchor": "selectByName(String name)"
+          }
+        }
+      ],
+      "diagnostics": [
+        "XML statement selectByEmail 没有对应 Java 方法：作为孤立 statement 呈现，不虚构接口方法",
+        "Mapper 接口不凭类名尾缀识别：namespace 必须与接口 FQN 相符"
+      ],
+      "entry_points": [
+        "MyBatis statement com.example.shop.mapper.UserMapper#selectById",
+        "MyBatis statement com.example.shop.mapper.UserMapper#selectByName",
+        "MyBatis statement com.example.shop.mapper.UserMapper#selectByEmail"
+      ],
+      "questions": [
+        {
+          "id": "SQ06"
+        }
+      ],
+      "question_ids": [
+        "SQ06"
+      ]
+    },
+    {
+      "id": "S08",
+      "scenario": "注解 SQL、include 循环、if/foreach、DOCTYPE",
+      "source_sets": [
+        "main"
+      ],
+      "files": [
+        "S08/com/example/shop/mapper/OrderMapper.java",
+        "S08/resources/mapper/OrderMapper.xml"
+      ],
+      "symbols": [
+        "com.example.shop.mapper.OrderMapper#listByUser(int)",
+        "com.example.shop.mapper.OrderMapper#listActive(String)",
+        "com.example.shop.mapper.OrderMapper#listActive",
+        "com.example.shop.mapper.OrderMapper#activeFilter",
+        "com.example.shop.mapper.OrderMapper#baseColumns",
+        "com.example.shop.mapper.OrderMapper#cycleA",
+        "com.example.shop.mapper.OrderMapper#cycleB"
+      ],
+      "assertions": [
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.OrderMapper#listByUser(int)",
+          "target": "@Select 注解 SQL（方法声明处）",
+          "certainty": "syntactic",
+          "note": "注解 SQL 保留字面量与范围",
+          "source": {
+            "owner": "com.example.shop.mapper.OrderMapper#listByUser(int)",
+            "path": "S08/com/example/shop/mapper/OrderMapper.java",
+            "callee": "com.example.shop.mapper.OrderMapper#listByUser(int)",
+            "occurrence": 1,
+            "anchor": "listByUser(int userId)"
+          }
+        },
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.OrderMapper#listActive(String)",
+          "source": {
+            "owner": "com.example.shop.mapper.OrderMapper#listActive(String)",
+            "path": "S08/com/example/shop/mapper/OrderMapper.java",
+            "callee": "XML namespace statement mapping",
+            "occurrence": 1,
+            "anchor": "listActive(String status)"
+          },
+          "target": "com.example.shop.mapper.OrderMapper#listActive",
+          "certainty": "syntactic"
+        }
+      ],
+      "diagnostics": [
+        "include 仅展开本地可定位片段（activeFilter/baseColumns），循环（cycleA→cycleB→cycleA）与深度设上限；if/foreach 保留条件模板，不拼造唯一执行 SQL；DOCTYPE 允许存在但不加载远程 DTD、不联网"
+      ],
+      "entry_points": [
+        "MyBatis statement com.example.shop.mapper.OrderMapper#listActive",
+        "@Select com.example.shop.mapper.OrderMapper#listByUser"
+      ],
+      "questions": [
+        {
+          "id": "SQ11"
+        }
+      ],
+      "question_ids": [
+        "SQ11"
+      ]
+    },
+    {
+      "id": "S09",
+      "scenario": "JPA Repository/Query/Entity/Table",
+      "files": [
+        "S09/com/example/shop/entity/OrderEntity.java",
+        "S09/com/example/shop/repo/OrderRepository.java"
+      ],
+      "symbols": [
+        "com.example.shop.entity.OrderEntity",
+        "com.example.shop.repo.OrderRepository#findByStatus(String)",
+        "com.example.shop.repo.OrderRepository#findByOrderNo(String)"
+      ],
+      "assertions": [
+        {
+          "kind": "inherits",
+          "call_site": "com.example.shop.repo.OrderRepository extends JpaRepository<OrderEntity, Long>",
+          "target": "?org.springframework.data.jpa.repository.JpaRepository",
+          "certainty": "syntactic",
+          "note": "外部类型边界；实体参数 OrderEntity 可关联",
+          "source": {
+            "owner": "com.example.shop.repo.OrderRepository",
+            "path": "S09/com/example/shop/repo/OrderRepository.java",
+            "callee": "com.example.shop.repo.OrderRepository extends JpaRepository<OrderEntity, Long>",
+            "occurrence": 1,
+            "anchor": "extends JpaRepository<OrderEntity, Long>"
+          }
+        },
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.repo.OrderRepository#findByOrderNo(String)",
+          "target": "@Query JPQL 字面量（方法声明处）",
+          "certainty": "syntactic",
+          "note": "只显示声明；不生成派生查询实现源码或最终 SQL",
+          "source": {
+            "owner": "com.example.shop.repo.OrderRepository#findByOrderNo(String)",
+            "path": "S09/com/example/shop/repo/OrderRepository.java",
+            "callee": "com.example.shop.repo.OrderRepository#findByOrderNo(String)",
+            "occurrence": 1,
+            "anchor": "findByOrderNo(@Param(\"orderNo\") String orderNo)"
+          }
+        }
+      ],
+      "diagnostics": [
+        "findByStatus 为方法名派生声明：仅说明声明意图；@Table(name=\"t_order\") 是声明证据，不推断表血缘"
+      ],
+      "entry_points": [
+        "JPA repository com.example.shop.repo.OrderRepository",
+        "JPA entity com.example.shop.entity.OrderEntity"
+      ],
+      "questions": [
+        {
+          "id": "SQ07"
+        }
+      ],
+      "question_ids": [
+        "SQ07"
+      ]
+    },
+    {
+      "id": "S10",
+      "scenario": "Transactional/Async/Scheduled/EventListener/Kafka/Rabbit 消息监听标记（javax/jakarta 边界）",
+      "files": [
+        "S10/com/example/job/JobService.java",
+        "S10/com/example/job/LegacyJobService.java"
+      ],
+      "symbols": [
+        "com.example.job.JobService#settle()",
+        "com.example.job.JobService#warmCache()",
+        "com.example.job.JobService#nightly()",
+        "com.example.job.JobService#onOrderEvent(String)",
+        "com.example.job.JobService#onInternalEvent(Object)",
+        "com.example.job.JobService#onOrderMessage(String)",
+        "com.example.job.LegacyJobService#settleLegacy()"
+      ],
+      "assertions": [
+        {
+          "kind": "annotations",
+          "call_site": "JobService 四个方法上的框架标记注解",
+          "source": {
+            "owner": "com.example.job.JobService#settle()",
+            "path": "S10/com/example/job/JobService.java",
+            "callee": "framework annotations",
+            "occurrence": 1,
+            "anchor": "@Scheduled(cron = \"0 0 3 * * ?\")"
+          },
+          "certainty": "syntactic",
+          "note": "注解位置与文字说明是全部产出；不合成真实事务/调度/消息运行链或时序"
+        },
+        {
+          "kind": "annotations",
+          "call_site": "LegacyJobService#settleLegacy() 上的 javax.transaction.Transactional",
+          "source": {
+            "owner": "LegacyJobService#settleLegacy()",
+            "path": "S10/com/example/job/LegacyJobService.java",
+            "callee": "@Transactional",
+            "occurrence": 1,
+            "anchor": "@Transactional"
+          },
+          "target": "javax.transaction.Transactional",
+          "certainty": "syntactic",
+          "note": "与 jakarta 注解命名空间并列保留，版本适配不等同运行时启用"
+        }
+      ],
+      "diagnostics": [
+        "@Scheduled cron、@KafkaListener topics、@RabbitListener queues 与 @EventListener 作为声明证据呈现，不解析运行时语义；javax/jakarta 仅作命名空间兼容边界"
+      ],
+      "entry_points": [
+        "Scheduled JobService#nightly()",
+        "Kafka listener JobService#onOrderEvent(String)",
+        "Rabbit listener JobService#onOrderMessage(String)",
+        "Event listener JobService#onInternalEvent(Object)"
+      ],
+      "questions": [
+        {
+          "id": "SQ12"
+        }
+      ],
+      "question_ids": [
+        "SQ12"
+      ]
+    },
+    {
+      "id": "S11",
+      "scenario": "Lombok RequiredArgsConstructor/Data",
+      "files": [
+        "S11/com/example/dto/UserDto.java",
+        "S11/com/example/svc/UserRepo.java",
+        "S11/com/example/svc/LombokService.java"
+      ],
+      "symbols": [
+        "com.example.dto.UserDto",
+        "com.example.svc.UserRepo#load(long)",
+        "com.example.svc.LombokService#label(long)"
+      ],
+      "assertions": [
+        {
+          "kind": "injects_candidate",
+          "call_site": "com.example.svc.LombokService @RequiredArgsConstructor final 字段 userRepo",
+          "candidates": [
+            "com.example.svc.UserRepo"
+          ],
+          "certainty": "inferred",
+          "rule": "lombok.required_args_constructor",
+          "note": "生成构造器不可见，注入候选保留但标注 generated_source_unavailable，不伪造构造器行号",
+          "source": {
+            "owner": "com.example.svc.LombokService",
+            "path": "S11/com/example/svc/LombokService.java",
+            "callee": "com.example.svc.LombokService @RequiredArgsConstructor final 字段 userRepo",
+            "occurrence": 1,
+            "anchor": "final UserRepo userRepo;"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.svc.LombokService#label(long) 调用 dto.getName()",
+          "certainty": "unknown",
+          "candidates": [],
+          "note": "getName 由 @Data 生成，源码不可见：不虚构方法定义与行号",
+          "source": {
+            "owner": "com.example.svc.LombokService#label(long)",
+            "path": "S11/com/example/svc/LombokService.java",
+            "callee": "dto.getName()",
+            "occurrence": 1,
+            "anchor": "dto.getName()"
+          }
+        }
+      ],
+      "diagnostics": [
+        "UserDto 与 LombokService 上的 Lombok 注解是证据；getName/create 等合成成员不进入真实定义列表"
+      ],
+      "entry_points": [],
+      "questions": [
+        {
+          "id": "SQ19"
+        }
+      ],
+      "question_ids": [
+        "SQ19"
+      ]
+    },
+    {
+      "id": "S12",
+      "scenario": "完整业务样例：订单取消释放库存（Boot 2/3 注解形态，jakarta）",
+      "files": [
+        "S12/com/example/shop/web/CancelOrderController.java",
+        "S12/com/example/shop/service/OrderService.java",
+        "S12/com/example/shop/service/DefaultOrderService.java",
+        "S12/com/example/shop/service/PreviewOrderService.java",
+        "S12/com/example/shop/mapper/InventoryMapper.java",
+        "S12/resources/mapper/InventoryMapper.xml"
+      ],
+      "symbols": [
+        "com.example.shop.web.CancelOrderController#cancel(String)",
+        "com.example.shop.service.OrderService#cancelOrder(String)",
+        "com.example.shop.service.DefaultOrderService#cancelOrder(String)",
+        "com.example.shop.service.PreviewOrderService#cancelOrder(String)",
+        "com.example.shop.mapper.InventoryMapper#lockedQty(String)",
+        "com.example.shop.mapper.InventoryMapper#release(String,int)",
+        "com.example.shop.mapper.InventoryMapper#release",
+        "com.example.shop.mapper.InventoryMapper#lockedQty"
+      ],
+      "assertions": [
+        {
+          "kind": "handles",
+          "call_site": "HTTP POST /api/orders/{id}/cancel",
+          "target": "com.example.shop.web.CancelOrderController#cancel(String)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.shop.web.CancelOrderController#cancel(String)",
+            "path": "S12/com/example/shop/web/CancelOrderController.java",
+            "callee": "HTTP POST /api/orders/{id}/cancel",
+            "occurrence": 1,
+            "anchor": "@PostMapping(\"/{id}/cancel\")"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.shop.web.CancelOrderController#cancel(String) 调用 orderService.cancelOrder(id)",
+          "target": "com.example.shop.service.OrderService#cancelOrder(String)",
+          "certainty": "syntactic",
+          "note": "声明调用指接口方法",
+          "source": {
+            "owner": "com.example.shop.web.CancelOrderController#cancel(String)",
+            "path": "S12/com/example/shop/web/CancelOrderController.java",
+            "callee": "orderService.cancelOrder(id)",
+            "occurrence": 1,
+            "anchor": "orderService.cancelOrder(id)"
+          }
+        },
+        {
+          "kind": "dispatch_candidates",
+          "call_site": "com.example.shop.web.CancelOrderController#cancel(String) 调用 orderService.cancelOrder(id)",
+          "candidates": [
+            "com.example.shop.service.DefaultOrderService#cancelOrder(String)",
+            "com.example.shop.service.PreviewOrderService#cancelOrder(String)"
+          ],
+          "certainty": "inferred",
+          "rule": "spring.implementation_candidates",
+          "note": "PreviewOrderService 受 @Profile(\"preview\") 条件限制：基准答案必须说明候选条件，不得默认两种实现都会执行",
+          "source": {
+            "owner": "com.example.shop.web.CancelOrderController#cancel(String)",
+            "path": "S12/com/example/shop/web/CancelOrderController.java",
+            "callee": "orderService.cancelOrder(id)",
+            "occurrence": 1,
+            "anchor": "orderService.cancelOrder(id)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.shop.service.DefaultOrderService#cancelOrder(String) 调用 inventoryMapper.release(orderId, qty)",
+          "target": "com.example.shop.mapper.InventoryMapper#release(String,int)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.shop.service.DefaultOrderService#cancelOrder(String)",
+            "path": "S12/com/example/shop/service/DefaultOrderService.java",
+            "callee": "inventoryMapper.release(orderId, qty)",
+            "occurrence": 1,
+            "anchor": "inventoryMapper.release(orderId, qty)"
+          }
+        },
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.InventoryMapper#release(String,int)",
+          "target": "com.example.shop.mapper.InventoryMapper#release",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.shop.mapper.InventoryMapper#release(String,int)",
+            "path": "S12/com/example/shop/mapper/InventoryMapper.java",
+            "callee": "com.example.shop.mapper.InventoryMapper#release(String,int)",
+            "occurrence": 1,
+            "anchor": "release(String orderId, int qty)"
+          }
+        },
+        {
+          "kind": "calls",
+          "call_site": "com.example.shop.service.DefaultOrderService#cancelOrder(String) 调用 inventoryMapper.lockedQty(orderId)",
+          "target": "com.example.shop.mapper.InventoryMapper#lockedQty(String)",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.shop.service.DefaultOrderService#cancelOrder(String)",
+            "path": "S12/com/example/shop/service/DefaultOrderService.java",
+            "callee": "inventoryMapper.lockedQty(orderId)",
+            "occurrence": 1,
+            "anchor": "inventoryMapper.lockedQty(orderId)"
+          }
+        },
+        {
+          "kind": "maps_to",
+          "call_site": "com.example.shop.mapper.InventoryMapper#lockedQty(String)",
+          "target": "com.example.shop.mapper.InventoryMapper#lockedQty",
+          "certainty": "syntactic",
+          "source": {
+            "owner": "com.example.shop.mapper.InventoryMapper#lockedQty(String)",
+            "path": "S12/com/example/shop/mapper/InventoryMapper.java",
+            "callee": "com.example.shop.mapper.InventoryMapper#lockedQty(String)",
+            "occurrence": 1,
+            "anchor": "lockedQty(String orderId)"
+          }
+        }
+      ],
+      "diagnostics": [
+        "com.example.shop.mapper.InventoryMapper#release 含 <if test=\"qty > 0\"> 动态条件：呈现条件模板，不拼造唯一执行 SQL"
+      ],
+      "entry_points": [
+        "HTTP POST /api/orders/{id}/cancel",
+        "MyBatis statement com.example.shop.mapper.InventoryMapper#release",
+        "MyBatis statement com.example.shop.mapper.InventoryMapper#lockedQty"
+      ],
+      "questions": [
+        {
+          "id": "SQ08"
+        },
+        {
+          "id": "SQ09"
+        }
+      ],
+      "question_ids": [
+        "SQ08",
+        "SQ09"
+      ]
+    }
+  ],
+  "question_bank": [
+    {
+      "id": "SQ01",
+      "group": "S01",
+      "q": "订单详情接口的 URL 和处理方法是什么？",
+      "allowed_points": [
+        "GET /api/orders/{id}",
+        "GET /api/orders/detail/{id} → OrderController#detail"
+      ]
+    },
+    {
+      "id": "SQ02",
+      "group": "S01",
+      "q": "批量下单接口在哪里？",
+      "allowed_points": [
+        "POST /api/orders/batch"
+      ]
+    },
+    {
+      "id": "SQ03",
+      "group": "S04",
+      "q": "价格计算有哪些实现类？",
+      "allowed_points": [
+        "VipPriceCalculator",
+        "NormalPriceCalculator"
+      ]
+    },
+    {
+      "id": "SQ04",
+      "group": "S05",
+      "q": "缓存读取接口的 URL 是什么？背后用哪个存储？",
+      "allowed_points": [
+        "GET /cache/get → RedisCacheStore"
+      ]
+    },
+    {
+      "id": "SQ05",
+      "group": "S06",
+      "q": "通知服务有哪几种渠道的实现？",
+      "allowed_points": [
+        "EmailNotifyService",
+        "SmsNotifyService"
+      ]
+    },
+    {
+      "id": "SQ06",
+      "group": "S07",
+      "q": "用户查询的 SQL 写在哪里？",
+      "allowed_points": [
+        "UserMapper.xml namespace com.example.shop.mapper.UserMapper"
+      ]
+    },
+    {
+      "id": "SQ07",
+      "group": "S09",
+      "q": "订单实体对应的数据库表是什么？",
+      "allowed_points": [
+        "@Table(name=\"t_order\") → OrderEntity"
+      ]
+    },
+    {
+      "id": "SQ08",
+      "group": "S12",
+      "q": "订单取消后在哪里释放库存？",
+      "allowed_points": [
+        "Controller → OrderService → InventoryMapper#release → XML"
+      ]
+    },
+    {
+      "id": "SQ09",
+      "group": "S12",
+      "q": "取消订单接口的完整声明链是什么？",
+      "allowed_points": [
+        "cancel → cancelOrder(声明) → DefaultOrderService#cancelOrder → mapper.release"
+      ]
+    },
+    {
+      "id": "SQ10",
+      "group": "S03",
+      "q": "ProfileController 的依赖是怎么注入的？",
+      "allowed_points": [
+        "构造器 + setter 注入点；单构造器无注解也成立"
+      ]
+    },
+    {
+      "id": "SQ11",
+      "group": "S08",
+      "q": "listActive 的 SQL 是怎么拼出来的？",
+      "allowed_points": [
+        "include 片段 + if/foreach 条件模板，不合并唯一 SQL"
+      ]
+    },
+    {
+      "id": "SQ12",
+      "group": "S10",
+      "q": "JobService 里哪些方法有定时/消息触发标记？",
+      "allowed_points": [
+        "nightly @Scheduled",
+        "onOrderEvent @KafkaListener；仅声明证据"
+      ]
+    },
+    {
+      "id": "SQ13",
+      "group": "S04",
+      "q": "PriceController 的两个注入点各拿到什么？",
+      "allowed_points": [
+        "Qualifier 唯一",
+        "List 保留两个候选，Primary 不强选"
+      ]
+    },
+    {
+      "id": "SQ14",
+      "group": "S03",
+      "q": "AmbiguousCtorController 用哪个构造器？",
+      "allowed_points": [
+        "@Autowired(required=true) 构造器是唯一选择",
+        "int flag 依赖不可满足时报告诊断"
+      ]
+    },
+    {
+      "id": "SQ15",
+      "group": "S05",
+      "q": "CacheController 的 store 是哪个 Bean？backupCache 呢？",
+      "allowed_points": [
+        "@Resource 按名称",
+        "@Bean 返回接口按可证明表达式关联，别名保留"
+      ]
+    },
+    {
+      "id": "SQ16",
+      "group": "S06",
+      "q": "生产环境通知走哪个实现？",
+      "allowed_points": [
+        "运行条件未知，候选两个，不唯一断言"
+      ]
+    },
+    {
+      "id": "SQ17",
+      "group": "S02",
+      "q": "LegacyController 上的 @Service 是 Spring 的吗？",
+      "allowed_points": [
+        "FQN 不符不识别",
+        "RestController 才是识别依据"
+      ]
+    },
+    {
+      "id": "SQ18",
+      "group": "S02",
+      "q": "/combined/ping 这个组合注解路由可靠吗？",
+      "allowed_points": [
+        "ApiGet 基于合法 @RequestMapping(method=GET)",
+        "固定 GET 语义可解析",
+        "AliasFor 属性传播不在覆盖范围"
+      ]
+    },
+    {
+      "id": "SQ19",
+      "group": "S11",
+      "q": "LombokService 的构造器和 getName 定义在哪行？",
+      "allowed_points": [
+        "生成代码不可见，无行号，诊断 generated_source_unavailable"
+      ]
+    },
+    {
+      "id": "SQ20",
+      "group": "S01",
+      "q": "legacy() 接口的完整 URL 是什么？",
+      "allowed_points": [
+        "${legacy.base} 占位符不展开，保留表达式并说明缺口"
+      ]
+    }
+  ]
+}

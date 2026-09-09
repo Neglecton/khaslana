@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod code_index;
+pub mod code_understanding;
 pub mod credentials;
 pub mod external_merge;
 pub mod git;

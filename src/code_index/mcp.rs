@@ -140,8 +140,7 @@ impl McpServer {
             let db_path = self.data_dir.join("code-index").join(&key).join("index.db");
             if db_path.is_file() {
                 let stats = read_index_stats(&db_path)
-                    .ok()
-                    .flatten()
+                    .map_err(|e| json!({ "error": e.to_string() }))?
                     .unwrap_or_default();
                 return Ok(Self::context_from_entry(&self.data_dir, &key, &stats));
             }
