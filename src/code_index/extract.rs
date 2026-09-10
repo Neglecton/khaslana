@@ -15,14 +15,12 @@ use super::{LangId, err};
 use crate::types::Result;
 
 /// 单文件提取结果。
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct FileExtractResult {
     pub defs: Vec<SymbolDef>,
     pub imports: Vec<ImportRef>,
     pub calls: Vec<CallSite>,
     pub type_refs: Vec<TypeRef>,
-    pub java: Option<super::java::JavaFileFacts>,
-    pub has_error: bool,
 }
 
 /// 一个定义符号。`scope` 是外层类/命名空间链（不含自身名）。
@@ -31,12 +29,8 @@ pub struct SymbolDef {
     pub label: NodeLabel,
     pub name: String,
     pub scope: Vec<String>,
-    pub signature: String,
-    pub start_byte: u32,
-    pub end_byte: u32,
     pub start_line: u32,
     pub end_line: u32,
-    pub java: Option<super::java::JavaSymbolFact>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,11 +47,6 @@ pub struct CallSite {
     pub callee_display: String,
     pub name: String,
     pub line: u32,
-    pub end_line: u32,
-    pub start_byte: u32,
-    pub end_byte: u32,
-    pub receiver_expr: String,
-    pub argument_exprs: Vec<String>,
     pub owner: Option<OwnerFunction>,
 }
 
@@ -66,7 +55,6 @@ pub struct CallSite {
 pub struct OwnerFunction {
     pub class_chain: Vec<String>,
     pub fn_name: String,
-    pub signature: String,
 }
 
 /// 类型关系引用（INHERITS / IMPLEMENTS 边的来源）。
@@ -106,56 +94,7 @@ impl Extractor {
             class_stack: Vec::new(),
             fn_stack: Vec::new(),
         };
-        ctx.result.has_error = tree.root_node().has_error();
         walk(tree.root_node(), 0, &mut ctx);
-        if lang == LangId::Java {
-            let java = super::java::extract::extract_java(tree.root_node(), bytes);
-            for call in &mut ctx.result.calls {
-                call.owner = java
-                    .symbols
-                    .iter()
-                    .filter(|symbol| {
-                        symbol.is_callable()
-                            && symbol.start_byte <= call.start_byte
-                            && symbol.end_byte >= call.end_byte
-                    })
-                    .min_by_key(|symbol| symbol.end_byte - symbol.start_byte)
-                    .map(|symbol| OwnerFunction {
-                        class_chain: symbol.owner_chain.clone(),
-                        fn_name: symbol.identity_name().to_string(),
-                        signature: symbol.signature.clone(),
-                    });
-            }
-            ctx.result.defs = java
-                .symbols
-                .iter()
-                .map(|symbol| SymbolDef {
-                    label: match symbol.kind.as_str() {
-                        "interface" | "annotation" => NodeLabel::Interface,
-                        "enum" => NodeLabel::Enum,
-                        "class" | "record" => NodeLabel::Class,
-                        "field" => NodeLabel::Field,
-                        _ => NodeLabel::Method,
-                    },
-                    name: symbol.identity_name().to_string(),
-                    scope: symbol.owner_chain.clone(),
-                    signature: symbol.signature.clone(),
-                    start_byte: symbol.start_byte,
-                    end_byte: symbol.end_byte,
-                    start_line: symbol.start_line,
-                    end_line: symbol.end_line,
-                    java: Some(symbol.clone()),
-                })
-                .collect();
-            ctx.result.imports = java
-                .imports
-                .iter()
-                .map(|import| ImportRef {
-                    module: import.path.clone(),
-                })
-                .collect();
-            ctx.result.java = Some(java);
-        }
         Ok(Some(ctx.result))
     }
 
@@ -179,7 +118,7 @@ struct WalkContext<'a> {
     result: FileExtractResult,
     class_stack: Vec<String>,
     /// 当前所在的函数/方法链（内层优先），调用点归属用。
-    fn_stack: Vec<OwnerFunction>,
+    fn_stack: Vec<String>,
 }
 
 fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
@@ -197,7 +136,10 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
     if let Some((_, strategy)) = ctx.spec.call_types.iter().find(|(t, _)| *t == kind)
         && let Some(mut site) = extract_call_site(node, *strategy, ctx.source)
     {
-        site.owner = ctx.fn_stack.last().cloned();
+        site.owner = ctx.fn_stack.last().map(|fn_name| OwnerFunction {
+            class_chain: ctx.class_stack.clone(),
+            fn_name: fn_name.clone(),
+        });
         ctx.result.calls.push(site);
     }
 
@@ -222,12 +164,8 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
             label: NodeLabel::Field,
             name,
             scope: ctx.class_stack.clone(),
-            signature: String::new(),
-            start_byte: node.start_byte() as u32,
-            end_byte: node.end_byte() as u32,
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            java: None,
         });
     }
     // 初始化器里的调用点由下方通用递归覆盖，此处不 return。
@@ -249,11 +187,7 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
             ctx.class_stack.push(def.name.clone());
         }
         if is_fn_def {
-            ctx.fn_stack.push(OwnerFunction {
-                class_chain: def.scope.clone(),
-                fn_name: def.name.clone(),
-                signature: def.signature.clone(),
-            });
+            ctx.fn_stack.push(def.name.clone());
         }
         recurse_children(node, depth, ctx);
         if is_fn_def {
@@ -351,12 +285,8 @@ fn extract_def(
             label: NodeLabel::Method,
             name,
             scope: ctx.class_stack.clone(),
-            signature: String::new(),
-            start_byte: node.start_byte() as u32,
-            end_byte: node.end_byte() as u32,
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            java: None,
         });
     }
 
@@ -372,12 +302,8 @@ fn extract_def(
             label,
             name,
             scope: ctx.class_stack.clone(),
-            signature: String::new(),
-            start_byte: node.start_byte() as u32,
-            end_byte: node.end_byte() as u32,
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            java: None,
         });
     }
 
@@ -425,12 +351,8 @@ fn extract_def(
         label,
         name,
         scope: ctx.class_stack.clone(),
-        signature: String::new(),
-        start_byte: node.start_byte() as u32,
-        end_byte: node.end_byte() as u32,
         start_line: node.start_position().row as u32 + 1,
         end_line: node.end_position().row as u32 + 1,
-        java: None,
     })
 }
 
@@ -549,37 +471,10 @@ fn extract_call_site(node: Node, strategy: CallNameStrategy, source: &[u8]) -> O
     if callee_display.is_empty() || name.is_empty() {
         return None;
     }
-    // Java 的 method_invocation `name` 字段只有末段标识符，receiver 必须从
-    // object AST 字段取得；其他语言仍保留原完整 callee 文本的兜底。
-    let receiver_expr = node
-        .child_by_field_name("object")
-        .and_then(|object| object.utf8_text(source).ok())
-        .map(str::to_string)
-        .or_else(|| {
-            callee_display
-                .rsplit_once(['.', ':'])
-                .map(|(receiver, _)| receiver.trim().trim_end_matches(':').to_string())
-        })
-        .unwrap_or_default();
-    let argument_exprs = node
-        .child_by_field_name("arguments")
-        .map(|arguments| {
-            let mut cursor = arguments.walk();
-            arguments
-                .named_children(&mut cursor)
-                .filter_map(|child| child.utf8_text(source).ok().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
     Some(CallSite {
         callee_display,
         name,
         line: node.start_position().row as u32 + 1,
-        end_line: node.end_position().row as u32 + 1,
-        start_byte: node.start_byte() as u32,
-        end_byte: node.end_byte() as u32,
-        receiver_expr,
-        argument_exprs,
         owner: None,
     })
 }

@@ -6,8 +6,8 @@
 //! 解析 pass（registry 策略链）→ 整库落盘。
 //!
 //! 增量路由与参考项目一致：已有库且 文件数 ≤ 已存哈希数 × 1.5 走增量，
-//! 否则全量。增量 = mtime+size 三分类 → 入边快照 → 按文件清除 → 生成单批文件
-//! 事实快照（图只合并变更文件）→ 重链接快照边 → 整库重写。
+//! 否则全量。增量 = mtime+size 三分类 → 入边快照 → 按文件清除 → 重解析变更
+//! 文件 → 重链接快照边 → 整库重写（对齐参考项目「增量也整体重写 DB」）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,16 +17,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::discover::{DiscoveredFile, discover_files};
 use super::extract::{Extractor, FileExtractResult};
-use super::facts::{CallFact, DiagnosticFact, FileFacts, SnapshotFacts};
 use super::graph::{
     EdgeType, GraphBuffer, NodeId, NodeLabel, calls_edge_properties, file_properties,
     file_qualified_name, folder_qualified_name, lang_of_rel_path,
 };
 use super::identity::content_fingerprint;
-use super::java::{JavaProjectModel, JavaSourceScope};
 use super::resolve::Registry;
 use super::store::{CodeIndexMeta, CodeIndexStore, FileHashRow};
-use super::{IndexPhase, IndexProgress, err};
+use super::{IndexPhase, IndexProgress};
 use crate::types::Result;
 
 #[derive(Clone, Debug, Default)]
@@ -101,54 +99,20 @@ pub fn run_index(
 
     options.report(IndexPhase::Discover, 0, 0);
     let outcome = discover_files(repo_root)?;
-    let excluded_count = outcome.excluded_count;
     let files = outcome.files;
     let total_files = files.len();
     if options.cancelled() {
         return Ok(RunOutcome::Cancelled);
     }
 
-    let refs: Vec<&DiscoveredFile> = files.iter().collect();
-    let mut store = match CodeIndexStore::open(db_path) {
-        Ok(store) => store,
-        Err(error) if force_full && error.to_string().contains("NeedsRebuild") => {
-            // 旧库只读探测成功后，先在内存完成全部提取；取消/失败均不会触碰 v2。
-            let Some((mut graph, parsed)) = build_full_graph(&repo_name, &branch, &refs, options)?
-            else {
-                return Ok(RunOutcome::Cancelled);
-            };
-            graph.prune_orphan_modules();
-            let meta = index_meta(repo_root, &repo_name, &branch, "rebuild");
-            let hashes = files_hash_rows(&parsed);
-            let project_model = java_project_model(&parsed);
-            let facts = snapshot_from_parsed(
-                &repo_name,
-                &parsed,
-                &project_model,
-                excluded_count,
-                now_millis(),
-            );
-            CodeIndexStore::rebuild_incompatible_with_facts(
-                db_path, &graph, &hashes, &facts, &meta,
-            )?;
-            let store = CodeIndexStore::open(db_path)?;
-            let stats = store.read_stats()?.unwrap_or_default();
-            return Ok(RunOutcome::Completed(IndexRunStats {
-                files: stats.files,
-                symbols: stats.symbols,
-                edges: stats.edges,
-                calls: stats.calls,
-                duration_ms: started.elapsed().as_millis() as u64,
-            }));
-        }
-        Err(error) => return Err(error),
-    };
+    let mut store = CodeIndexStore::open(db_path)?;
 
     // 增量路由（参考项目 try_incremental_or_delete_db 的判定式）。
     let existing_hashes = store.load_file_hashes()?;
     let incremental_eligible = !force_full
         && !existing_hashes.is_empty()
         && total_files as f64 <= existing_hashes.len() as f64 * 1.5;
+    let refs: Vec<&DiscoveredFile> = files.iter().collect();
     let inner = if incremental_eligible {
         run_incremental_inner(
             repo_root,
@@ -156,20 +120,11 @@ pub fn run_index(
             &branch,
             &refs,
             &existing_hashes,
-            excluded_count,
             &mut store,
             options,
         )?
     } else {
-        run_full_inner(
-            repo_root,
-            &repo_name,
-            &branch,
-            &refs,
-            excluded_count,
-            &mut store,
-            options,
-        )?
+        run_full_inner(repo_root, &repo_name, &branch, &refs, &mut store, options)?
     };
 
     match inner {
@@ -232,14 +187,25 @@ fn run_full_inner(
     repo_name: &str,
     branch: &str,
     files: &[&DiscoveredFile],
-    excluded_count: usize,
     store: &mut CodeIndexStore,
     options: &mut PipelineOptions,
 ) -> Result<InnerOutcome> {
-    let baseline_generation = store.generation()?;
-    let Some((mut graph, parsed)) = build_full_graph(repo_name, branch, files, options)? else {
+    let mut graph = GraphBuffer::new();
+    build_structure_pass(repo_name, branch, files, &mut graph);
+
+    // 全部发现文件都过一遍提取 pass：无语言/大文件/二进制只产出哈希行
+    // （file_hashes 需覆盖全量，增量路由靠它对比）；符号提取在 parse_one 内分流。
+    let parsed = run_extraction_pass(files, options)?;
+    if options.cancelled() {
         return Ok(InnerOutcome::Cancelled);
-    };
+    }
+
+    let mut merger = GraphMerger::new(repo_name);
+    merger.merge_parsed(&mut graph, &parsed);
+    merger.resolve_pending(&mut graph, options)?;
+    if options.cancelled() {
+        return Ok(InnerOutcome::Cancelled);
+    }
 
     options.report(IndexPhase::Write, 0, 0);
     // 全量图为全新构建，Module 恒有 IMPORTS 入边；清扫仅作防御（零成本）。
@@ -252,39 +218,11 @@ fn run_full_inner(
         "full",
         &graph,
         files_hash_rows(&parsed),
-        snapshot_from_parsed(
-            repo_name,
-            &parsed,
-            &java_project_model(&parsed),
-            excluded_count,
-            now_millis(),
-        ),
-        baseline_generation,
     )?;
     Ok(InnerOutcome::Done)
 }
 
-fn build_full_graph(
-    repo_name: &str,
-    branch: &str,
-    files: &[&DiscoveredFile],
-    options: &mut PipelineOptions,
-) -> Result<Option<(GraphBuffer, Vec<ParseOutput>)>> {
-    let mut graph = GraphBuffer::new();
-    build_structure_pass(repo_name, branch, files, &mut graph);
-    let parsed = run_extraction_pass(files, options)?;
-    if options.cancelled() {
-        return Ok(None);
-    }
-    let mut merger = GraphMerger::new(repo_name, java_project_model(&parsed));
-    merger.merge_parsed(&mut graph, &parsed);
-    merger.resolve_pending(&mut graph, options)?;
-    if options.cancelled() {
-        return Ok(None);
-    }
-    Ok(Some((graph, parsed)))
-}
-
+/// 由提取 pass 输出组装 file_hashes 行：sha256 在解析时对真实字节计算。
 fn files_hash_rows(parsed: &[ParseOutput]) -> Vec<FileHashRow> {
     parsed
         .iter()
@@ -307,22 +245,16 @@ fn write_store(
     mode: &str,
     graph: &GraphBuffer,
     hashes: Vec<FileHashRow>,
-    facts: SnapshotFacts,
-    baseline_generation: u64,
 ) -> Result<()> {
-    let meta = index_meta(repo_root, repo_name, branch, mode);
-    store.replace_all_with_facts_at_generation(graph, &hashes, &facts, &meta, baseline_generation)
-}
-
-fn index_meta(repo_root: &Path, repo_name: &str, branch: &str, mode: &str) -> CodeIndexMeta {
-    CodeIndexMeta {
+    let meta = CodeIndexMeta {
         repo_name: repo_name.to_string(),
         repo_path: repo_root.to_string_lossy().to_string(),
         branch: branch.to_string(),
         indexed_at: now_millis(),
         duration_ms: 0,
         mode: mode.to_string(),
-    }
+    };
+    store.replace_all(graph, &hashes, &meta)
 }
 
 fn now_millis() -> u64 {
@@ -342,11 +274,9 @@ fn run_incremental_inner(
     branch: &str,
     files: &[&DiscoveredFile],
     existing_hashes: &[FileHashRow],
-    excluded_count: usize,
     store: &mut CodeIndexStore,
     options: &mut PipelineOptions,
 ) -> Result<InnerOutcome> {
-    let baseline_generation = store.generation()?;
     let old_by_path: HashMap<&str, &FileHashRow> = existing_hashes
         .iter()
         .map(|h| (h.rel_path.as_str(), h))
@@ -414,15 +344,9 @@ fn run_incremental_inner(
     // 3. 按文件清除（级联删边 + 幸存节点 id 重排）。
     graph.purge_files(&purge_set);
 
-    // 4. 全部发现文件只读、只解析一次，形成同一代际的不可变事实快照；
-    //    兼容图只合并变更子集，避免重复创建未变符号。
-    let all_parsed = run_extraction_pass(files, options)?;
-    let changed_paths: HashSet<&str> = changed.iter().map(|file| file.rel_path.as_str()).collect();
-    let parsed: Vec<ParseOutput> = all_parsed
-        .iter()
-        .filter(|output| changed_paths.contains(output.rel_path.as_str()))
-        .cloned()
-        .collect();
+    // 4. 只解析变更文件。
+    let parse_jobs: Vec<&DiscoveredFile> = changed.to_vec();
+    let parsed = run_extraction_pass(&parse_jobs, options)?;
     if options.cancelled() {
         return Ok(InnerOutcome::Cancelled);
     }
@@ -430,8 +354,7 @@ fn run_incremental_inner(
     // 5. 结构补建（新文件的 Folder/File 节点可能不存在；upsert 幂等）。
     build_structure_pass(repo_name, branch, &changed, &mut graph);
 
-    let project_model = java_project_model(&all_parsed);
-    let mut merger = GraphMerger::new(repo_name, project_model.clone());
+    let mut merger = GraphMerger::new(repo_name);
     merger.merge_parsed(&mut graph, &parsed);
     merger.resolve_pending(&mut graph, options)?;
     if options.cancelled() {
@@ -452,7 +375,9 @@ fn run_incremental_inner(
 
     // 8. 整库重写。
     options.report(IndexPhase::Write, 0, 0);
-    let hashes = files_hash_rows(&all_parsed);
+    let mut hashes = unchanged_hashes;
+    hashes.extend(files_hash_rows(&parsed));
+    hashes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     write_store(
         store,
         repo_root,
@@ -461,14 +386,6 @@ fn run_incremental_inner(
         "incremental",
         &graph,
         hashes,
-        snapshot_from_parsed(
-            repo_name,
-            &all_parsed,
-            &project_model,
-            excluded_count,
-            now_millis(),
-        ),
-        baseline_generation,
     )?;
     Ok(InnerOutcome::Done)
 }
@@ -575,17 +492,14 @@ fn parent_dir(rel_path: &str) -> String {
 // 提取 pass（并行，参照 pass_parallel.c 阶段 3A）
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
 struct ParseOutput {
     rel_path: String,
     result: Option<FileExtractResult>,
     line_count: usize,
+    /// 发布时的真实内容指纹（含非可解析文件），落 file_hashes 供查询侧复核。
     sha256: Option<String>,
     mtime_ns: u64,
     size: u64,
-    parse_status: &'static str,
-    diagnostic: Option<DiagnosticFact>,
-    project_text: Option<String>,
 }
 
 /// 并行提取：worker 数 = 可用核数-1 钳到 [1,6]，每个 worker 独立持有
@@ -608,7 +522,7 @@ fn run_extraction_pass(
     let chunk_size = total.div_ceil(workers);
     let cancel = Arc::clone(&options.cancel);
 
-    let chunks: Result<Vec<Vec<ParseOutput>>> = std::thread::scope(|scope| {
+    let chunks: Vec<Vec<ParseOutput>> = std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
             .chunks(chunk_size.max(1))
             .map(|chunk| {
@@ -626,16 +540,8 @@ fn run_extraction_pass(
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| err("代码索引解析线程异常退出，已放弃本次发布"))
-            })
-            .collect()
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
-    let chunks = chunks?;
 
     let done: usize = chunks.iter().map(Vec::len).sum();
     let mut outputs: Vec<ParseOutput> = chunks.into_iter().flatten().collect();
@@ -652,257 +558,31 @@ fn parse_one(file: &DiscoveredFile, extractor: &mut Extractor) -> ParseOutput {
         sha256: None,
         mtime_ns: file.mtime_ns,
         size: file.size,
-        parse_status: "error",
-        diagnostic: None,
-        project_text: None,
     };
-    let bytes = match std::fs::read(&file.abs_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            output.diagnostic = Some(DiagnosticFact {
-                rel_path: file.rel_path.clone(),
-                adapter: "source_reader".into(),
-                code: "unreadable".into(),
-                detail: error.to_string(),
-                range_json: "{}".into(),
-            });
-            return output;
-        }
+    let Ok(bytes) = std::fs::read(&file.abs_path) else {
+        return output;
     };
+    // 二进制嗅探：前 8KB 出现 NUL 视为二进制（与项目内其他嗅探口径一致）。
+    let sniff_len = bytes.len().min(8192);
+    if bytes[..sniff_len].contains(&0) {
+        return output;
+    }
+    output.sha256 = Some(content_fingerprint(&bytes));
     output.size = bytes.len() as u64;
     output.mtime_ns = std::fs::metadata(&file.abs_path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(file.mtime_ns);
-    output.sha256 = Some(content_fingerprint(&bytes));
-    if is_java_project_file(&file.rel_path) {
-        output.project_text = std::str::from_utf8(&bytes).ok().map(str::to_string);
-    }
-    let Some(lang) = lang_of_rel_path(&file.rel_path) else {
-        if output.project_text.is_some() {
-            output.parse_status = "ok";
-            return output;
-        }
-        output.parse_status = "skipped";
-        output.diagnostic = Some(DiagnosticFact {
-            rel_path: file.rel_path.clone(),
-            adapter: "generic".into(),
-            code: "unsupported_language".into(),
-            detail: "没有对应 tree-sitter 适配器".into(),
-            range_json: "{}".into(),
-        });
-        return output;
-    };
-    if output.size > super::PARSE_MAX_BYTES {
-        output.parse_status = "skipped";
-        output.diagnostic = Some(DiagnosticFact {
-            rel_path: file.rel_path.clone(),
-            adapter: "generic".into(),
-            code: "budget_exceeded".into(),
-            detail: format!("文件超过 {} 字节解析上限", super::PARSE_MAX_BYTES),
-            range_json: "{}".into(),
-        });
-        return output;
-    }
-    // 二进制嗅探：前 8KB 出现 NUL 视为二进制（与项目内其他嗅探口径一致）。
-    let sniff_len = bytes.len().min(8192);
-    if bytes[..sniff_len].contains(&0) {
-        output.parse_status = "skipped";
-        output.diagnostic = Some(DiagnosticFact {
-            rel_path: file.rel_path.clone(),
-            adapter: "source_reader".into(),
-            code: "binary".into(),
-            detail: "前 8KB 含 NUL".into(),
-            range_json: "{}".into(),
-        });
-        return output;
-    }
     output.line_count = byte_line_count(&bytes);
-    match extractor.extract(lang, &bytes) {
-        Ok(Some(result)) => {
-            if result.has_error {
-                output.parse_status = "partial";
-                output.diagnostic = Some(DiagnosticFact {
-                    rel_path: file.rel_path.clone(),
-                    adapter: "generic".into(),
-                    code: "parse_partial".into(),
-                    detail: "tree-sitter 语法树含 ERROR 节点，已保留可提取事实".into(),
-                    range_json: "{}".into(),
-                });
-            } else {
-                output.parse_status = "ok";
-            }
-            output.result = Some(result);
-        }
-        Ok(None) => {
-            output.diagnostic = Some(DiagnosticFact {
-                rel_path: file.rel_path.clone(),
-                adapter: "generic".into(),
-                code: "parse_error".into(),
-                detail: "tree-sitter 未返回语法树".into(),
-                range_json: "{}".into(),
-            })
-        }
-        Err(error) => {
-            output.diagnostic = Some(DiagnosticFact {
-                rel_path: file.rel_path.clone(),
-                adapter: "generic".into(),
-                code: "parse_error".into(),
-                detail: error.to_string(),
-                range_json: "{}".into(),
-            })
-        }
+    // 超 PARSE_MAX_BYTES 的大文件只登记哈希不提取符号（is_parseable 守卫内移）。
+    if let Some(lang) = lang_of_rel_path(&file.rel_path)
+        && file.size <= super::PARSE_MAX_BYTES
+    {
+        output.result = extractor.extract(lang, &bytes).ok().flatten();
     }
     output
-}
-
-/// 事实快照独立于兼容图构建。即使某调用无法解析也逐点落盘；全量和增量均
-/// 直接消费本轮唯一的 ParseOutput 批次，不再二次读盘或解析。
-fn snapshot_from_parsed(
-    project: &str,
-    parsed: &[ParseOutput],
-    project_model: &JavaProjectModel,
-    excluded_count: usize,
-    extracted_at: u64,
-) -> SnapshotFacts {
-    let mut snapshot = SnapshotFacts {
-        files_discovered: parsed.len() as u64 + excluded_count as u64,
-        excluded_count: excluded_count as u64,
-        ..Default::default()
-    };
-    if excluded_count > 0 {
-        snapshot.diagnostics.push(DiagnosticFact {
-            rel_path: String::new(),
-            adapter: "discover".into(),
-            code: "excluded".into(),
-            detail: format!("发现阶段排除 {excluded_count} 项"),
-            range_json: "{}".into(),
-        });
-    }
-    for output in parsed {
-        if let Some(diagnostic) = &output.diagnostic {
-            snapshot.diagnostics.push(diagnostic.clone());
-        }
-        let Some(sha256) = output.sha256.clone() else {
-            continue;
-        };
-        let (definitions, imports, calls) = if let Some(result) = &output.result {
-            let definitions = result.defs.iter().map(|def| serde_json::json!({"name":def.name,"kind":def.label.as_str(),"scope":def.scope,"signature":def.signature,"start_byte":def.start_byte,"end_byte":def.end_byte,"start_line":def.start_line,"end_line":def.end_line,"java":def.java})).collect();
-            let imports = result
-                .imports
-                .iter()
-                .map(|import| import.module.clone())
-                .collect();
-            let calls = result
-                .calls
-                .iter()
-                .map(|call| {
-                    let owner_qn = call.owner.as_ref().map(|owner| {
-                        let mut qn = file_qualified_name(project, &output.rel_path);
-                        if !owner.class_chain.is_empty() {
-                            qn.push('.');
-                            qn.push_str(&owner.class_chain.join("."));
-                        }
-                        qn.push('.');
-                        qn.push_str(&owner.fn_name);
-                        qn.push_str(&owner.signature);
-                        qn
-                    });
-                    snapshot.calls.push(CallFact {
-                        owner_qn: owner_qn.clone(),
-                        rel_path: output.rel_path.clone(),
-                        sha256: sha256.clone(),
-                        start_byte: call.start_byte,
-                        end_byte: call.end_byte,
-                        start_line: call.line,
-                        end_line: call.end_line,
-                        receiver_expr: call.receiver_expr.clone(),
-                        callee_expr: call.callee_display.clone(),
-                        argument_exprs: call.argument_exprs.clone(),
-                        resolution: "unresolved".into(),
-                        target_qn: None,
-                        detail: "generic resolver 未证明目标".into(),
-                    });
-                    serde_json::json!({"owner":owner_qn,"callee":call.callee_display,"start_byte":call.start_byte,"end_byte":call.end_byte,"start_line":call.line,"end_line":call.end_line,"receiver":call.receiver_expr,"arguments":call.argument_exprs})
-                })
-                .collect();
-            (definitions, imports, calls)
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
-        snapshot.files.push(FileFacts::from_json(
-            output.rel_path.clone(),
-            sha256,
-            output.parse_status,
-            serde_json::json!({
-                "definitions":definitions,
-                "imports":imports,
-                "calls":calls,
-                "java":result_java_json(output, project_model),
-            }),
-            extracted_at,
-        ));
-    }
-    for diagnostic in &project_model.diagnostics {
-        snapshot.diagnostics.push(DiagnosticFact {
-            rel_path: diagnostic.rel_path.clone(),
-            adapter: "java-project".into(),
-            code: diagnostic.code.clone(),
-            detail: diagnostic.detail.clone(),
-            range_json: "{}".into(),
-        });
-    }
-    snapshot
-}
-
-fn java_project_model(parsed: &[ParseOutput]) -> JavaProjectModel {
-    JavaProjectModel::from_sources(parsed.iter().filter_map(|output| {
-        output
-            .project_text
-            .as_deref()
-            .map(|text| (output.rel_path.as_str(), text))
-    }))
-}
-
-fn is_java_project_file(rel_path: &str) -> bool {
-    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "pom.xml" | "settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts"
-    )
-}
-
-fn result_java_json(output: &ParseOutput, project_model: &JavaProjectModel) -> serde_json::Value {
-    let Some(result) = output.result.as_ref() else {
-        return serde_json::Value::Null;
-    };
-    let Some(java) = result.java.as_ref() else {
-        return serde_json::Value::Null;
-    };
-    let scope = project_model.scope_for(&output.rel_path);
-    serde_json::json!({"scope":scope,"facts":java})
-}
-
-fn definition_properties(
-    def: &super::extract::SymbolDef,
-    source_scope: &JavaSourceScope,
-    package: &str,
-) -> String {
-    let Some(java) = def.java.as_ref() else {
-        return "{}".to_string();
-    };
-    serde_json::to_string(&serde_json::json!({
-        "java": {
-            "module_key": source_scope.module_key,
-            "source_set": source_scope.source_set,
-            "source_root": source_scope.source_root,
-            "package": package,
-            "symbol": java,
-        }
-    }))
-    .expect("Java 节点属性可序列化")
 }
 
 fn byte_line_count(bytes: &[u8]) -> usize {
@@ -927,14 +607,10 @@ struct PendingCall {
 }
 
 /// 定义键：scope 链 \u{1} 名字。方法归属与调用来源定位共用。
-fn def_key(rel_path: &str, scope: &[String], name: &str, signature: &str) -> String {
-    let mut key = rel_path.to_string();
-    key.push('\u{1}');
-    key.push_str(&scope.join("\u{1}"));
+fn def_key(scope: &[String], name: &str) -> String {
+    let mut key = scope.join("\u{1}");
     key.push('\u{1}');
     key.push_str(name);
-    key.push('\u{1}');
-    key.push_str(signature);
     key
 }
 
@@ -943,17 +619,15 @@ struct GraphMerger {
     def_index: HashMap<String, NodeId>,
     pending_calls: Vec<PendingCall>,
     pending_types: Vec<(NodeId, super::extract::TypeRef)>,
-    java_project: JavaProjectModel,
 }
 
 impl GraphMerger {
-    fn new(project: &str, java_project: JavaProjectModel) -> Self {
+    fn new(project: &str) -> Self {
         Self {
             project: project.to_string(),
             def_index: HashMap::new(),
             pending_calls: Vec::new(),
             pending_types: Vec::new(),
-            java_project,
         }
     }
 
@@ -1001,16 +675,7 @@ impl GraphMerger {
                     } else {
                         format!(".{}", def.scope.join("."))
                     },
-                    format!("{}{}", def.name, def.signature)
-                );
-                let properties = definition_properties(
-                    def,
-                    &self.java_project.scope_for(rel_path),
-                    result
-                        .java
-                        .as_ref()
-                        .map(|java| java.package.as_str())
-                        .unwrap_or(""),
+                    def.name
                 );
                 let node_id = graph.add_symbol(
                     def.label,
@@ -1019,19 +684,14 @@ impl GraphMerger {
                     rel_path.to_string(),
                     def.start_line,
                     def.end_line,
-                    properties,
+                    "{}".to_string(),
                 );
-                self.def_index.insert(
-                    def_key(rel_path, &def.scope, &def.name, &def.signature),
-                    node_id,
-                );
+                self.def_index
+                    .insert(def_key(&def.scope, &def.name), node_id);
                 // 方法/字段挂到容器符号；顶层定义挂到文件。
                 match def.scope.split_last() {
                     Some((container, parents)) => {
-                        if let Some(&cid) = self
-                            .def_index
-                            .get(&def_key(rel_path, parents, container, ""))
-                        {
+                        if let Some(&cid) = self.def_index.get(&def_key(parents, container)) {
                             graph.add_edge(cid, node_id, EdgeType::DefinesMethod, "{}".to_string());
                             continue;
                         }
@@ -1055,10 +715,7 @@ impl GraphMerger {
                     )
                 });
                 let Some(host) = host else { continue };
-                if let Some(&host_id) =
-                    self.def_index
-                        .get(&def_key(rel_path, &host.scope, &host.name, &host.signature))
-                {
+                if let Some(&host_id) = self.def_index.get(&def_key(&host.scope, &host.name)) {
                     self.pending_types.push((host_id, tr.clone()));
                 }
             }
@@ -1068,14 +725,7 @@ impl GraphMerger {
                 let source = call
                     .owner
                     .as_ref()
-                    .and_then(|o| {
-                        self.def_index.get(&def_key(
-                            rel_path,
-                            &o.class_chain,
-                            &o.fn_name,
-                            &o.signature,
-                        ))
-                    })
+                    .and_then(|o| self.def_index.get(&def_key(&o.class_chain, &o.fn_name)))
                     .copied()
                     .unwrap_or(file_id);
                 self.pending_calls.push(PendingCall {

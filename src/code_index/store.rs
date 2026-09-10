@@ -10,22 +10,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, params};
 
 use super::err;
-use super::facts::{FileFacts, SnapshotFacts};
 use super::graph::{EdgeType, GraphBuffer, NodeId};
-use super::identity::{
-    CoverageSummary, SymbolKeyMaterial, sha256_hex, symbol_key_from_material, symbol_key_material,
-};
-use crate::ai::review_store::repo_key;
-use crate::code_understanding::{
-    EntityKey, EvidenceKind, RelationKind, evidence_id_from_parts, relation_id_from_parts,
-};
 use crate::types::Result;
 
-/// 索引库 schema 版本：建库时写入 meta；不匹配时由调用方显式整库重建。
-pub const CODE_INDEX_SCHEMA_VERSION: u32 = 3;
+/// 索引库 schema 版本：建库时写入 meta，打开时不匹配则整库删除重建。
+/// v4：file_hashes.sha256 从预留空串升级为强制内容指纹（V2 工具层复核用）。
+pub const CODE_INDEX_SCHEMA_VERSION: u32 = 4;
 
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
@@ -35,7 +28,8 @@ pub fn open_index_db_path(data_dir: &Path, repo_hash8: &str) -> Result<PathBuf> 
     Ok(dir.join("index.db"))
 }
 
-/// file_hashes 行（mtime+size 用于增量预筛，sha256 是发布时的真实内容指纹）。
+/// file_hashes 行（mtime+size 用于增量预筛，sha256 是发布时的真实内容指纹，
+/// 供查询侧「索引记录位置 vs 当前文件内容」守卫复核）。
 #[derive(Clone, Debug)]
 pub struct FileHashRow {
     pub rel_path: String,
@@ -99,69 +93,19 @@ const SYMBOL_LABELS: &[&str] = &[
 ];
 
 impl CodeIndexStore {
-    /// 在已经完成内存提取后，将不兼容库原子替换为 v3 快照。任一步失败时
-    /// SQLite 回滚到原来的 v2 文件；这里绝不能在提取之前调用。
-    pub fn rebuild_incompatible(
-        path: &Path,
-        graph: &GraphBuffer,
-        hashes: &[FileHashRow],
-        meta: &CodeIndexMeta,
-    ) -> Result<()> {
-        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|e| err(format!("打开待重建索引库失败：{e}")))?;
-        enable_foreign_keys(&conn)?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| err(format!("锁定待重建索引库失败：{e}")))?;
-        tx.execute_batch("DROP TRIGGER IF EXISTS search_fts_update; DROP TRIGGER IF EXISTS search_fts_delete; DROP TRIGGER IF EXISTS search_fts_insert; DROP TABLE IF EXISTS search_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS diagnostics; DROP TABLE IF EXISTS entry_points; DROP TABLE IF EXISTS relation_evidence; DROP TABLE IF EXISTS evidence; DROP TABLE IF EXISTS relations; DROP TABLE IF EXISTS call_sites; DROP TABLE IF EXISTS symbol_semantics; DROP TABLE IF EXISTS file_facts; DROP TABLE IF EXISTS nodes_fts; DROP TABLE IF EXISTS edges; DROP TABLE IF EXISTS nodes; DROP TABLE IF EXISTS entities; DROP TABLE IF EXISTS file_hashes; DROP TABLE IF EXISTS meta;")
-            .map_err(|e| err(format!("清理旧 schema 失败：{e}")))?;
-        tx.execute_batch(Self::V3_SCHEMA_SQL)
-            .map_err(|e| err(format!("创建 v3 schema 失败：{e}")))?;
-        tx.execute(
-            "INSERT INTO meta(key,value) VALUES('schema_version','3'),('generation','0')",
-            [],
-        )
-        .map_err(|e| err(format!("初始化 v3 元信息失败：{e}")))?;
-        Self::write_snapshot(&tx, graph, hashes, &SnapshotFacts::default(), meta, 0)?;
-        tx.commit()
-            .map_err(|e| err(format!("提交索引重建失败：{e}")))
-    }
-
-    pub fn rebuild_incompatible_with_facts(
-        path: &Path,
-        graph: &GraphBuffer,
-        hashes: &[FileHashRow],
-        facts: &SnapshotFacts,
-        meta: &CodeIndexMeta,
-    ) -> Result<()> {
-        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|e| err(format!("打开待重建索引库失败：{e}")))?;
-        enable_foreign_keys(&conn)?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| err(format!("锁定待重建索引库失败：{e}")))?;
-        tx.execute_batch("DROP TRIGGER IF EXISTS search_fts_update; DROP TRIGGER IF EXISTS search_fts_delete; DROP TRIGGER IF EXISTS search_fts_insert; DROP TABLE IF EXISTS search_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS diagnostics; DROP TABLE IF EXISTS entry_points; DROP TABLE IF EXISTS relation_evidence; DROP TABLE IF EXISTS evidence; DROP TABLE IF EXISTS relations; DROP TABLE IF EXISTS call_sites; DROP TABLE IF EXISTS symbol_semantics; DROP TABLE IF EXISTS file_facts; DROP TABLE IF EXISTS nodes_fts; DROP TABLE IF EXISTS edges; DROP TABLE IF EXISTS nodes; DROP TABLE IF EXISTS entities; DROP TABLE IF EXISTS file_hashes; DROP TABLE IF EXISTS meta;")
-            .map_err(|e| err(format!("清理旧 schema 失败：{e}")))?;
-        tx.execute_batch(Self::V3_SCHEMA_SQL)
-            .map_err(|e| err(format!("创建 v3 schema 失败：{e}")))?;
-        tx.execute(
-            "INSERT INTO meta(key,value) VALUES('schema_version','3'),('generation','0')",
-            [],
-        )
-        .map_err(|e| err(format!("初始化 v3 元信息失败：{e}")))?;
-        Self::write_snapshot(&tx, graph, hashes, facts, meta, 0)?;
-        tx.commit()
-            .map_err(|e| err(format!("提交索引重建失败：{e}")))
-    }
-
-    /// 打开（必要时创建）索引库。历史/损坏库绝不自动删除，调用方必须显式重建。
+    /// 打开（必要时创建）索引库。schema 版本不符时删除重建。
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(store) = Self::try_open(path)? {
             return Ok(store);
         }
-        Err(err(
-            "[NeedsRebuild] 索引 schema 不兼容，需要重建；旧数据未被修改",
-        ))
+        // 版本不符 / 库损坏：删掉主文件与 WAL 伴生文件后重建。
+        for suffix in ["", "-wal", "-shm"] {
+            let p = PathBuf::from(format!("{}{suffix}", path.display()));
+            if p.exists() {
+                std::fs::remove_file(&p).map_err(|e| err(format!("重置索引库失败：{e}")))?;
+            }
+        }
+        Self::try_open(path)?.ok_or_else(|| err("索引库创建失败"))
     }
 
     fn try_open(path: &Path) -> Result<Option<Self>> {
@@ -174,7 +118,7 @@ impl CodeIndexStore {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
         conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
-        enable_foreign_keys(&conn)?;
+        conn.pragma_update(None, "foreign_keys", "ON").ok();
 
         let store = Self { conn };
         if !exists {
@@ -197,16 +141,8 @@ impl CodeIndexStore {
 
     fn initialize_schema(&self) -> Result<()> {
         self.conn
-            .execute_batch(Self::V3_SCHEMA_SQL)
-            .map_err(|e| err(format!("初始化索引 schema 失败：{e}")))?;
-        self.set_meta(
-            "schema_version",
-            CODE_INDEX_SCHEMA_VERSION.to_string().as_str(),
-        )?;
-        self.set_meta("generation", "0")
-    }
-    const V3_SCHEMA_SQL: &str = r#"
-                CREATE TABLE IF NOT EXISTS entities (entity_key TEXT PRIMARY KEY, entity_kind TEXT NOT NULL CHECK(entity_kind IN ('symbol','callsite','entry')), rel_path TEXT NOT NULL DEFAULT '', CHECK((entity_kind='symbol' AND length(entity_key)=68 AND substr(entity_key,1,4)='sk1:') OR (entity_kind='callsite' AND length(entity_key)=68 AND substr(entity_key,1,4)='cs1:') OR (entity_kind='entry' AND length(entity_key)=68 AND substr(entity_key,1,4)='ep1:')), CHECK(substr(entity_key,5) NOT GLOB '*[^0-9a-f]*'));
+            .execute_batch(
+                r#"
                 CREATE TABLE IF NOT EXISTS nodes (
                   id INTEGER PRIMARY KEY,
                   label TEXT NOT NULL,
@@ -215,9 +151,7 @@ impl CodeIndexStore {
                   file_path TEXT DEFAULT '',
                   start_line INTEGER DEFAULT 0,
                   end_line INTEGER DEFAULT 0,
-                  properties TEXT DEFAULT '{}',
-                  symbol_key TEXT UNIQUE REFERENCES entities(entity_key) ON DELETE CASCADE,
-                  CHECK((label IN ('Project','Branch','Folder','File','Module') AND symbol_key IS NULL) OR (label IN ('Function','Method','Class','Struct','Interface','Enum','Trait','Type','Field') AND symbol_key IS NOT NULL))
+                  properties TEXT DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS edges (
                   id INTEGER PRIMARY KEY,
@@ -241,21 +175,14 @@ impl CodeIndexStore {
                   name, qualified_name, label, file_path,
                   content='', tokenize='unicode61 remove_diacritics 2'
                 );
-                CREATE TABLE IF NOT EXISTS file_facts (rel_path TEXT PRIMARY KEY REFERENCES file_hashes(rel_path) ON DELETE CASCADE, sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'), adapter_versions_json TEXT NOT NULL, parse_status TEXT NOT NULL CHECK(parse_status IN ('ok','partial','error','skipped')), facts_json TEXT NOT NULL, extracted_at INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS symbol_semantics (symbol_key TEXT PRIMARY KEY REFERENCES nodes(symbol_key) ON DELETE CASCADE, module_key TEXT DEFAULT '', source_set TEXT DEFAULT '', package TEXT DEFAULT '', signature TEXT DEFAULT '', kind TEXT NOT NULL, type_metadata_json TEXT DEFAULT '{}', annotations_json TEXT DEFAULT '[]', stability TEXT NOT NULL DEFAULT 'stable');
-                CREATE TABLE IF NOT EXISTS call_sites (callsite_key TEXT PRIMARY KEY REFERENCES entities(entity_key) ON DELETE CASCADE, owner_key TEXT NOT NULL REFERENCES nodes(symbol_key) ON DELETE CASCADE, rel_path TEXT NOT NULL REFERENCES file_hashes(rel_path) ON DELETE CASCADE, start_byte INTEGER NOT NULL CHECK(start_byte >= 0), end_byte INTEGER NOT NULL CHECK(end_byte >= start_byte), start_line INTEGER NOT NULL CHECK(start_line >= 1), end_line INTEGER NOT NULL CHECK(end_line >= start_line), content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'), receiver_expr TEXT DEFAULT '', callee_expr TEXT NOT NULL, argument_exprs_json TEXT DEFAULT '[]', resolution TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS relations (relation_id TEXT PRIMARY KEY CHECK(length(relation_id)=67 AND substr(relation_id,1,3)='r1:' AND substr(relation_id,4) NOT GLOB '*[^0-9a-f]*'), source_key TEXT NOT NULL REFERENCES entities(entity_key) ON DELETE CASCADE, target_key TEXT REFERENCES entities(entity_key) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('contains','calls','inherits','implements','overrides','dispatch_candidate','injects_candidate','handles','maps_to')), certainty TEXT NOT NULL CHECK(certainty IN ('syntactic','inferred','unknown')), resolution_state TEXT NOT NULL CHECK(resolution_state IN ('resolved','ambiguous','unresolved','external')), rule_id TEXT, candidate_group TEXT, conditions_json TEXT DEFAULT '[]', heuristic_score REAL, CHECK(target_key IS NOT NULL OR resolution_state IN ('unresolved','external')));
-                CREATE TABLE IF NOT EXISTS evidence (evidence_id TEXT PRIMARY KEY CHECK(length(evidence_id)=67 AND substr(evidence_id,1,3)='e1:' AND substr(evidence_id,4) NOT GLOB '*[^0-9a-f]*'), kind TEXT NOT NULL CHECK(kind IN ('declaration','call_site','annotation','sql_mapping','control_flow','module_aggregation')), rule_id TEXT, excerpt_digest TEXT NOT NULL, refs_json TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS relation_evidence (relation_id TEXT NOT NULL REFERENCES relations(relation_id) ON DELETE CASCADE, evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id) ON DELETE CASCADE, PRIMARY KEY(relation_id,evidence_id));
-                CREATE TABLE IF NOT EXISTS entry_points (entry_key TEXT PRIMARY KEY REFERENCES entities(entity_key) ON DELETE CASCADE, kind TEXT NOT NULL, symbol_key TEXT REFERENCES nodes(symbol_key) ON DELETE SET NULL, module_key TEXT DEFAULT '', meta_json TEXT DEFAULT '{}', evidence_id TEXT REFERENCES evidence(evidence_id) ON DELETE SET NULL);
-                CREATE TABLE IF NOT EXISTS diagnostics (id INTEGER PRIMARY KEY, rel_path TEXT DEFAULT '', adapter TEXT NOT NULL, code TEXT NOT NULL, detail TEXT DEFAULT '', range_json TEXT DEFAULT '{}');
-                CREATE TABLE IF NOT EXISTS search_documents (doc_id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, module_key TEXT DEFAULT '', generation INTEGER NOT NULL);
-                CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(title, body, content='search_documents', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2');
-                CREATE TRIGGER IF NOT EXISTS search_fts_insert AFTER INSERT ON search_documents BEGIN INSERT INTO search_fts(rowid,title,body) VALUES(new.rowid,new.title,new.body); END;
-                CREATE TRIGGER IF NOT EXISTS search_fts_delete AFTER DELETE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,title,body) VALUES('delete',old.rowid,old.title,old.body); END;
-                CREATE TRIGGER IF NOT EXISTS search_fts_update AFTER UPDATE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,title,body) VALUES('delete',old.rowid,old.title,old.body); INSERT INTO search_fts(rowid,title,body) VALUES(new.rowid,new.title,new.body); END;
-                CREATE INDEX IF NOT EXISTS idx_entities_path_kind ON entities(rel_path,entity_kind); CREATE INDEX IF NOT EXISTS idx_semantics_module ON symbol_semantics(module_key,source_set); CREATE INDEX IF NOT EXISTS idx_callsites_owner ON call_sites(owner_key); CREATE INDEX IF NOT EXISTS idx_callsites_path ON call_sites(rel_path); CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_key,kind,target_key); CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key,kind,source_key); CREATE INDEX IF NOT EXISTS idx_relations_kind ON relations(kind); CREATE INDEX IF NOT EXISTS idx_entry_kind ON entry_points(kind); CREATE INDEX IF NOT EXISTS idx_diagnostics_path ON diagnostics(rel_path); CREATE INDEX IF NOT EXISTS idx_search_docs_kind ON search_documents(kind);
-                "#;
+                "#,
+            )
+            .map_err(|e| err(format!("初始化索引 schema 失败：{e}")))?;
+        self.set_meta(
+            "schema_version",
+            CODE_INDEX_SCHEMA_VERSION.to_string().as_str(),
+        )
+    }
 
     fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn
@@ -269,92 +196,18 @@ impl CodeIndexStore {
     }
 
     /// 全量替换图内容 + 文件哈希表 + 元信息（整库重写语义，全量与增量共用；
-    /// 对齐参考项目「增量也整体重写 DB」的做法；schema 损坏库必须显式重建，
-    /// 不能借此路径静默修复。
+    /// 对齐参考项目「增量也整体重写 DB」的做法，保证坏库可自愈）。
     pub fn replace_all(
         &mut self,
         graph: &GraphBuffer,
         hashes: &[FileHashRow],
         meta: &CodeIndexMeta,
     ) -> Result<()> {
-        let baseline_generation = self.generation()?;
-        self.replace_all_at_generation(graph, hashes, meta, baseline_generation)
-    }
-
-    /// 发布一个已在内存中完成的批次，并核对提取前捕获的基准代际。
-    pub fn replace_all_at_generation(
-        &mut self,
-        graph: &GraphBuffer,
-        hashes: &[FileHashRow],
-        meta: &CodeIndexMeta,
-        baseline_generation: u64,
-    ) -> Result<()> {
         let tx = self
             .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .transaction()
             .map_err(|e| err(format!("开启索引事务失败：{e}")))?;
-        let current_generation: u64 = tx
-            .query_row("SELECT value FROM meta WHERE key='generation'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|e| err(format!("核对索引代际失败：{e}")))?
-            .parse()
-            .map_err(|_| err("索引代际格式无效"))?;
-        if current_generation != baseline_generation {
-            return Err(err("[GenerationMismatch] 索引已更新，本次发布已回滚"));
-        }
-        Self::write_snapshot(
-            &tx,
-            graph,
-            hashes,
-            &SnapshotFacts::default(),
-            meta,
-            current_generation,
-        )?;
-        tx.commit()
-            .map_err(|e| err(format!("提交索引事务失败：{e}")))?;
-        Ok(())
-    }
 
-    /// DEV-03 的真实事实发布入口。旧 `replace_all*` 仍保留给既有测试和
-    /// 兼容调用；新管线必须走本函数，不能回退为 generic 占位事实。
-    pub fn replace_all_with_facts_at_generation(
-        &mut self,
-        graph: &GraphBuffer,
-        hashes: &[FileHashRow],
-        facts: &SnapshotFacts,
-        meta: &CodeIndexMeta,
-        baseline_generation: u64,
-    ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| err(format!("开启索引事务失败：{e}")))?;
-        let current_generation: u64 = tx
-            .query_row("SELECT value FROM meta WHERE key='generation'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|e| err(format!("核对索引代际失败：{e}")))?
-            .parse()
-            .map_err(|_| err("索引代际格式无效"))?;
-        if current_generation != baseline_generation {
-            return Err(err("[GenerationMismatch] 索引已更新，本次发布已回滚"));
-        }
-        Self::write_snapshot(&tx, graph, hashes, facts, meta, current_generation)?;
-        tx.commit()
-            .map_err(|e| err(format!("提交索引事务失败：{e}")))
-    }
-
-    /// 写入一个完整的发布快照。调用者拥有事务，从而保证重建和普通发布共享
-    /// 完全相同的事实→关系→兼容投影顺序。
-    fn write_snapshot(
-        tx: &rusqlite::Transaction<'_>,
-        graph: &GraphBuffer,
-        hashes: &[FileHashRow],
-        facts: &SnapshotFacts,
-        meta: &CodeIndexMeta,
-        current_generation: u64,
-    ) -> Result<()> {
         // bulk 模式：先删辅助索引，插完重建。
         tx.execute_batch(
             "DROP INDEX IF EXISTS idx_nodes_label;
@@ -365,42 +218,22 @@ impl CodeIndexStore {
         )
         .map_err(|e| err(format!("清理索引辅助索引失败：{e}")))?;
 
-        tx.execute("DELETE FROM relation_evidence", [])
-            .and_then(|_| tx.execute("DELETE FROM relations", []))
-            .and_then(|_| tx.execute("DELETE FROM call_sites", []))
-            .and_then(|_| tx.execute("DELETE FROM entry_points", []))
-            .and_then(|_| tx.execute("DELETE FROM symbol_semantics", []))
-            .and_then(|_| tx.execute("DELETE FROM file_facts", []))
-            .and_then(|_| tx.execute("DELETE FROM search_documents", []))
-            .and_then(|_| tx.execute("DELETE FROM evidence", []))
-            .and_then(|_| tx.execute("DELETE FROM edges", []))
+        tx.execute("DELETE FROM edges", [])
             .and_then(|_| tx.execute("DELETE FROM nodes", []))
-            .and_then(|_| tx.execute("DELETE FROM entities", []))
             .and_then(|_| tx.execute("DELETE FROM file_hashes", []))
             .map_err(|e| err(format!("清空旧图失败：{e}")))?;
         // contentless FTS 的整表清空特殊命令。
         tx.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')", [])
             .map_err(|e| err(format!("清空全文索引失败：{e}")))?;
 
-        let mut keys = HashMap::new();
         {
             let mut stmt = tx
                 .prepare(
-                    "INSERT INTO nodes (id, label, name, qualified_name, file_path, start_line, end_line, properties, symbol_key)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO nodes (id, label, name, qualified_name, file_path, start_line, end_line, properties)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 )
                 .map_err(|e| err(format!("准备节点写入失败：{e}")))?;
             for node in &graph.nodes {
-                let key = node
-                    .label
-                    .is_symbol()
-                    .then(|| stable_symbol_key(node, meta))
-                    .transpose()?;
-                if let Some(key) = &key {
-                    tx.execute("INSERT INTO entities(entity_key, entity_kind, rel_path) VALUES(?1, 'symbol', ?2)", params![key, node.file_path])
-                        .map_err(|e| err(format!("写入实体注册表失败：{e}")))?;
-                    keys.insert(node.id, key.clone());
-                }
                 stmt.execute(params![
                     node.id as i64 + 1,
                     node.label.as_str(),
@@ -410,86 +243,8 @@ impl CodeIndexStore {
                     node.start_line,
                     node.end_line,
                     node.properties,
-                    key,
                 ])
                 .map_err(|e| err(format!("写入节点失败：{e}")))?;
-            }
-            drop(stmt);
-            for node in &graph.nodes {
-                if let Some(key) = keys.get(&node.id) {
-                    let properties: serde_json::Value =
-                        serde_json::from_str(&node.properties).unwrap_or_default();
-                    let java = properties.get("java");
-                    let symbol = java.and_then(|value| value.get("symbol"));
-                    let module_key = java
-                        .and_then(|value| value.get("module_key"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let source_set = java
-                        .and_then(|value| value.get("source_set"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let package = java
-                        .and_then(|value| value.get("package"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let signature = symbol
-                        .and_then(|value| value.get("signature"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    let kind = symbol
-                        .and_then(|value| value.get("kind"))
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| node.label.as_str().to_ascii_lowercase());
-                    let stability = symbol
-                        .and_then(|value| value.get("stability"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("stable");
-                    let type_metadata_json = symbol
-                        .map(serde_json::Value::to_string)
-                        .unwrap_or_else(|| "{}".into());
-                    let annotations_json = symbol
-                        .and_then(|value| value.get("annotations"))
-                        .map(serde_json::Value::to_string)
-                        .unwrap_or_else(|| "[]".into());
-                    tx.execute(
-                        "INSERT INTO symbol_semantics(symbol_key,module_key,source_set,package,signature,kind,type_metadata_json,annotations_json,stability) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                        params![key,module_key,source_set,package,signature,kind,type_metadata_json,annotations_json,stability],
-                    )
-                    .map_err(|e| err(format!("写入符号语义失败：{e}")))?;
-                    tx.execute("INSERT INTO search_documents(doc_id,kind,title,body,generation) VALUES(?1,'symbol',?2,?3,?4)", params![key, node.name, node.qualified_name, (current_generation + 1) as i64])
-                        .map_err(|e| err(format!("写入检索文档失败：{e}")))?;
-                }
-            }
-            for edge in &graph.edges {
-                if edge.etype == EdgeType::Calls {
-                    if let (Some(source), Some(target)) =
-                        (keys.get(&edge.source), keys.get(&edge.target))
-                    {
-                        let source = EntityKey::Symbol(super::identity::parse_symbol_key(source)?);
-                        let target = EntityKey::Symbol(super::identity::parse_symbol_key(target)?);
-                        let relation_id = relation_id_from_parts(
-                            &source,
-                            Some(&target),
-                            RelationKind::Calls,
-                            None,
-                            None,
-                            &[],
-                        );
-                        let properties: serde_json::Value =
-                            serde_json::from_str(&edge.properties).unwrap_or_default();
-                        let strategy = properties
-                            .get("strategy")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("unknown");
-                        let confidence = properties
-                            .get("confidence")
-                            .and_then(|value| value.as_f64());
-                        tx.execute("INSERT INTO relations(relation_id,source_key,target_key,kind,certainty,resolution_state,rule_id,heuristic_score) VALUES(?1,?2,?3,'calls','inferred','resolved',?4,?5)", params![relation_id, source.id(), target.id(), format!("legacy:{strategy}"), confidence])
-                            .map_err(|e| err(format!("写入关系失败：{e}")))?;
-                    }
-                }
             }
         }
         {
@@ -540,268 +295,24 @@ impl CodeIndexStore {
                 .prepare("INSERT INTO file_hashes (rel_path, sha256, mtime_ns, size) VALUES (?1, ?2, ?3, ?4)")
                 .map_err(|e| err(format!("准备文件哈希写入失败：{e}")))?;
             for h in hashes {
-                stmt.execute(params![
-                    h.rel_path,
-                    h.sha256,
-                    h.mtime_ns as i64,
-                    h.size as i64,
-                ])
-                .map_err(|e| err(format!("写入文件哈希失败：{e}")))?;
-                let facts = facts
-                    .files
-                    .iter()
-                    .find(|fact| fact.rel_path == h.rel_path)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        FileFacts::from_json(
-                            h.rel_path.clone(),
-                            h.sha256.clone(),
-                            "skipped",
-                            serde_json::json!({"definitions":[],"imports":[],"calls":[]}),
-                            meta.indexed_at,
-                        )
-                    });
-                tx.execute("INSERT INTO file_facts(rel_path,sha256,adapter_versions_json,parse_status,facts_json,extracted_at) VALUES(?1,?2,?3,?4,?5,?6)", params![facts.rel_path,facts.sha256,facts.adapter_versions_json,facts.parse_status,facts.facts_json,facts.extracted_at as i64])
-                    .map_err(|e| err(format!("写入原始事实失败：{e}")))?;
+                stmt.execute(params![h.rel_path, h.sha256, h.mtime_ns as i64, h.size as i64,])
+                    .map_err(|e| err(format!("写入文件哈希失败：{e}")))?;
             }
         }
 
-        // 调用点以位置为身份，不按 callee 聚合。无法对应函数的顶层调用没有可用
-        // owner_key，故只记录诊断；普通语言的函数范围内调用都可稳定落表。
-        let mut call_ordinals: HashMap<(String, String, u32, u32), u32> = HashMap::new();
-        for call in &facts.calls {
-            let owner = call
-                .owner_qn
-                .as_ref()
-                .and_then(|qualified_name| graph.find_by_qn(qualified_name))
-                .and_then(|node_id| keys.get(&node_id));
-            let Some(owner) = owner else {
-                tx.execute("INSERT INTO diagnostics(rel_path,adapter,code,detail,range_json) VALUES(?1,'generic','unowned_call',?2,?3)", params![call.rel_path, call.detail, format!("{{\"start_byte\":{},\"end_byte\":{}}}", call.start_byte, call.end_byte)])
-                    .map_err(|e| err(format!("写入调用点诊断失败：{e}")))?;
-                continue;
-            };
-            let owner_key = super::identity::parse_symbol_key(owner)?;
-            let ordinal_key = (
-                owner.clone(),
-                call.rel_path.clone(),
-                call.start_byte,
-                call.end_byte,
-            );
-            let ordinal = *call_ordinals.entry(ordinal_key).or_insert(0);
-            *call_ordinals
-                .get_mut(&(
-                    owner.clone(),
-                    call.rel_path.clone(),
-                    call.start_byte,
-                    call.end_byte,
-                ))
-                .expect("调用点序号已插入") += 1;
-            let callsite = EntityKey::callsite_from_parts(
-                &owner_key,
-                &call.rel_path,
-                call.start_byte as u64,
-                call.end_byte as u64,
-                ordinal,
-            );
-            tx.execute(
-                "INSERT INTO entities(entity_key,entity_kind,rel_path) VALUES(?1,'callsite',?2)",
-                params![callsite.id(), call.rel_path],
+        // 发布代际：每次整库重写递增，供查询侧检测索引已换代（旧代结果应失效）。
+        // 在清理 meta 前读取旧值，否则增量重写永远读到 1。
+        let current_generation: u64 = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'generation'",
+                [],
+                |row| row.get::<_, String>(0),
             )
-            .map_err(|e| err(format!("写入调用点实体失败：{e}")))?;
-            let owner_id = graph
-                .nodes
-                .iter()
-                .find(|node| keys.get(&node.id) == Some(owner))
-                .map(|node| node.id);
-            let resolved_target = owner_id.and_then(|source| {
-                graph
-                    .edges
-                    .iter()
-                    .find(|edge| {
-                        if edge.etype != EdgeType::Calls || edge.source != source {
-                            return false;
-                        }
-                        serde_json::from_str::<serde_json::Value>(&edge.properties)
-                            .ok()
-                            .and_then(|properties| {
-                                properties
-                                    .get("callee")
-                                    .and_then(|value| value.as_str())
-                                    .map(|callee| callee == call.callee_expr)
-                            })
-                            .unwrap_or(false)
-                    })
-                    .and_then(|edge| {
-                        let target_key = keys.get(&edge.target)?.clone();
-                        let properties: serde_json::Value =
-                            serde_json::from_str(&edge.properties).unwrap_or_default();
-                        let strategy = properties
-                            .get("strategy")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let confidence = properties
-                            .get("confidence")
-                            .and_then(|value| value.as_f64());
-                        Some((target_key, strategy, confidence))
-                    })
-            });
-            let resolution_state = if resolved_target.is_some() {
-                "resolved"
-            } else {
-                call.resolution.as_str()
-            };
-            let resolution = serde_json::json!({"state":resolution_state,"target":resolved_target.as_ref().map(|target| target.0.as_str()),"reason":call.detail}).to_string();
-            tx.execute("INSERT INTO call_sites(callsite_key,owner_key,rel_path,start_byte,end_byte,start_line,end_line,content_sha256,receiver_expr,callee_expr,argument_exprs_json,resolution) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![callsite.id(), owner, call.rel_path, call.start_byte as i64, call.end_byte as i64, call.start_line as i64, call.end_line as i64, call.sha256, call.receiver_expr, call.callee_expr, serde_json::to_string(&call.argument_exprs).unwrap_or_else(|_| "[]".into()), resolution])
-                .map_err(|e| err(format!("写入调用点失败：{e}")))?;
-            let reference = super::identity::SourceRef::new(super::identity::SourceRefParts {
-                project_key: repo_key(&meta.repo_path),
-                generation: current_generation + 1,
-                relative_path: call.rel_path.clone(),
-                content_sha256: call.sha256.clone(),
-                start_byte: call.start_byte as u64,
-                end_byte: call.end_byte as u64,
-                start_line: call.start_line,
-                end_line: call.end_line,
-            })?;
-            let evidence_id = evidence_id_from_parts(
-                EvidenceKind::CallSite,
-                &[reference.clone()],
-                None,
-                &sha256_hex(call.callee_expr.as_bytes()),
-            );
-            tx.execute("INSERT INTO evidence(evidence_id,kind,excerpt_digest,refs_json) VALUES(?1,'call_site',?2,?3)", params![evidence_id, sha256_hex(call.callee_expr.as_bytes()), serde_json::to_string(&[reference]).unwrap()])
-                .map_err(|e| err(format!("写入调用点证据失败：{e}")))?;
-            let relation_id = if let Some((target_key, strategy, confidence)) = resolved_target {
-                let target = EntityKey::Symbol(super::identity::parse_symbol_key(&target_key)?);
-                let relation_id = relation_id_from_parts(
-                    &callsite,
-                    Some(&target),
-                    RelationKind::Calls,
-                    None,
-                    None,
-                    &[],
-                );
-                tx.execute("INSERT INTO relations(relation_id,source_key,target_key,kind,certainty,resolution_state,rule_id,heuristic_score) VALUES(?1,?2,?3,'calls','inferred','resolved',?4,?5)", params![relation_id, callsite.id(), target.id(), format!("legacy:{strategy}"), confidence])
-                    .map_err(|e| err(format!("写入调用点关系失败：{e}")))?;
-                relation_id
-            } else {
-                let relation_id =
-                    relation_id_from_parts(&callsite, None, RelationKind::Calls, None, None, &[]);
-                tx.execute("INSERT INTO relations(relation_id,source_key,target_key,kind,certainty,resolution_state) VALUES(?1,?2,NULL,'calls','unknown',?3)", params![relation_id, callsite.id(), resolution_state])
-                    .map_err(|e| err(format!("写入未解析调用关系失败：{e}")))?;
-                relation_id
-            };
-            tx.execute(
-                "INSERT INTO relation_evidence(relation_id,evidence_id) VALUES(?1,?2)",
-                params![relation_id, evidence_id],
-            )
-            .map_err(|e| err(format!("关联调用点证据失败：{e}")))?;
-        }
-        for diagnostic in &facts.diagnostics {
-            tx.execute("INSERT INTO diagnostics(rel_path,adapter,code,detail,range_json) VALUES(?1,?2,?3,?4,?5)", params![diagnostic.rel_path, diagnostic.adapter, diagnostic.code, diagnostic.detail, diagnostic.range_json])
-                .map_err(|e| err(format!("写入覆盖诊断失败：{e}")))?;
-        }
-
-        let generation = current_generation;
-        let manifest_digest = manifest_digest(hashes);
-        let calls_total = if facts.calls.is_empty() {
-            graph
-                .edges
-                .iter()
-                .filter(|edge| edge.etype == EdgeType::Calls)
-                .count() as u64
-        } else {
-            facts.calls.len() as u64
-        };
-        let calls_resolved = if facts.calls.is_empty() {
-            calls_total
-        } else {
-            tx.query_row("SELECT COUNT(*) FROM call_sites WHERE json_extract(resolution, '$.state') = 'resolved'", [], |row| row.get::<_, i64>(0)).unwrap_or(0) as u64
-        };
-        let calls_ambiguous = facts
-            .calls
-            .iter()
-            .filter(|call| call.resolution == "ambiguous")
-            .count() as u64;
-        let calls_external = facts
-            .calls
-            .iter()
-            .filter(|call| call.resolution == "external")
-            .count() as u64;
-        let files_parsed = if facts.files.is_empty() {
-            hashes.len() as u64
-        } else {
-            facts
-                .files
-                .iter()
-                .filter(|file| file.parse_status == "ok")
-                .count() as u64
-        };
-        let files_partial = facts
-            .files
-            .iter()
-            .filter(|file| file.parse_status == "partial")
-            .count() as u64;
-        let mut files_skipped = facts
-            .files
-            .iter()
-            .filter(|file| file.parse_status == "skipped")
-            .count() as u64;
-        files_skipped = files_skipped.saturating_add(facts.excluded_count);
-        let files_unreadable = facts
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code == "unreadable")
-            .count() as u64;
-        let files_discovered = if facts.files_discovered == 0 {
-            hashes.len() as u64
-        } else {
-            facts.files_discovered
-        };
-        let classified = files_parsed
-            .checked_add(files_partial)
-            .and_then(|value| value.checked_add(files_skipped))
-            .and_then(|value| value.checked_add(files_unreadable))
-            .ok_or_else(|| err("覆盖文件计数溢出"))?;
-        if classified != files_discovered {
-            return Err(err(format!(
-                "覆盖文件计数不闭合：发现 {files_discovered}，分类 {classified}"
-            )));
-        }
-        let classified_known_calls = calls_resolved
-            .checked_add(calls_ambiguous)
-            .and_then(|value| value.checked_add(calls_external))
-            .ok_or_else(|| err("覆盖调用计数溢出"))?;
-        let calls_unresolved =
-            calls_total
-                .checked_sub(classified_known_calls)
-                .ok_or_else(|| {
-                    err(format!(
-                        "覆盖调用计数不闭合：总数 {calls_total}，已分类 {classified_known_calls}"
-                    ))
-                })?;
-        let coverage = serde_json::to_string(&CoverageSummary {
-            files_discovered,
-            files_parsed,
-            files_partial,
-            files_skipped,
-            files_unreadable,
-            calls_total,
-            calls_resolved,
-            calls_ambiguous,
-            calls_unresolved,
-            calls_external,
-        })
-        .map_err(|e| err(format!("序列化覆盖摘要失败：{e}")))?;
-        let adapter_versions =
-            serde_json::to_string(&[("generic", if facts.files.is_empty() { "1" } else { "2" })])
-                .map_err(|e| err(format!("序列化适配器版本失败：{e}")))?;
-        tx.execute(
-            "DELETE FROM meta WHERE key NOT IN ('schema_version', 'generation')",
-            [],
-        )
-        .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        tx.execute("DELETE FROM meta WHERE key != 'schema_version'", [])
+            .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
         for (key, value) in [
             ("repo_name", meta.repo_name.as_str()),
             ("repo_path", meta.repo_path.as_str()),
@@ -809,11 +320,7 @@ impl CodeIndexStore {
             ("indexed_at", &meta.indexed_at.to_string()),
             ("duration_ms", &meta.duration_ms.to_string()),
             ("mode", meta.mode.as_str()),
-            ("generation", &(generation + 1).to_string()),
-            ("manifest_digest", manifest_digest.as_str()),
-            ("adapter_versions", adapter_versions.as_str()),
-            ("canonical_root", meta.repo_path.as_str()),
-            ("coverage", coverage.as_str()),
+            ("generation", &(current_generation + 1).to_string()),
         ] {
             tx.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -823,18 +330,9 @@ impl CodeIndexStore {
             .map_err(|e| err(format!("写入索引元信息失败：{e}")))?;
         }
 
+        tx.commit()
+            .map_err(|e| err(format!("提交索引事务失败：{e}")))?;
         Ok(())
-    }
-
-    /// 发布前读取代际。提取器以此作为基线；后续 DEV-07 用它驱动跨进程冲突重试。
-    pub fn generation(&self) -> Result<u64> {
-        self.conn
-            .query_row("SELECT value FROM meta WHERE key='generation'", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| err(format!("读取索引代际失败：{e}")))?
-            .parse()
-            .map_err(|_| err("索引代际格式无效"))
     }
 
     /// 从库载入完整图（增量路径）。数据库行 id 映射回紧凑下标。
@@ -916,6 +414,20 @@ impl CodeIndexStore {
             })
             .map_err(|e| err(format!("查询文件哈希失败：{e}")))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 当前发布代际（meta 缺失或损坏时按 0 处理）。
+    /// 查询侧会话持有打开时的代际，工具执行前复核，换代后拒绝继续使用旧结果。
+    pub fn generation(&self) -> Result<u64> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'generation'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| err("读取索引代际失败"))
     }
 
     /// 读统计信息。空库返回 None（从未索引过）。
@@ -1058,126 +570,14 @@ impl CodeIndexStore {
     }
 }
 
-fn stable_symbol_key(node: &super::graph::GraphNode, meta: &CodeIndexMeta) -> Result<String> {
-    let language = match node.file_path.rsplit('.').next() {
-        Some("java") => "java",
-        Some("kt") | Some("kts") => "kotlin",
-        Some("py") => "python",
-        Some("js") => "javascript",
-        Some("ts") | Some("tsx") => "typescript",
-        Some("go") => "go",
-        Some("rs") => "rust",
-        _ => "text",
-    };
-    let project_key = if meta.repo_path.is_empty() {
-        "unknown".to_string()
-    } else {
-        repo_key(&meta.repo_path)
-    };
-    let properties: serde_json::Value = serde_json::from_str(&node.properties).unwrap_or_default();
-    let java = properties.get("java");
-    let symbol = java.and_then(|value| value.get("symbol"));
-    let module = java
-        .and_then(|value| value.get("module_key"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let source_set = java
-        .and_then(|value| value.get("source_set"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let package = java
-        .and_then(|value| value.get("package"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let owner_chain = symbol
-        .and_then(|value| value.get("owner_chain"))
-        .and_then(|value| value.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(".")
-        })
-        .unwrap_or_default();
-    let stability = symbol
-        .and_then(|value| value.get("stability"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("stable");
-    let java_type_chain = if language == "java" && stability == "local" {
-        let start_byte = symbol
-            .and_then(|value| value.get("start_byte"))
-            .and_then(|value| value.as_u64())
-            .unwrap_or_default();
-        format!("{owner_chain}@local:{start_byte}")
-    } else {
-        owner_chain.clone()
-    };
-    let semantic_kind = symbol
-        .and_then(|value| value.get("kind"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_else(|| node.label.as_str());
-    let signature = symbol
-        .and_then(|value| value.get("signature"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let material = symbol_key_material(&SymbolKeyMaterial {
-        language,
-        project_key: &project_key,
-        module,
-        source_set,
-        package,
-        relative_path: if matches!(language, "java" | "kotlin") {
-            ""
-        } else {
-            &node.file_path
-        },
-        type_chain: if language == "java" {
-            &java_type_chain
-        } else {
-            &node.qualified_name
-        },
-        kind: semantic_kind,
-        name: &node.name,
-        signature,
-    })?;
-    Ok(symbol_key_from_material(&material).to_string())
-}
-
-fn manifest_digest(hashes: &[FileHashRow]) -> String {
-    let mut rows: Vec<_> = hashes.iter().collect();
-    rows.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    let mut material = String::new();
-    for row in rows {
-        material.push_str(&format!(
-            "{}:{}{}:{}",
-            row.rel_path.len(),
-            row.rel_path,
-            row.sha256.len(),
-            row.sha256
-        ));
-    }
-    sha256_hex(material.as_bytes())
-}
-
-fn enable_foreign_keys(conn: &Connection) -> Result<()> {
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| err(format!("启用 SQLite 外键失败：{e}")))?;
-    let enabled: i64 = conn
-        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-        .map_err(|e| err(format!("确认 SQLite 外键失败：{e}")))?;
-    if enabled != 1 {
-        return Err(err("SQLite 外键未启用"));
-    }
-    Ok(())
-}
-
 /// 只读打开索引库读统计（设置页展示用）。库不存在返回 None。
 /// WAL 模式下与正在写入的索引任务并发安全（读者不阻塞）。
 pub fn read_index_stats(db_path: &Path) -> Result<Option<IndexStats>> {
-    let Some(store) = open_read_only_if_exists(db_path)? else {
+    if !db_path.exists() {
         return Ok(None);
-    };
+    }
+    let conn = open_read_only(db_path)?;
+    let store = CodeIndexStore { conn };
     let mut stats = store.read_stats()?;
     if let Some(s) = stats.as_mut() {
         s.db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
@@ -1197,39 +597,32 @@ pub fn search_symbols_filtered(
     label: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<SearchHit>, usize)> {
-    let Some(store) = open_read_only_if_exists(db_path)? else {
+    if !db_path.exists() {
         return Ok((Vec::new(), 0));
-    };
-    store.search_symbols_filtered(query, label, limit)
+    }
+    let conn = open_read_only(db_path)?;
+    CodeIndexStore { conn }.search_symbols_filtered(query, label, limit)
 }
 
-/// 只读打开一个已存在的索引库（查询层专用）。文件不存在时返回 `Ok(None)`；
-/// 存在但 schema 版本不符或损坏时返回 `[NeedsRebuild]`——绝不创建/重建。
+/// 只读打开一个已存在的索引库（查询层专用）。文件不存在、不是本引擎的
+/// 索引库或 schema 版本不符时返回 `Ok(None)`——**绝不创建/重建**（幽灵库
+/// 防护，对齐参考项目只读打开语义）；损坏库由 GUI 侧的全量重建路径处理。
 pub fn open_read_only_if_exists(db_path: &Path) -> Result<Option<CodeIndexStore>> {
     if !db_path.exists() {
         return Ok(None);
     }
-    let conn = open_read_only(db_path)
-        .map_err(|e| err(format!("[NeedsRebuild] 索引库无法读取，需要重建：{e}")))?;
+    let conn = open_read_only(db_path)?;
     let store = CodeIndexStore { conn };
-    let version = store
+    let version_ok = store
         .conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
             [],
             |row| row.get::<_, String>(0),
         )
-        .map_err(|e| {
-            err(format!(
-                "[NeedsRebuild] 索引库损坏或 schema 不完整，需要重建：{e}"
-            ))
-        })?;
-    if version != CODE_INDEX_SCHEMA_VERSION.to_string() {
-        return Err(err(format!(
-            "[NeedsRebuild] 索引 schema 版本为 {version}，需要重建"
-        )));
-    }
-    Ok(Some(store))
+        .map(|v| v == CODE_INDEX_SCHEMA_VERSION.to_string())
+        .unwrap_or(false);
+    Ok(version_ok.then_some(store))
 }
 
 fn open_read_only(db_path: &Path) -> Result<Connection> {

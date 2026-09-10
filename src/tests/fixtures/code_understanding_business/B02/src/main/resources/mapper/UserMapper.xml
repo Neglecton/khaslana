@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.shop.mapper.UserMapper">
+    <select id="findByUsername" resultType="com.example.shop.entity.UserAccount">
+        SELECT id, username, password_hash, status
+        FROM app_user
+        WHERE username = #{username}
+    </select>
+
+    <update id="incrementFailedAttempts">
+        UPDATE app_user
+        SET failed_attempts = failed_attempts + 1
+        WHERE id = #{id}
+    </update>
+
+    <update id="markLoginSuccess">
+        UPDATE app_user
+        SET last_login_at = NOW(), failed_attempts = 0
+        WHERE id = #{id}
+    </update>
+</mapper>

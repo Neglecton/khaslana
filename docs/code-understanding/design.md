@@ -1,397 +1,184 @@
-# 代码理解与逻辑可视化设计文档
+# AI 代码理解设计文档
 
-版本：1.0。状态：架构与交互基线，待实现。日期：2026-09-06。
+版本：2.0。日期：2026-09-10。当前范围见[需求文档](requirements.md)。
 
-范围以[需求文档](requirements.md)为准；下文标“拟新增”的模块、字段和 API 均是设计契约，不是已实现能力。
+## 1. 核心方案
 
-## 1. 现有代码与实际缺口
-
-核查基线：`b4ec8914139ba768f7a6596e3f870173869eabfb`。以下依据源码，而非只依据旧手册。
-
-| 现有接入点 | 已具备 | 本次需要补齐 |
-| --- | --- | --- |
-| `src/code_index/discover.rs::discover_files` | ignore 感知发现、文件预算、目录剪枝 | 明确源码根/源集、框架资源的受控发现与覆盖诊断 |
-| `src/code_index/extract.rs::SymbolDef/CallSite` | 符号范围；调用名、行号、所属函数 | 参数签名、声明类型、字节范围、注解、调用点身份、原始解析事实 |
-| `src/code_index/lang_spec.rs::LANG_SPECS` | Java 类/接口/枚举/record、方法/构造器等通用语法规则 | Java 专用类型/作用域语义与 Spring/MyBatis/JPA 规则 |
-| `src/code_index/resolve.rs::Registry::resolve_call` | 同文件、导入、唯一名、限定名启发式 | Java 不可直接用同名唯一规则认定目标；保留多候选和未解析调用 |
-| `src/code_index/graph.rs::GraphNode/GraphEdge` | 节点及 JSON 属性；边按 source/target/type 去重 | 稳定符号键、独立调用点/证据、图关系确定性分类 |
-| `src/code_index/pipeline.rs::run_incremental_inner` | mtime+size 比较、变更文件重提取、入边快照恢复 | 目标语义变化后的重解析；未变调用方也要反映新增/删除实现和重载 |
-| `src/code_index/store.rs` | SQLite/WAL、contentless FTS5、schema_version=2 | 有效内容哈希、索引代际、兼容迁移、邻接查询、事实持久化 |
-| `src/code_index/queries.rs` | 概览、详情、调用追踪、源码片段；`trace_calls` 逐次 `load_graph` | 有界子图、完整边、调用证据、候选状态；避免每次查询整图载入 |
-| `TraceHop` | 名称、QN、路径、hop、risk | 新工作台不使用风险级别，不把平铺 hop 列表当成路径 |
-| `read_source_snippet` | 从本地文件读行，有体积上限 | 内容哈希校验、路径范围验证、行号越界报错；不夹取到最后一行冒充原证据 |
-| `src/code_index/mcp.rs::McpServer::call_tool` | search_symbols/get_symbol_detail/trace_path/get_architecture/index_status/refresh_index/list_projects，也有 detect_changes | 复用进程内服务，不在 UI 启动 MCP 子进程；问答白名单排除 detect_changes |
-| `src/code_palette_view.rs` | Ctrl+P 符号检索，确认后进入追溯 | 独立代码阅读器；不改变旧面板确认语义，可新增显式“理解此符号”动作 |
-| `src/ai/client.rs::ChatClient::request_agent_stream` | 流式工具调用、读取超时、重试与截断处理 | 独立理解任务的上下文、工具、结果校验与取消事件 |
-| `src/tasks.rs::TaskKind` | Short/Long/Ai/Index 任务池 | AI 全局在途名额共享、每个理解会话请求代际；不占 Long 池 |
-| `docs/ui-design-system.md` | Calm Technical 原生壳层、token、列表与交互约束 | 增加代码理解模式与有界图画布 |
-
-特别注意：`file_hashes` 表已有 `sha256` 列，但 `FileHashRow` 目前只有路径、mtime、size；不能把现有索引误认为内容寻址快照。现有数字 NodeId 随重写重排，QN 的 `#N` 重载消歧也不适合作为长期引用身份。
-
-## 2. 架构决策
-
-| 决策 | 采用方案与原因 | 不采用的方案 |
-| --- | --- | --- |
-| AD-01 分层 | 扩展现有 Rust/SQLite 索引，在其上建立独立理解服务 | 新建第二套图数据库，增加部署与一致性成本 |
-| AD-02 代码范围 | `ProjectContext` 只接收根目录和索引信息；关系事实与问答无 Git 类型 | 借用 Git review agent 的分支/diff 上下文 |
-| AD-03 语义可信度 | 事实、候选、未知分开；规则带来源，AI 仅解释有证据的子集 | 让模型直接生成任意节点、边和源码位置 |
-| AD-04 Java | 首版增强 AST 与有限声明类型解析，普通 Java/Spring 同时交付 | JDT LS 强依赖；其额外进程、运行环境和构建导入单独立项 |
-| AD-05 检索 | 结构化入口检索 + FTS + 按需源码搜索 + AI 查询词扩展 | 首版全仓库 embeddings 和自动摘要库 |
-| AD-06 增量 | 原始事实按文件持久化；提取增量、关系全量重算，保证首版正确性 | 仅把旧入边按 QN 恢复后当新语义使用 |
-| AD-07 UI | 新增 GPUI `MainMode::CodeUnderstanding`；后台局部图布局、原生绘制 | 内嵌 WebView/React 或复用 Git 提交泳道语义 |
-| AD-08 生命周期 | 离开模式/切换项目取消问答，已完成结果会话内保留 | 直接照搬 AI 评审的后台继续和持久历史语义 |
-
-本设计借鉴 Product Design 的现有产品上下文优先原则；本轮仅交付文档，不包含可验收的高保真视觉稿。
-
-## 3. 总体结构
+采用“已有索引导航 + AI 按需读代码 + 本次回答的证据与简图”。业务理解由 AI 完成，不先建立完整 Java/Spring/数据库语义图。
 
 ```mermaid
-flowchart TB
-    FS[项目本地源码与允许的资源文件] --> D[文件发现与内容指纹]
-    D --> E[通用 AST 提取与 Java 事实提取]
-    E --> R[通用关系解析 / Java 类型解析 / 框架规则]
-    R --> S[(现有 SQLite 索引升级)]
-    S --> Q[CodeQueryService 有界查询]
-    FS --> G[SourceReader 路径与内容校验]
-    Q --> U[UnderstandingService 检索与证据编排]
-    G --> U
-    U <--> A[现有 AI 客户端与只读工具]
-    U --> V[证据校验后的 AnswerDocument / GraphSlice]
-    V --> UI[GPUI 代码理解工作台]
-    Q --> UI
-    G --> UI
+flowchart LR
+    Q[用户业务问题] --> A[代码理解 AI agent]
+    A <--> I[已有符号和调用索引]
+    A <--> R[源码搜索与有限文件读取]
+    A --> E[带来源的业务解释]
+    E --> T[读写表与其他副作用]
+    E --> G[本次回答的流程简图]
+    E --> S[可点击源码]
 ```
 
-模块职责（拟新增名称，可在保持契约下小幅调整）：
-
-| 模块 | 职责 |
-| --- | --- |
-| `src/code_index/identity.rs` | 稳定键、SourceRef、索引版本和内容指纹 |
-| `src/code_index/facts.rs` | 持久化原始提取事实、诊断与适配器输出契约 |
-| `src/code_index/java/{extract,types,resolve,project}.rs` | Java 符号/类型/作用域/模块事实与调用解析 |
-| `src/code_index/java/{spring,mybatis,jpa}.rs` | 具名框架规则，不污染通用 walk |
-| `src/code_index/query_service.rs` | 受限 SQL 查询、子图、入口、类型与诊断检索 |
-| `src/code_understanding/{mod,types,retrieval,tools,agent,evidence,source}.rs` | 独立于 Git 的理解服务与只读源码能力 |
-| `src/code_understanding/layout.rs` | SCC 与有向分层布局纯函数 |
-| `src/code_understanding_view.rs` | UI 容器、导航、输入、状态事件适配 |
-| `src/code_graph_view.rs` | 画布、命中测试、视口与图例 |
-| `src/code_source_view.rs` | 源码虚拟列表、行高亮、证据定位 |
-
-实现时不为满足目录表一次创建空模块；每个里程碑随实际职责落地。基础类型留 lib crate；GPUI 与 `RepositoryView` 依赖只出现在 bin crate 适配层。
-
-## 4. 数据与身份契约
-
-### 4.1 上下文与版本
-
-`ProjectContext { project_key, canonical_root, index_db_path }` 从宿主仓库标签取得路径后立即脱离 Git 语义。`project_key` 沿用项目路径规范化规则；8 位目录哈希仅作定位，打开库必须再次核对完整根路径，防止碰撞误用。
-
-`IndexSnapshot { schema_version, generation, adapter_versions, manifest_digest, indexed_at, coverage }` 是每次查询必带的元数据。`generation` 是每次成功发布后递增的 u64，必须在与数据发布相同的事务提交；时间戳不能代替代际。
-
-“快照”表示一次索引生成的内容清单，不承诺索引长时间扫描期间全仓库在某一瞬间静止。每个文件以实际解析字节的 SHA-256 记录；发布前重新检查变化迹象并记录不稳定文件。任何随后引用的文件都按哈希重新验证。
-
-### 4.2 符号键
-
-`SymbolKey` 对外使用带版本的字符串（例如 `sk1:<sha256>`），不暴露数据库整数主键。
-
-- Java 顶层/成员符号的规范串：语言 + 项目内模块根 + 源集 + package + 嵌套类型链 + 符号种类 + 名称 + 参数类型签名。构造器使用 `<init>`，不使用返回类型区分重载。
-- 可解析参数类型用 FQN；不可解析类型保留规范化原文及不完整标记。类型解析增强引起键变化时旧引用视为过期，不能按短名自动迁移。
-- 类型擦除只用于部分匹配规则，不丢掉原始泛型签名。无法唯一规范化的重复定义标为冲突，不以扫描顺序伪造唯一身份。
-- 普通语言可采用语言 + 相对路径 + 容器 + 名称 + 签名；同名缺签名时局部范围键标为不稳定。
-- 方法内部匿名/局部声明可以使用父键 + AST 局部路径，但必须 `stability=local`。
-- 源码移动、改名或签名变化允许身份变化；不做 Git rename 追踪。
-
-### 4.3 源码与证据
-
-`SourceRef { project_key, generation, relative_path, content_sha256, start_byte, end_byte, start_line, end_line }`。
-
-行号从 1 开始，字节范围为原始文件字节的半开区间；范围不得跨文件。`EvidenceRecord { evidence_id, kind, source_refs, rule_id?, relation_ids, excerpt_digest }` 由服务创建。证据种类至少包含声明、调用点、注解、SQL 映射、方法内条件/返回、模块聚合来源。
-
-AI 只引用 `evidence_id`，不能指定任意磁盘路径作为可点击引用。对重复调用 `save()` 的两行必须保存两个调用点，即使图上聚合成一条边。
-
-### 4.4 关系模型
-
-| 关系 | 源 → 目标 | 语义 |
+| 层 | 负责 | 不负责 |
 | --- | --- | --- |
-| CONTAINS | 模块/类型 → 符号 | 结构包含，不是调用 |
-| CALLS | 调用者 → 声明方法/构造器 | 调用表达式与可解析的声明绑定，实例调用仍可能动态分派 |
-| INHERITS / IMPLEMENTS | 子类型 → 父类型/接口 | 源码声明关系 |
-| OVERRIDES | 实现方法 → 被覆写声明 | 可证明的方法对应关系 |
-| DISPATCH_CANDIDATE | 调用点 → 候选实现方法 | 可能的动态分派，不替代 CALLS 声明边 |
-| INJECTS_CANDIDATE | 注入点 → Bean 候选 | 框架规则推断，不是方法调用 |
-| HANDLES | 路由声明 → handler | 映射注解声明的处理关系，不代表运行时路由已注册 |
-| MAPS_TO | Mapper 方法 → XML/注解 SQL 声明 | 持久化声明关联，不代表 SQL 已执行 |
+| 现有索引 | 找符号/路径，给调用和类型关系线索 | 证明运行时所有调用与所有读写 |
+| 工具适配层 | 将索引和本地文件以有界、可引用的形式提供给模型 | 静态模拟 Spring、执行 SQL、任意命令 |
+| 理解 agent | 制定搜索词，阅读源码，沿上下游追问，分析表读写与分支 | 未看源码就补造事实 |
+| 结果校验/呈现 | 校验引用身份、范围和结构，显示解释、推断和简图 | 把结构校验等同语义绝对正确 |
 
-验收标注中的 `annotations`、`statements`、`selects_constructor` 是证据断言种类，不冒充 CALLS 关系：前者只记录框架注解位置，后者记录方法体语句范围，构造器选择则记录 Spring required 构造器规则。注解事实可为 `syntactic`，构造器选择是消费注解事实后的 `inferred` 规则推断（如 `spring.autowired_required_constructor`）。它们必须带 SourceRef（owner/path/range），不能仅靠模型生成的自由文本定位。
+索引中不存在的关系，只要 AI 通过源码查证，就可以成为本次回答的一部分；不强制先写入索引数据库。
 
-`RelationRecord { id, source_key, target_key?, kind, certainty, resolution_state, rule_id, evidence_ids, candidate_group?, conditions, heuristic_score? }`。
+## 2. 复用边界与当前代码
 
-`certainty` 为 `syntactic`（源码声明/表达式可证实）、`inferred`（有限静态规则推断）、`unknown`（未解析）。`resolution_state` 为 resolved/ambiguous/unresolved/external。这两个维度不得互相替代；确定存在接口调用，不等于确定其运行时实现。
+2026-09-10 工作区 HEAD 为 `59de3e4a0f05b5af5ac7a31142f9e43f5cf93065`，同时有 Java 解析等未提交修改。历史交接记载 schema v3、原始事实、SourceRef、EvidenceBundle、GraphSlice、AnswerDocument 等已落地。本轮不重复建库或回退这些资产；运行状态与实际测试应由下个实现批次核实。
 
-现有 confidence=0.95 等数字是启发式得分，不是正确率。旧边统一映射为 `inferred + legacy:<strategy>`；证据不完整时不得显示成已验证的实线业务链。未知目标保存在调用点记录中，图中用明确的“未解析调用”边界节点投影，不虚构真实符号。
-
-### 4.5 SQLite 演进
-
-在现有库中升级到下一 schema（基线为 2，预期 3；开工时复核），复用 nodes/edges，但新增独立事实/证据表。下面是逻辑 schema，最终 DDL、外键及索引必须在 M0/M1 一并固化。
-
-| 表/字段 | 主要内容与约束 |
+| 现有位置 | 使用方式 |
 | --- | --- |
-| `entities` | sk1/cs1/ep1 持久实体统一注册表，供关系端点外键与级联失效；bn1 仅作查询期投影 |
-| `nodes.symbol_key` | 源码符号节点为非空唯一稳定键；Project/Branch/Folder/File/Module 兼容结构节点保持空，现有 QN 保留兼容查询 |
-| `file_hashes.sha256` | 真正写入解析字节哈希；原 mtime/size 保留作快速筛选 |
-| `file_facts` | path 主键、hash、adapter_versions_json、facts_json、parse_status；记录本文件实际消费的语言/框架版本并持久保存未解析调用等原始事实 |
-| `symbol_semantics` | symbol_key 主键/FK、module_key、source_set、package、signature、类型与注解元数据 |
-| `call_sites` | callsite_key 主键、owner_key、SourceRef、receiver/type/argument 事实；多个调用点不被聚合去重 |
-| `relations` | relation_id 主键、源/目标实体键、kind、certainty、resolution_state、rule/conditions、candidate_group |
-| `evidence` / `relation_evidence` | evidence_id → SourceRef 列表与摘要；关系到证据的多对多连接 |
-| `entry_points` | 路由/普通入口/持久化声明键、所属模块、结构元数据与来源 |
-| `diagnostics` | 文件/适配器/原因码/范围；解析错误、未识别资源、外部类型等覆盖缺口 |
-| `search_documents` + `search_fts` | 符号/入口/注释/路径检索文本；内容表 + FTS，避免把当前 contentless FTS 当源码库 |
-| `meta` | schema、generation、manifest_digest、adapter_versions、canonical_root、覆盖信息 |
+| `src/code_index/store.rs` | 复用符号搜索、索引版本与现有存储 |
+| `src/code_index/queries.rs` | 复用 symbol_detail、trace_calls、index_overview；作为导航线索而非最终业务答案 |
+| `src/code_index/identity.rs` | 复用稳定符号、内容 hash、SourceRef |
+| `src/code_understanding/types.rs` | 复用已有基础类型和严格校验；新增会话分析结果适配，不伪装成索引权威边 |
+| `src/ai/client.rs` | 复用工具调用、SSE、代理、读空闲超时、重试与截断处理 |
+| `src/ai/review_agent.rs` | 参考 agent 循环组织；不带入 diff、分支或 Git 工具 |
+| `src/tasks.rs` | 使用 Ai 池，复用现有任务计数/取消方式，不使用 Long 池 |
+| `src/syntax.rs`、UI helper | 复用代码着色、虚拟列表、输入、按钮与布局 token |
 
-实体键使用带类型前缀且固定 64 位小写 hex 摘要的 `EntityKey` 联合体（symbol/callsite/entry/boundary），不是任意字符串；反序列化必须执行同一校验。身份材料使用长度前缀编码，普通语言符号键包含相对路径。聚合 `edges` 作为旧查询兼容投影；`relations` 与 `call_sites` 是新逻辑图证据来源。发布时两者从同一事实集生成，禁止独立双写产生漂移。
+现有 trace_calls 每次整图载入且返回 hop 列表，不能把相邻 hop 项直接连成调用链。首版在工具适配器内缓存每问/同代索引快照，输出有界的一跳或少量关系；只有基准显示不足时才改为直接邻接 SQL。没有必要把全索引查询引擎重写设为 AI 开工前置任务。
 
-建立 source/kind/target 与 target/kind/source 双向索引、module/source_set 索引、call_sites.owner_key 索引。所有跨表删除、FTS 更新、代际递增同事务完成。大 JSON 仅存补充元数据；邻接和模块过滤条件不得靠逐行 JSON 全表扫描。
+## 3. 最少新增模块
 
-兼容策略：schema 不符时返回 NeedsRebuild，不给旧数据贴新版本号。采用同一个 SQLite 文件内事务重建/发布，避免 Windows 下替换被 GUI/MCP 持有的数据库文件。提取阶段在内存或受控临时数据中完成，发布才进入写事务；失败/取消保留旧表和代际。
+| 拟新增模块 | 职责 |
+| --- | --- |
+| `code_understanding/tools.rs` | 六个只读工具，复用索引服务，统一参数/预算/结果包装 |
+| `code_understanding/source.rs` | 有限源码搜索与读取，来源 ID、路径和文件版本检查 |
+| `code_understanding/agent.rs` | 提问/追问上下文、工具循环、结束和取消 |
+| `code_understanding/analysis.rs` | AI 业务发现、表读写、流程步骤的会话 DTO 与校验 |
+| `code_understanding_view.rs` | 问答、来源查看和简图原生 UI；确有必要时再拆子 view |
 
-GUI 与 MCP 都必须使用统一发布协议：提取前记基准代际，`BEGIN IMMEDIATE` 后核对基准代际，匹配才写入新数据并加一；若已有新版本，当前产物丢弃并提示重新执行，不用旧事实覆盖新库。旧 MCP 进程不会遵守新协议，升级引导必须要求重启旧进程后再迁移；不能宣称对旧版本并发写完全透明。同版本查询只持短读事务，不跨网络等待持有 SQLite 快照或阻碍 WAL 回收。
+无需新增 Spring/MyBatis/JPA 静态规则模块、向量库或业务图存储。仅为确定性的定位缺口补小型能力，例如“允许安全检索 Mapper XML”；不要因此开始实现 XML/SQL 全语义解析器。
 
-## 5. 索引与增量正确性
+## 4. 工具契约
 
-### 5.1 提取流水线
+agent 使用独立白名单，GUI 直接调用 Rust 服务，不启动本机 MCP 子进程绕一圈。每个工具返回 request_id、索引代际（适用时）、数据、来源/证据 ID、truncated 和原因。
 
-发现文件 → 确定模块/源集 → 读取受限字节并计算 hash → 通用/Java AST 提取 → 保存原始事实 → 建类型与符号注册表 → 解析通用/Java 调用 → 框架规则补关系 → 生成搜索文档/兼容图 → 原子发布。
-
-框架资源只额外发现允许的 `pom.xml`、Gradle settings/build 文本和 Mapper XML 等；禁止为了 Spring 扫描整个磁盘。资源上限并入总文件预算。XML 必须禁用外部实体/DTD 解析与网络访问，文本/深度/节点数设限。允许 XML 声明存在 DOCTYPE，但不得加载它引用的远程 DTD。解析失败产生诊断，不中止其余源码分析。
-
-`gitignore` 感知过滤仅复用本地文件选择规则，不构成 Git 业务融合。新的 AI SourceReader 在该基础上额外排除 `.git`、`.env*`、私钥/证书、凭据和默认敏感配置内容；识别框架不需要向模型暴露环境变量值或数据库密码。
-
-### 5.2 增量解析与失效传播
-
-首版采用“提取增量、关系全量重算”：未变文件的原始 facts 从库读取；变更文件重提取；删除文件删除 facts；随后对所有持久事实重新解析关系。这会增加增量时间，但可以正确处理调用方未编辑、目标方法重载/接口实现/Bean 候选已经变化的情况。
-
-不能继续用旧的入边快照作为新 Java 关系真相。未来可引入类型/import/模块依赖的反向失效图；必须先有与全量重算等价的差分测试，再替换全量关系 pass。
-
-mtime+size 用于快速提示，hash 是证据一致性依据。用户手动“更新索引”执行允许文件的内容哈希比较，可发现相同大小且恢复 mtime 的修改；自动轻量检查仅标示“已检查”而非承诺完全新鲜。提问前做轻量检查，每次证据读取再核对 hash。
-
-文件不再发现时区分原因：明确排除/删除应移除事实；临时权限/读取失败保留旧事实但标 stale，不作为新鲜证据。过滤配置、源码根、适配器版本变化触发受影响文件重提取或全量重建；不能永久保留新 ignore 规则已排除的文件供 AI 读取。
-
-### 5.3 覆盖信息
-
-每代统计发现/成功解析/部分解析/跳过/不可读文件数，以及调用总数、确定声明绑定数、候选数、未解析数、外部边界数。UI 显示范围和缺口，不用“分析完成”暗示所有语义已解析。计数必须覆盖被预算剪枝的情况，无法知道准确漏掉多少文件时写“至少/未知”。
-
-## 6. Java 与框架适配
-
-### 6.1 Java 原始事实
-
-新增 Java 专用提取输出：package、imports（显式/静态/通配分开）、类型声明、成员签名、参数、返回类型、作用域内变量、可见性、修饰符、注解（FQN/原名/参数表达式/范围）、Javadoc、调用接收者/参数表达式、类继承/实现、lambda/方法引用、局部条件/异常/return 范围。
-
-所有规则基于 tree-sitter 节点和字段，不能用方法名正则代替语法解析。保留原始表达式，避免后续类型推断无法回溯。解析器 `ERROR` 节点只降低覆盖，不把局部损坏文件当空文件。实现核对固定的 [tree-sitter-java v0.23.5 语法源](https://github.com/tree-sitter/tree-sitter-java/tree/v0.23.5)，升级语法版本须重新运行语言矩阵。
-
-### 6.2 Java 调用解析次序
-
-1. 确定词法作用域、owner 类型、receiver：this/super/显式变量/类型名/new/链式返回值。
-2. 解析声明类型：当前嵌套类型、显式导入、同包、限定名、受限通配导入。源码根和模块限定候选，测试与主源集分开。
-3. 按可见性、static/instance、构造器、名称、arity、数组/varargs 与可证明参数类型过滤。没有足够证据就保留候选，不用全仓库短名唯一兜底为确定。
-4. 得到声明目标后建立 CALLS。接口/可覆写实例调用再按本地实现、override、有限 receiver/注入事实生成 DISPATCH_CANDIDATE，附开放世界说明：仓库外可能仍有实现。
-5. primitive/字面量/明确 new/参数声明等支持有限匹配。对固定 Java 语言规则，`null` 不适用于基本类型且在 J02 的引用类型候选中选择 `String`，primitive widening 也优先于 boxing；超出已实现规则的复杂泛型仍返回 ambiguous，不实现半套规则却给确定结果。
-6. 静态方法、private/final 等是否能排除分派也必须以已解析事实为条件；只看到类名相同不能断言。
-
-方法重载的编译期选择与运行时动态查找是不同阶段，因此设计将“声明调用”与“实现候选”拆开。依据：[Java Language Specification §15.12](https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.12)。
-
-### 6.3 项目模型
-
-Maven：解析 POM 内明确写出的 modules、依赖坐标及常规 `src/main/java`/`src/test/java`；可解析本地常量，不下载父 POM/依赖。Gradle：只识别静态文本中的 include/projectDir 和常规源码根，不执行 DSL。动态根目录/未解析依赖使模块可见性为 unknown，候选标注跨模块不确定。
-
-构建文件解析提供源码组织信息，不等同真实 classpath。外部 jar 不展开；外部类型保留全名和边界。单目录普通 Java 无构建文件也能分析，按目录和 package 建组织视图。
-
-### 6.4 框架规则契约
-
-`FrameworkRule { rule_id, version, prerequisites }` 消费 Java facts/project facts，输出派生实体、关系、证据、诊断。规则幂等；不能读取 Git 或直接写 UI。每条 inferred 关系存规则版本与依赖证据，便于失效和解释。
-
-路由规则：只把正确 FQN 的 Spring 注解当映射。组合类/方法路径、HTTP 方法和显式 params/headers/consumes/produces 条件；字符串字面量与可解析 static final 拼接可求值；未知表达式原样保留。内置 Get/Post 等组合注解首版支持；用户自定义组合注解仅在元注解是允许的 `@RequestMapping` 且固定属性可证明时识别，接口方法继承映射单独标 inferred；AliasFor 全语义或未知传播仍标 partially_resolved，不冒充最终路由。依据：[Spring MVC Mapping Requests](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-requestmapping.html)。
-
-注入规则：先区分 Autowired、Resource 和普通构造调用。按声明类型收集可见 Bean 候选，Qualifier 缩小候选范围，单值注入在候选内应用可证明的 Primary；集合注入保留匹配集合，不强选 Primary。默认 Bean 名和显式 Bean 别名可记录，但无法证明扫描/条件/参数名语义时保持推断。`@Bean` 返回接口时只能按返回类型与可证明表达式分析。Profile/Conditional 不静态判定激活；`@Resource(name=...)` 用独立按名称规则，不套用 Qualifier。单构造器无 Autowired 也纳入候选；多个构造器若恰有一个 `required=true` 的 Autowired，则选择确定、依赖可满足性另行诊断；没有唯一 required 构造器时才保留选择歧义。依据：[Autowired](https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html)、[Qualifiers](https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-qualifiers.html)、[Primary](https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-primary.html)。
-
-MyBatis 规则：通过 XML namespace 对应接口全名、statement id 对应方法名，建立 MAPS_TO 并保留双方范围；验收引用统一使用 `<namespace>#<statement id>`，XML 文件路径/source_set 作为 SourceRef 字段，不混进 statement 名。重载方法存在时呈现关联候选及不支持唯一映射原因。注解 SQL 保留字面量/表达式范围；XML include 仅展开本地可定位片段，设循环与深度上限；if/choose/foreach 等显示条件模板，不拼造唯一执行 SQL。依据：[Mapper XML](https://mybatis.org/mybatis-3/sqlmap-xml.html)、[Dynamic SQL](https://mybatis.org/mybatis-3/dynamic-sql.html)。
-
-JPA 规则：识别正确 FQN 的 Repository 继承、Query 与 Entity/Table 声明，只输出声明与边界。派生方法不生成虚假实现源码；数据库行为和最终 SQL 不在本轮静态分析承诺内。声明查询与方法名派生机制参考 [Spring Data JPA Query Methods](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html)。
-
-Lombok 等生成机制：注解本身是证据；合成成员不进入“真实定义”列表。如 RequiredArgsConstructor 对注入关系有帮助，只输出 `generated_source_unavailable` 候选，不为不存在的构造器生成行号。
-
-### 6.5 后续扩展点
-
-可增加 `JavaSemanticProvider` 获得语言服务器/编译器级声明解析，但首版只有本地静态 provider。JDT LS 接入涉及独立进程、运行环境、工程导入及取消/资源管理，需另行设计，不隐藏在本次 Java 适配内。[JDT LS 官方项目](https://github.com/eclipse-jdtls/eclipse.jdt.ls)作为后续选型参考。
-
-## 7. 有界查询服务
-
-拟新增 API 用 Rust 类型作为唯一契约源，serde DTO 为 AI/MCP/UI 适配；禁止把模型生成的 SQL/Cypher直接传进数据库。
-
-| API | 输入 | 输出 |
+| 工具 | 输入 | 返回与作用 |
 | --- | --- | --- |
-| `overview` | context、范围、generation? | 模块聚合、入口摘要、覆盖信息 |
-| `search` | query、module/path/source_set/kind、limit/cursor | 带匹配字段与分数的候选、分页状态 |
-| `symbol_detail` | SymbolKey、expected_generation | 声明、签名、类型、来源、诊断 |
-| `entry_points` | 业务关键词/路由/入口种类、范围 | 入口实体与声明证据 |
-| `neighbors` | EntityKey、方向、关系种类、预算 | GraphSlice（节点和完整边） |
-| `paths_between` | 明确起止键、范围、预算 | 最多 3 条有证据路径、候选/截断原因 |
-| `implementations` | 类型/方法键、预算 | 声明与实现候选及证据 |
-| `read_source` | 服务发放的 SourceRef、行预算 | VerifiedSnippet 或可解释失效状态 |
-| `search_source` | 关键词/受限 regex、路径范围、预算 | 本地代码命中与校验后的 SourceRef |
+| search_symbols | 关键词、可选路径/语言、limit | 类/方法候选、范围、现有身份；中文问题可多次换英文词 |
+| get_symbol | 稳定键或精确候选 ID | 定义位置、可用签名/注释、索引元数据；正文通过统一 reader 校验后读取 |
+| trace_calls | 候选 ID、inbound/outbound、depth、limit | 已索引的关系线索及覆盖/策略；没有边不表示没有调用 |
+| search_code | 文本或受限 regex、path/suffix、limit | 源码/注释/XML/SQL 中命中位置和短上下文；可查引用、注解、表名 |
+| read_file | 合法相对路径、start_line、end_line | 当前文件有限行、内容 hash、服务发放的引用 ID；可读尚无符号索引的资源 |
+| get_file_tree | 子目录、depth、limit | 有界目录结构，帮助找到 mapper/resources/model/security 等相关路径 |
 
-`GraphSlice { snapshot, nodes, relations, boundary_nodes, coverage, truncated, truncation_reasons, next_cursor? }` 必须满足所有关系端点都出现在 nodes 或 boundary_nodes 中。BFS 前驱不能代替实际边；被节点上限切断的边转边界或省略并计数。默认测试过滤是检索范围过滤，不删除数据库中的测试事实。
+首版不用专门的 find_tables 工具：AI 从读到的 SQL/映射中识别表与操作。需要查看调用的调用方时继续使用 trace_calls/read_file/search_code；不要增加任意 SQL/Cypher、shell、联网或数据库工具。
 
-分页游标包含 generation、规范化筛选哈希、排序键；条件变化或代际变化返回 CursorExpired，不在不同快照之间续页。排序稳定使用“相关度 → 入口/类型优先级 → 模块路径 → 稳定键”，不要依赖 HashMap 迭代顺序。
+read_file/get_symbol 的引用由服务生成，模型不能随意指定一段路径行号变成“有效证据”。search_code 的短预览先视为定位线索，关键结论必须读取足够的上下文；尤其不能把文件里另一个方法的 SQL 关联到登录路径。
 
-查询用只读连接和短事务执行参数化 SQL；neighbors 逐层限量取邻接，扫描行数/时间/节点/边同时受限。应用 SQL 进度中断机制，取消不能只在 SQL 执行完成后检查。概览按数据库聚合，不载入 GraphBuffer；索引内部全图重算不受此查询约束替代。
+## 5. “登录逻辑”执行策略
 
-## 8. 自然语言理解服务
+1. **找到入口**：保留用户明确路径/类名；搜索 login、signIn、authenticate、登录及项目自身词汇，参考目录结构和路由/过滤器等文本线索。不是要求每次硬编码跑完这些词。
+2. **读入口和核心实现**：定位 Controller/handler/main/过滤器等，阅读方法本体、关联字段/接口与关键调用。不同登录入口分别列出，必要时询问范围。
+3. **向两边追踪**：既看被调用方，也检索调用方。索引结果只作线索；对关键边读调用位置。遇到接口多实现，搜索实现、注入点与相关配置片段，有证据才缩小候选。
+4. **核对数据访问**：沿 Repository/Mapper/JDBC 调用找到 SQL、XML 或实体映射。不能在“调用了 UserRepository”处结束数据分析，也不能无关扩展到全项目所有表。
+5. **检查其他路径**：阅读失败分支、异常处理及会话/缓存/消息等副作用；区分方法内逻辑与框架可能提供的行为。
+6. **整理答案**：入口、关键步骤、调用上下游、读写表/对象、其他副作用、未确定处及来源；可视化投影为少量业务步骤。
+7. **继续追问**：复用近几轮摘要与选中对象，重新读取需要的证据；不盲目发送全部历史工具输出。
 
-### 8.1 检索闭环
+停止条件：用户所问维度已有足够证据，继续读只会重复；或到外部/动态边界；或预算耗尽。答案说明尚未查证的部分。不存在“完成全仓库静态关系分析后才允许回答”的步骤。
 
-1. 绑定 ProjectContext、会话 request_id 和 IndexSnapshot；检查可用索引及 AI 配置。
-2. 从用户输入提取显式路径/符号/路由，本地检索先产生种子；可追加 AI 产生的最多 6 组查询词。精确标识符优先，不被翻译改写。
-3. 混合检索符号名、FQN、路径、入口、Javadoc/注释；初始最多 20 候选，按相关度与模块多样性选种子。FTS 匹配分不是可信度分。
-4. 拉取预算内声明和 1～2 跳关系，给模型提供证据 ID、关系类型、候选条件、范围/覆盖信息。初始上下文总量控制在 16K 字符。
-5. 模型可按需使用只读工具补充；服务验证工具参数、版本和路径，每个调用检查预算。
-6. 模型提交结构化答案；校验成功后将步骤与真实子图关联，渲染最终答案。无证据/歧义时给部分答案，不补造边。
+## 6. Java 适配的实际含义
 
-首版固定工具白名单：`search_symbols`、`find_entry_points`、`get_symbol`、`get_relations`、`find_paths`、`get_implementations`、`read_source`、`search_source`、`get_project_overview`。这些名称是理解 agent 的工具契约，可适配现有服务，不是当前 MCP 已具备这些工具的声明。
+普通 Java 和 Spring Boot 都支持同一 agent 工作流。增强体现在检索指导和阅读材料上：
 
-禁止 `detect_changes`/`read_diff`/`get_file_history`/`get_blame`、任意 shell、任意 URL、数据库写入、代码执行。索引更新由用户动作/本地任务编排管理，不让模型自行刷新并更换正在回答的快照。
+- 充分使用现有 package、import、类/方法、接口实现和调用索引；其正确性限制不隐藏。
+- 模型遇到 Spring 代码时读取 Controller、Service、注入点、认证过滤器/配置及异常处理相关源码，而不是要求本地重建容器状态。
+- MyBatis：先对齐实际调用方法与 namespace/id/SQL 注解；必要时读 include 与动态分支的原文。无需提前解析整个项目 XML。
+- JPA/其他 ORM：读取调用与实体映射，物理表名未确认就写未确认；命名策略、级联等没有证据时不推断具体读写。
+- 重载、Lombok、代理或复杂泛型导致索引不足时，继续源码查证或报告候选；不以新增语言特性测试数量作为业务交付指标。
 
-### 8.2 结果协议
+这些是 agent 的阅读策略，不承诺 AI 总能消除运行时不确定性。未读到的 SQL、实现或配置不能由语言常识补成项目事实。
 
-`AnswerDocument` 最少包含：protocol_version、project_key、generation、request_id、scope、summary、claims、steps、focus_entity_keys、evidence_ids、uncertainties、coverage、completion_status。
+## 7. 回答数据结构与轻量兼容
 
-- `claims[] = { id, text, evidence_ids, nature: observed|inferred }`。
-- `steps[] = { id, title, claim_ids, entity_keys, relation_ids }`。相邻步骤不保证存在调用边；不能以步骤顺序自动连线。
-- `uncertainties[]` 明确区分歧义候选、源码不可读、解析缺口、外部依赖、预算截断。
-- `completion_status` 为 complete/partial；失败、取消作为任务状态，不伪装成完整 AnswerDocument。
-- 项目功能概括同样需要入口/模块/注释证据；用户提供的业务背景单独标“问题上下文”，不能冒充代码事实。
+已有 AnswerDocument/GraphSlice 校验强调“关系必须来自权威图”。保持该契约服务原有静态图，不直接将 AI 解释塞成新的 CALLS/INJECTS 表记录。
 
-输出使用普通工具调用协议加最终 JSON 内容，不强依赖供应商专有 JSON Schema 模式。流式阶段展示简短检索进度；只有增量解析得到的正文片段才可标“正在整理，尚未核验”展示，禁止把原始 JSON/工具参数流直接放进解释区。图只接受已验证工具结果。完成后解析并校验：所有 ID 来自本次 EvidenceBundle，关系存在、端点一致、范围/代际匹配。格式错误最多一次修复请求（计入总预算）；仍失败保留本地结果，显示“回答格式无法验证”，不转成无引用成功回答。
+拟新增会话 DTO `AnalysisResult`（自身 `version=1`，独立于既有 ANSWER_PROTOCOL_VERSION）：
 
-只验证 ID 存在不能证明自然语言完全正确；验收还需人工逐条检查“结论是否由所引代码支持”。模型不得将 inferred 重写为确定事实。
-
-### 8.3 预算与 AI 复用
-
-复用 ChatClient、供应商四项配置、代理、SSE、读空闲超时、瞬态重试、EOF/length 截断判定。新增 `understanding_agent`，不复制 `ReviewAgentInput` 的 Git 数据和评审持久化逻辑，也不使用一次性全屏 AI 思考弹窗承载交互式代码探索。
-
-每问总轮数 ≤ 41，其中最多 40 个带工具的模型轮次，预算逼近时为最后一个无 tools 收尾轮保留位置；工具调用总数 ≤ 40（批量调用逐项计数）。单工具结果 ≤ 8K 字符、累计 ≤ 120K 字符。对全部请求消息（system/user/历史/schema/结果）估算输入 token，上限 48K；同时保留默认 4000 输出 token 空间。估算不是精确 tokenizer，已知更小模型窗口应下调；服务配置不能宣称兼容所有 48K 以下模型。
-
-输入超限先压缩可丢弃历史和重复片段，保留用户当前问题、证据身份及不确定性；仍超限进入有理由的 partial 收尾。预留至少 8K 输入 token 的收尾空间，不把最后指令挤出窗口。重试耗费网络请求次数另行记录并设每问总 HTTP 尝试 ≤ 80；不执行重复 tool_call_id。达到任何限制，明确注明哪个限制触顶。
-
-会话仅保留最近 5 个问题的可显示结果；发给模型的历史最多最近 3 轮摘要和验证仍有效的符号键，总历史预算 8K 字符。旧代际的原始工具内容不重发为当前证据。用户的当前问题永远保留；过长问题在发送前提示缩短。
-
-### 8.4 生命周期与并发
-
-`UnderstandingSession` 存于 RepoTabState，含 scope、selection、navigation_stack（最多 20）、result_history、graph_viewport、source_scroll、request_seq、cancel token。全局 RepositoryView 只存任务名额与全局偏好；新输入字段要随项目保存/恢复，不沿用会串项目的全局单字符串。
-
-状态机：Idle → Retrieving → Explaining → Validating → Completed/Partial；任何运行态可进 Cancelling → Cancelled，错误进 Failed，代际不符进 Stale。事件携带 `(project_key, tab_session_id, request_id, generation)`，四项验证通过才回填。
-
-同项目单问答，全局理解+AI 评审+一次性生成共享最多 3 个在途任务名额，采用生命周期 permit，失败/panic/取消均释放。首版不改原评审的后台显示规则，仅抽出共享计数机制。切标签/离开理解模式取消理解请求；迟到事件丢弃。取消不立即谎称网络已中断，UI 可以先解锁本地探索，但 permit 保留到任务实际退出。
-
-新索引发布后旧会话结果保留为“较早索引”；运行中的问答不跨代续用工具。下次工具调用发现 GenerationMismatch 即停止追加证据并返回 partial/stale，用户可一键重试。不在 AI 网络等待期间锁住数据库。
-
-## 9. 源码读取、安全与隐私
-
-SourceReader 是唯一源码读取入口，既服务 AI 也服务 UI。它必须：
-
-1. 拒绝绝对路径、`..`、UNC 越界、Windows 盘符混用和 NTFS ADS；规范化后验证项目根路径包含关系，不能只做字符串前缀比较。
-2. 对 symlink/junction 解析真实目标并再次验证；通过打开句柄校验最终目标与元数据，降低检查后替换风险。任一步无法验证则拒绝读取。
-3. 按当前允许文件集合与敏感路径策略校验，不因为模型知道路径就绕开 ignore/排除规则。
-4. 有限读取、二进制检测和行范围验证；读取字节计算 SHA-256，与 SourceRef 匹配才标 verified。错位行号返回 SourceChanged/RangeInvalid，不 clamp 成另一个位置。
-5. 首版 Java 精确语义支持 UTF-8/UTF-8 BOM；其他编码可借助现有解码层阅读，但标 encoding_not_indexable，不混用解码字符位置和原始字节范围。
-
-索引/阅读/普通检索在本地完成。点击“提问”才把预算内必要源码片段发往已配置供应商；输入区说明这一行为并显示供应商名称，无需每问重复确认。首次为项目启用代码问答时记录该范围的知情选择；不自动后台上传，不保存原始代码/问题/模型思考到日志。日志仅保留请求 ID、耗时、计数和脱敏错误。
-
-仓库文本、注释、Javadoc、SQL、工具返回都是不可信数据。system 规则固定其“证据材料”身份；即使源码写了“执行命令、读取密钥、忽略约束”也不能改变工具白名单或权限。会话首版只在内存，关闭标签/应用释放；索引删除沿用已有用户操作并同时失效相关缓存。
-
-## 10. 图形投影与布局
-
-### 10.1 三种视图
-
-- **项目概览**：按模块/包聚合，不按 AI 想象业务域自动分组；显示入口数、关系方向，点击下钻。
-- **关系图**：以选中符号为中心，默认两跳；声明调用、类型关系、实现候选按用户筛选呈现。
-- **业务链路**：从回答步骤选择相关的真实 GraphSlice；步骤高亮与来源一致，缺证据的断点明确留白并说明。
-
-只有选择某一候选实现后才沿该候选扩展局部链；其“推测/条件”标记继续保留，用户选择不把推断改为事实。源码条件和异常分支在说明/证据区展示；首版不生成完整方法 CFG 或伪时序图。
-
-### 10.2 可读性与性能
-
-采用确定性有向分层布局：识别 SCC → 缩成 DAG → 层级排序 → 有界交叉优化 → 坐标与边路由。循环调用折叠为可展开组，展开仍受全局节点预算限制。布局运行于后台，缓存键为 generation+scope+稳定节点/边集合+布局版本。
-
-默认 40 节点/80 边，最多 120/240；超过的邻接以“还有 N 个关系”展示，N 未知则写“更多关系”。只实例化可见节点，边用 GPUI canvas 绘制；空间命中索引与缩放变换共享同一坐标系。文本宽度先测量并限制，长符号单行裁剪+tooltip。
-
-实线表示源码声明/可证实关系，虚线表示候选/框架推断，未知边界有文字状态。不能仅用红绿配色区分，更不能套 Git 新增/删除色。主色只用于当前选择/路径高亮，其他节点保持中性 surface。
-
-## 11. 原生用户入口与交互设计
-
-### 11.1 信息架构
-
-Context Navigator 模式区新增“代码理解”图标+文字按钮，收起时沿用 48px 模式窄条。项目选择沿用壳层；本页面自身不展示分支、提交或变更状态。宽屏默认收起仓库引用导航，其偏好按项目和模式保存。
-
-页面从上到下：page_header（名称/索引状态/更新）→ 问题输入行（单行，Enter 提问，发送按钮）→ 内容工作区。起始态显示简洁项目概览和 3 条可点击示例问题；有结果后显示平面分栏，不增加欢迎大卡片、装饰插画和大型聊天头像。
-
-| 内容宽度（扣除宿主 Navigator 后） | 布局 |
+| 字段 | 作用 |
 | --- | --- |
-| ≥ 1160px | 左解释列 320px（可调 280～440）+ 中间图 ≥ 420px + 按需右源码列 360px（可调 320～560）；总宽不足时先收源码列，不硬压图 |
-| 760～1159px | 左解释列 300px（可调 260～380）+ 主区“关系图/源码”互切，选择引用自动切源码 |
-| < 760px | 单主区“解释/关系图/源码”互切，问题输入和状态常驻，选中与视口不因切换清空 |
+| context | project_key、request_id、index_generation、问题与实际检索范围 |
+| summary / findings | 一句话回答与业务发现；每条 finding 含来源 ID 和 observed/inferred 状态 |
+| callers / callees | 相关调用说明、涉及代码、来源、direct/indirect/candidate 和覆盖说明 |
+| data_accesses | 对象、对象类别、操作列表、条件、访问方法、来源与 observed/inferred/unknown |
+| steps / links | 业务步骤与显式连接，附来源；连接种类为 call/branch/read/write/sequence_hint 等展示语义 |
+| unknowns / completion | 未确定内容及 complete/partial；范围内回答完成不代表全项目分析完成 |
 
-这些是本页面内容宽度策略，不替换壳层 1120/1440px 断点。切换阈值和可调宽度 clamp 写成纯函数；恢复宽屏时还原用户列宽，不保存窄窗临时折叠为长期偏好。
+对象类别区分 db_object/cache/external/message/unknown；数据操作区分 read/insert/update/delete/unknown，允许同对象多操作。未知对象可保留表达式；不可为了表格整齐捏造名称。
 
-### 11.2 视觉规范
+模型内部步骤 ID 只是本次回答的局部 ID，不要求每个步骤是数据库 SymbolKey。节点可以表示“校验密码”或“更新最后登录时间”，但必须关联已读代码的证据；table 节点可以来自 SQL 引用，不需要先落索引库。纯阅读顺序使用 sequence_hint，不能冒充真实调用或必然执行顺序。
 
-复用 [UI 设计系统](../ui-design-system.md)：SURFACE/CONTENT/BORDER/PRIMARY 等 token，4px 间距，12px 正文、14px 小标题、16px 页标题，28/32px 控件和36px普通行，圆角6/8px。平面面板配单条分隔线；使用 `render_column_splitter` 后相邻面板不得再画重复边框。
+**校验两层分开：**
 
-解释列按“入口 → 关键步骤 → 不能确定的部分”组织；证据用小型来源按钮和路径行号呈现，工具轨迹默认收起成进度条。用户看到的是“正在查找入口/正在核对调用/正在整理说明”，不暴露 schema、工具参数 JSON 或任意模型内部思考。
+- 服务验证结构、来源归属、文件 hash/行范围、所有 link 端点存在、数量限制；索引键若提供则必须可解析。
+- AI 对源码做语义判断，UI 以“AI 根据源码分析”呈现；推断可见。人工验收判断结论是否被引用内容支持，不能把“引用存在”当正确性的充分证明。
 
-图控制栏只保留返回、方向、深度/范围、适应画布及缩放；更细筛选收进单一菜单。外部依赖和未知关系按需显示。源码标题显示路径与实际编码/证据状态，不加 Git 注释栏。
+这样既保留已有严格 DTO 的价值，也允许模型用源码建立业务层解释，而不必扩建静态语义 schema。
 
-### 11.3 关键交互
+## 8. 表读写的证据要求
 
-| 动作 | 结果 |
+明确 SQL 的表/对象和操作：引用 SQL 本体以及它与当前业务路径的调用或映射来源。条件更新同时引用条件所在分支。对于 JOIN/子查询/INSERT…SELECT，应分别列读源和写目标；不能把别名/CTE 当新增物理表。
+
+ORM 推断：至少引用调用和实体映射，标“按映射推断”。只有 `findBy...`/`save` 和实体名字时，先说明对象意图，物理表名未知。动态表名、存储过程、外部服务、不可见级联/触发器以未知边界结束。
+
+同一表按对象与操作聚合展示，保留各条件和证据，避免成功路径和失败路径合并成“每次登录都会写”。缓存与外部调用单列。模型不得运行 SQL、访问数据库或读取密钥来补全答案。
+
+## 9. 来源与文件变化
+
+复用 SourceRef/hash 基础，只增加安全的本地 reader。项目路径从宿主获取，理解工具不依赖 GitService。
+
+- 路径限制于当前项目允许目录；拒绝越界、符号链接/junction 根外目标、敏感排除路径、二进制与超大文件。沿用现有 ignore 选择规则。
+- Mapper XML、SQL、实体等可在允许范围按需读，即使未建立符号节点。来源记录实际读取 hash；“属于本次查询的索引代际”不意味着资源已被索引。
+- 每次读取保存来源片段和 hash；结束时/用户点击时检查所引文件。发现变化则标该发现过期、禁用精确跳转并提示重试，不按旧行号打开新内容。
+- 同一文件在本问内变化，不混合两份内容形成一个确定结论；索引代际改变则结束本次为 partial/stale，不跨代追加索引证据。
+- 路径/注释/XML/源码内容均是待分析数据，不能修改系统规则或工具权限。
+
+工具只向已配置供应商发送问题所需的有限片段。输入区说明这一点；点击提问发起请求，不后台上传全库。日志只保留请求/耗时/数量和脱敏错误。
+
+## 10. 预算、流式与生命周期
+
+复用现有 Ai 池和 ChatClient 重试/超时/截断策略。首版保持以下内部默认，集中常量定义，不新增用户配置旋钮：
+
+| 项目 | 默认限制 |
 | --- | --- |
-| 点候选入口 | 设为 focus、查询局部图，不立即发起新的 AI 请求 |
-| 点解释步骤/来源 | 图高亮关联实体；源码滚动到服务校验的范围 |
-| 点节点 | 在源码区显示声明；右侧提供调用方/被调用方/实现按钮 |
-| 点边 | 显示关系类型、规则/条件与全部调用点的有界列表 |
-| 选“解释此符号” | 在输入范围中附带已验证 SymbolKey，用户发送后提问 |
-| 展开关系 | 后台查询并稳定布局，保持已选节点附近视口，超过预算提示 |
-| 图上空白拖动/滚轮 | 仅画布平移/缩放；侧栏滚轮继续滚动文本；提供点击缩放按钮 |
-| 返回 | 恢复 focus/filter/selection/viewport/source scroll，不回滚真实索引代际 |
-| 点更新索引 | 复用索引任务入口与互斥，完成后标旧结果过期并提供重新提问 |
+| 工具次数/模型轮次 | 40 次工具、41 轮总量，包含必要收尾与格式修复；批量调用逐项计数 |
+| 单次读取 | 源文件 ≤ 1 MiB；read_file 最多 200 行且返回 ≤ 8K 字符，超限显式截断，可分段再读 |
+| 其他工具 | 搜索默认 20/最多 50 命中；目录默认 2/最多 4 层且最多 200 条；trace 默认 1/最多 3 跳、最多 40 个符号 |
+| 总上下文 | 工具累计 120K 字符，总输入保守估算 ≤ 48K token（包含提示、schema、历史等），收尾预留 8K 输入空间；输出沿用客户端配置 |
+| 全部 HTTP 尝试 | 每问最多 80 次，瞬态重试同样计入，防止只按成功轮数限额 |
+| 检索运行 | 单次本地搜索 ≤ 2s/最多 1000 个候选文件，先到即返回部分结果 |
+| 展示 | 默认最多 15 步/20 连接；超限在文字说明中保留并提示聚焦，不截出悬空边 |
+| 历史 | 会话内最近 5 次答案，发送给模型最多最近 3 次摘要、合计 8K 字符 |
 
-### 11.4 与既有控件约束一致
+模型窗口小于默认预算时下调或明确报错，不声称 48K 输入适用所有端点。补读请求可能达到输出截断，必须报告未完成，不能把半段 JSON 当成功。
 
-遵循 AGENTS.md 的键盘白名单：新按钮不加 focus/Tab/Enter/Space 导航，不增加图形 ↑↓/Esc 热键；输入框沿用 `text_input.rs`。需要“打开代码理解”快捷键时注册现有可配置应用动作，默认不分配新组合键。Ctrl+P 原确认行为保留；新增“理解此符号”仅为显式鼠标动作，不扩大其既有键盘例外。
+流式阶段先显示查找/阅读进度，已有源码来源可见；仅渲染可解析的临时文字，禁止直接显示工具参数或 JSON。最终结果用普通工具调用兼容端点 + JSON 内容，不依赖供应商专有结构化输出；格式修复最多一次并计入总预算。仍失败保留已读来源，显示可重试错误。
 
-虚拟列表不能 render 时预建全部元素，行名使用 `overflow_hidden + whitespace_nowrap`；滚动遵循有界外层 + `scrollable_frame_when` 直接子层。符号/调用点列表的 ElementId 包含项目键和实体键，避免同名按钮跨行共享状态。
+状态简化为 Idle → Searching/Reading → Answering → Completed/Partial/Failed；运行中可 Cancelled/Stale。事件携带项目键、标签会话键和请求代际。切项目/离页取消理解请求；已完成答案保留；旧消息不回填。取消许可在任务实际退出后释放。
 
-新增 `MainMode` 必须补齐模式切换、Navigator 展开/收起态、偏好持久化默认值、快捷键跳转、关闭标签和 UI 事件路由等穷尽分支；老配置缺字段用 serde 默认值。
+同项目单问答，全局复用现有 AI 任务限制；实现时使用共享许可或现有可用计数入口，不能因增加独立页面绕开既有并发上限。若需要小改共享计数，仅做必要兼容，不重构整个任务框架。
 
-### 11.5 后续视觉验证
+## 11. 用户入口与简图
 
-正式 UI 开工前，在现有应用截图与本规范基础上制作可评审画稿；若继续用 Product Design，则走其视觉方案选择流程。此处已冻结信息结构、内容优先级和交互，不宣称像素视觉已验收。UI 完成后核对亮/暗主题、100%/150%/200% DPI、宽/中/窄三档、全部主要状态，截图与已选画稿对比，修复遮挡、滚动、长文本和重复分隔线。
+遵循 [Calm Technical 设计系统](../ui-design-system.md)。左侧模式区增加“代码理解”；页头显示项目和索引状态。主要内容是问题输入和可读回答，输入示例为“登录逻辑怎么实现的？”。
 
-## 12. 失败与降级契约
+答案采用平面分区：概述与流程 → 调用上下游 → 数据读写表 → 其他副作用/未确认 → 来源。来源按钮按需打开代码侧栏；不要求常驻三栏或先在复杂图中选节点。
 
-统一错误码：IndexMissing、IndexBusy、NeedsRebuild、GenerationMismatch、CursorExpired、SourceChanged、SourceMissing、OutsideProject、ExcludedPath、EncodingUnsupported、BudgetExceeded、AmbiguousSymbol、ProviderUnavailable、ProviderToolUnsupported、AnswerInvalid、Cancelled。
+简图直接由已校验的 steps/links 渲染为少量原生步骤卡与连接，可折叠。默认按回答顺序从上向下排布，分支使用带条件标签的连接；循环回到已有步骤，不无限复制。无需全图 SCC/力导向布局、缩放平移编辑器或复杂聚类。语义含义不同的关系用文字标签区分，推断连接用虚线/标记，不仅靠颜色。
 
-错误包含可展示中文说明和是否可重试，不泄露密钥/代理 URL。模型配置类失败不无意义重试；静态查询仍可用。查询截断返回可用部分与原因，不伪装 empty success。源码读取失败保留路径与索引声明，但禁用精确跳转，不能换读 HEAD、diff 或 blame 补救。
+宽屏回答+按需源码侧栏；剩余宽度不足时源码替换主区并提供返回，保留阅读位置。具体尺寸按现有原生页面确定，不在本版增加独立多级断点系统。正文、间距、圆角、分隔和深浅主题复用 token。按钮/输入/滚动/虚拟列表遵守 AGENTS.md；不新增图键盘导航。Ctrl+P 原行为不变，额外入口不是首版必要项。
 
-## 13. 需要实现阶段验证的风险
+本轮未生成高保真稿或实现 UI。后续实现先确认现有组件视觉，再做简洁页面并进行原生截图/交互验证。
 
-| 风险 | 首版处理与验收要求 |
-| --- | --- |
-| Java 类型解析范围扩大 | 有限规则 + 两套人工标注样例；复杂类型主动降级，不能拿候选充确定关系 |
-| 增量关系全量重算变慢 | 标准集基准先测；瓶颈数据驱动优化，优化前保留全量等价 oracle |
-| 图证据与文件快速变化 | 代际守卫 + hash 校验；旧结果显式过期，不保证工作区全局原子时刻 |
-| 中文业务词弱匹配 | AI 查询扩展 + 注释/入口检索 + 单独 Recall@5 评估；后续再考虑 embeddings |
-| UI 渲染能力未知 | 先验证 GPUI canvas 的虚线、命中和裁剪小样，再正式接入；不在文档阶段声称通过 |
-| 既有 MCP 并发写 | 统一发布协议、旧进程重启策略和跨进程测试是迁移交付条件 |
-| AI 输出看似有证据但歪曲内容 | 结构校验 + 人工 claim/evidence 审核；不把 schema 校验误当事实验证 |
+## 12. 首版不需要的基础设施
 
-本轮没有阻止文档定型的未决产品问题。表中的验证项属于实现工作，不授权后续 agent 自动扩大需求范围。
+不升级索引 schema 来存表或业务流程，不继续强制补 Java 全语法，不实现 Spring 容器/SQL 血缘，不建向量库，不先重写完整查询引擎，不缓存持久“AI 业务知识图”。已有重型基础仅在能直接提高定位时复用。
+
+首个技术交付应是：不借助新 UI，调用理解服务对一个登录样例给出准确的入口、调用关系、读写对象与来源。测试如何执行见[开发文档](development.md)。

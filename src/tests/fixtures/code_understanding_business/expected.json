@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "B01",
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "allowed_entries": [
+        "com.example.login.LoginController#login(String,String)",
+        "com.example.login.AdminLoginProbe#verify(String,String)"
+      ],
+      "core_method": "com.example.login.AuthService#authenticate(String,String)",
+      "direct_callers": [
+        "com.example.login.LoginController#login(String,String)",
+        "com.example.login.AdminLoginProbe#verify(String,String)"
+      ],
+      "data_accesses": [
+        {
+          "object": "app_user",
+          "operations": ["read", "update"],
+          "conditions": ["按用户名且 enabled = TRUE 读取", "密码错误时累加 failed_attempts", "成功时更新 last_login_at 并清零 failed_attempts"]
+        },
+        {
+          "object": "login_attempt",
+          "operations": ["insert"],
+          "conditions": ["用户不存在、密码错误和成功分支都会记录，reason/succeeded 不同"]
+        },
+        {
+          "object": "in_memory_session",
+          "category": "cache",
+          "operations": ["write"],
+          "conditions": ["仅密码校验成功后创建；不是数据库表"]
+        }
+      ],
+      "unknowns": [
+        "PasswordHashLibrary 代表样例内的哈希校验边界，不应推断生产算法或外部副作用",
+        "代码样例不连接真实数据库，不能声明运行时记录或事务结果"
+      ]
+    },
+    {
+      "id": "B02",
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "allowed_entries": [
+        "com.example.shop.web.LoginController#login(LoginRequest)"
+      ],
+      "core_method": "com.example.shop.service.AuthService#login(String,String)",
+      "direct_callers": ["com.example.shop.web.LoginController#login(LoginRequest)"],
+      "data_accesses": [
+        {
+          "object": "app_user",
+          "operations": ["read", "update"],
+          "conditions": [
+            "UserMapper.findByUsername 查 app_user（按 username）",
+            "密码错误 incrementFailedAttempts 更新 failed_attempts",
+            "成功 markLoginSuccess 更新 last_login_at 并清零 failed_attempts"
+          ],
+          "evidence": "Mapper XML 的 select/update id 与 AuthService 调用对齐"
+        },
+        {
+          "object": "login_log",
+          "operations": ["insert"],
+          "conditions": ["USER_NOT_FOUND / DISABLED / BAD_PASSWORD / SUCCESS 四个分支都插入"],
+          "evidence": "LoginLogMapper.xml 的 insert"
+        },
+        {
+          "object": "redis session key（session:<uuid>）",
+          "category": "cache",
+          "operations": ["write"],
+          "conditions": ["仅密码校验成功后由 SessionService.createSession 写入，TTL 2 小时"],
+          "evidence": "SessionService 源码；不得混进数据库表清单"
+        }
+      ],
+      "branch_notes": [
+        "用户不存在：只记录 login_log(USER_NOT_FOUND)，不更新 app_user",
+        "账号停用（status != 1）：记录 DISABLED，不更新 app_user",
+        "密码错误：先累加 failed_attempts 再记 BAD_PASSWORD",
+        "成功：更新 app_user + 记 SUCCESS + 创建 Redis 会话"
+      ],
+      "unknowns": [
+        "PasswordEncoder 是 Spring Security 实现，样例不推断具体算法",
+        "MyBatis 注解与 XML 同时存在时以 XML 的 id 为准；不执行 SQL",
+        "不能声明运行时事务结果"
+      ]
+    },
+    {
+      "id": "B03",
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "allowed_entries": ["com.example.crm.web.LoginController#login(Credentials)"],
+      "core_method": "com.example.crm.service.AuthService#login(String,String)",
+      "direct_callers": ["com.example.crm.web.LoginController#login(Credentials)"],
+      "data_accesses": [
+        {
+          "object": "app_user",
+          "operations": ["read", "update"],
+          "conditions": [
+            "findByUsernameAndEnabledTrue 读取（派生查询，表名来自 @Table(name=\"app_user\") 的映射证据）",
+            "密码错误 users.save(user) 累加 failed_attempts",
+            "成功 users.save(user) 更新 last_login_at 并清零"
+          ],
+          "evidence": "UserEntity 的 @Entity + @Table(name = \"app_user\")；标 observed 或 inferred 均可，但必须引用映射"
+        },
+        {
+          "object": "LoginAudit 对应表",
+          "operations": ["insert"],
+          "conditions": ["USER_NOT_FOUND / BAD_PASSWORD / SUCCESS 三分支都 audits.save(...)"],
+          "state_requirement": "LoginAudit 没有 @Table、没有显式表名映射，命名策略又不可见，因此物理表名必须标为 unknown（不得推断为 login_audit 并当作已确认）"
+        },
+        {
+          "object": "TokenIssuer 生成的令牌",
+          "category": "unknown",
+          "operations": ["unknown"],
+          "conditions": ["成功路径返回 token；不是数据库表，样例内部生成"]
+        }
+      ],
+      "branch_notes": [
+        "用户不存在：只保存 audit，不更新用户",
+        "密码错误：save 用户（累加失败次数）再保存 audit",
+        "成功：save 用户、保存 audit、签发令牌",
+        "方法带 @Transactional，但样例不能声明运行时事务边界"
+      ],
+      "unknowns": [
+        "LoginAudit 物理表名未知（无 @Table，未提供命名策略）",
+        "countLocked 的 JPQL 未被登录流程调用，不应算作登录的数据访问",
+        "不能执行 JPQL 或声明查询结果"
+      ]
+    }
+  ]
+}

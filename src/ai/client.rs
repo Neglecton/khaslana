@@ -93,7 +93,10 @@ pub const AGENT_STREAM_MAX_RETRIES: usize = 3;
 
 impl AgentStreamError {
     /// 瞬态故障：重试至默认上限。
-    fn transient(message: String) -> Self {
+    ///
+    /// `pub` 供实现自定义 `UnderstandingTurnProvider` 的调用方构造错误；
+    /// 生产路径由 `ChatClient` 内部产生。
+    pub fn transient(message: String) -> Self {
         Self {
             message,
             retryable: true,
@@ -102,7 +105,7 @@ impl AgentStreamError {
     }
 
     /// 基本确定性的失败：只再试 1 次（采样波动可能产生更短输出）。
-    fn transient_once(message: String) -> Self {
+    pub fn transient_once(message: String) -> Self {
         Self {
             message,
             retryable: true,
@@ -111,7 +114,7 @@ impl AgentStreamError {
     }
 
     /// 配置/能力类错误：重试无意义。
-    fn fatal(message: String) -> Self {
+    pub fn fatal(message: String) -> Self {
         Self {
             message,
             retryable: false,
@@ -289,6 +292,11 @@ impl ChatClient {
             settings,
             proxy_url,
         }
+    }
+
+    /// 客户端配置的输出 token 上限；一次性生成类请求沿用它，不新增独立旋钮。
+    pub fn max_tokens(&self) -> u32 {
+        self.settings.max_tokens
     }
 
     /// agent 循环的一轮流式请求：请求可携带工具定义，SSE 增量同时推送

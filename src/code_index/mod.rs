@@ -21,10 +21,8 @@
 
 mod discover;
 mod extract;
-pub mod facts;
 mod graph;
 pub mod identity;
-pub mod java;
 mod lang_spec;
 pub mod mcp;
 mod pipeline;
@@ -36,7 +34,6 @@ pub use discover::{DiscoverOutcome, DiscoveredFile, discover_files};
 pub use extract::{
     CallSite, Extractor, FileExtractResult, ImportRef, OwnerFunction, SymbolDef, TypeRef,
 };
-pub use facts::FileFacts;
 pub use graph::{
     EdgeType, GraphBuffer, GraphEdge, GraphNode, NodeId, NodeLabel, calls_edge_properties,
     file_qualified_name,
@@ -45,10 +42,6 @@ pub use identity::{
     CoverageSummary, IndexSnapshot, ProjectContext, SYMBOL_KEY_VERSION, SourceRef, SourceRefParts,
     SymbolKey, SymbolKeyMaterial, content_fingerprint, parse_symbol_key, sha256_hex,
     symbol_key_from_material, symbol_key_material,
-};
-pub use java::{
-    JavaFileFacts, JavaImportFact, JavaParameterFact, JavaProjectDiagnostic, JavaProjectModel,
-    JavaSourceScope, JavaSymbolFact, JavaVariableFact,
 };
 pub use pipeline::{
     IncrementalOutcome, IndexRunStats, PipelineOptions, RunOutcome, run_incremental_if_stale,
@@ -64,6 +57,7 @@ pub use resolve::Registry;
 pub use store::{
     CODE_INDEX_SCHEMA_VERSION, CodeIndexMeta, CodeIndexStore, FileHashRow, IndexStats, SearchHit,
     camel_split, open_index_db_path, open_read_only_if_exists, read_index_stats, search_symbols,
+    search_symbols_filtered,
 };
 
 /// 索引阶段（进度事件文案用）。
