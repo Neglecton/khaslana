@@ -214,12 +214,65 @@ pub fn parse_analysis_result(content: &str) -> UnderstandingResult<AnalysisResul
             "AI 未返回分析结果正文",
         ));
     }
-    serde_json::from_str::<AnalysisResult>(candidate).map_err(|error| {
-        UnderstandingError::new(
-            ErrorCode::AnswerInvalid,
-            format!("AI 返回的分析结果不是合法 JSON：{error}"),
-        )
-    })
+    let parse_error = match serde_json::from_str::<AnalysisResult>(candidate) {
+        Ok(result) => return Ok(result),
+        Err(original_error) => {
+            // 部分兼容端点会把 JSON 字符串里的换行/制表符作为原始控制字符返回。
+            // 只转义字符串内部的控制字符；结构缺失、半截 JSON 等错误仍保持失败。
+            if let Some(normalized) = escape_json_string_control_chars(candidate)
+            {
+                match serde_json::from_str::<AnalysisResult>(&normalized) {
+                    Ok(result) => return Ok(result),
+                    Err(normalized_error) => normalized_error,
+                }
+            } else {
+                original_error
+            }
+        }
+    };
+    Err(UnderstandingError::new(
+        ErrorCode::AnswerInvalid,
+        format!("AI 返回的分析结果不是合法 JSON：{parse_error}"),
+    ))
+}
+
+/// 转义 JSON 字符串字面量中的原始控制字符；字符串外的内容保持原样。
+fn escape_json_string_control_chars(text: &str) -> Option<String> {
+    let mut output = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for ch in text.chars() {
+        if in_string && ch <= '\u{001f}' {
+            match ch {
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                _ => {
+                    use std::fmt::Write as _;
+                    let _ = write!(output, "\\u{:04x}", ch as u32);
+                }
+            }
+            escaped = false;
+            changed = true;
+            continue;
+        }
+        output.push(ch);
+        if !in_string {
+            if ch == '"' {
+                in_string = true;
+            }
+        } else if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            in_string = false;
+        }
+    }
+
+    changed.then_some(output)
 }
 
 /// 从可能夹带说明文字的正文中截出最外层 JSON 对象。
@@ -366,27 +419,6 @@ pub fn validate_analysis_result(
         }
     }
 
-    if !issues.is_empty() && std::env::var_os("KHASLANA_DEBUG_SOURCES").is_some() {
-        eprintln!("DEBUG issued source ids:");
-        for source in tools.issued_sources() {
-            eprintln!(
-                "  {} {}:{}-{}",
-                crate::code_understanding::source_id_of(&source),
-                source.relative_path,
-                source.start_line,
-                source.end_line
-            );
-        }
-        let mut mismatched = 0;
-        for (key, computed) in tools.source_service().debug_keys() {
-            if key != computed {
-                mismatched += 1;
-                eprintln!("DEBUG KEY MISMATCH stored={key} computed={computed}");
-            }
-        }
-        eprintln!("DEBUG key/value mismatches: {mismatched}");
-        eprintln!("DEBUG issues: {}", issues.join(" | "));
-    }
     if issues.is_empty() {
         return Ok(());
     }

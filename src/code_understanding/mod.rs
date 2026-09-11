@@ -41,7 +41,6 @@ pub use session::{
     UnderstandingSession, UnderstandingSessionEvent, UnderstandingSessionStatus,
     validate_history_source,
 };
-pub(crate) use source::source_id_of;
 pub use source::{
     FileTreeEntry, FileTreeEntryKind, FileTreeResult, SOURCE_FILE_MAX_BYTES, SOURCE_READ_MAX_CHARS,
     SOURCE_READ_MAX_LINES, SOURCE_SEARCH_MAX_FILES, SOURCE_SEARCH_MAX_RESULTS,
@@ -75,9 +74,6 @@ mod tools_tests;
 #[path = "../tests/code_understanding_live.rs"]
 mod live_tests;
 
-#[cfg(test)]
-#[path = "../tests/code_understanding_srcprobe.rs"]
-mod srcprobe_tests;
 
 #[cfg(test)]
 #[path = "../tests/code_understanding_session.rs"]

@@ -461,3 +461,74 @@ fn trace_on_a_non_callable_candidate_explains_the_real_cause() {
         error.message
     );
 }
+
+#[test]
+fn source_ids_are_short_and_accept_a_unique_prefix() {
+    // 真实模型无法可靠转录长十六进制串（实测抄错长度）。来源 ID 因此缩短到
+    // 8 位，并允许按唯一前缀兜底匹配，但仍然拒绝未发放过的 ID。
+    let (_temp, _root, source) = source_fixture();
+    let read = source
+        .read_file("resources/mapper/UserMapper.xml", 2, 2)
+        .unwrap();
+    let id = &read.source_id;
+    assert!(id.starts_with("sr1:"));
+    let digest = &id[4..];
+    assert_eq!(digest.len(), 8, "来源 ID 摘要应为 8 位：{id}");
+
+    // 完整 ID 与足够长的唯一前缀都能解析到同一条来源。
+    assert_eq!(source.validate_source(id).unwrap(), read.source_ref);
+    let prefix = &id[..id.len() - 1];
+    assert_eq!(
+        source.validate_source(prefix).unwrap(),
+        read.source_ref,
+        "唯一前缀应可解析"
+    );
+
+    // 太短的前缀与伪造 ID 仍被拒绝（不能凭猜测套到别的来源）。
+    assert!(source.validate_source("sr1:0").is_err());
+    assert!(source.validate_source("sr1:ffffffff").is_err());
+}
+
+#[test]
+fn candidate_ids_are_short_and_accept_a_unique_prefix() {
+    // 与来源 ID 同一类问题：长候选 ID 会被模型抄错。候选 ID 因此也改为短序号，
+    // 并允许唯一前缀匹配，但仍拒绝未注册过的 ID。
+    let (_temp, root, db_path) = indexed_fixture();
+    let tools = UnderstandingTools::open(&root, &db_path).unwrap();
+    let search = tools
+        .search_symbols(
+            "req-search",
+            SearchSymbolsArgs {
+                query: "login".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let candidate = &search.data.candidates[0];
+    let id = &candidate.candidate_id;
+    assert!(id.starts_with("sc1:"));
+    assert_eq!(id[4..].len(), 1, "首个候选应为一号短 ID：{id}");
+
+    // 完整 ID 与唯一前缀都能解析到同一符号。
+    let full = tools
+        .get_symbol(
+            "req-full",
+            GetSymbolArgs {
+                candidate_id: id.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(full.data.name, "login");
+
+    // 多个候选时前缀必须唯一：'1' 只对应 sc1:1。
+    let unknown = tools
+        .get_symbol(
+            "req-unknown",
+            GetSymbolArgs {
+                candidate_id: "sc1:99".to_string(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code, ErrorCode::AmbiguousSymbol);
+    assert!(unknown.message.contains("不是本次会话搜索结果"));
+}

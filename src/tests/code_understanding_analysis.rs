@@ -46,6 +46,22 @@ fn parse_tolerates_surrounding_prose() {
 }
 
 #[test]
+fn parse_escapes_raw_control_characters_inside_strings() {
+    let raw = minimal_json("第一行\n第二行\t缩进")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t");
+    let result = parse_analysis_result(&raw).unwrap();
+    assert_eq!(result.summary, "第一行\n第二行\t缩进");
+}
+
+#[test]
+fn parse_reports_the_remaining_error_after_control_character_cleanup() {
+    let error = parse_analysis_result("{\"summary\":\"第一行\n第二行\"}").unwrap_err();
+    assert!(error.message.contains("missing field"), "{}", error.message);
+    assert!(!error.message.contains("control character"), "{}", error.message);
+}
+
+#[test]
 fn parse_rejects_empty_and_truncated_json() {
     assert!(parse_analysis_result("   ").is_err());
     // 半截 JSON 不能被当成成功结果。

@@ -77,9 +77,11 @@ completion 标 partial」的 user 指令并省略 tools；收尾轮仍吐 tool_c
 
 ## 测试命令与结果
 
-- `cargo test --lib code_understanding --no-fail-fast`：52 passed，0 failed，
-  540 filtered out。
-- `cargo test --lib --no-fail-fast`：590 passed，0 failed，2 ignored。
+- `cargo test --lib code_understanding --no-fail-fast`：70 passed，0 failed，
+  10 ignored（实况）。
+- `cargo test --lib --no-fail-fast`：606 passed，0 failed，12 ignored。
+- 实况：`cargo test --lib live_tests -- --ignored --nocapture --test-threads=1`：
+  10 passed（B01～B05 各两遍），工具失败 0 次。
 - `cargo check --all-targets`：成功，零警告。
 - `cargo build --release`：成功，零警告。
 - `cargo clippy --lib --tests`：本批新增文件无提示（仓库既有 clippy 提示位于
@@ -90,24 +92,31 @@ completion 标 partial」的 user 指令并省略 tools；收尾轮仍吐 tool_c
 答案引用真实 `sr1:` 来源）；缺索引边时 `search_code + read_file` 补查并标
 partial；预算触顶；重复 `tool_call_id`；格式修复成功/失败；伪造来源拒绝；
 未知对象类别标 observed 被拒；悬空 link 被拒；轮次边界取消与退避期取消；
-瞬态重试后成功；重试耗尽报尝试次数;不支持工具调用端点分流；缺索引直接报错。
+瞬态重试后成功；重试耗尽报尝试次数；不支持工具调用端点分流；缺索引直接报错；
+非可调用候选的 trace 报错；来源/候选短 ID 与唯一前缀兜底；B04 检索缺口样例
+（反射边确不在索引、文本搜索可补查）；B05 边界样例（动态分表/存储过程/CTE
+可读、接口双实现可数、SSO 无实现可证）。
 
 ## 已知限制与下一步
 
 - **脚本化模型不等于真实理解**。测试用脚本 provider 驱动真实索引与工具，能证明
-  工具中介、来源绑定、预算与生命周期正确，不能证明模型能理解项目。开发文档 §7
-  的真实模型业务验收（B01～B03 各两遍）尚未执行；本批未连接任何真实供应商。
-- **B02～B05 样例未建**（Spring + MyBatis、Spring + JPA、缺边、动态表边界），
-  属 T3 剩余验收对象。
+  工具中介、来源绑定、预算与生命周期正确，不能证明模型能理解项目。真实模型业务验收
+  已在后续批次完成：B01～B05 各两遍全部通过，见
+  [CU2-T3 实况验收](cu2-t3-live-acceptance.md)；实况同时暴露并修复了两个真实缺陷
+  （非可调用候选误报索引失效、长 ID 被模型抄错），详见该报告。
+- **B02～B05 样例**：全部已建并验收通过（B02 MyBatis、B03 JPA、B04 检索缺口、
+  B05 边界变体）。
+- **索引调用边对方法重名的限制**：`字段名.方法名` 调用在 receiver 类型不可见时靠
+  import_map/unique 策略解析，方法名全仓库不唯一（如 Controller 与 Service 同名
+  `login`）时入方向边会缺失。B04 样例刻意用唯一方法名 `authenticate` 保证普通边
+  在、反射边缺；这是索引已知限制，不是 agent 缺陷（B04 验收证明文本搜索可兜底）。
 - **无 UI**：`run_understanding_agent` 可直接调用，但还没有问题输入、回答主区、
   来源侧栏与步骤简图；接入 AI 池（`TaskKind::Ai`）与并发许可、事件落 UI 是 T5。
-  本轮未在 `main.rs`/`ui` 侧接线，避免与 T5 页面重构冲突。
-- **追问与生命周期（T4）未实现**：会话历史摘要、最近 3 次答案回灌、切换项目/
-  离页的旧消息隔离、来源点击时的 hash 复验提示，都留给 T4；当前每问独立，
-  校验时已做来源 hash 复验。
+- **追问与生命周期（T4）**：由并行批次实现（`src/code_understanding/session.rs`）；
+  本批冻结了其依赖的 `source_id_of` 纯函数语义（同一 `SourceRef` 恒等映射同一 ID），
+  两者兼容。
 - 符号搜索的 path/language 过滤仍是「前 1000 条 FTS 候选内过滤」（T1 限制未变）。
 - `UnderstandingTools::open` 要求索引已存在，否则返回 `IndexMissing`；「无索引
   时引导建索引」的交互属于 T5 页面职责。
 
-下一步：T4（追问与生命周期）或先补 B02/B03 样例跑真实模型验收；两者都不需要
-先扩静态分析器。
+下一步：T5 原生页面（T4 追问的真实模型验收不在本阶段展开）。

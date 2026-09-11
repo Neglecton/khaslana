@@ -13,7 +13,7 @@ use crate::ai::ToolSchema;
 use crate::ai::review_store::repo_key;
 use crate::code_index::{
     DetailOutcome, ProjectContext, TraceDirection, TraceOutcome, open_read_only_if_exists,
-    search_symbols_filtered, sha256_hex, symbol_detail, trace_calls,
+    search_symbols_filtered, symbol_detail, trace_calls,
 };
 
 use super::source::{
@@ -175,6 +175,47 @@ struct RegisteredCandidate {
     label: String,
 }
 
+/// 会话候选注册表：对外用短序号 `sc1:N`，而不是 64 位内容摘要。
+///
+/// 与来源 ID 同理（见 `source::source_id_of` 注释）：真实模型无法可靠转录
+/// 长十六进制串，抄错后会被当成「不是本次搜索的候选」，`get_symbol` /
+/// `trace_calls` 又把它报成疑似歧义，模型会反复重试同一个坏 ID。
+#[derive(Default)]
+struct CandidateRegistry {
+    by_id: HashMap<String, RegisteredCandidate>,
+    /// 同一（限定名, 路径）重复搜索返回同一 ID。
+    by_key: HashMap<(String, String), String>,
+    next: u64,
+}
+
+impl CandidateRegistry {
+    fn register(&mut self, qualified_name: &str, label: &str, file_path: &str) -> String {
+        let key = (qualified_name.to_string(), file_path.to_string());
+        if let Some(existing) = self.by_key.get(&key) {
+            return existing.clone();
+        }
+        self.next += 1;
+        let id = format!("sc1:{}", self.next);
+        self.by_id.insert(
+            id.clone(),
+            RegisteredCandidate {
+                qualified_name: qualified_name.to_string(),
+                label: label.to_string(),
+            },
+        );
+        self.by_key.insert(key, id.clone());
+        id
+    }
+
+    fn get(&self, id: &str) -> Option<&RegisteredCandidate> {
+        self.by_id.get(id)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &String> {
+        self.by_id.keys()
+    }
+}
+
 /// 单个问题/同一索引代际内使用的工具会话。
 pub struct UnderstandingTools {
     context: ProjectContext,
@@ -182,7 +223,7 @@ pub struct UnderstandingTools {
     generation: u64,
     indexed_hashes: HashMap<String, String>,
     source: SourceService,
-    candidates: Mutex<HashMap<String, RegisteredCandidate>>,
+    candidates: Mutex<CandidateRegistry>,
 }
 
 impl UnderstandingTools {
@@ -233,7 +274,7 @@ impl UnderstandingTools {
             generation,
             indexed_hashes,
             source,
-            candidates: Mutex::new(HashMap::new()),
+            candidates: Mutex::new(CandidateRegistry::default()),
         })
     }
 
@@ -299,14 +340,11 @@ impl UnderstandingTools {
             {
                 continue;
             }
-            let candidate_id = candidate_id(self.generation, &hit.qualified_name, &hit.file_path);
-            self.candidates.lock().expect("候选注册表锁被污染").insert(
-                candidate_id.clone(),
-                RegisteredCandidate {
-                    qualified_name: hit.qualified_name.clone(),
-                    label: hit.label.clone(),
-                },
-            );
+            let candidate_id = self
+                .candidates
+                .lock()
+                .expect("候选注册表锁被污染")
+                .register(&hit.qualified_name, &hit.label, &hit.file_path);
             scoped.push(SymbolCandidateView {
                 candidate_id,
                 name: hit.name,
@@ -549,17 +587,31 @@ impl UnderstandingTools {
     }
 
     fn resolve_candidate(&self, candidate_id: &str) -> UnderstandingResult<RegisteredCandidate> {
-        self.candidates
-            .lock()
-            .expect("候选注册表锁被污染")
-            .get(candidate_id)
-            .cloned()
-            .ok_or_else(|| {
-                UnderstandingError::new(
-                    ErrorCode::AmbiguousSymbol,
-                    "候选 ID 不是本次会话搜索结果，请先调用 search_symbols",
-                )
-            })
+        let registry = self.candidates.lock().expect("候选注册表锁被污染");
+        let exact = registry.get(candidate_id).cloned();
+        let resolved = exact.or_else(|| {
+            // 模型可能抄错短 ID 末位：唯一前缀匹配兜底；多个候选取不到唯一
+            // 前缀时仍拒绝，避免把符号错配到同类其它定义。
+            let prefix = candidate_id.trim_start_matches("sc1:");
+            if prefix.is_empty() {
+                return None;
+            }
+            let matches: Vec<&RegisteredCandidate> = registry
+                .keys()
+                .filter(|key| key.starts_with("sc1:") && key[4..].starts_with(prefix))
+                .filter_map(|key| registry.get(key))
+                .collect();
+            match matches.as_slice() {
+                [only] => Some((*only).clone()),
+                _ => None,
+            }
+        });
+        resolved.ok_or_else(|| {
+            UnderstandingError::new(
+                ErrorCode::AmbiguousSymbol,
+                "候选 ID 不是本次会话搜索结果，请先调用 search_symbols",
+            )
+        })
     }
 
     pub fn validate_source(
@@ -693,15 +745,6 @@ fn validate_request_id(request_id: &str) -> UnderstandingResult<()> {
         ));
     }
     Ok(())
-}
-
-fn candidate_id(generation: u64, qualified_name: &str, relative_path: &str) -> String {
-    let material = format!(
-        "{generation}:{}:{qualified_name}:{}:{relative_path}",
-        qualified_name.len(),
-        relative_path.len()
-    );
-    format!("sc1:{}", sha256_hex(material.as_bytes()))
 }
 
 fn relation_view(hop: crate::code_index::TraceHop) -> SymbolRelationView {

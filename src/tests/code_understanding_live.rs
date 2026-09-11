@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::code_understanding::{
-    AnalysisResult, ChatTurnProvider, DataObjectCategory, SearchCodeArgs, SearchSymbolsArgs,
-    UnderstandingAgentInput, UnderstandingAnswer, UnderstandingEvent, UnderstandingStep,
-    UnderstandingTools, run_understanding_agent,
+    AnalysisResult, CallTraceDirection, ChatTurnProvider, DataObjectCategory, SearchCodeArgs,
+    SearchSymbolsArgs, TraceCallsArgs, UnderstandingAgentInput, UnderstandingAnswer,
+    UnderstandingEvent, UnderstandingStep, UnderstandingTools, run_understanding_agent,
 };
 use crate::code_understanding::ReadFileArgs;
 use crate::ai::{AiProviderSettings, ChatClient};
@@ -216,8 +216,208 @@ fn expected_json_covers_three_main_samples() {
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
         .collect();
-    // B01～B03 主样例就位；B04/B05 边界变体仍是 T3 剩余项。
-    assert_eq!(ids, vec!["B01", "B02", "B03"]);
+    // B01～B03 主样例 + B04/B05 边界样例全部就位。
+    assert_eq!(ids, vec!["B01", "B02", "B03", "B04", "B05"]);
+}
+
+/// B04 检索缺口样例的核心机制自检：
+/// 1. 反射调用的两条调用边（LegacyJspLogin / PluginLoginBridge → AuthService.login）
+///    在索引图中确实不存在——这才是“检索缺口”，模型只能靠文本搜索发现；
+/// 2. search_code 能按 "com.example.report.service.AuthService" 文本搜到两个反射入口，
+///    证明缺口是可补查的（否则验收目标“AI 能搜索源码补查”无从谈起）；
+/// 3. Mapper XML 无符号节点但内容可读。
+#[test]
+fn b04_retrieval_gap_fixture_has_real_missing_edges() {
+    let (_temp, root, db_path) = prepared_fixture("B04");
+    let tools = UnderstandingTools::open(&root, &db_path).unwrap();
+
+    // 定位核心方法 AuthService#authenticate。
+    let search = tools
+        .search_symbols(
+            "req-b04",
+            SearchSymbolsArgs {
+                query: "AuthService".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let candidate = search
+        .data
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.qualified_name.contains("service.AuthService")
+                && candidate.qualified_name.ends_with("authenticate")
+        })
+        .expect("应找到 AuthService#authenticate 候选");
+    assert_eq!(candidate.label, "Method");
+
+    // 1. 入方向调用追踪：反射调用边必须不存在。
+    let trace = tools
+        .trace_calls(
+            "req-b04-trace",
+            TraceCallsArgs {
+                candidate_id: candidate.candidate_id.clone(),
+                direction: CallTraceDirection::Inbound,
+                depth: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+    let caller_names: Vec<&str> = trace.data.callers.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        !caller_names.iter().any(|name| name.contains("LegacyJspLogin")),
+        "LegacyJspLogin 是反射调用，索引不应有这条边：{caller_names:?}"
+    );
+    assert!(
+        !caller_names.iter().any(|name| name.contains("PluginLoginBridge")),
+        "PluginLoginBridge 是反射调用，索引不应有这条边：{caller_names:?}"
+    );
+    // LoginController 的普通调用边应该在（缺口样例只缺反射边，不缺正常边）。
+    // 索引里 caller 以方法短名记录，login 即 LoginController#login。
+    assert!(
+        caller_names.contains(&"login"),
+        "LoginController#login 的普通调用边应存在：{caller_names:?}"
+    );
+
+    // 2. 文本搜索能发现两个反射入口（缺口可补查）。
+    let reflection = tools
+        .search_code(
+            "req-b04-search",
+            SearchCodeArgs {
+                query: "com.example.report.service.AuthService".to_string(),
+                regex: false,
+                path_prefix: None,
+                suffix: Some(".java".to_string()),
+                limit: Some(20),
+            },
+        )
+        .unwrap();
+    let hit_paths: Vec<&str> = reflection
+        .data
+        .matches
+        .iter()
+        .map(|hit| hit.relative_path.as_str())
+        .collect();
+    assert!(
+        hit_paths.iter().any(|path| path.contains("LegacyJspLogin")),
+        "search_code 应能发现 LegacyJspLogin：{hit_paths:?}"
+    );
+    assert!(
+        hit_paths.iter().any(|path| path.contains("PluginLoginBridge")),
+        "search_code 应能发现 PluginLoginBridge：{hit_paths:?}"
+    );
+
+    // 3. Mapper XML 无符号节点但可读。
+    let xml = tools
+        .search_code(
+            "req-b04-xml",
+            SearchCodeArgs {
+                query: "report_login_log".to_string(),
+                regex: false,
+                path_prefix: Some("src/main/resources".to_string()),
+                suffix: Some(".xml".to_string()),
+                limit: Some(20),
+            },
+        )
+        .unwrap();
+    assert!(
+        xml.data
+            .matches
+            .iter()
+            .any(|hit| hit.relative_path.ends_with("LoginLogMapper.xml")),
+        "应能在 XML 中搜到 report_login_log：{:?}",
+        xml.data
+    );
+}
+
+/// B05 边界变体样例的核心机制自检：动态分表 SQL、存储过程调用、CTE、
+/// 接口双实现都可在源码中读到（模型据此判断“未知”，不编造）。
+#[test]
+fn b05_boundary_fixture_exposes_dynamic_and_external_boundaries() {
+    let (_temp, root, db_path) = prepared_fixture("B05");
+    let tools = UnderstandingTools::open(&root, &db_path).unwrap();
+
+    // 动态分表与存储过程在 Mapper XML 中可读。
+    let xml = tools
+        .read_file(
+            "req-b05-xml",
+            ReadFileArgs {
+                path: "src/main/resources/mapper/UserRepository.xml".to_string(),
+                start_line: Some(1),
+                end_line: Some(30),
+            },
+        )
+        .unwrap();
+    let text: Vec<&str> = xml.data.lines.iter().map(|line| line.text.as_str()).collect();
+    assert!(
+        text.iter().any(|line| line.contains("portal_user_")),
+        "应读到动态分表名 portal_user_${{month}}"
+    );
+    assert!(
+        text.iter().any(|line| line.contains("sp_archive_inactive_users")),
+        "应读到存储过程调用 sp_archive_inactive_users"
+    );
+
+    // CTE 与别名在 StatsMapper.xml 可读，且不出现别的物理表。
+    let stats = tools
+        .read_file(
+            "req-b05-stats",
+            ReadFileArgs {
+                path: "src/main/resources/mapper/StatsMapper.xml".to_string(),
+                start_line: Some(1),
+                end_line: Some(30),
+            },
+        )
+        .unwrap();
+    let stats_text: Vec<&str> = stats.data.lines.iter().map(|line| line.text.as_str()).collect();
+    assert!(
+        stats_text.iter().any(|line| line.contains("WITH active_users AS")),
+        "应读到 CTE active_users"
+    );
+    assert!(
+        stats_text.iter().any(|line| line.contains("portal_login_event_")),
+        "应读到 JOIN 的分月事件表"
+    );
+
+    // SsoAuthPort 无实现：接口符号存在，但全仓库没有它的实现类。
+    let implementations = tools
+        .search_code(
+            "req-b05-sso",
+            SearchCodeArgs {
+                query: "implements SsoAuthPort".to_string(),
+                regex: false,
+                path_prefix: None,
+                suffix: Some(".java".to_string()),
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+    assert!(
+        implementations.data.matches.is_empty(),
+        "样例内不应有 SsoAuthPort 的实现类：{:?}",
+        implementations.data.matches
+    );
+
+    // CredentialChecker 双实现可发现（条件多实现的证据）。
+    let checkers = tools
+        .search_code(
+            "req-b05-checker",
+            SearchCodeArgs {
+                query: "implements CredentialChecker".to_string(),
+                regex: false,
+                path_prefix: None,
+                suffix: Some(".java".to_string()),
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        checkers.data.matches.len(),
+        2,
+        "应恰好有两个 CredentialChecker 实现：{:?}",
+        checkers.data.matches
+    );
 }
 
 // ── 实况：真实模型跑登录问答并留报告 ───────────────────────────────────────
@@ -491,4 +691,28 @@ fn live_b03_jpa_login_run1() {
 #[ignore = "实况：调用本机已配置的 AI 供应商"]
 fn live_b03_jpa_login_run2() {
     live_once("B03", 2);
+}
+
+#[test]
+#[ignore = "实况：调用本机已配置的 AI 供应商"]
+fn live_b04_retrieval_gap_run1() {
+    live_once("B04", 1);
+}
+
+#[test]
+#[ignore = "实况：调用本机已配置的 AI 供应商"]
+fn live_b04_retrieval_gap_run2() {
+    live_once("B04", 2);
+}
+
+#[test]
+#[ignore = "实况：调用本机已配置的 AI 供应商"]
+fn live_b05_boundary_run1() {
+    live_once("B05", 1);
+}
+
+#[test]
+#[ignore = "实况：调用本机已配置的 AI 供应商"]
+fn live_b05_boundary_run2() {
+    live_once("B05", 2);
 }

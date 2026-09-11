@@ -1,0 +1,555 @@
+{
+  "case": "B04",
+  "run": 2,
+  "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+  "model": "gpt-5.6-luna",
+  "elapsed_ms": 151316,
+  "analysis": {
+    "version": 1,
+    "context": {
+      "project_key": "1ee4dbf4",
+      "request_id": "live-B04-2",
+      "index_generation": 1,
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "scope": "src/main/java/com/example/report/web、service、mapper、security、legacy、plugin，以及 src/main/resources/mapper；搜索词包括 login、登录、authenticate、findByUsername、matches、SELECT。"
+    },
+    "summary": "登录主入口是 POST /api/login，流程为按用户名查询用户、校验密码、记录成功或失败日志并返回基于用户 ID 拼接的会话字符串；另有遗留 JSP 和插件反射入口。",
+    "coverage_note": "已检索登录 Controller、AuthService、UserMapper/LoginLogMapper 及其 MyBatis XML、密码校验器、遗留 JSP 和插件桥接代码；调用索引无边不代表运行时不存在其他调用方。",
+    "findings": [
+      {
+        "text": "HTTP 登录入口为 LoginController.login，映射到 POST /api/login，接收 LoginRequest，调用 AuthService.authenticate(username, password)，成功后将返回值封装为 LoginResponse。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:4141e35d"
+        ]
+      },
+      {
+        "text": "核心认证流程先调用 UserMapper.findByUsername(username) 查询用户；用户不存在时写入 USER_NOT_FOUND 登录日志并抛出 IllegalArgumentException；用户存在但密码校验失败时写入 BAD_PASSWORD 日志并抛出同样的通用错误；校验成功时写入 SUCCESS 日志并返回 \"session-\" + user.id()。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:31d1bb3f"
+        ]
+      },
+      {
+        "text": "密码校验由 PasswordVerifier.matches(rawPassword, storedHash) 执行，但当前实现只判断 rawPassword 非空且长度等于 3，传入的 storedHash 没有参与实际比较。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:0f9da46f"
+        ]
+      },
+      {
+        "text": "成功返回的会话值只是代码中拼接出的字符串 \"session-\" + 用户 ID；已读取代码未发现该值写入数据库、缓存或 HTTP Session。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:31d1bb3f"
+        ]
+      },
+      {
+        "text": "遗留 JSP 入口 LegacyJspLogin.handleLogin 通过反射加载 AuthService、创建实例并反射调用 authenticate(username, password)。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:12842d4f"
+        ]
+      },
+      {
+        "text": "插件入口 PluginLoginBridge.signIn 只有在配置 report.auth.plugin.enabled 等于 true 时才继续，否则抛出“插件登录未启用”；启用后同样通过反射调用 AuthService.authenticate。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:60e5ca60"
+        ]
+      },
+      {
+        "text": "LegacyJspLogin 和 PluginLoginBridge 通过无参构造反射创建 AuthService，而 AuthService 源码显示的构造器需要 UserMapper、LoginLogMapper、PasswordVerifier 参数，因此这两个反射入口是否能成功实例化 AuthService 未确认，按源码推断可能触发构造失败。",
+        "state": "inferred",
+        "condition": null,
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:12842d4f",
+          "sr1:60e5ca60"
+        ]
+      }
+    ],
+    "callers": [
+      {
+        "name": "LoginController.login",
+        "relative_path": "src/main/java/com/example/report/web/LoginController.java",
+        "detail": "HTTP POST /api/login 直接调用 AuthService.authenticate。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4141e35d"
+        ]
+      },
+      {
+        "name": "LegacyJspLogin.handleLogin",
+        "relative_path": "src/main/java/com/example/report/legacy/LegacyJspLogin.java",
+        "detail": "通过反射获取 authenticate 方法并调用；当前检索未确认其上游 JSP 或框架调用方。",
+        "kind": "indirect",
+        "source_ids": [
+          "sr1:12842d4f"
+        ]
+      },
+      {
+        "name": "PluginLoginBridge.signIn",
+        "relative_path": "src/main/java/com/example/report/plugin/PluginLoginBridge.java",
+        "detail": "配置 report.auth.plugin.enabled=true 时，通过反射调用 authenticate；当前检索未确认其上游插件调用方。",
+        "kind": "indirect",
+        "source_ids": [
+          "sr1:60e5ca60"
+        ]
+      },
+      {
+        "name": "HTTP 客户端或 Web 框架",
+        "relative_path": null,
+        "detail": "可确认 Controller 暴露了 POST /api/login，但源码中未找到具体调用方。",
+        "kind": "candidate",
+        "source_ids": [
+          "sr1:4141e35d"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "AuthService.authenticate",
+        "relative_path": "src/main/java/com/example/report/service/AuthService.java",
+        "detail": "Controller、遗留 JSP 和插件桥接入口最终调用的核心认证方法。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4141e35d",
+          "sr1:31d1bb3f",
+          "sr1:12842d4f",
+          "sr1:60e5ca60"
+        ]
+      },
+      {
+        "name": "UserMapper.findByUsername",
+        "relative_path": "src/main/java/com/example/report/mapper/UserMapper.java",
+        "detail": "按 username 查询用户账号对象。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:57be4810"
+        ]
+      },
+      {
+        "name": "PasswordVerifier.matches",
+        "relative_path": "src/main/java/com/example/report/security/PasswordVerifier.java",
+        "detail": "执行密码校验；当前实现实际只检查原始密码长度和非空。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:0f9da46f"
+        ]
+      },
+      {
+        "name": "LoginLogMapper.insertLog",
+        "relative_path": "src/main/java/com/example/report/mapper/LoginLogMapper.java",
+        "detail": "记录 USER_NOT_FOUND、BAD_PASSWORD 或 SUCCESS 结果。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:b7f8d93b"
+        ]
+      }
+    ],
+    "data_accesses": [
+      {
+        "object": "report_user",
+        "category": "db_object",
+        "operations": [
+          "read"
+        ],
+        "conditions": [
+          "每次调用 AuthService.authenticate 时，按 username = #{username} 查询"
+        ],
+        "access_method": "UserMapper.findByUsername；SELECT id, username, password_hash, status FROM report_user WHERE username = #{username}",
+        "state": "observed",
+        "source_ids": [
+          "sr1:81673c9b",
+          "sr1:57be4810",
+          "sr1:31d1bb3f"
+        ]
+      },
+      {
+        "object": "report_login_log",
+        "category": "db_object",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "用户不存在时插入 result=USER_NOT_FOUND",
+          "密码校验失败时插入 result=BAD_PASSWORD",
+          "密码校验成功时插入 result=SUCCESS"
+        ],
+        "access_method": "LoginLogMapper.insertLog；INSERT INTO report_login_log (username, result, created_at) VALUES (#{username}, #{result}, NOW())",
+        "state": "observed",
+        "source_ids": [
+          "sr1:be756e7e",
+          "sr1:b7f8d93b",
+          "sr1:31d1bb3f"
+        ]
+      },
+      {
+        "object": "\"session-\" + user.id()",
+        "category": "unknown",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "仅在用户存在且密码校验成功时生成；当前代码只看到返回字符串，未看到实际持久化或缓存写入"
+        ],
+        "access_method": "AuthService.authenticate",
+        "state": "unknown",
+        "source_ids": [
+          "sr1:31d1bb3f"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "s1",
+        "title": "接收登录请求",
+        "detail": "POST /api/login 接收用户名和密码。",
+        "source_ids": [
+          "sr1:4141e35d"
+        ]
+      },
+      {
+        "id": "s2",
+        "title": "查询用户",
+        "detail": "调用 UserMapper.findByUsername，按用户名读取 report_user。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:81673c9b"
+        ]
+      },
+      {
+        "id": "s3",
+        "title": "处理用户不存在",
+        "detail": "插入 USER_NOT_FOUND 登录日志，然后抛出通用用户名或密码错误。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:be756e7e"
+        ]
+      },
+      {
+        "id": "s4",
+        "title": "校验密码",
+        "detail": "调用 PasswordVerifier.matches；当前实现要求原始密码非空且长度为 3。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:0f9da46f"
+        ]
+      },
+      {
+        "id": "s5",
+        "title": "处理密码错误",
+        "detail": "插入 BAD_PASSWORD 登录日志，然后抛出通用用户名或密码错误。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:be756e7e"
+        ]
+      },
+      {
+        "id": "s6",
+        "title": "记录登录成功",
+        "detail": "插入 SUCCESS 登录日志。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:be756e7e"
+        ]
+      },
+      {
+        "id": "s7",
+        "title": "生成并返回会话值",
+        "detail": "返回 \"session-\" + user.id() 并由 Controller 封装为 LoginResponse。",
+        "source_ids": [
+          "sr1:31d1bb3f",
+          "sr1:4141e35d"
+        ]
+      },
+      {
+        "id": "s8",
+        "title": "遗留 JSP 兼容入口",
+        "detail": "通过反射调用 AuthService.authenticate。",
+        "source_ids": [
+          "sr1:12842d4f"
+        ]
+      },
+      {
+        "id": "s9",
+        "title": "插件登录入口",
+        "detail": "配置开关关闭时失败；开启时通过反射调用 AuthService.authenticate。",
+        "source_ids": [
+          "sr1:60e5ca60"
+        ]
+      }
+    ],
+    "links": [
+      {
+        "from": "s1",
+        "to": "s2",
+        "kind": "call",
+        "label": null
+      },
+      {
+        "from": "s2",
+        "to": "s3",
+        "kind": "branch",
+        "label": "用户不存在"
+      },
+      {
+        "from": "s2",
+        "to": "s4",
+        "kind": "sequence_hint",
+        "label": "用户存在"
+      },
+      {
+        "from": "s4",
+        "to": "s5",
+        "kind": "branch",
+        "label": "密码校验失败"
+      },
+      {
+        "from": "s4",
+        "to": "s6",
+        "kind": "branch",
+        "label": "密码校验成功"
+      },
+      {
+        "from": "s6",
+        "to": "s7",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s8",
+        "to": "s2",
+        "kind": "call",
+        "label": "反射调用 authenticate 后进入相同流程"
+      },
+      {
+        "from": "s9",
+        "to": "s2",
+        "kind": "call",
+        "label": "插件已启用"
+      }
+    ],
+    "unknowns": [
+      "未找到具体 HTTP 客户端、JSP 容器或插件对这些入口的上游调用代码。",
+      "未发现登录成功后创建、保存或校验 session-<id> 的会话管理实现；其是否由外部框架接管未知。",
+      "数据库事务边界、异常处理器如何将 IllegalArgumentException 转换为 HTTP 响应，当前检索范围未确认。",
+      "UserMapper 查询读取了 status 字段，但 SQL 没有按 status 过滤，AuthService 也没有对 status 做额外校验。",
+      "密码校验器源码明确未使用 storedHash；真实部署是否替换为其他实现或配置注入实现，当前代码未确认。",
+      "未检索到除 report_user 和 report_login_log 之外与登录直接相关的数据库表、缓存、HTTP 外部服务或消息调用。"
+    ],
+    "completion": "complete"
+  },
+  "steps": [
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_ChmvlyzaSTteLSgx0LllvqUs\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/report/web/LoginController.java\",\"start_line\":17},{\"candidate_id\":\"sc1:2\",\"name\":\"LoginController\",\"label\":\"M"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code 登录",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_ehnbnc00bfsA1B1Dls4RWxmx\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/report/legacy/LegacyJspLogin.java\",\"line_number\":6,\"line_text\":\" * 遗留 JSP 时代的登录入口：新框架接管前保留兼容。\"},{\"relative_path\":\"src/main/java/com/example/report/plugin/PluginLoginBridge.java\",\"line_number\":15,\"line_text\":\"            throw new IllegalStateException(\\\"插件登录未启用\\\");\"}],\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_AaOPOp1ofnQLMAhfu0HK0Dzh\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/report/legacy/LegacyJspLogin.java\",\"line_number\":16,\"line_text\":\"        Method login = serviceClass.getMethod(\\\"authenticate\\\", String.class, String.class);\"},{\"relative_path\":\"src/main/java/com/example/report/legacy/LegacyJspLogin.java\",\"line_number\":17,\"line_text\":\" "
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree /",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_GmO1zTpwDETOtPFrzUYggHJS\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src\",\"kind\":\"directory\"},{\"relative_path\":\"src/main\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources/mapper\",\"kind\":\"di"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:1",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_6K7wR4pp9pTZr1jOLeGvv8q3\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/report/web/LoginController.java\",\"start_line\":17,\"end_line\":21,\"callers\":[],\"callees\":[{\"name\":\"authenticate\",\"qualified_nam"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:3",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_F6y1J1CWMitO4VLwVBJsuFlK\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:3\",\"name\":\"handleLogin\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.legacy.LegacyJspLogin.java.LegacyJspLogin.handleLogin\",\"relative_path\":\"src/main/java/com/example/report/legacy/LegacyJspLogin.java\",\"start_line\":13,\"end_line\":19,\"callers\":[],\"callees\":[],\"source\":{\"source_id"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:8",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_NpXUAm1wbUHHWpHfnjCaBThl\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:8\",\"name\":\"LoginLogMapper\",\"label\":\"Interface\",\"qualified_name\":\"b04.src.main.java.com.example.report.mapper.LoginLogMapper.java.LoginLogMapper\",\"relative_path\":\"src/main/java/com/example/report/mapper/LoginLogMapper.java\",\"start_line\":6,\"end_line\":10,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\"sr1:"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:9",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_t7oNn6afjr0zZ5TTigvI8N1F\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:9\",\"name\":\"PluginLoginBridge\",\"label\":\"Class\",\"qualified_name\":\"b04.src.main.java.com.example.report.plugin.PluginLoginBridge.java.PluginLoginBridge\",\"relative_path\":\"src/main/java/com/example/report/plugin/PluginLoginBridge.java\",\"start_line\":11,\"end_line\":23,\"callers\":[],\"callees\":[],\"source\":{\"source_"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/report/service/AuthService.java:1-160",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Onco0FjBDoR78HAUJIfxsil6\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:31d1bb3f\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/report/service/AuthService.java\",\"content_sha256\":\"3ffa19a7ab27d2463eb695116dbb35af9761bb0854dadd0eb5b3768eb2a81ee7\",\"start_byte\":0,\"end_byte\":1354,\"start_line\":1,\"end_line\":35},\"lines\":[{\"line_number\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/report/web/LoginController.java:1-120",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_weLKwNTdflaiejKtMGlCeXfV\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:4141e35d\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/report/web/LoginController.java\",\"content_sha256\":\"1877bedcd16b732a663f18e7c7c5b5615c1f9524a45c61143259dad7f12c438f\",\"start_byte\":0,\"end_byte\":693,\"start_line\":1,\"end_line\":22},\"lines\":[{\"line_number\":"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/report/mapper/LoginLogMapper.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_qEYxcNaS6YfYp9fR0ieiPfyF\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:b7f8d93b\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/report/mapper/LoginLogMapper.java\",\"content_sha256\":\"c6ac3a0c68afb96831b67afe9931d3d852dd34e897a45fb399ad28cd2ac5ac51\",\"start_byte\":0,\"end_byte\":257,\"start_line\":1,\"end_line\":10},\"lines\":[{\"line_number"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/resources/mapper/LoginLogMapper.xml:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_juCFzhF8TANK4hfluCoWpJ73\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:be756e7e\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/resources/mapper/LoginLogMapper.xml\",\"content_sha256\":\"aede19c17e489262f09cf7f73e091d1c32e6eebe30a91108f4f651bdf5251bad\",\"start_byte\":0,\"end_byte\":383,\"start_line\":1,\"end_line\":9},\"lines\":[{\"line_number\":1,\"text\":\"<?xm"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code interface UserMapper|class UserMapper|findByUsername|selectB…",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_lKEVaomTUwNFlBbnLM2eX4qk\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":12,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols AuthService",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_fdiVQOZiL8Rjd4cIGyZ5pseP\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:20\",\"name\":\"AuthService\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.service.AuthService.java.AuthService.AuthService\",\"relative_path\":\"src/main/java/com/example/report/service/AuthService.java\",\"start_line\":16},{\"candidate_id\":\"sc1:21\",\"name\":\"authenticate\",\"la"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols findByUsername",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_OYYyAo2Z0REBtERVdB3Jfbo9\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:26\",\"name\":\"findByUsername\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.mapper.UserMapper.java.UserMapper.findByUsername\",\"relative_path\":\"src/main/java/com/example/report/mapper/UserMapper.java\",\"start_line\":10}],\"matched_before_scope_filter\":1},\"truncated\":fal"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols authenticate",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_LVnqDtzh9bQVYX0fX0e9aPXL\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:21\",\"name\":\"authenticate\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.service.AuthService.java.AuthService.authenticate\",\"relative_path\":\"src/main/java/com/example/report/service/AuthService.java\",\"start_line\":22}],\"matched_before_scope_filter\":1},\"truncated\":fa"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols matches",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_pgepFF8h8nqAEqZDU92th87T\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:27\",\"name\":\"matches\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.security.PasswordVerifier.java.PasswordVerifier.matches\",\"relative_path\":\"src/main/java/com/example/report/security/PasswordVerifier.java\",\"start_line\":8}],\"matched_before_scope_filter\":1},\"truncat"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code SELECT [.xml]",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_hQretyhMDRd4zXdq33gfrlLv\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/resources/mapper/UserMapper.xml\",\"line_number\":6,\"line_text\":\"        SELECT id, username, password_hash, status\"}],\"scanned_files\":2,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree src/main",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_s9orI554VLOFbsPB13b69xeb\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src/main/java\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com/example\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com/example/report\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources\",\"kind\":\"directory\"},{\"relativ"
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:1 (inbound)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_W2VpkbbqqkTsJBfRMnPIdy1B\",\"index_generation\":1,\"data\":{\"function\":\"login\",\"direction\":\"inbound\",\"callers\":[],\"callees\":[],\"coverage_note\":\"这是当前索引中的调用线索；无边不表示不存在调用，关键关系请继续读取调用位置或搜索源码。\"},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:1 (outbound)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_atq2vOsb4N5lW1bsmJno3UQJ\",\"index_generation\":1,\"data\":{\"function\":\"login\",\"direction\":\"outbound\",\"callers\":[],\"callees\":[{\"name\":\"authenticate\",\"qualified_name\":\"b04.src.main.java.com.example.report.service.AuthService.java.AuthService.authenticate\",\"relative_path\":\"src/main/java/com/example/report/service/AuthService.java\",\"hop\":1},{\"name\":\"insertLog\",\"qualified_name\":\"b04.src"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:26",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_8HgWlmtKX4znH6eKvp0BdP65\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:26\",\"name\":\"findByUsername\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.mapper.UserMapper.java.UserMapper.findByUsername\",\"relative_path\":\"src/main/java/com/example/report/mapper/UserMapper.java\",\"start_line\":10,\"end_line\":10,\"callers\":[{\"name\":\"authenticate\",\"qualified_name\":"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:27",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_c5XNw5lR04pqRWGGfJPL965c\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:27\",\"name\":\"matches\",\"label\":\"Method\",\"qualified_name\":\"b04.src.main.java.com.example.report.security.PasswordVerifier.java.PasswordVerifier.matches\",\"relative_path\":\"src/main/java/com/example/report/security/PasswordVerifier.java\",\"start_line\":8,\"end_line\":11,\"callers\":[{\"name\":\"authenticate\",\"qualified"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/resources/mapper/UserMapper.xml:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_dRZekdmEwiEtW76WSXQ6zmOU\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:81673c9b\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/resources/mapper/UserMapper.xml\",\"content_sha256\":\"6707a44c64e424e10427223d011f9ebb806b1caf0ac415ec87c080253d1b18f9\",\"start_byte\":0,\"end_byte\":433,\"start_line\":1,\"end_line\":10},\"lines\":[{\"line_number\":1,\"text\":\"<?xml v"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/report/mapper/UserMapper.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_rXu531ZA22ZSr6GnbDyL9por\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:57be4810\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/report/mapper/UserMapper.java\",\"content_sha256\":\"018a34283180e37d990ec1620663c798611a90e9960f6113cbfa6efa0327a8c3\",\"start_byte\":0,\"end_byte\":280,\"start_line\":1,\"end_line\":11},\"lines\":[{\"line_number\":1,"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/report/security/PasswordVerifier.j…:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_tKe1eGKwbF6fjmVBFbphuIg5\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:0f9da46f\",\"source_ref\":{\"project_key\":\"1ee4dbf4\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/report/security/PasswordVerifier.java\",\"content_sha256\":\"7f203dbc77d570a9e1e4f35ce3892e52525808cdf1ddcc3d072bfec04227fe70\",\"start_byte\":0,\"end_byte\":319,\"start_line\":1,\"end_line\":12},\"lines\":[{\"line_nu"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code new LoginController|/api/login|LoginController",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Q9g9UreTbBA7F0MSXoYjg9jX\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":12,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code LegacyJspLogin|PluginLoginBridge|handleLogin|signIn",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_v515lnhX0ENkwHU8GUT4LFZl\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":12,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "message",
+      "text": "{\n  \"version\": 1,\n  \"summary\": \"登录主入口是 POST /api/login，流程为按用户名查询用户、校验密码、记录成功或失败日志并返回基于用户 ID 拼接的会话字符串；同时存在通过反射调用 AuthService.authenticate 的遗留 JSP 和插件入口。\",\n  \"coverage_note\": \"已检索登录 Controller、AuthService、UserMapper/LoginLogMapper 及其 MyBatis XML、密码校验器、遗留 JSP 和插件桥接代码；调用索引无边不代表运行时不存在其他调用方。\",\n  \"context\": {\n    \"question\": \"登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？\",\n    \"scope\": \"src/main/java/com/example/report/web、service、mapper、security、legacy、plugin，以及 src/main/resources/mapper；搜索词包括 login、登录、authenticate、findByUsername、matches、SELECT。\"\n  },\n  \"findings\": [\n    {\n      \"text\": \"HTTP 登录入口为 LoginController.login，映射到 POST /api/login，接收 LoginRequest，调用 AuthService.authenticate(username, password)，成功后将返回值封装为 LoginResponse。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4141e35d\"\n      ]\n    },\n    {\n      \"text\": \"核心认证流程先调用 UserMapper.findByUsername(username) 查询用户；用户不存在时写入 USER_NOT_FOUND 登录日志并抛出 IllegalArgumentException；用户存在但密码校验失败时写入 BAD_PASSWORD 日志并抛出同样的通用错误；校验成功时写入 SUCCESS 日志并返回 \\\"session-\\\" + user.id()。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:31d1bb3f\"\n      ]\n    },\n    {\n      \"text\": \"密码校验由 PasswordVerifier.matches(rawPassword, storedHash) 执行，但当前实现只判断 rawPassword 非空且长度等于 3，传入的 storedHash 没有参与实际比较。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:0f9da46f\"\n      ]\n    },\n    {\n      \"text\": \"成功返回的所谓会话值只是内存中拼接出的字符串 \\\"session-\\\" + 用户 ID；已读取代码未发现该值写入数据库、缓存或 HTTP Session。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:31d1bb3f\"\n      ]\n    },\n    {\n      \"text\": \"遗留 JSP 入口 LegacyJspLogin.handleLogin 通过反射加载 AuthService、创建实例并反射调用 authenticate(username, password)。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:12842d4f\"\n      ]\n    },\n    {\n      \"text\": \"插件入口 PluginLoginBridge.signIn 只有在配置 report.auth.plugin.enabled 等于 true 时才继续，否则抛出“插件登录未启用”；启用后同样通过反射调用 AuthService.authenticate。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:60e5ca60\"\n      ]\n    },\n    {\n      \"text\": \"LegacyJspLogin 和 PluginLoginBridge 都通过无参构造反射创建 AuthService，而 AuthService 源码仅显示带 UserMapper、LoginLogMapper、PasswordVerifier 参数的构造器；因此这两个反射入口是否能在当前运行配置下成功实例化 AuthService 未确认，按源码推断可能触发构造失败。\",\n      \"state\": {\n        \"type\": \"inferred\"\n      },\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:12842d4f\",\n        \"sr1:60e5ca60\"\n      ]\n    }\n  ],\n  \"callers\": [\n    {\n      \"name\": \"LoginController.login\",\n      \"relative_path\": \"src/main/java/com/example/report/web/LoginController.java\",\n      \"detail\": \"HTTP POST /api/login 直接调用 AuthService.authenticate。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4141e35d\"\n      ]\n    },\n    {\n      \"name\": \"LegacyJspLogin.handleLogin\",\n      \"relative_path\": \"src/main/java/com/example/report/legacy/LegacyJspLogin.java\",\n      \"detail\": \"通过反射获取 authenticate 方法并调用；当前索引未确认其上游 JSP/框架调用方。\",\n      \"kind\": \"indirect\",\n      \"source_ids\": [\n        \"sr1:12842d4f\"\n      ]\n    },\n    {\n      \"name\": \"PluginLoginBridge.signIn\",\n      \"relative_path\": \"src/main/java/com/example/report/plugin/PluginLoginBridge.java\",\n      \"detail\": \"配置 report.auth.plugin.enabled=true 时，通过反射调用 authenticate；当前索引未确认其上游插件调用方。\",\n      \"kind\": \"indirect\",\n      \"source_ids\": [\n        \"sr1:60e5ca60\"\n      ]\n    },\n    {\n      \"name\": \"HTTP 客户端或 Web 框架\",\n      \"detail\": \"可确认 Controller 暴露了 POST /api/login，但源码检索未发现具体调用方。\",\n      \"kind\": \"candidate\",\n      \"source_ids\": [\n        \"sr1:4141e35d\"\n      ]\n    }\n  ],\n  \"callees\": [\n    {\n      \"name\": \"AuthService.authenticate\",\n      \"relative_path\": \"src/main/java/com/example/report/service/AuthService.java\",\n      \"detail\": \"Controller、遗留 JSP 和插件桥接入口最终调用的核心认证方法。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4141e35d\",\n        \"sr1:31d1bb3f\",\n        \"sr1:12842d4f\",\n        \"sr1:60e5ca60\"\n      ]\n    },\n    {\n      \"name\": \"UserMapper.findByUsername\",\n      \"relative_path\": \"src/main/java/com/example/report/mapper/UserMapper.java\",\n      \"detail\": \"按 username 查询用户账号对象。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:57be4810\"\n      ]\n    },\n    {\n      \"name\": \"PasswordVerifier.matches\",\n      \"relative_path\": \"src/main/java/com/example/report/security/PasswordVerifier.java\",\n      \"detail\": \"比较原始密码与用户密码信息；当前实现实际只检查原始密码长度和非空。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:0f9da46f\"\n      ]\n    },\n    {\n      \"name\": \"LoginLogMapper.insertLog\",\n      \"relative_path\": \"src/main/java/com/example/report/mapper/LoginLogMapper.java\",\n      \"detail\": \"记录 USER_NOT_FOUND、BAD_PASSWORD 或 SUCCESS 结果。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:b7f8d93b\"\n      ]\n    }\n  ],\n  \"data_accesses\": [\n    {\n      \"object\": \"report_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"read\"\n      ],\n      \"conditions\": [\n        \"每次调用 AuthService.authenticate 时，按 username = #{username} 查询\"\n      ],\n      \"access_method\": \"UserMapper.findByUsername；SELECT id, username, password_hash, status FROM report_user WHERE username = #{username}\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:81673c9b\",\n        \"sr1:57be4810\",\n        \"sr1:31d1bb3f\"\n      ]\n    },\n    {\n      \"object\": \"report_login_log\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"用户不存在时插入 result=USER_NOT_FOUND\",\n        \"密码校验失败时插入 result=BAD_PASSWORD\",\n        \"密码校验成功时插入 result=SUCCESS\"\n      ],\n      \"access_method\": \"LoginLogMapper.insertLog；INSERT INTO report_login_log (username, result, created_at) VALUES (#{username}, #{result}, NOW())\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:be756e7e\",\n        \"sr1:b7f8d93b\",\n        \"sr1:31d1bb3f\"\n      ]\n    },\n    {\n      \"object\": \"AuthService 返回的 \\\"session-\\\" + user.id() 字符串\",\n      \"category\": \"unknown\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"仅在用户存在且密码校验成功时生成；当前代码只看到返回字符串，未看到实际持久化或缓存写入\"\n      ],\n      \"access_method\": \"AuthService.authenticate\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:31d1bb3f\"\n      ]\n    }\n  ],\n  \"steps\": [\n    {\n      \"id\": \"s1\",\n      \"title\": \"接收登录请求\",\n      \"detail\": \"POST /api/login 接收用户名和密码。\",\n      \"source_ids\": [\n        \"sr1:4141e35d\"\n      ]\n    },\n    {\n      \"id\": \"s2\",\n      \"title\": \"查询用户\",\n      \"detail\": \"调用 UserMapper.findByUsername，按用户名读取 report_user。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:81673c9b\"\n      ]\n    },\n    {\n      \"id\": \"s3\",\n      \"title\": \"处理用户不存在\",\n      \"detail\": \"插入 USER_NOT_FOUND 登录日志，然后抛出通用用户名或密码错误。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:be756e7e\"\n      ]\n    },\n    {\n      \"id\": \"s4\",\n      \"title\": \"校验密码\",\n      \"detail\": \"调用 PasswordVerifier.matches；当前实现要求原始密码非空且长度为 3。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:0f9da46f\"\n      ]\n    },\n    {\n      \"id\": \"s5\",\n      \"title\": \"处理密码错误\",\n      \"detail\": \"插入 BAD_PASSWORD 登录日志，然后抛出通用用户名或密码错误。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:be756e7e\"\n      ]\n    },\n    {\n      \"id\": \"s6\",\n      \"title\": \"记录登录成功\",\n      \"detail\": \"插入 SUCCESS 登录日志。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:be756e7e\"\n      ]\n    },\n    {\n      \"id\": \"s7\",\n      \"title\": \"生成并返回会话值\",\n      \"detail\": \"返回 \\\"session-\\\" + user.id() 并由 Controller 封装为 LoginResponse。\",\n      \"source_ids\": [\n        \"sr1:31d1bb3f\",\n        \"sr1:4141e35d\"\n      ]\n    },\n    {\n      \"id\": \"s8\",\n      \"title\": \"遗留 JSP 兼容入口\",\n      \"detail\": \"通过反射调用 AuthService.authenticate。\",\n      \"source_ids\": [\n        \"sr1:12842d4f\"\n      ]\n    },\n    {\n      \"id\": \"s9\",\n      \"title\": \"插件登录入口\",\n      \"detail\": \"配置开关关闭时失败；开启时通过反射调用 AuthService.authenticate。\",\n      \"source_ids\": [\n        \"sr1:60e5ca60\"\n      ]\n    }\n  ],\n  \"links\": [\n    {\n      \"from\": \"s1\",\n      \"to\": \"s2\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s3\",\n      \"kind\": \"branch\",\n      \"label\": \"用户不存在\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s4\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"用户存在\"\n    },\n    {\n      \"from\": \"s3\",\n      \"to\": \"s4\",\n      \"kind\": \"branch\",\n      \"label\": \"不继续；抛出异常\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s5\",\n      \"kind\": \"branch\",\n      \"label\": \"密码校验失败\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s6\",\n      \"kind\": \"branch\",\n      \"label\": \"密码校验成功\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s7\",\n      \"kind\": \"branch\",\n      \"label\": \"不继续；抛出异常\"\n    },\n    {\n      \"from\": \"s6\",\n      \"to\": \"s7\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s8\",\n      \"to\": \"s2\",\n      \"kind\": \"call\",\n      \"label\": \"反射调用 authenticate 后进入相同流程\"\n    },\n    {\n      \"from\": \"s9\",\n      \"to\": \"s2\",\n      \"kind\": \"call\",\n      \"label\": \"插件已启用\"\n    }\n  ],\n  \"unknowns\": [\n    \"未找到具体 HTTP 客户端、JSP 容器或插件对这些入口的上游调用代码。\",\n    \"未发现登录成功后创建、保存或校验 session-<id> 的会话管理实现；其是否由外部框架接管未知。\",\n    \"数据库事务边界、异常处理器如何将 IllegalArgumentException 转换为 HTTP 响应，当前检索范围未确认。\",\n    \"UserMapper 查询读取了 status 字段，但 SQL 没有按 status 过滤，AuthService 也没有对 status 做额外校验。\",\n    \"密码校验器源码明确未使用 storedHash；真实部署是否替换为其他实现或配置注入实现，当前代码未确认。\",\n    \"未检索到除 report_user 和 report_login_log 之外与登录直接相关的数据库表、缓存、HTTP 外部服务或消息调用。\"\n  ],\n  \"completion\": \"complete\"\n}"
+    }
+  ]
+}

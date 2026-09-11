@@ -29,6 +29,15 @@ pub const SOURCE_SEARCH_MAX_RESULTS: usize = 50;
 pub const SOURCE_TREE_MAX_DEPTH: usize = 4;
 pub const SOURCE_TREE_MAX_ENTRIES: usize = 200;
 const SOURCE_SEARCH_DEADLINE: Duration = Duration::from_secs(2);
+/// 来源 ID 摘要长度（十六进制字符）。
+///
+/// 真实模型实测无法可靠转录长十六进制串（先是一次 65 字符、一次 15 字符的
+/// 抄写错误），而 `sr1:` 后的摘要越长越容易出错。8 字符（32 位）在单会话
+/// 几百条来源下碰撞概率可忽略，配合 [`SourceService::resolve_source_id`] 的
+/// 唯一前缀匹配可容忍末尾一位抄错；完整内容 hash 仍保存在 `SourceRef` 里。
+const SOURCE_ID_DIGEST_CHARS: usize = 8;
+/// 允许前缀兜底匹配的最短长度：太短会撞到别的来源上，不如让模型重查。
+const SOURCE_ID_MIN_PREFIX: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLine {
@@ -152,18 +161,6 @@ impl SourceService {
 
     pub fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// 诊断：返回原始 map 的 (key, computed_id) 对。
-    pub(crate) fn debug_keys(&self) -> Vec<(String, String)> {
-        let map = self.issued_sources.lock().expect("来源注册表锁被污染");
-        let mut out: Vec<(String, String)> = map
-            .iter()
-            .map(|(key, value): (&String, &SourceRef)| (key.clone(), source_id(value)))
-            .collect();
-        out.sort();
-        out.dedup();
-        out
     }
 
     /// 本会话已发放的来源快照（按路径、起始行排序）；用于生成检索范围摘要。
@@ -294,35 +291,29 @@ impl SourceService {
 
     /// 只接受本会话实际发放的来源 ID，并重新校验文件内容。
     pub fn validate_source(&self, source_id: &str) -> UnderstandingResult<SourceRef> {
-        let source_ref = self
-            .issued_sources
-            .lock()
-            .expect("来源注册表锁被污染")
-            .get(source_id)
-            .cloned()
-            .ok_or_else(|| {
-                if std::env::var_os("KHASLANA_DEBUG_SOURCES").is_some() {
-                    eprintln!(
-                        "DEBUG source miss: len={} escaped={:?}",
-                        source_id.len(),
-                        source_id
-                    );
-                    for (key, value) in self
-                        .issued_sources
-                        .lock()
-                        .expect("来源注册表锁被污染")
-                        .iter()
-                    {
-                        eprintln!(
-                            "DEBUG   key_len={} key={:?} value_id={:?}",
-                            key.len(),
-                            key,
-                            source_id_of(value)
-                        );
-                    }
-                }
-                understanding_error(ErrorCode::AnswerInvalid, "来源 ID 不是本次会话发放")
-            })?;
+        let registry = self.issued_sources.lock().expect("来源注册表锁被污染");
+        let exact = registry.get(source_id).cloned();
+        let resolved = exact.or_else(|| {
+            // 模型可能抄错摘要末位：按前缀唯一匹配兜底。多个候选取最长公共前缀
+            // 仍不唯一时拒绝——宁可让模型重试，也不能把证据错配到别的文件。
+            let prefix = source_id.trim_start_matches("sr1:");
+            if prefix.len() < SOURCE_ID_MIN_PREFIX {
+                return None;
+            }
+            let matches: Vec<&SourceRef> = registry
+                .keys()
+                .filter(|key| key.starts_with("sr1:") && key[4..].starts_with(prefix))
+                .filter_map(|key| registry.get(key))
+                .collect();
+            match matches.as_slice() {
+                [only] => Some((*only).clone()),
+                _ => None,
+            }
+        });
+        drop(registry);
+        let source_ref = resolved.ok_or_else(|| {
+            understanding_error(ErrorCode::AnswerInvalid, "来源 ID 不是本次会话发放")
+        })?;
         self.validate_source_ref(&source_ref)
     }
 
@@ -670,12 +661,18 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
-/// 供诊断输出使用：与发放时同一算法。
+
+/// `SourceRef` → 会话来源 ID（纯函数：同一引用总是同一 ID）。
+///
+/// 用一个短摘要而非 64 位完整 SHA-256：真实模型实测会把长串抄错一位
+/// （多发/漏发一个字符），导致本来有效的证据被拒。`SourceRef` 本身仍保存
+/// 完整内容 hash，ID 只是模型可引用的把手。
 pub(crate) fn source_id_of(source_ref: &SourceRef) -> String {
     source_id(source_ref)
 }
 
 fn source_id(source_ref: &SourceRef) -> String {
     let wire = serde_json::to_vec(source_ref).expect("SourceRef 必须可序列化");
-    format!("sr1:{}", sha256_hex(&wire))
+    let digest = sha256_hex(&wire);
+    format!("sr1:{}", &digest[..SOURCE_ID_DIGEST_CHARS])
 }

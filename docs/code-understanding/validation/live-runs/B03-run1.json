@@ -1,0 +1,596 @@
+{
+  "case": "B03",
+  "run": 1,
+  "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+  "model": "gpt-5.6-luna",
+  "elapsed_ms": 168793,
+  "analysis": {
+    "version": 1,
+    "context": {
+      "project_key": "b10c9de7",
+      "request_id": "live-B03-1",
+      "index_generation": 1,
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "scope": "src/main/java 下的 web、service、repository、entity、security、exception；搜索并核对 login、UserRepository、LoginAudit、PasswordHasher、TokenIssuer、@PostMapping 等实现。"
+    },
+    "summary": "登录入口是 POST /login，控制器调用 AuthService.login 完成启用用户查询、密码校验、失败计数与登录审计；成功后更新登录状态并生成 token。",
+    "coverage_note": "已读取登录控制器、认证服务、用户仓储、登录审计实体与仓储、密码校验器、token 生成器及登录失败异常。未发现显式 SQL 或 LoginAudit 的物理表名映射。",
+    "findings": [
+      {
+        "text": "HTTP 入口是 LoginController 的 POST /login，接收 Credentials 中的用户名和密码，调用 AuthService.login；成功后返回 HTTP 200 和 token。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:98b74def"
+        ]
+      },
+      {
+        "text": "AuthService.login 标注为 @Transactional，整个登录处理在事务范围内执行。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3"
+        ]
+      },
+      {
+        "text": "登录首先调用 UserRepository.findByUsernameAndEnabledTrue(username) 查询启用用户。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:e6b5d04a"
+        ]
+      },
+      {
+        "text": "用户不存在时写入登录审计 reason=USER_NOT_FOUND，然后抛出 LoginFailedException，错误信息为“用户名或密码错误”。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:9de05cbc"
+        ]
+      },
+      {
+        "text": "找到用户后调用 PasswordHasher.matches(rawPassword, user.getPasswordHash()) 校验密码；当前实现是判断 storedHash 非空且等于 PREFIX + rawPassword。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:4a58e1d4"
+        ]
+      },
+      {
+        "text": "密码错误时将 failedAttempts 加一，保存用户，写入 reason=BAD_PASSWORD 的登录审计，然后抛出 LoginFailedException。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3"
+        ]
+      },
+      {
+        "text": "密码正确时设置 lastLoginAt 为当前时间，将 failedAttempts 重置为 0，保存用户，写入 reason=SUCCESS 的登录审计，然后调用 TokenIssuer.issue(user.getId()) 返回 token。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:bbd36047"
+        ]
+      },
+      {
+        "text": "TokenIssuer.issue 在内存中拼接 token-、用户 ID 和随机 UUID，不访问数据库或外部服务。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:bbd36047"
+        ]
+      },
+      {
+        "text": "已读取源码中未发现缓存、会话存储、消息发送或 HTTP 外部调用。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:bbd36047"
+        ]
+      }
+    ],
+    "callers": [
+      {
+        "name": "LoginController.login",
+        "relative_path": "src/main/java/com/example/crm/web/LoginController.java",
+        "detail": "收到 POST /login 请求后调用 AuthService.login(credentials.username(), credentials.password())。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:98b74def"
+        ]
+      },
+      {
+        "name": "POST /login 的外部请求方",
+        "relative_path": "src/main/java/com/example/crm/web/LoginController.java",
+        "detail": "可以触发登录入口，但具体客户端或上游服务未在已读取源码中确认。",
+        "kind": "candidate",
+        "source_ids": [
+          "sr1:98b74def"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "UserRepository.findByUsernameAndEnabledTrue",
+        "relative_path": "src/main/java/com/example/crm/repository/UserRepository.java",
+        "detail": "按用户名查询 enabled=true 的用户。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:e6b5d04a"
+        ]
+      },
+      {
+        "name": "PasswordHasher.matches",
+        "relative_path": "src/main/java/com/example/crm/security/PasswordHasher.java",
+        "detail": "校验原始密码与用户存储密码值是否匹配。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:4a58e1d4"
+        ]
+      },
+      {
+        "name": "UserRepository.save",
+        "relative_path": "src/main/java/com/example/crm/repository/UserRepository.java",
+        "detail": "密码错误时保存失败次数；密码正确时保存最后登录时间和失败次数重置。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:e6b5d04a"
+        ]
+      },
+      {
+        "name": "LoginAuditRepository.save",
+        "relative_path": "src/main/java/com/example/crm/repository/LoginAuditRepository.java",
+        "detail": "记录 USER_NOT_FOUND、BAD_PASSWORD、SUCCESS 三类登录结果。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:803bc837"
+        ]
+      },
+      {
+        "name": "TokenIssuer.issue",
+        "relative_path": "src/main/java/com/example/crm/security/TokenIssuer.java",
+        "detail": "成功登录后根据用户 ID 生成 token。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:bbd36047"
+        ]
+      },
+      {
+        "name": "LoginFailedException",
+        "relative_path": "src/main/java/com/example/crm/exception/LoginFailedException.java",
+        "detail": "用户不存在或密码错误时抛出的运行时异常。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:9de05cbc"
+        ]
+      }
+    ],
+    "data_accesses": [
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "read",
+          "update"
+        ],
+        "conditions": [
+          "每次登录按 username 查询 enabled=true 的用户",
+          "密码错误时更新 failedAttempts",
+          "密码正确时更新 lastLoginAt 和 failedAttempts",
+          "用户不存在时不调用 UserRepository.save"
+        ],
+        "access_method": "UserRepository.findByUsernameAndEnabledTrue(username) 和 UserRepository.save(user)",
+        "state": "observed",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:e6b5d04a"
+        ]
+      },
+      {
+        "object": "LoginAudit",
+        "category": "db_object",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "用户不存在时插入 USER_NOT_FOUND",
+          "密码错误时插入 BAD_PASSWORD",
+          "密码正确时插入 SUCCESS"
+        ],
+        "access_method": "LoginAuditRepository.save(new LoginAudit(username, reason))",
+        "state": "observed",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:803bc837",
+          "sr1:5ea97d55"
+        ]
+      },
+      {
+        "object": "LoginAudit 的物理表名",
+        "category": "unknown",
+        "operations": [
+          "unknown"
+        ],
+        "conditions": [
+          "实体标注了 @Entity，但已读取源码没有显式 @Table(name=...) 或 SQL"
+        ],
+        "access_method": "JPA LoginAuditRepository",
+        "state": "unknown",
+        "source_ids": [
+          "sr1:5ea97d55",
+          "sr1:803bc837"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "s1",
+        "title": "接收登录请求",
+        "detail": "POST /login 接收用户名和密码。",
+        "source_ids": [
+          "sr1:98b74def"
+        ]
+      },
+      {
+        "id": "s2",
+        "title": "查询启用用户",
+        "detail": "按用户名查询 enabled=true 的用户。",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:e6b5d04a"
+        ]
+      },
+      {
+        "id": "s3",
+        "title": "处理用户不存在",
+        "detail": "记录 USER_NOT_FOUND 审计并抛出登录失败异常。",
+        "source_ids": [
+          "sr1:c8bb14c3"
+        ]
+      },
+      {
+        "id": "s4",
+        "title": "校验密码",
+        "detail": "调用 PasswordHasher.matches 比较原始密码和存储值。",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:4a58e1d4"
+        ]
+      },
+      {
+        "id": "s5",
+        "title": "处理密码错误",
+        "detail": "失败次数加一，保存用户，记录 BAD_PASSWORD 审计并抛出异常。",
+        "source_ids": [
+          "sr1:c8bb14c3"
+        ]
+      },
+      {
+        "id": "s6",
+        "title": "更新成功登录状态",
+        "detail": "设置最后登录时间并将失败次数重置为 0。",
+        "source_ids": [
+          "sr1:c8bb14c3"
+        ]
+      },
+      {
+        "id": "s7",
+        "title": "保存成功状态并记录审计",
+        "detail": "保存用户并记录 SUCCESS 审计。",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:5ea97d55"
+        ]
+      },
+      {
+        "id": "s8",
+        "title": "生成并返回 token",
+        "detail": "根据用户 ID 生成 token，并由控制器返回。",
+        "source_ids": [
+          "sr1:c8bb14c3",
+          "sr1:bbd36047",
+          "sr1:98b74def"
+        ]
+      }
+    ],
+    "links": [
+      {
+        "from": "s1",
+        "to": "s2",
+        "kind": "call",
+        "label": null
+      },
+      {
+        "from": "s2",
+        "to": "s3",
+        "kind": "branch",
+        "label": "用户不存在"
+      },
+      {
+        "from": "s2",
+        "to": "s4",
+        "kind": "branch",
+        "label": "找到启用用户"
+      },
+      {
+        "from": "s4",
+        "to": "s5",
+        "kind": "branch",
+        "label": "密码错误"
+      },
+      {
+        "from": "s4",
+        "to": "s6",
+        "kind": "branch",
+        "label": "密码正确"
+      },
+      {
+        "from": "s6",
+        "to": "s7",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s7",
+        "to": "s8",
+        "kind": "call",
+        "label": null
+      },
+      {
+        "from": "s8",
+        "to": "s1",
+        "kind": "sequence_hint",
+        "label": "控制器向请求方返回 token"
+      }
+    ],
+    "unknowns": [
+      "LoginAudit 没有显式 @Table 映射，物理表名无法由已读取源码确认。",
+      "JPA 自动生成的具体 SQL、索引以及事务提交结果未在源码中展开。",
+      "登录失败异常的全局异常处理和最终 HTTP 状态码未确认。",
+      "具体上游 HTTP 客户端或网关调用方未在已读取源码中确认。",
+      "数据库配置和 JPA 命名策略可能影响 LoginAudit 的实际物理表名。"
+    ],
+    "completion": "partial"
+  },
+  "steps": [
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree /",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_izL11jTi0uQ0fd6EzwfSL1vD\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src\",\"kind\":\"directory\"},{\"relative_path\":\"src/main\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com\",\"kind\":\"directory\"}],\"truncated\":false,\"truncation_reason\":null},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_S3RyviwAfaIO60irgifTZY8a\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/crm/web/LoginController.java\",\"start_line\":17},{\"candidate_id\":\"sc1:2\",\"name\":\"LoginAudit\",\"label\":\"Method\",\"qua"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_WhU3YslQPuHFpvrqVIFdaVtJ\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/UserEntity.java\",\"line_number\":29,\"line_text\":\"    @Column(name = \\\"last_login_at\\\")\"},{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":33,\"line_text\":\"    public String login(String username, String rawPassword) {\"},{\"r"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code authenticate",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_KS1TCEs9WjUube5g7XMAxmNm\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:1",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_A2UwJlPYyZKrD4VGi7dQIRhM\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/crm/web/LoginController.java\",\"start_line\":17,\"end_line\":21,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\"sr1:98b74def\",\"sou"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:21",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_QMJZLPH7Skv3luPt1tdWZz2D\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:21\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.service.AuthService.java.AuthService.login\",\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"start_line\":32,\"end_line\":50,\"callers\":[],\"callees\":[{\"name\":\"LoginAudit\",\"qualified_name\":\"b03.src"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:8",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_taLeNI4lbJo1EHNqM0ELvhgJ\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:8\",\"name\":\"LoginAuditRepository\",\"label\":\"Interface\",\"qualified_name\":\"b03.src.main.java.com.example.crm.repository.LoginAuditRepository.java.LoginAuditRepository\",\"relative_path\":\"src/main/java/com/example/crm/repository/LoginAuditRepository.java\",\"start_line\":6,\"end_line\":6,\"callers\":[],\"callees\":[],\"s"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code UserRepository",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_MYaMuSouSz8Vowu5yGCbv8xh\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/repository/UserRepository.java\",\"line_number\":9,\"line_text\":\"public interface UserRepository extends JpaRepository<UserEntity, Long> {\"},{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":7,\"line_text\":\"import com.example.crm.rep"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @Table",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_hLmLcrMhEavoh5NO0DFVwtxu\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/UserEntity.java\",\"line_number\":12,\"line_text\":\"@Table(name = \\\"app_user\\\")\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code PasswordEncoder",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_szv1xhSamWZXYwqiSLlhe1qu\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:21 (both)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_FBZuhgPwmF6SBEbeKfIZZDHu\",\"index_generation\":1,\"data\":{\"function\":\"login\",\"direction\":\"both\",\"callers\":[],\"callees\":[{\"name\":\"LoginAudit\",\"qualified_name\":\"b03.src.main.java.com.example.crm.entity.LoginAudit.java.LoginAudit.LoginAudit\",\"relative_path\":\"src/main/java/com/example/crm/entity/LoginAudit.java\",\"hop\":1},{\"name\":\"getFailedAttempts\",\"qualified_name\":\"b03.src.main.java."
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code extends JpaRepository",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Bxe8gTUgrCM4qY1VY691YUKM\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/repository/LoginAuditRepository.java\",\"line_number\":6,\"line_text\":\"public interface LoginAuditRepository extends JpaRepository<LoginAudit, Long> {}\"},{\"relative_path\":\"src/main/java/com/example/crm/repository/UserRepository.java\",\"line_number\":9,\"line_text\":\"public "
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @Table(name",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_sFx4INQ0ABdnsbhihGfWq3wi\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/UserEntity.java\",\"line_number\":12,\"line_text\":\"@Table(name = \\\"app_user\\\")\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code audits.save",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_7T0WMTOh0ImdAIxQ9OUlHLrT\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":36,\"line_text\":\"            audits.save(new LoginAudit(username, \\\"USER_NOT_FOUND\\\"));\"},{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":42,\"line_text\":\"            audits.save(new Login"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @PostMapping",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_OFdy9xfE2DHV3fCy3NUKWk6c\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/web/LoginController.java\",\"line_number\":17,\"line_text\":\"    @PostMapping(\\\"/login\\\")\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code TokenIssuer",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_QLoN1XvJnnuOrCVZiittEzHl\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/security/TokenIssuer.java\",\"line_number\":7,\"line_text\":\"public class TokenIssuer {\"},{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":9,\"line_text\":\"import com.example.crm.security.TokenIssuer;\"},{\"relative_path\":\"src/main/java"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code PasswordHasher",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_uiL6wQn9RLemJ1CSlP0Qb0NZ\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/security/PasswordHasher.java\",\"line_number\":6,\"line_text\":\"public class PasswordHasher {\"},{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":8,\"line_text\":\"import com.example.crm.security.PasswordHasher;\"},{\"relative_path\":\"src/"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:5",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_TNwrDkT4rxld3AuOk5U5i1WU\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:5\",\"name\":\"LoginAudit\",\"label\":\"Class\",\"qualified_name\":\"b03.src.main.java.com.example.crm.entity.LoginAudit.java.LoginAudit\",\"relative_path\":\"src/main/java/com/example/crm/entity/LoginAudit.java\",\"start_line\":9,\"end_line\":26,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\"sr1:5ea97d55\",\"source_ref\":{\"p"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:3",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_BW7VQea2uPC5aKoqFx6CHSyj\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:3\",\"name\":\"LoginController\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.web.LoginController.java.LoginController.LoginController\",\"relative_path\":\"src/main/java/com/example/crm/web/LoginController.java\",\"start_line\":13,\"end_line\":15,\"callers\":[],\"callees\":[],\"source\":{\"source_id\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols findByUsernameAndEnabledTrue",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_wHFKrqFy7xmwooOkjXIB6RKc\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:24\",\"name\":\"findByUsernameAndEnabledTrue\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.repository.UserRepository.java.UserRepository.findByUsernameAndEnabledTrue\",\"relative_path\":\"src/main/java/com/example/crm/repository/UserRepository.java\",\"start_line\":10}],\"match"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols issue",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_C5DzglDiOGN6a6bLVLQMePUN\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:25\",\"name\":\"issue\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.security.TokenIssuer.java.TokenIssuer.issue\",\"relative_path\":\"src/main/java/com/example/crm/security/TokenIssuer.java\",\"start_line\":8},{\"candidate_id\":\"sc1:26\",\"name\":\"TokenIssuer\",\"label\":\"Class\",\"qual"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols matches",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_3WFt6RhLrfFFKbGUjOfOBGn6\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:30\",\"name\":\"matches\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.security.PasswordHasher.java.PasswordHasher.matches\",\"relative_path\":\"src/main/java/com/example/crm/security/PasswordHasher.java\",\"start_line\":9}],\"matched_before_scope_filter\":1},\"truncated\":false,\"t"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code LoginAudit",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_OHjRJeJehwYCZSI3lGyyRq8i\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/LoginAudit.java\",\"line_number\":10,\"line_text\":\"public class LoginAudit {\"},{\"relative_path\":\"src/main/java/com/example/crm/entity/LoginAudit.java\",\"line_number\":21,\"line_text\":\"    public LoginAudit(String username, String reason) {\"},{\"relative_path\":\"src/ma"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:24",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_swIvUbXqpvmFPrNL9yqUuX5r\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:24\",\"name\":\"findByUsernameAndEnabledTrue\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.repository.UserRepository.java.UserRepository.findByUsernameAndEnabledTrue\",\"relative_path\":\"src/main/java/com/example/crm/repository/UserRepository.java\",\"start_line\":10,\"end_line\":10,\"callers\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:25",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_rv2d36GAw32iR5CHDfroWRet\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:25\",\"name\":\"issue\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.security.TokenIssuer.java.TokenIssuer.issue\",\"relative_path\":\"src/main/java/com/example/crm/security/TokenIssuer.java\",\"start_line\":8,\"end_line\":10,\"callers\":[{\"name\":\"login\",\"qualified_name\":\"b03.src.main.java.com.ex"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:30",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_v0I7ADNX2vIIY0yqraJHtOUG\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:30\",\"name\":\"matches\",\"label\":\"Method\",\"qualified_name\":\"b03.src.main.java.com.example.crm.security.PasswordHasher.java.PasswordHasher.matches\",\"relative_path\":\"src/main/java/com/example/crm/security/PasswordHasher.java\",\"start_line\":9,\"end_line\":11,\"callers\":[{\"name\":\"login\",\"qualified_name\":\"b03.src.mai"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @Entity",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_pXy4gBWWCbMRRrOvmyfc8oaB\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/LoginAudit.java\",\"line_number\":9,\"line_text\":\"@Entity\"},{\"relative_path\":\"src/main/java/com/example/crm/entity/UserEntity.java\",\"line_number\":11,\"line_text\":\"@Entity\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncatio"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @RequestMapping",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_cBEnJTMwpdMnzWtLyNwRYEnD\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:7",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_95P483eyEyKnBLOgS1Qn2g7f\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:7\",\"name\":\"LoginFailedException\",\"label\":\"Class\",\"qualified_name\":\"b03.src.main.java.com.example.crm.exception.LoginFailedException.java.LoginFailedException\",\"relative_path\":\"src/main/java/com/example/crm/exception/LoginFailedException.java\",\"start_line\":3,\"end_line\":7,\"callers\":[],\"callees\":[],\"source\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code class LoginController",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_mpUsOHpLxTnLK8cqkCwWBRUJ\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/web/LoginController.java\",\"line_number\":10,\"line_text\":\"public class LoginController {\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code @Transactional",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_yShfvht6XHtnmcuvFgf86yTl\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/service/AuthService.java\",\"line_number\":32,\"line_text\":\"    @Transactional\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code class UserEntity",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_3WyL37t1njpgYzfpaQp5cOdq\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/crm/entity/UserEntity.java\",\"line_number\":13,\"line_text\":\"public class UserEntity {\"}],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "message",
+      "text": "{\n  \"version\": 1,\n  \"summary\": \"登录入口是 POST /login，控制器委托 AuthService.login 完成启用用户查询、密码校验、失败计数与登录审计，成功后更新登录时间并生成 token。\",\n  \"coverage_note\": \"已检索 src/main/java 下 web、service、repository、entity、security、exception 相关源码；调用关系结合符号索引与关键源码核对。未发现显式 SQL、Mapper XML 或实体 LoginAudit 的物理表名映射。\",\n  \"context\": {\n    \"question\": \"登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？\",\n    \"scope\": \"搜索词包括 login、authenticate、UserRepository、@Table、@Entity、audits.save、PasswordHasher、TokenIssuer、@PostMapping；重点读取 LoginController、AuthService、UserRepository、LoginAuditRepository、LoginAudit、PasswordHasher、TokenIssuer 和 LoginFailedException。\"\n  },\n  \"findings\": [\n    {\n      \"text\": \"HTTP 入口为 LoginController 的 POST /login，接收请求体 Credentials，取出 username 和 password，调用 authService.login；成功时直接以 HTTP 200 返回 token。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:98b74def\"\n      ]\n    },\n    {\n      \"text\": \"AuthService.login 使用 @Transactional 包裹整个登录处理流程。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\"\n      ]\n    },\n    {\n      \"text\": \"首先通过 UserRepository.findByUsernameAndEnabledTrue(username) 查询启用状态的用户；查询不到用户时写入登录审计 reason=USER_NOT_FOUND，然后抛出 LoginFailedException，错误信息为“用户名或密码错误”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:e6b5d04a\"\n      ]\n    },\n    {\n      \"text\": \"查询到用户后，使用 PasswordHasher.matches(rawPassword, user.getPasswordHash()) 校验密码；当前实现是判断 storedHash 非空且等于 PREFIX + rawPassword。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:4a58e1d4\"\n      ]\n    },\n    {\n      \"text\": \"密码错误时将 failedAttempts 加一，调用 UserRepository.save(user) 保存用户，再写入 reason=BAD_PASSWORD 的登录审计，随后抛出 LoginFailedException；因此该失败分支会更新用户失败次数并记录审计。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\"\n      ]\n    },\n    {\n      \"text\": \"密码正确时将 lastLoginAt 设置为当前时间、failedAttempts 重置为 0，调用 UserRepository.save(user) 保存用户，写入 reason=SUCCESS 的登录审计，最后以用户 ID 调用 TokenIssuer.issue 生成并返回 token。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:bbd36047\"\n      ]\n    },\n    {\n      \"text\": \"登录失败统一使用 LoginFailedException，且用户不存在与密码错误对外使用相同错误信息，避免直接区分用户名不存在和密码错误。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:9de05cbc\"\n      ]\n    },\n    {\n      \"text\": \"TokenIssuer.issue 不访问数据库或外部服务，而是返回“token-”加 userId 加随机 UUID 组成的字符串。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:bbd36047\"\n      ]\n    },\n    {\n      \"text\": \"已读取范围内未发现缓存、会话存储、消息发送或 HTTP 外部调用；token 生成是本地字符串拼接。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:bbd36047\",\n        \"sr1:c8bb14c3\"\n      ]\n    }\n  ],\n  \"callers\": [\n    {\n      \"name\": \"LoginController.login\",\n      \"relative_path\": \"src/main/java/com/example/crm/web/LoginController.java\",\n      \"detail\": \"收到 POST /login 请求后，直接调用 AuthService.login(credentials.username(), credentials.password())。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:98b74def\"\n      ]\n    },\n    {\n      \"name\": \"外部 HTTP 客户端\",\n      \"relative_path\": \"src/main/java/com/example/crm/web/LoginController.java\",\n      \"detail\": \"可由 POST /login 的请求方触发，但具体客户端、网关或上游调用方未在已读取源码中出现。\",\n      \"kind\": \"candidate\",\n      \"source_ids\": [\n        \"sr1:98b74def\"\n      ]\n    }\n  ],\n  \"callees\": [\n    {\n      \"name\": \"UserRepository.findByUsernameAndEnabledTrue\",\n      \"relative_path\": \"src/main/java/com/example/crm/repository/UserRepository.java\",\n      \"detail\": \"按 username 查询 enabled=true 的用户。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:e6b5d04a\"\n      ]\n    },\n    {\n      \"name\": \"PasswordHasher.matches\",\n      \"relative_path\": \"src/main/java/com/example/crm/security/PasswordHasher.java\",\n      \"detail\": \"比较原始密码与存储密码哈希表达式。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:4a58e1d4\"\n      ]\n    },\n    {\n      \"name\": \"UserRepository.save\",\n      \"relative_path\": \"src/main/java/com/example/crm/repository/UserRepository.java\",\n      \"detail\": \"密码错误时保存失败次数，成功时保存登录时间和失败次数重置。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:Bxe8gTUgrCM4qY1VY691YUKM\"\n      ]\n    },\n    {\n      \"name\": \"LoginAuditRepository.save\",\n      \"relative_path\": \"src/main/java/com/example/crm/repository/LoginAuditRepository.java\",\n      \"detail\": \"记录 USER_NOT_FOUND、BAD_PASSWORD、SUCCESS 三类登录结果。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:803bc837\"\n      ]\n    },\n    {\n      \"name\": \"TokenIssuer.issue\",\n      \"relative_path\": \"src/main/java/com/example/crm/security/TokenIssuer.java\",\n      \"detail\": \"成功登录后根据 userId 生成本地 token 字符串。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:bbd36047\"\n      ]\n    },\n    {\n      \"name\": \"LoginFailedException\",\n      \"relative_path\": \"src/main/java/com/example/crm/exception/LoginFailedException.java\",\n      \"detail\": \"用户不存在或密码错误时抛出运行时异常。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:9de05cbc\"\n      ]\n    }\n  ],\n  \"data_accesses\": [\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"read\",\n        \"update\"\n      ],\n      \"conditions\": [\n        \"每次登录先按 username 查询 enabled=true 的用户\",\n        \"密码错误时更新 failedAttempts\",\n        \"密码正确时更新 lastLoginAt 并将 failedAttempts 重置为 0\",\n        \"用户不存在时不执行 UserRepository.save\"\n      ],\n      \"access_method\": \"UserRepository.findByUsernameAndEnabledTrue(username) 和 UserRepository.save(user)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:e6b5d04a\",\n        \"sr1:sFx4INQ0ABdnsbhihGfWq3wi\"\n      ]\n    },\n    {\n      \"object\": \"LoginAudit\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"用户不存在时插入 reason=USER_NOT_FOUND\",\n        \"密码错误时插入 reason=BAD_PASSWORD\",\n        \"密码正确时插入 reason=SUCCESS\"\n      ],\n      \"access_method\": \"LoginAuditRepository.save(new LoginAudit(username, reason))\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:803bc837\",\n        \"sr1:5ea97d55\n      ]\n    },\n    {\n      \"object\": \"LoginAudit 的物理表名\",\n      \"category\": \"unknown\",\n      \"operations\": [\n        \"unknown\"\n      ],\n      \"conditions\": [\n        \"实体标注了 @Entity，但已读取源码中没有 @Table(name=...) 或显式 SQL\"\n      ],\n      \"access_method\": \"JPA LoginAuditRepository\",\n      \"state\": {\n        \"type\": \"unknown\"\n      },\n      \"source_ids\": [\n        \"sr1:5ea97d55\",\n        \"sr1:803bc837\"\n      ]\n    },\n    {\n      \"object\": \"PasswordHasher\",\n      \"category\": \"unknown\",\n      \"operations\": [\n        \"read\"\n      ],\n      \"conditions\": [\n        \"登录校验阶段读取用户密码哈希并进行内存比较\"\n      ],\n      \"access_method\": \"PasswordHasher.matches(rawPassword, storedHash)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4a58e1d4\"\n      ]\n    },\n    {\n      \"object\": \"TokenIssuer\",\n      \"category\": \"unknown\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"仅在密码校验成功后生成 token；这里的 insert 表示生成/产生字符串，不是数据库插入\"\n      ],\n      \"access_method\": \"TokenIssuer.issue(userId)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:bbd36047\"\n      ]\n    }\n  ],\n  \"steps\": [\n    {\n      \"id\": \"s1\",\n      \"title\": \"接收登录请求\",\n      \"detail\": \"POST /login 接收 Credentials。\",\n      \"source_ids\": [\n        \"sr1:98b74def\"\n      ]\n    },\n    {\n      \"id\": \"s2\",\n      \"title\": \"查询启用用户\",\n      \"detail\": \"按 username 查询 enabled=true 的 UserEntity。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:e6b5d04a\"\n      ]\n    },\n    {\n      \"id\": \"s3\",\n      \"title\": \"处理用户不存在\",\n      \"detail\": \"记录 USER_NOT_FOUND 审计并抛出登录失败异常。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\"\n      ]\n    },\n    {\n      \"id\": \"s4\",\n      \"title\": \"校验密码\",\n      \"detail\": \"调用 PasswordHasher.matches 比较原始密码与存储值。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:4a58e1d4\"\n      ]\n    },\n    {\n      \"id\": \"s5\",\n      \"title\": \"处理密码错误\",\n      \"detail\": \"failedAttempts 加一，保存用户，记录 BAD_PASSWORD 审计并抛出异常。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\"\n      ]\n    },\n    {\n      \"id\": \"s6\",\n      \"title\": \"更新成功登录状态\",\n      \"detail\": \"设置 lastLoginAt=当前时间，并将 failedAttempts 重置为 0。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\"\n      ]\n    },\n    {\n      \"id\": \"s7\",\n      \"title\": \"保存成功状态并记录审计\",\n      \"detail\": \"保存用户并插入 SUCCESS 登录审计。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:5ea97d55\"\n      ]\n    },\n    {\n      \"id\": \"s8\",\n      \"title\": \"生成并返回 token\",\n      \"detail\": \"按用户 ID 生成 token，控制器返回 HTTP 200。\",\n      \"source_ids\": [\n        \"sr1:c8bb14c3\",\n        \"sr1:bbd36047\",\n        \"sr1:98b74def\"\n      ]\n    }\n  ],\n  \"links\": [\n    {\n      \"from\": \"s1\",\n      \"to\": \"s2\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s3\",\n      \"kind\": \"branch\",\n      \"label\": \"用户不存在\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s4\",\n      \"kind\": \"branch\",\n      \"label\": \"找到启用用户\"\n    },\n    {\n      \"from\": \"s3\",\n      \"to\": \"s4\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"异常抛出后流程终止；不进入密码校验\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s5\",\n      \"kind\": \"branch\",\n      \"label\": \"密码错误\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s6\",\n      \"kind\": \"branch\",\n      \"label\": \"密码正确\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s6\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"异常抛出后流程终止；不进入成功分支\"\n    },\n    {\n      \"from\": \"s6\",\n      \"to\": \"s7\",\n      \"kind\": \"write\"\n    },\n    {\n      \"from\": \"s7\",\n      \"to\": \"s8\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"s8\",\n      \"to\": \"s1\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"控制器向请求方返回 token\"\n    }\n  ],\n  \"unknowns\": [\n    \"LoginAudit 没有显式 @Table 映射，物理表名无法仅由已读取源码确认。\",\n    \"UserRepository 的 JPA 自动生成 SQL 未在源码中展开，具体 SQL、索引和事务提交结果未核对。\",\n    \"没有找到登录接口的具体上游 HTTP 客户端、网关或安全过滤器调用方；调用索引无边不代表运行时不存在调用。\",\n    \"LoginFailedException 的全局异常映射和最终 HTTP 错误状态码未在已读取源码中确认。\",\n    \"未确认数据库配置、事务回滚策略及 JPA 命名策略对 LoginAudit 默认表名的实际影响。\"\n  ],\n  \"completion\": \"partial\"\n}"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.portal.repo.UserRepository">
+
+    <!-- 按月分表：物理表名 = portal_user_202609 这类带月份后缀的表，
+         运行时由 ${month} 拼接；源码无法确定唯一物理表名。 -->
+    <select id="findActive" resultType="com.example.portal.service.UserRecord">
+        SELECT id, username, password_hash
+        FROM portal_user_${month}
+        WHERE username = #{username} AND status = 1
+    </select>
+
+    <insert id="insertLoginEvent">
+        INSERT INTO portal_login_event_${month} (username, result, created_at)
+        VALUES (#{username}, #{result}, NOW())
+    </insert>
+
+    <!-- 存储过程：归档逻辑封装在数据库端，源码不可见其内部实现。 -->
+    <update id="archiveInactiveUsers" statementType="CALLABLE">
+        {call sp_archive_inactive_users(#{beforeDate})}
+    </update>
+</mapper>

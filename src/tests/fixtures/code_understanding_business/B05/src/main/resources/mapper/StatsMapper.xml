@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.portal.repo.StatsMapper">
+
+    <!-- CTE active_users 与表别名 u/e 都不是物理表；
+         实际读的物理表是 portal_user_${month} 与 portal_login_event_${month}。 -->
+    <select id="countActiveLogins" resultType="int">
+        WITH active_users AS (
+            SELECT id, username
+            FROM portal_user_${month}
+            WHERE status = 1
+        )
+        SELECT COUNT(*)
+        FROM active_users u
+        JOIN portal_login_event_${month} e ON e.username = u.username
+        WHERE e.result = 'SUCCESS'
+    </select>
+</mapper>

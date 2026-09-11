@@ -23,6 +23,7 @@ use super::analysis::{
     AnalysisResult, parse_analysis_result, validate_analysis_result,
 };
 use super::session::UnderstandingPromptContext;
+use super::source::source_id_of;
 use super::tools::{
     GetFileTreeArgs, GetSymbolArgs, ReadFileArgs, SearchCodeArgs, SearchSymbolsArgs,
     TraceCallsArgs, UnderstandingTools, tool_schemas,
@@ -280,7 +281,7 @@ pub fn run_understanding_agent_with_context(
                         content: turn.content,
                         tool_calls: Vec::new(),
                     });
-                    messages.push(AgentChatMessage::User(repair_instruction(&error)));
+                    messages.push(AgentChatMessage::User(repair_instruction(&error, &tools)));
                 }
             }
             continue;
@@ -595,11 +596,23 @@ fn initial_user_prompt_with_context(
 }
 
 /// 格式修复指令：带上具体校验问题，并要求只输出 JSON。
-fn repair_instruction(error: &UnderstandingError) -> String {
+fn repair_instruction(error: &UnderstandingError, tools: &UnderstandingTools) -> String {
+    let valid_source_ids = tools
+        .issued_sources()
+        .iter()
+        .map(source_id_of)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source_note = if valid_source_ids.is_empty() {
+        "当前没有合法 source_id；不要为任何结论编造来源。".to_string()
+    } else {
+        format!("合法 source_id 白名单（只能逐字使用其中的值）：{valid_source_ids}")
+    };
     format!(
         "上面的回复不是可用的最终结果：{error}\n\
          请只输出一个符合系统提示协议的 JSON 对象（不要 Markdown 围栏、不要额外说明）。\
-         source_ids 必须原样引用前面工具结果中出现的 source_id。"
+         source_ids 必须来自下面的白名单，不能使用 call_id/candidate_id；\
+         category=unknown 时 state 必须为 unknown。\n{source_note}"
     )
 }
 

@@ -1,0 +1,618 @@
+{
+  "case": "B05",
+  "run": 2,
+  "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+  "model": "gpt-5.6-luna",
+  "elapsed_ms": 161355,
+  "analysis": {
+    "version": 1,
+    "context": {
+      "project_key": "22670863",
+      "request_id": "live-B05-2",
+      "index_generation": 1,
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "scope": "src/main/java/com/example/portal/web、service、repo、auth、notification，以及 src/main/resources/mapper；搜索词包括 login、登录、password、AuthService、AuthController、authenticate、portal_user、login_event。"
+    },
+    "summary": "登录入口是 POST /api/auth：sso: 前缀走外部 SSO，否则查询当前月份的启用用户、校验密码、记录登录事件并发送 MQ 通知。",
+    "coverage_note": "已读取 Controller、AuthService、Repository 接口及 MyBatis XML、SSO 接口、密码校验实现和 MQ 通知实现；动态表具体月份、SSO 实现及运行时密码校验器配置未确认。",
+    "findings": [
+      {
+        "text": "HTTP 入口是 POST /api/auth。AuthController 从请求体取得 username 和 password，调用 AuthService.authenticate，并把返回的 AuthResult 转换为 AuthResponse。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:f000bda0",
+          "sr1:dc862dc4"
+        ]
+      },
+      {
+        "text": "当 username 非空且以 sso: 开头时，去掉此前缀后调用 SsoAuthPort.exchangeToken，并直接返回其 AuthResult；该分支不会执行本地用户查询和本地登录事件插入。",
+        "state": "observed",
+        "condition": "username != null && username.startsWith(\"sso:\")",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:6e1f23b1"
+        ]
+      },
+      {
+        "text": "本地登录按当前日期生成 YYYYMM 格式的 month，调用 UserRepository.findActive 查询启用用户；查询不到用户时抛出“用户不存在或已停用”。",
+        "state": "observed",
+        "condition": "username 不以 sso: 开头",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:0e132f8e"
+        ]
+      },
+      {
+        "text": "密码校验比较用户记录中的 passwordHash 与 credentialChecker.hash(password) 的结果。CredentialChecker 有 LocalCredentialChecker 和 LegacyCredentialChecker 两个实现，实际实现由 portal.auth.mode 配置决定。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:1de59701",
+          "sr1:1be62bcb"
+        ]
+      },
+      {
+        "text": "密码错误时插入 BAD_PASSWORD 登录事件，发送 auth.login.failed 消息，然后抛出“用户名或密码错误”。",
+        "state": "observed",
+        "condition": "用户存在但 passwordHash 不等于 credentialChecker.hash(password)",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:e2fc2b52",
+          "sr1:38b5d203"
+        ]
+      },
+      {
+        "text": "密码正确时插入 SUCCESS 登录事件，发送 auth.login.succeeded 消息，并返回 token-用户ID，fromSso=false。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:e2fc2b52",
+          "sr1:4073e8e6"
+        ]
+      },
+      {
+        "text": "失败和成功分支都会记录登录事件；查询不到用户的分支在 AuthService 中未调用 insertLoginEvent，也未发送登录通知。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "text": "MQ 通知由 MqLoginNotifier 实现，分别使用 auth.login.succeeded 和 auth.login.failed routing key；publish 的真实 MQ 连接实现未展示。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:e2fc2b52",
+          "sr1:aae874af",
+          "sr1:6c508dfb"
+        ]
+      }
+    ],
+    "callers": [
+      {
+        "name": "AuthController.authenticate",
+        "relative_path": "src/main/java/com/example/portal/web/AuthController.java",
+        "detail": "处理 POST /api/auth，并直接调用 authService.authenticate(request.username(), request.password())。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:f000bda0"
+        ]
+      },
+      {
+        "name": "POST /api/auth 的 HTTP 客户端",
+        "relative_path": "src/main/java/com/example/portal/web/AuthController.java",
+        "detail": "通过 HTTP 请求进入 AuthController；具体客户端未在当前源码中确认。",
+        "kind": "candidate",
+        "source_ids": [
+          "sr1:f000bda0"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "SsoAuthPort.exchangeToken",
+        "relative_path": "src/main/java/com/example/portal/auth/SsoAuthPort.java",
+        "detail": "SSO 分支调用的外部认证边界。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:6e1f23b1"
+        ]
+      },
+      {
+        "name": "UserRepository.findActive",
+        "relative_path": "src/main/java/com/example/portal/repo/UserRepository.java",
+        "detail": "读取当前月份的启用用户记录。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:0e132f8e"
+        ]
+      },
+      {
+        "name": "CredentialChecker.hash",
+        "relative_path": "src/main/java/com/example/portal/auth/CredentialChecker.java",
+        "detail": "对原始密码进行摘要转换后参与比较。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:1de59701",
+          "sr1:1be62bcb"
+        ]
+      },
+      {
+        "name": "UserRepository.insertLoginEvent",
+        "relative_path": "src/main/java/com/example/portal/repo/UserRepository.java",
+        "detail": "密码错误时写 BAD_PASSWORD，密码正确时写 SUCCESS。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:0e132f8e"
+        ]
+      },
+      {
+        "name": "LoginNotifier.notifyFailedLogin / notifyLoginSucceeded",
+        "relative_path": "src/main/java/com/example/portal/notification/MqLoginNotifier.java",
+        "detail": "分别发送失败和成功登录消息。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:e2fc2b52"
+        ]
+      }
+    ],
+    "data_accesses": [
+      {
+        "object": "portal_user_${month}",
+        "category": "db_object",
+        "operations": [
+          "read"
+        ],
+        "conditions": [
+          "仅本地登录分支执行",
+          "username = #{username} AND status = 1"
+        ],
+        "access_method": "SELECT id, username, password_hash FROM portal_user_${month}",
+        "state": "observed",
+        "source_ids": [
+          "sr1:38b5d203",
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "object": "portal_login_event_${month}",
+        "category": "db_object",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "密码错误时 result=BAD_PASSWORD",
+          "密码正确时 result=SUCCESS"
+        ],
+        "access_method": "INSERT INTO portal_login_event_${month} (username, result, created_at) VALUES (#{username}, #{result}, NOW())",
+        "state": "observed",
+        "source_ids": [
+          "sr1:38b5d203",
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "object": "外部 SSO 认证中心",
+        "category": "external",
+        "operations": [
+          "unknown"
+        ],
+        "conditions": [
+          "username 非空且以 sso: 开头"
+        ],
+        "access_method": "SsoAuthPort.exchangeToken(username.substring(4), password)",
+        "state": "observed",
+        "source_ids": [
+          "sr1:6e1f23b1",
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "object": "MQ",
+        "category": "message",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "密码错误时发送 auth.login.failed",
+          "密码正确时发送 auth.login.succeeded"
+        ],
+        "access_method": "MqLoginNotifier.publish(routingKey, username)",
+        "state": "observed",
+        "source_ids": [
+          "sr1:e2fc2b52"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "s1",
+        "title": "接收登录请求",
+        "detail": "POST /api/auth 接收 username 和 password。",
+        "source_ids": [
+          "sr1:f000bda0"
+        ]
+      },
+      {
+        "id": "s2",
+        "title": "判断 SSO 分支",
+        "detail": "判断 username 是否以 sso: 开头。",
+        "source_ids": [
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "id": "s3",
+        "title": "调用外部 SSO",
+        "detail": "去掉 sso: 前缀后调用 exchangeToken 并直接返回。",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:6e1f23b1"
+        ]
+      },
+      {
+        "id": "s4",
+        "title": "生成月份参数",
+        "detail": "按当前日期生成 YYYYMM 格式的 month。",
+        "source_ids": [
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "id": "s5",
+        "title": "查询启用用户",
+        "detail": "从 portal_user_${month} 查询用户及 password_hash。",
+        "source_ids": [
+          "sr1:38b5d203",
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "id": "s6",
+        "title": "处理用户不存在",
+        "detail": "查询结果为空时抛出用户不存在或已停用异常。",
+        "source_ids": [
+          "sr1:e813e1eb"
+        ]
+      },
+      {
+        "id": "s7",
+        "title": "校验密码",
+        "detail": "比较 passwordHash 与 credentialChecker.hash(password)。",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:1de59701",
+          "sr1:1be62bcb"
+        ]
+      },
+      {
+        "id": "s8",
+        "title": "处理密码错误",
+        "detail": "写 BAD_PASSWORD、发送失败消息并抛出异常。",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:e2fc2b52"
+        ]
+      },
+      {
+        "id": "s9",
+        "title": "处理登录成功",
+        "detail": "写 SUCCESS、发送成功消息并生成 token-用户ID。",
+        "source_ids": [
+          "sr1:e813e1eb",
+          "sr1:e2fc2b52"
+        ]
+      },
+      {
+        "id": "s10",
+        "title": "返回认证响应",
+        "detail": "Controller 将 token 和 fromSso 封装为 AuthResponse。",
+        "source_ids": [
+          "sr1:f000bda0",
+          "sr1:4073e8e6"
+        ]
+      }
+    ],
+    "links": [
+      {
+        "from": "s1",
+        "to": "s2",
+        "kind": "call",
+        "label": null
+      },
+      {
+        "from": "s2",
+        "to": "s3",
+        "kind": "branch",
+        "label": "sso: 前缀"
+      },
+      {
+        "from": "s2",
+        "to": "s4",
+        "kind": "branch",
+        "label": "非 sso: 前缀"
+      },
+      {
+        "from": "s3",
+        "to": "s10",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s4",
+        "to": "s5",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s5",
+        "to": "s6",
+        "kind": "branch",
+        "label": "用户不存在或已停用"
+      },
+      {
+        "from": "s5",
+        "to": "s7",
+        "kind": "branch",
+        "label": "查询到用户"
+      },
+      {
+        "from": "s7",
+        "to": "s8",
+        "kind": "branch",
+        "label": "密码错误"
+      },
+      {
+        "from": "s7",
+        "to": "s9",
+        "kind": "branch",
+        "label": "密码正确"
+      },
+      {
+        "from": "s9",
+        "to": "s10",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s8",
+        "to": "s8",
+        "kind": "write",
+        "label": "写入 BAD_PASSWORD"
+      },
+      {
+        "from": "s9",
+        "to": "s9",
+        "kind": "write",
+        "label": "写入 SUCCESS"
+      }
+    ],
+    "unknowns": [
+      "动态表名 portal_user_${month} 和 portal_login_event_${month} 的具体月份由运行时日期决定，源码无法确认唯一物理表名。",
+      "SsoAuthPort 没有在已读源码中找到实现类，外部调用协议、失败处理和其内部数据访问未知。",
+      "实际注入 LocalCredentialChecker 还是 LegacyCredentialChecker 由 portal.auth.mode 配置决定。",
+      "MQ publish 的真实连接、投递确认和重试行为未在当前源码中实现。",
+      "源码未显示登录成功后的会话持久化或缓存写入；后续 token 的会话管理方式未知。",
+      "数据库插入或 MQ 发布失败时是否回滚、重试或转换异常，当前源码未确认。"
+    ],
+    "completion": "complete"
+  },
+  "steps": [
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree /",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_BwNyjPv8kPJ30hGmyq57iHFV\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src\",\"kind\":\"directory\"},{\"relative_path\":\"src/main\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources/mapper\",\"kind\":\"di"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_t4NvjQ300CP5158JRIMBCcSd\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:1\",\"name\":\"notifyLoginSucceeded\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.notification.LoginNotifier.java.LoginNotifier.notifyLoginSucceeded\",\"relative_path\":\"src/main/java/com/example/portal/notification/LoginNotifier.java\",\"start_line\":8},{\"candidate_id\":\"s"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code 登录",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Y68tckMJzo5xdHB6h35AsU6p\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/portal/notification/LoginNotifier.java\",\"line_number\":4,\"line_text\":\" * 登录结果通知：成功/失败都发消息（归类为消息/事件，不是数据库表）。\"},{\"relative_path\":\"src/main/java/com/example/portal/notification/MqLoginNotifier.java\",\"line_number\":6,\"line_text\":\" * 消息队列实现：把登录事件发到 MQ。\"},{\"relative_path\":\"src/"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code password",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_xjXJSiK67ktJqEkeA5FwHzrV\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"line_number\":38,\"line_text\":\"    public AuthResult authenticate(String username, String password) {\"},{\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"line_number\":40,\"line_text\":\"            return ssoAuthP"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols AuthService",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_4kujgDWu7PSLV5ONr1TiBnyl\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:14\",\"name\":\"AuthService\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.service.AuthService.java.AuthService.AuthService\",\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"start_line\":27},{\"candidate_id\":\"sc1:15\",\"name\":\"AuthService\",\"lab"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols AuthController",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_L2Sp6TWwBTOLcwW9EvBuGk0H\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:23\",\"name\":\"AuthController\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.web.AuthController.java.AuthController.AuthController\",\"relative_path\":\"src/main/java/com/example/portal/web/AuthController.java\",\"start_line\":15},{\"candidate_id\":\"sc1:24\",\"name\":\"AuthContro"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols findByUsername",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_xBUwEAg1nSfSFOMdcPzfoEIk\",\"index_generation\":1,\"data\":{\"candidates\":[],\"matched_before_scope_filter\":0},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols credentialChecker",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_29PiYgzxIYeqUcMFDk5VnS3e\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:27\",\"name\":\"CredentialChecker\",\"label\":\"Interface\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.CredentialChecker.java.CredentialChecker\",\"relative_path\":\"src/main/java/com/example/portal/auth/CredentialChecker.java\",\"start_line\":7},{\"candidate_id\":\"sc1:28\",\"name\":\"LegacyCre"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols ssoAuthPort",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_XwPjbMJ9SuFkh1dtsF12perm\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:37\",\"name\":\"SsoAuthPort\",\"label\":\"Interface\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.SsoAuthPort.java.SsoAuthPort\",\"relative_path\":\"src/main/java/com/example/portal/auth/SsoAuthPort.java\",\"start_line\":9},{\"candidate_id\":\"sc1:38\",\"name\":\"com.example.portal.auth.SsoAuthPo"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols AuthResult",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_tTTVqVT8UwAqdT6NjQfzqsW7\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:41\",\"name\":\"AuthResult\",\"label\":\"Class\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.AuthResult.java.AuthResult\",\"relative_path\":\"src/main/java/com/example/portal/auth/AuthResult.java\",\"start_line\":3},{\"candidate_id\":\"sc1:42\",\"name\":\"com.example.portal.auth.AuthResult\",\"labe"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code CREATE TABLE",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_ooZBtphML9PgEiT6C2d5uFMV\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":16,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code portal_user",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_vU3na8FHs2tE1ueNc1pzWS9w\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"line_number\":16,\"line_text\":\" * 按月分表：用户表与登录事件表的物理表名带月份后缀（如 portal_user_202609），\"},{\"relative_path\":\"src/main/resources/mapper/StatsMapper.xml\",\"line_number\":7,\"line_text\":\"         实际读的物理表是 portal_user_${month} 与 portal_login_event_${mo"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code login_event",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_xCqeM9hEPzsXe9baXqHB0YlP\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/resources/mapper/StatsMapper.xml\",\"line_number\":7,\"line_text\":\"         实际读的物理表是 portal_user_${month} 与 portal_login_event_${month}。 -->\"},{\"relative_path\":\"src/main/resources/mapper/StatsMapper.xml\",\"line_number\":16,\"line_text\":\"        JOIN portal_login_event_${month} e ON e.username "
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:17",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Q7Q2hnO1bQOVcQaZJ7fWME4A\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:17\",\"name\":\"authenticate\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.service.AuthService.java.AuthService.authenticate\",\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"start_line\":38,\"end_line\":55,\"callers\":[],\"callees\":[{\"name\":\"hash\",\"qualified_"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:25",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_osrzVpkWDHekX9Ab8MK6qmks\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:25\",\"name\":\"authenticate\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.web.AuthController.java.AuthController.authenticate\",\"relative_path\":\"src/main/java/com/example/portal/web/AuthController.java\",\"start_line\":19,\"end_line\":23,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:13",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_bTO9K82SMsR630yuYP9BcR6c\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:13\",\"name\":\"insertLoginEvent\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.repo.UserRepository.java.UserRepository.insertLoginEvent\",\"relative_path\":\"src/main/java/com/example/portal/repo/UserRepository.java\",\"start_line\":12,\"end_line\":12,\"callers\":[{\"name\":\"authenticate\",\"qual"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:28",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_98aB6I6vtWmGoxSVG70qM3G4\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:28\",\"name\":\"LegacyCredentialChecker\",\"label\":\"Class\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.LegacyCredentialChecker.java.LegacyCredentialChecker\",\"relative_path\":\"src/main/java/com/example/portal/auth/LegacyCredentialChecker.java\",\"start_line\":9,\"end_line\":16,\"callers\":[],\"callees\":["
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:29",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_amO8Z0TKtTTSuwZ9r20cIRWD\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:29\",\"name\":\"LocalCredentialChecker\",\"label\":\"Class\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.LocalCredentialChecker.java.LocalCredentialChecker\",\"relative_path\":\"src/main/java/com/example/portal/auth/LocalCredentialChecker.java\",\"start_line\":9,\"end_line\":16,\"callers\":[],\"callees\":[],\"s"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:3",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_4sg6Ur16eJXuBjD6WEc8fEGs\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:3\",\"name\":\"notifyLoginSucceeded\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.notification.MqLoginNotifier.java.MqLoginNotifier.notifyLoginSucceeded\",\"relative_path\":\"src/main/java/com/example/portal/notification/MqLoginNotifier.java\",\"start_line\":12,\"end_line\":15,\"callers\":[],"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:4",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_BmVoIhtDnPGNbF8GHh5e2mPI\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:4\",\"name\":\"notifyFailedLogin\",\"label\":\"Method\",\"qualified_name\":\"b05.src.main.java.com.example.portal.notification.MqLoginNotifier.java.MqLoginNotifier.notifyFailedLogin\",\"relative_path\":\"src/main/java/com/example/portal/notification/MqLoginNotifier.java\",\"start_line\":17,\"end_line\":20,\"callers\":[],\"calle"
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:17 (both)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_1Oxif1EUDKP0HTTHIyeOB8Yw\",\"index_generation\":1,\"data\":{\"function\":\"authenticate\",\"direction\":\"both\",\"callers\":[],\"callees\":[{\"name\":\"hash\",\"qualified_name\":\"b05.src.main.java.com.example.portal.auth.CredentialChecker.java.CredentialChecker.hash\",\"relative_path\":\"src/main/java/com/example/portal/auth/CredentialChecker.java\",\"hop\":1},{\"name\":\"exchangeToken\",\"qualified_name\":\"b05."
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/resources/mapper/UserRepository.xml:1-120",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_zLQ8EDyUhcdLu2AujWkv9d4o\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:38b5d203\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/resources/mapper/UserRepository.xml\",\"content_sha256\":\"961eebb80fc1a7a44363e0db19b2abb691a06baa99f0104f840ce952bf44ed3f\",\"start_byte\":0,\"end_byte\":1030,\"start_line\":1,\"end_line\":23},\"lines\":[{\"line_number\":1,\"text\":\"<?"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/repo/UserRepository.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_AeLHPp8yThnWGG900By2ixmP\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:0e132f8e\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/repo/UserRepository.java\",\"content_sha256\":\"99b12932af5810f2802a577256086af2d8ccd9280ce716e8eb93f9edbc4a58fd\",\"start_byte\":0,\"end_byte\":503,\"start_line\":1,\"end_line\":15},\"lines\":[{\"line_number\":"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/service/AuthService.java:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_FiJbbvxQr2W7oTp2BOaHWyrm\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:e813e1eb\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/service/AuthService.java\",\"content_sha256\":\"c1b9b0025fba43ae7e53086f7018a09df6afdbe3fc92caecd9e78738fe1a56d3\",\"start_byte\":0,\"end_byte\":2347,\"start_line\":1,\"end_line\":56},\"lines\":[{\"line_number\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/web/AuthController.java:1-40",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_CxPjUDshhdyYeU2FRKPUDgUm\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:f000bda0\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/web/AuthController.java\",\"content_sha256\":\"a340b5724fd23360b339913346762a4002708d04b6ec8c200d65eed9411f6dd6\",\"start_byte\":0,\"end_byte\":813,\"start_line\":1,\"end_line\":24},\"lines\":[{\"line_number\":1"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/notification/MqLoginNotifie…:1-60",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_8qCcvL5S21koSnPED7FafQUO\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:e2fc2b52\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/notification/MqLoginNotifier.java\",\"content_sha256\":\"c728116bcd2c1aadca316540e4e0c5454a2435687ca97abed29d3a7cc93bc145\",\"start_byte\":0,\"end_byte\":672,\"start_line\":1,\"end_line\":25},\"lines\":[{\"line"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/auth/SsoAuthPort.java:1-40",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_DLpY5v4uIr24B64jsNhSywBO\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:6e1f23b1\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/auth/SsoAuthPort.java\",\"content_sha256\":\"e99f1ba743c696dee6ee0dcb712fed31871d6060a999231a3efe60bc3f969e9d\",\"start_byte\":0,\"end_byte\":375,\"start_line\":1,\"end_line\":12},\"lines\":[{\"line_number\":1,\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/portal/auth/AuthResult.java:1-30",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_3ZjyE5hnOC741AgY4fuMYgHM\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:4073e8e6\",\"source_ref\":{\"project_key\":\"22670863\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/portal/auth/AuthResult.java\",\"content_sha256\":\"e004e4f10be4a351b8ac70a80cc1a4fd846ffbef63ff9c3c8adb0891f31e41a9\",\"start_byte\":0,\"end_byte\":92,\"start_line\":1,\"end_line\":3},\"lines\":[{\"line_number\":1,\"tex"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code AuthController",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_uGqCQBKjSctzuHlDCY1kJaZP\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/portal/web/AuthController.java\",\"line_number\":11,\"line_text\":\"public class AuthController {\"},{\"relative_path\":\"src/main/java/com/example/portal/web/AuthController.java\",\"line_number\":15,\"line_text\":\"    public AuthController(AuthService authService) {\"}],\"scanned_files"
+    },
+    {
+      "kind": "message",
+      "text": "{\n  \"version\": 1,\n  \"summary\": \"登录入口是 POST /api/auth：以 sso: 前缀走外部 SSO，否则按当前月份查询启用用户、校验口令，并记录登录事件及发送 MQ 通知。\",\n  \"coverage_note\": \"已检索 web、service、auth、repo、notification 及 mapper 目录；调用索引未发现 AuthService.authenticate 的调用方边，但已通过 Controller 源码确认直接调用关系。SSO 实现类和实际运行时 CredentialChecker 配置未在已读源码中确认。\",\n  \"context\": {\n    \"question\": \"登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？\",\n    \"scope\": \"检索词 login、登录、password、AuthService、AuthController、authenticate、portal_user、login_event；读取 src/main/java/com/example/portal/web/AuthController.java、service/AuthService.java、repo/UserRepository.java、resources/mapper/UserRepository.xml、auth/SsoAuthPort.java、auth/AuthResult.java、notification/MqLoginNotifier.java 及两个 CredentialChecker 实现。\"\n  },\n  \"findings\": [\n    {\n      \"text\": \"HTTP 入口为 POST /api/auth，Controller 从请求体读取 username 和 password，调用 AuthService.authenticate，并将 AuthResult 转换为 AuthResponse 返回。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:f000bda0\"\n      ]\n    },\n    {\n      \"text\": \"AuthService.authenticate 首先判断 username 非空且以 \\\"sso:\\\" 开头；满足时去掉前缀后调用 ssoAuthPort.exchangeToken，并直接返回 SSO 结果，不进入本地用户表查询和本地登录事件记录流程。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"condition\": \"username != null && username.startsWith(\\\"sso:\\\")\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:6e1f23b1\"\n      ]\n    },\n    {\n      \"text\": \"本地登录使用当前日期生成 YYYYMM 格式的 month，调用 UserRepository.findActive(month, username) 查询启用用户；查询不到用户时抛出“用户不存在或已停用”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:38b5d203\"\n      ]\n    },\n    {\n      \"text\": \"本地口令校验是比较数据库返回的 passwordHash 与 credentialChecker.hash(password) 的结果；CredentialChecker 有 LocalCredentialChecker 和 LegacyCredentialChecker 两个实现，实际使用哪个由配置 portal.auth.mode 决定，当前源码无法确认。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:1de59701\",\n        \"sr1:1be62bcb\"\n      ]\n    },\n    {\n      \"text\": \"密码不匹配时先写入 BAD_PASSWORD 登录事件，再发送 auth.login.failed MQ 消息，最后抛出“用户名或密码错误”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"condition\": \"user.passwordHash() 不等于 credentialChecker.hash(password)\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:e2fc2b52\"\n      ]\n    },\n    {\n      \"text\": \"密码匹配时写入 SUCCESS 登录事件，发送 auth.login.succeeded MQ 消息，并返回 token-用户ID，且 fromSso=false。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:e2fc2b52\",\n        \"sr1:4073e8e6\"\n      ]\n    },\n    {\n      \"text\": \"本地用户查询 SQL 读取动态物理表 portal_user_${month} 的 id、username、password_hash，条件为 username = #{username} 且 status = 1；实际表名由运行时 month 拼接，源码不能确定唯一月份表名。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:38b5d203\"\n      ]\n    },\n    {\n      \"text\": \"登录事件 SQL 向动态物理表 portal_login_event_${month} 插入 username、result、created_at，其中 created_at 使用数据库 NOW()；result 为 BAD_PASSWORD 或 SUCCESS。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:38b5d203\",\n        \"sr1:0e132f8e\"\n      ]\n    },\n    {\n      \"text\": \"登录通知通过 LoginNotifier 的 MQ 实现发送，成功和失败分别使用 routing key auth.login.succeeded 与 auth.login.failed；publish 的真实 MQ 连接实现在当前样例源码中不可见。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e2fc2b52\"\n      ]\n    },\n    {\n      \"text\": \"登录流程未使用本地缓存或会话对象；成功返回的是拼接出的 token-用户ID 字符串。是否由后续组件把该 token 转换为真正会话，当前已读范围未确认。\",\n      \"state\": {\n        \"type\": \"inferred\"\n      },\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:4073e8e6\"\n      ]\n    }\n  ],\n  \"callers\": [\n    {\n      \"name\": \"AuthController.authenticate\",\n      \"relative_path\": \"src/main/java/com/example/portal/web/AuthController.java\",\n      \"detail\": \"处理 POST /api/auth 请求，并直接调用 authService.authenticate(request.username(), request.password())。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:f000bda0\"\n      ]\n    },\n    {\n      \"name\": \"HTTP 客户端\",\n      \"relative_path\": \"src/main/java/com/example/portal/web/AuthController.java\",\n      \"detail\": \"通过 POST /api/auth 进入 Controller；具体调用方客户端未在当前源码中出现。\",\n      \"kind\": \"candidate\",\n      \"source_ids\": [\n        \"sr1:f000bda0\"\n      ]\n    }\n  ],\n  \"callees\": [\n    {\n      \"name\": \"SsoAuthPort.exchangeToken\",\n      \"relative_path\": \"src/main/java/com/example/portal/auth/SsoAuthPort.java\",\n      \"detail\": \"sso: 前缀分支调用外部 SSO 认证边界。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:6e1f23b1\"\n      ]\n    },\n    {\n      \"name\": \"UserRepository.findActive\",\n      \"relative_path\": \"src/main/java/com/example/portal/repo/UserRepository.java\",\n      \"detail\": \"本地登录分支查询当前月份的启用用户及口令哈希。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:0e132f8e\"\n      ]\n    },\n    {\n      \"name\": \"CredentialChecker.hash\",\n      \"relative_path\": \"src/main/java/com/example/portal/auth/CredentialChecker.java\",\n      \"detail\": \"将原始密码转换为待比较的哈希/摘要；实现可能是 LocalCredentialChecker 或 LegacyCredentialChecker。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:1de59701\",\n        \"sr1:1be62bcb\"\n      ]\n    },\n    {\n      \"name\": \"UserRepository.insertLoginEvent\",\n      \"relative_path\": \"src/main/java/com/example/portal/repo/UserRepository.java\",\n      \"detail\": \"密码错误和密码正确分支都会调用，分别写入 BAD_PASSWORD 或 SUCCESS。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:0e132f8e\"\n      ]\n    },\n    {\n      \"name\": \"LoginNotifier.notifyFailedLogin / notifyLoginSucceeded\",\n      \"relative_path\": \"src/main/java/com/example/portal/notification/MqLoginNotifier.java\",\n      \"detail\": \"失败和成功分支分别发布 MQ 登录事件。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:e2fc2b52\"\n      ]\n    }\n  ],\n  \"data_accesses\": [\n    {\n      \"object\": \"portal_user_${month}\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"read\"\n      ],\n      \"conditions\": [\n        \"仅本地登录分支，即 username 不以 sso: 开头\",\n        \"查询条件为 username = #{username} AND status = 1\"\n      ],\n      \"access_method\": \"UserRepository.findActive -> SELECT id, username, password_hash FROM portal_user_${month}\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:38b5d203\",\n        \"sr1:e813e1eb\"\n      ]\n    },\n    {\n      \"object\": \"portal_login_event_${month}\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"本地用户存在但密码错误时插入 result=BAD_PASSWORD\",\n        \"本地密码校验成功时插入 result=SUCCESS\"\n      ],\n      \"access_method\": \"UserRepository.insertLoginEvent -> INSERT INTO portal_login_event_${month} (username, result, created_at) VALUES (..., NOW())\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:38b5d203\",\n        \"sr1:e813e1eb\"\n      ]\n    },\n    {\n      \"object\": \"外部 SSO 认证中心\",\n      \"category\": \"external\",\n      \"operations\": [\n        \"unknown\"\n      ],\n      \"conditions\": [\n        \"username 非空且以 sso: 开头\"\n      ],\n      \"access_method\": \"SsoAuthPort.exchangeToken(username.substring(4), password)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:6e1f23b1\"\n      ]\n    },\n    {\n      \"object\": \"MQ\",\n      \"category\": \"message\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"本地密码错误时发布 auth.login.failed\",\n        \"本地密码正确时发布 auth.login.succeeded\"\n      ],\n      \"access_method\": \"MqLoginNotifier.publish(routingKey, username)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e2fc2b52\"\n      ]\n    }\n  ],\n  \"steps\": [\n    {\n      \"id\": \"s1\",\n      \"title\": \"接收登录请求\",\n      \"detail\": \"POST /api/auth 接收 username 和 password。\",\n      \"source_ids\": [\n        \"sr1:f000bda0\"\n      ]\n    },\n    {\n      \"id\": \"s2\",\n      \"title\": \"判断 SSO 分支\",\n      \"detail\": \"判断 username 是否以 sso: 开头。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\"\n      ]\n    },\n    {\n      \"id\": \"s3\",\n      \"title\": \"调用外部 SSO\",\n      \"detail\": \"去掉 sso: 前缀后调用 exchangeToken 并直接返回。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:6e1f23b1\"\n      ]\n    },\n    {\n      \"id\": \"s4\",\n      \"title\": \"生成月份分表参数\",\n      \"detail\": \"按当前日期生成 YYYYMM 格式 month。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\"\n      ]\n    },\n    {\n      \"id\": \"s5\",\n      \"title\": \"查询启用用户\",\n      \"detail\": \"读取 portal_user_${month}，匹配用户名和 status=1。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:38b5d203\"\n      ]\n    },\n    {\n      \"id\": \"s6\",\n      \"title\": \"处理用户不存在\",\n      \"detail\": \"user 为 null 时抛出用户不存在或已停用异常。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\"\n      ]\n    },\n    {\n      \"id\": \"s7\",\n      \"title\": \"校验密码\",\n      \"detail\": \"使用 CredentialChecker.hash(password) 与 passwordHash 比较。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:1de59701\",\n        \"sr1:1be62bcb\"\n      ]\n    },\n    {\n      \"id\": \"s8\",\n      \"title\": \"处理密码错误\",\n      \"detail\": \"写 BAD_PASSWORD 事件、发送失败 MQ 消息并抛出异常。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:e2fc2b52\"\n      ]\n    },\n    {\n      \"id\": \"s9\",\n      \"title\": \"处理登录成功\",\n      \"detail\": \"写 SUCCESS 事件、发送成功 MQ 消息并生成 token-用户ID。\",\n      \"source_ids\": [\n        \"sr1:e813e1eb\",\n        \"sr1:e2fc2b52\"\n      ]\n    },\n    {\n      \"id\": \"s10\",\n      \"title\": \"返回认证响应\",\n      \"detail\": \"Controller 将 token 和 fromSso 封装为 AuthResponse。\",\n      \"source_ids\": [\n        \"sr1:f000bda0\",\n        \"sr1:4073e8e6\"\n      ]\n    }\n  ],\n  \"links\": [\n    {\n      \"from\": \"s1\",\n      \"to\": \"s2\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s3\",\n      \"kind\": \"branch\",\n      \"label\": \"sso: 前缀\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s4\",\n      \"kind\": \"branch\",\n      \"label\": \"非 sso: 前缀\"\n    },\n    {\n      \"from\": \"s3\",\n      \"to\": \"s10\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s5\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s6\",\n      \"kind\": \"branch\",\n      \"label\": \"用户不存在或已停用\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s7\",\n      \"kind\": \"branch\",\n      \"label\": \"查询到启用用户\"\n    },\n    {\n      \"from\": \"s7\",\n      \"to\": \"s8\",\n      \"kind\": \"branch\",\n      \"label\": \"密码错误\"\n    },\n    {\n      \"from\": \"s7\",\n      \"to\": \"s9\",\n      \"kind\": \"branch\",\n      \"label\": \"密码正确\"\n    },\n    {\n      \"from\": \"s9\",\n      \"to\": \"s10\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s5\",\n      \"kind\": \"read\"\n    },\n    {\n      \"from\": \"s8\",\n      \"to\": \"s8\",\n      \"kind\": \"write\",\n      \"label\": \"写 BAD_PASSWORD\"\n    },\n    {\n      \"from\": \"s9\",\n      \"to\": \"s9\",\n      \"kind\": \"write\",\n      \"label\": \"写 SUCCESS\"\n    }\n  ],\n  \"unknowns\": [\n    \"portal_user_${month} 和 portal_login_event_${month} 是动态月份表名，源码只能确认表达式，不能确认本次运行的具体物理表名。\",\n    \"SsoAuthPort 没有在当前已读源码中找到实现类，外部 SSO 的 HTTP、缓存、数据库及失败处理细节未知。\",\n    \"CredentialChecker 的实际注入实现由 portal.auth.mode 配置决定，无法从当前源码确认运行时使用 local 还是 legacy。\",\n    \"MQ publish 的真实连接、投递确认和失败重试行为在样例中未实现。\",\n    \"未在已读登录流程中发现本地缓存或会话写入；后续 token 的会话管理方式未知。\",\n    \"登录事件 INSERT 或 MQ 发布失败时 AuthService 是否继续、回滚或转换异常，当前源码未显式处理，事务边界未知。\",\n    \"数据库存储过程 archiveInactiveUsers 与登录主流程无直接调用关系，未纳入登录读写表清单。\"\n  ],\n  \"completion\": \"complete\"\n}"
+    }
+  ]
+}

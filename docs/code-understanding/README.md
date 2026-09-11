@@ -1,6 +1,6 @@
 # AI 代码理解：交接入口
 
-版本：2.0。日期：2026-09-10。状态：CU2-T0～T4 服务层已完成，T5 原生页面待实现；真实模型业务验收未执行。
+版本：2.0。日期：2026-09-11。状态：CU2-T0～T4 服务层已完成，B01～B05 真实模型验收全部通过（各两遍）；T5 原生页面待实现。
 
 **当前目标：用户问一个业务问题，AI 借助已有索引找到代码，沿调用与数据访问继续阅读，用解释、简图和源码引用讲清逻辑。** 不再以补齐 Java 类型系统或 Spring 静态分析器为前置条件。
 
@@ -13,7 +13,7 @@
 | [开发文档](development.md) | CU2 开发任务与登录闭环测试 |
 | [范围调整记录](scope-change-v2.md) | 旧 DEV 工作如何保留、哪些任务停止扩展 |
 
-实现交接：[CU2-T0 复用盘点](validation/cu2-t0-handoff.md)、[CU2-T1 只读工具](validation/cu2-t1-handoff.md)、[CU2-T2/T3 agent 闭环与业务答案](validation/cu2-t2-handoff.md)。
+实现交接：[CU2-T0 复用盘点](validation/cu2-t0-handoff.md)、[CU2-T1 只读工具](validation/cu2-t1-handoff.md)、[CU2-T2/T3 agent 闭环与业务答案](validation/cu2-t2-handoff.md)、[CU2-T3 真实模型验收](validation/cu2-t3-live-acceptance.md)。
 
 ## 本轮确认的方向
 
@@ -30,4 +30,4 @@
 
 [旧版文档归档](archive/v1/README.md)及 [DEV-05 进度记录](validation/dev05-progress.md)保留历史。其“下一步继续语句提取/框架语义”等排期已被本版替代。旧 DEV 编号不重命名，当前工作统一使用 CU2-T* 编号。
 
-后续 agent 先读根 [AGENTS.md](../../AGENTS.md)和上述 CU2 交接，先补 **B01～B03 真实模型业务验收**，再推进 **CU2-T5：简约原生页面**；不要先完成旧 DEV-05/06 的全部静态语义任务。T4 交接见 [validation/cu2-t4-handoff.md](validation/cu2-t4-handoff.md)。
+后续 agent 先读根 [AGENTS.md](../../AGENTS.md)和上述 CU2 交接，直接推进 **CU2-T5：简约原生页面**（T4 交接见 [validation/cu2-t4-handoff.md](validation/cu2-t4-handoff.md)）；不要先完成旧 DEV-05/06 的全部静态语义任务。真实模型验收已完成 B01～B05（各两遍，B04/B05 边界样例含检索缺口与动态/外部边界的诚实标注），结论见 [cu2-t3-live-acceptance.md](validation/cu2-t3-live-acceptance.md)。

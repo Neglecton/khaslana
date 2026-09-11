@@ -1,0 +1,580 @@
+{
+  "case": "B02",
+  "run": 2,
+  "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+  "model": "gpt-5.6-luna",
+  "elapsed_ms": 159769,
+  "analysis": {
+    "version": 1,
+    "context": {
+      "project_key": "cb0da88b",
+      "request_id": "live-B02-2",
+      "index_generation": 1,
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "scope": "src/main/java/com/example/shop/web/LoginController.java、service/AuthService.java、mapper/UserMapper.java、mapper/LoginLogMapper.java、resources/mapper/UserMapper.xml、resources/mapper/LoginLogMapper.xml、session/SessionService.java、entity/UserAccount.java、exception/AuthFailedException.java"
+    },
+    "summary": "登录入口是 POST /api/login，经过 AuthService 校验用户、账号状态和密码，按结果更新 app_user、写入 login_log，成功后在 Redis 创建 2 小时会话并返回 sessionId。",
+    "coverage_note": "已检索登录控制器、认证服务、Mapper 接口与 XML、会话服务、实体和异常类；调用索引未发现 AuthService.login 的入边，但控制器源码明确展示了直接调用。",
+    "findings": [
+      {
+        "text": "HTTP 入口是 LoginController 的 POST /api/login，接收 LoginRequest，并调用 authService.login(request.username(), request.password())；成功时返回 sessionId。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:01606066"
+        ]
+      },
+      {
+        "text": "AuthService.login 首先调用 UserMapper.findByUsername 按用户名查询用户；用户不存在时写入 USER_NOT_FOUND 登录日志并抛出 AuthFailedException，错误信息为“用户名或密码错误”。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "text": "查询到用户后要求 user.status() == 1；账号停用时写入 DISABLED 登录日志并抛出 AuthFailedException，错误信息为“账号已停用”。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:15d22b05"
+        ]
+      },
+      {
+        "text": "密码校验使用 PasswordEncoder.matches(rawPassword, user.passwordHash())；密码错误时增加 failed_attempts，写入 BAD_PASSWORD 登录日志并抛出 AuthFailedException。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "text": "密码校验成功后更新 last_login_at 并将 failed_attempts 重置为 0，写入 SUCCESS 登录日志，然后创建会话并返回 sessionId。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "text": "SessionService 使用 UUID 生成 sessionId，并向 Redis 写入 session:<sessionId> 到用户 ID 的映射，过期时间为 2 小时。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:67ccb3b7"
+        ]
+      },
+      {
+        "text": "已读取源码未确认 AuthFailedException 如何映射为 HTTP 状态码，也未确认数据库操作是否有事务边界。",
+        "state": "unknown",
+        "condition": null,
+        "source_ids": [
+          "sr1:15d22b05",
+          "sr1:24ed5bea"
+        ]
+      }
+    ],
+    "callers": [
+      {
+        "name": "LoginController.login",
+        "relative_path": "src/main/java/com/example/shop/web/LoginController.java",
+        "detail": "POST /api/login 请求处理方法直接调用 AuthService.login。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:01606066"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "UserMapper.findByUsername",
+        "relative_path": "src/main/java/com/example/shop/mapper/UserMapper.java",
+        "detail": "按 username 查询用户账号信息。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:2c1882f5",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "name": "PasswordEncoder.matches",
+        "relative_path": "src/main/java/com/example/shop/service/AuthService.java",
+        "detail": "比较原始密码和数据库返回的密码哈希。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "name": "UserMapper.incrementFailedAttempts",
+        "relative_path": "src/main/java/com/example/shop/mapper/UserMapper.java",
+        "detail": "密码错误时按用户 id 增加失败次数。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:2c1882f5",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "name": "UserMapper.markLoginSuccess",
+        "relative_path": "src/main/java/com/example/shop/mapper/UserMapper.java",
+        "detail": "密码正确时更新最后登录时间并重置失败次数。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:2c1882f5",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "name": "LoginLogMapper.insertLog",
+        "relative_path": "src/main/java/com/example/shop/mapper/LoginLogMapper.java",
+        "detail": "记录 USER_NOT_FOUND、DISABLED、BAD_PASSWORD 或 SUCCESS 登录结果。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:3aba8d18",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "name": "SessionService.createSession",
+        "relative_path": "src/main/java/com/example/shop/session/SessionService.java",
+        "detail": "登录成功后在 Redis 创建会话并返回 sessionId。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:67ccb3b7"
+        ]
+      },
+      {
+        "name": "AuthFailedException",
+        "relative_path": "src/main/java/com/example/shop/exception/AuthFailedException.java",
+        "detail": "用户不存在、账号停用或密码错误时抛出。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:15d22b05"
+        ]
+      }
+    ],
+    "data_accesses": [
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "read"
+        ],
+        "conditions": [
+          "每次登录开始时按 username 查询"
+        ],
+        "access_method": "SELECT id, username, password_hash, status FROM app_user WHERE username = #{username}",
+        "state": "observed",
+        "source_ids": [
+          "sr1:7b62df35",
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "update"
+        ],
+        "conditions": [
+          "用户存在但密码校验失败时"
+        ],
+        "access_method": "UPDATE app_user SET failed_attempts = failed_attempts + 1 WHERE id = #{id}",
+        "state": "observed",
+        "source_ids": [
+          "sr1:7b62df35",
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "update"
+        ],
+        "conditions": [
+          "用户存在、账号启用且密码校验成功时"
+        ],
+        "access_method": "UPDATE app_user SET last_login_at = NOW(), failed_attempts = 0 WHERE id = #{id}",
+        "state": "observed",
+        "source_ids": [
+          "sr1:7b62df35",
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "object": "login_log",
+        "category": "db_object",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "用户不存在时 reason = USER_NOT_FOUND",
+          "账号停用时 reason = DISABLED",
+          "密码错误时 reason = BAD_PASSWORD",
+          "登录成功时 reason = SUCCESS"
+        ],
+        "access_method": "INSERT INTO login_log (username, reason, created_at) VALUES (#{username}, #{reason}, NOW())",
+        "state": "observed",
+        "source_ids": [
+          "sr1:4164f28b",
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "object": "Redis key session:<sessionId>",
+        "category": "cache",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "用户存在、账号启用且密码校验成功后"
+        ],
+        "access_method": "StringRedisTemplate.opsForValue().set(\"session:\" + sessionId, String.valueOf(userId), Duration.ofHours(2))",
+        "state": "observed",
+        "source_ids": [
+          "sr1:67ccb3b7"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "s1",
+        "title": "接收登录请求",
+        "detail": "POST /api/login 接收用户名和密码。",
+        "source_ids": [
+          "sr1:01606066"
+        ]
+      },
+      {
+        "id": "s2",
+        "title": "查询用户",
+        "detail": "按 username 查询 app_user 的用户信息。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "id": "s3",
+        "title": "处理用户不存在",
+        "detail": "写入 USER_NOT_FOUND 日志并抛出认证失败异常。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "id": "s4",
+        "title": "校验账号状态",
+        "detail": "要求 status == 1。",
+        "source_ids": [
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "id": "s5",
+        "title": "处理停用账号",
+        "detail": "写入 DISABLED 日志并抛出认证失败异常。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "id": "s6",
+        "title": "校验密码",
+        "detail": "使用 PasswordEncoder.matches 比较原始密码和密码哈希。",
+        "source_ids": [
+          "sr1:24ed5bea"
+        ]
+      },
+      {
+        "id": "s7",
+        "title": "处理密码错误",
+        "detail": "更新 failed_attempts，写入 BAD_PASSWORD 日志并抛出认证失败异常。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "id": "s8",
+        "title": "更新成功状态",
+        "detail": "更新 last_login_at 并将 failed_attempts 清零。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:7b62df35"
+        ]
+      },
+      {
+        "id": "s9",
+        "title": "记录成功日志",
+        "detail": "向 login_log 写入 SUCCESS。",
+        "source_ids": [
+          "sr1:24ed5bea",
+          "sr1:4164f28b"
+        ]
+      },
+      {
+        "id": "s10",
+        "title": "创建会话并返回",
+        "detail": "生成 UUID，在 Redis 保存 2 小时后返回 sessionId。",
+        "source_ids": [
+          "sr1:67ccb3b7",
+          "sr1:01606066"
+        ]
+      }
+    ],
+    "links": [
+      {
+        "from": "s1",
+        "to": "s2",
+        "kind": "call",
+        "label": null
+      },
+      {
+        "from": "s2",
+        "to": "s3",
+        "kind": "branch",
+        "label": "用户不存在"
+      },
+      {
+        "from": "s2",
+        "to": "s4",
+        "kind": "sequence_hint",
+        "label": "用户存在"
+      },
+      {
+        "from": "s4",
+        "to": "s5",
+        "kind": "branch",
+        "label": "status != 1"
+      },
+      {
+        "from": "s4",
+        "to": "s6",
+        "kind": "sequence_hint",
+        "label": "status == 1"
+      },
+      {
+        "from": "s6",
+        "to": "s7",
+        "kind": "branch",
+        "label": "密码不匹配"
+      },
+      {
+        "from": "s6",
+        "to": "s8",
+        "kind": "sequence_hint",
+        "label": "密码匹配"
+      },
+      {
+        "from": "s8",
+        "to": "s9",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "s9",
+        "to": "s10",
+        "kind": "sequence_hint",
+        "label": null
+      }
+    ],
+    "unknowns": [
+      "未确认 AuthFailedException 到 HTTP 状态码和响应体的映射。",
+      "未确认数据库更新和登录日志写入是否处于同一事务。",
+      "未确认其他模块是否间接调用 AuthService.login。",
+      "未确认 session:<sessionId> 在后续请求中的读取和校验逻辑。"
+    ],
+    "completion": "complete"
+  },
+  "steps": [
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree /",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_LbOyoDKPk8QINYBxLaY4VryL\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src\",\"kind\":\"directory\"},{\"relative_path\":\"src/main\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/resources/mapper\",\"kind\":\"di"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_EEg9oIvpUXJa8PzBooIkniEh\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/shop/web/LoginController.java\",\"start_line\":19},{\"candidate_id\":\"sc1:2\",\"name\":\"LoginController\",\"label\":\"Metho"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_w4X8nMXIsImNjs1ATkPDyoCR\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"line_number\":14,\"line_text\":\"    private final LoginLogMapper loginLogMapper;\"},{\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"line_number\":20,\"line_text\":\"            LoginLogMapper loginLogMapper,\"},{\"relati"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code 登录",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_LBChsbon57CgHGtO3MmKMYpI\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:1",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_UN7YO7CaCLC591o61jLs8SIK\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.web.LoginController.java.LoginController.login\",\"relative_path\":\"src/main/java/com/example/shop/web/LoginController.java\",\"start_line\":19,\"end_line\":23,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\"sr1:9db88129\",\"s"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:13",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_INNswp3MMOMsNMsJeR66t9uk\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:13\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.service.AuthService.java.AuthService.login\",\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"start_line\":29,\"end_line\":47,\"callers\":[],\"callees\":[{\"name\":\"AuthFailedException\",\"qualified_nam"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:8",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_bg5GsZGIiKMgbRsuay6SKUeQ\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:8\",\"name\":\"insertLog\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.mapper.LoginLogMapper.java.LoginLogMapper.insertLog\",\"relative_path\":\"src/main/java/com/example/shop/mapper/LoginLogMapper.java\",\"start_line\":8,\"end_line\":8,\"callers\":[{\"name\":\"login\",\"qualified_name\":\"b02.src.mai"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:14",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_tcfQF6CK7Y5pa0otXwJMdse8\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:14\",\"name\":\"markLoginSuccess\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.mapper.UserMapper.java.UserMapper.markLoginSuccess\",\"relative_path\":\"src/main/java/com/example/shop/mapper/UserMapper.java\",\"start_line\":13,\"end_line\":13,\"callers\":[{\"name\":\"login\",\"qualified_name\":\"b02.sr"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/web/LoginController.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_How7r7HidoiniydSPJtCAcyl\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:01606066\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/web/LoginController.java\",\"content_sha256\":\"7a47ecb33cd0c81b6f7ba49a796c0f4e0d8b3142203874dea65563321508799b\",\"start_byte\":0,\"end_byte\":829,\"start_line\":1,\"end_line\":24},\"lines\":[{\"line_number\":1,"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/service/AuthService.java:1-120",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_kzUKvqC3JHmk0DOngG6sUlal\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:24ed5bea\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"content_sha256\":\"c4d3b1da38ae287b7046d0ff05a03c8e2e63a203f52b6ff9b5e61c296becf18c\",\"start_byte\":0,\"end_byte\":1905,\"start_line\":1,\"end_line\":48},\"lines\":[{\"line_number\":1"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/mapper/UserMapper.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_YwSapC0LPKrzBT2rhr3Ce0ls\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:2c1882f5\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/mapper/UserMapper.java\",\"content_sha256\":\"cce0bdc4a70ba88b251f3efeb777f6f79c29674e4f5392845687ebb5597db772\",\"start_byte\":0,\"end_byte\":380,\"start_line\":1,\"end_line\":14},\"lines\":[{\"line_number\":1,\"t"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/mapper/LoginLogMapper.java:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_kFoKfe99dY1orVhnSg6gkl6k\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:3aba8d18\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/mapper/LoginLogMapper.java\",\"content_sha256\":\"60ce2e9ea5a6bc0c46b8548ed5d3b1da55430bcfbf7849fa07ec138bcc90b02b\",\"start_byte\":0,\"end_byte\":254,\"start_line\":1,\"end_line\":9},\"lines\":[{\"line_number\":1"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/resources/mapper/UserMapper.xml:1-120",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_9cyhDsTNNfqFDEyYMCkIgB0z\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:7b62df35\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/resources/mapper/UserMapper.xml\",\"content_sha256\":\"ef0e49f46b0a5e8e53f7a032fc5307086e89a146a4446cc36f1538eaf32c362e\",\"start_byte\":0,\"end_byte\":736,\"start_line\":1,\"end_line\":22},\"lines\":[{\"line_number\":1,\"text\":\"<?xml v"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/resources/mapper/LoginLogMapper.xml:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Dg4srtkIFy9EEHF794jQ6V10\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:4164f28b\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/resources/mapper/LoginLogMapper.xml\",\"content_sha256\":\"a5118aa5011320ea66eb329ed4443e4937c1ad15317e479f2a35732a3d9a6c34\",\"start_byte\":0,\"end_byte\":374,\"start_line\":1,\"end_line\":9},\"lines\":[{\"line_number\":1,\"text\":\"<?xm"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols createSession",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_PWnmISTHoE1YDsGhY8hqqRMQ\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:16\",\"name\":\"createSession\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.session.SessionService.java.SessionService.createSession\",\"relative_path\":\"src/main/java/com/example/shop/session/SessionService.java\",\"start_line\":19}],\"matched_before_scope_filter\":1},\"trunca"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols AuthService",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_pm84FYOPuLbvu7aOsC5PNd1L\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:17\",\"name\":\"AuthService\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.service.AuthService.java.AuthService.AuthService\",\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"start_line\":18},{\"candidate_id\":\"sc1:18\",\"name\":\"AuthService\",\"label\":"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code SessionService",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_MAujh4NHSglVrDaTNIhtLJvf\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"line_number\":7,\"line_text\":\"import com.example.shop.session.SessionService;\"},{\"relative_path\":\"src/main/java/com/example/shop/service/AuthService.java\",\"line_number\":16,\"line_text\":\"    private final SessionService sessionService;\"},{\"re"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code AuthFailedException",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_T746y7rTulw5qNULDnQd2ZCq\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/main/java/com/example/shop/exception/AuthFailedException.java\",\"line_number\":3,\"line_text\":\"public class AuthFailedException extends RuntimeException {\"},{\"relative_path\":\"src/main/java/com/example/shop/exception/AuthFailedException.java\",\"line_number\":4,\"line_text\":\"    public AuthFailedExc"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree src/main/java/com/example/shop",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_zL7eOGJ20ZP6G8W2hxwKs0nF\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src/main/java/com/example/shop/entity\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com/example/shop/entity/UserAccount.java\",\"kind\":\"file\"},{\"relative_path\":\"src/main/java/com/example/shop/exception\",\"kind\":\"directory\"},{\"relative_path\":\"src/main/java/com/example/shop/exception/AuthFaile"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:16",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_tX4jZKyVD3p0KCx9TbOxoWVb\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:16\",\"name\":\"createSession\",\"label\":\"Method\",\"qualified_name\":\"b02.src.main.java.com.example.shop.session.SessionService.java.SessionService.createSession\",\"relative_path\":\"src/main/java/com/example/shop/session/SessionService.java\",\"start_line\":19,\"end_line\":23,\"callers\":[{\"name\":\"login\",\"qualified_name\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/session/SessionService.java:1-100",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_Htdn37rH43nb5bereaiMaO3N\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:67ccb3b7\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/session/SessionService.java\",\"content_sha256\":\"fd1946ba44a1764209babe87be6223e4e7f2ea7dcedec09b3ca498dda0126ee5\",\"start_byte\":0,\"end_byte\":746,\"start_line\":1,\"end_line\":24},\"lines\":[{\"line_number\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:13 (inbound)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_8ylNFY9mnstO30vY6Y0znaqT\",\"index_generation\":1,\"data\":{\"function\":\"login\",\"direction\":\"inbound\",\"callers\":[],\"callees\":[],\"coverage_note\":\"这是当前索引中的调用线索；无边不表示不存在调用，关键关系请继续读取调用位置或搜索源码。\"},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/exception/AuthFailedException…:1-50",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_d1mu8NHK0PsgOQdNOPd9QDWn\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:15d22b05\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/exception/AuthFailedException.java\",\"content_sha256\":\"95914fd541206d55217147c6d61997abc196069ded4f55c6d4bfd50c8132020c\",\"start_byte\":0,\"end_byte\":177,\"start_line\":1,\"end_line\":7},\"lines\":[{\"line_n"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/main/java/com/example/shop/entity/UserAccount.java:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_gVbCMWpTQpvi5KUvDRve9r1u\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:5f3f4d38\",\"source_ref\":{\"project_key\":\"cb0da88b\",\"generation\":1,\"relative_path\":\"src/main/java/com/example/shop/entity/UserAccount.java\",\"content_sha256\":\"76495bb6299a9a1ecd57df594095839e4f88386237cdaff4421a3d4a331f1f0f\",\"start_byte\":0,\"end_byte\":121,\"start_line\":1,\"end_line\":3},\"lines\":[{\"line_number\":1,\"t"
+    },
+    {
+      "kind": "message",
+      "text": "{\n  \"version\": 1,\n  \"summary\": \"登录入口是 POST /api/login，经过 AuthService 校验用户状态和密码，按结果写入用户登录状态/失败次数与登录日志，成功后在 Redis 创建 2 小时会话并返回 sessionId。\",\n  \"coverage_note\": \"已检索 web、service、mapper、resources/mapper、session、entity、exception 目录及 login/AuthService/SessionService 相关源码；调用索引对登录方法未发现入边，但控制器源码明确展示了直接调用关系。\",\n  \"context\": {\n    \"question\": \"登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？\",\n    \"scope\": \"src/main/java/com/example/shop/web/LoginController.java、service/AuthService.java、mapper/UserMapper.java、mapper/LoginLogMapper.java、resources/mapper/UserMapper.xml、resources/mapper/LoginLogMapper.xml、session/SessionService.java、entity/UserAccount.java、exception/AuthFailedException.java；搜索词 login、登录、AuthService、SessionService、AuthFailedException\"\n  },\n  \"findings\": [\n    {\n      \"text\": \"HTTP 入口为 LoginController 的 POST /api/login，接收 LoginRequest，请求中的 username 和 password 被传给 AuthService.login；成功时以 HTTP 200 返回 sessionId。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:01606066\"\n      ]\n    },\n    {\n      \"text\": \"AuthService.login 首先按 username 查询用户；查询不到时写入 USER_NOT_FOUND 登录日志，然后抛出 AuthFailedException，提示“用户名或密码错误”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"text\": \"查询到用户后要求 user.status() == 1；账号停用时写入 DISABLED 登录日志并抛出 AuthFailedException，提示“账号已停用”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:5f3f4d38\"\n      ]\n    },\n    {\n      \"text\": \"密码校验使用 PasswordEncoder.matches(rawPassword, user.passwordHash())；密码错误时更新用户 failed_attempts 加 1，写入 BAD_PASSWORD 登录日志，然后抛出 AuthFailedException。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\",\n        \"sr1:15d22b05\"\n      ]\n    },\n    {\n      \"text\": \"密码校验成功后更新用户 last_login_at = NOW() 并将 failed_attempts 重置为 0，写入 SUCCESS 登录日志，随后创建并返回会话。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"text\": \"会话由 SessionService 生成 UUID 作为 sessionId，并向 Redis 写入 key 为 session:<sessionId>、value 为用户 ID 的字符串，TTL 为 2 小时。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:67ccb3b7\"\n      ]\n    },\n    {\n      \"text\": \"当前读取到的登录实现未显示事务边界、AuthFailedException 的统一 HTTP 错误映射，也未显示后续如何消费 sessionId。\",\n      \"state\": {\n        \"type\": \"unknown\"\n      },\n      \"source_ids\": [\n        \"sr1:01606066\",\n        \"sr1:24ed5bea\",\n        \"sr1:67ccb3b7\"\n      ]\n    }\n  ],\n  \"callers\": [\n    {\n      \"name\": \"LoginController.login\",\n      \"relative_path\": \"src/main/java/com/example/shop/web/LoginController.java\",\n      \"detail\": \"在 POST /api/login 请求处理中直接调用 authService.login(request.username(), request.password())。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:01606066\"\n      ]\n    }\n  ],\n  \"callees\": [\n    {\n      \"name\": \"UserMapper.findByUsername\",\n      \"relative_path\": \"src/main/java/com/example/shop/mapper/UserMapper.java\",\n      \"detail\": \"按 username 查询用户账号信息。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:2c1882f5\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"name\": \"PasswordEncoder.matches\",\n      \"relative_path\": \"src/main/java/com/example/shop/service/AuthService.java\",\n      \"detail\": \"比较原始密码与数据库返回的 passwordHash。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"name\": \"UserMapper.incrementFailedAttempts\",\n      \"relative_path\": \"src/main/java/com/example/shop/mapper/UserMapper.java\",\n      \"detail\": \"密码错误分支调用，按用户 id 将失败次数加 1。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:2c1882f5\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"name\": \"UserMapper.markLoginSuccess\",\n      \"relative_path\": \"src/main/java/com/example/shop/mapper/UserMapper.java\",\n      \"detail\": \"密码正确分支调用，更新最后登录时间并重置失败次数。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:2c1882f5\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"name\": \"LoginLogMapper.insertLog\",\n      \"relative_path\": \"src/main/java/com/example/shop/mapper/LoginLogMapper.java\",\n      \"detail\": \"用户不存在、账号停用、密码错误和登录成功分支都会写入对应 reason 的登录日志。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:3aba8d18\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"name\": \"SessionService.createSession\",\n      \"relative_path\": \"src/main/java/com/example/shop/session/SessionService.java\",\n      \"detail\": \"登录成功后创建 Redis 会话并返回 sessionId。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:67ccb3b7\"\n      ]\n    },\n    {\n      \"name\": \"AuthFailedException\",\n      \"relative_path\": \"src/main/java/com/example/shop/exception/AuthFailedException.java\",\n      \"detail\": \"用户不存在、账号停用或密码错误时抛出运行时认证失败异常。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:15d22b05\"\n      ]\n    }\n  ],\n  \"data_accesses\": [\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"read\"\n      ],\n      \"conditions\": [\n        \"每次登录开始时，按 username = #{username} 查询\"\n      ],\n      \"access_method\": \"UserMapper.findByUsername；SELECT id, username, password_hash, status FROM app_user WHERE username = #{username}\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:7b62df35\",\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"update\"\n      ],\n      \"conditions\": [\n        \"用户存在但密码校验失败时\"\n      ],\n      \"access_method\": \"UserMapper.incrementFailedAttempts；UPDATE app_user SET failed_attempts = failed_attempts + 1 WHERE id = #{id}\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:7b62df35\",\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"update\"\n      ],\n      \"conditions\": [\n        \"用户存在、账号启用且密码校验成功时\"\n      ],\n      \"access_method\": \"UserMapper.markLoginSuccess；UPDATE app_user SET last_login_at = NOW(), failed_attempts = 0 WHERE id = #{id}\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:7b62df35\",\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"object\": \"login_log\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"用户不存在时 reason = USER_NOT_FOUND\",\n        \"账号停用时 reason = DISABLED\",\n        \"密码错误时 reason = BAD_PASSWORD\",\n        \"登录成功时 reason = SUCCESS\"\n      ],\n      \"access_method\": \"LoginLogMapper.insertLog；INSERT INTO login_log (username, reason, created_at) VALUES (#{username}, #{reason}, NOW())\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4164f28b\",\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"object\": \"Redis key session:<sessionId>\",\n      \"category\": \"cache\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"数据库用户存在、账号启用且密码校验成功后\"\n      ],\n      \"access_method\": \"StringRedisTemplate.opsForValue().set(\\\"session:\\\" + sessionId, String.valueOf(userId), Duration.ofHours(2))\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:67ccb3b7\",\n        \"sr1:24ed5bea\"\n      ]\n    }\n  ],\n  \"steps\": [\n    {\n      \"id\": \"s1\",\n      \"title\": \"接收登录请求\",\n      \"detail\": \"POST /api/login 接收 username 和 password。\",\n      \"source_ids\": [\n        \"sr1:01606066\"\n      ]\n    },\n    {\n      \"id\": \"s2\",\n      \"title\": \"查询用户\",\n      \"detail\": \"按 username 从 app_user 查询 id、用户名、密码哈希和状态。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"id\": \"s3\",\n      \"title\": \"处理用户不存在\",\n      \"detail\": \"写 USER_NOT_FOUND 日志并抛出认证失败异常。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"id\": \"s4\",\n      \"title\": \"校验账号状态\",\n      \"detail\": \"要求 status == 1。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"id\": \"s5\",\n      \"title\": \"处理停用账号\",\n      \"detail\": \"写 DISABLED 日志并抛出认证失败异常。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"id\": \"s6\",\n      \"title\": \"校验密码\",\n      \"detail\": \"使用 PasswordEncoder.matches 比较原始密码和 passwordHash。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\"\n      ]\n    },\n    {\n      \"id\": \"s7\",\n      \"title\": \"处理密码错误\",\n      \"detail\": \"更新 failed_attempts，写 BAD_PASSWORD 日志并抛出认证失败异常。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"id\": \"s8\",\n      \"title\": \"更新登录成功状态\",\n      \"detail\": \"更新 last_login_at 并将 failed_attempts 清零。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:7b62df35\"\n      ]\n    },\n    {\n      \"id\": \"s9\",\n      \"title\": \"记录成功日志\",\n      \"detail\": \"向 login_log 写入 SUCCESS。\",\n      \"source_ids\": [\n        \"sr1:24ed5bea\",\n        \"sr1:4164f28b\"\n      ]\n    },\n    {\n      \"id\": \"s10\",\n      \"title\": \"创建会话并返回\",\n      \"detail\": \"生成 UUID，在 Redis 保存 2 小时后返回 sessionId。\",\n      \"source_ids\": [\n        \"sr1:67ccb3b7\",\n        \"sr1:01606066\"\n      ]\n    }\n  ],\n  \"links\": [\n    {\n      \"from\": \"s1\",\n      \"to\": \"s2\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s3\",\n      \"kind\": \"branch\",\n      \"label\": \"用户不存在\"\n    },\n    {\n      \"from\": \"s2\",\n      \"to\": \"s4\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"用户存在\"\n    },\n    {\n      \"from\": \"s3\",\n      \"to\": \"s1\",\n      \"kind\": \"branch\",\n      \"label\": \"认证失败返回异常；具体 HTTP 映射未查证\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s5\",\n      \"kind\": \"branch\",\n      \"label\": \"status != 1\"\n    },\n    {\n      \"from\": \"s4\",\n      \"to\": \"s6\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"status == 1\"\n    },\n    {\n      \"from\": \"s5\",\n      \"to\": \"s1\",\n      \"kind\": \"branch\",\n      \"label\": \"认证失败返回异常；具体 HTTP 映射未查证\"\n    },\n    {\n      \"from\": \"s6\",\n      \"to\": \"s7\",\n      \"kind\": \"branch\",\n      \"label\": \"密码不匹配\"\n    },\n    {\n      \"from\": \"s6\",\n      \"to\": \"s8\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"密码匹配\"\n    },\n    {\n      \"from\": \"s7\",\n      \"to\": \"s1\",\n      \"kind\": \"branch\",\n      \"label\": \"认证失败返回异常；具体 HTTP 映射未查证\"\n    },\n    {\n      \"from\": \"s8\",\n      \"to\": \"s9\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s9\",\n      \"to\": \"s10\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"s10\",\n      \"to\": \"s1\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"HTTP 200 返回 sessionId\"\n    }\n  ],\n  \"unknowns\": [\n    \"未在已读取源码中确认 AuthFailedException 到 HTTP 状态码和响应体的统一异常处理器。\",\n    \"未确认数据库操作是否处于同一事务，以及成功状态更新、登录日志写入和 Redis 写入失败时的回滚/补偿行为。\",\n    \"未在本次范围内确认其他模块是否间接调用 AuthService.login；trace_calls 未返回入边，但索引无边不等于源码中不存在调用。\",\n    \"未查证 session:<sessionId> 后续被哪些请求读取或校验。\"\n  ],\n  \"completion\": \"complete\"\n}"
+    }
+  ]
+}

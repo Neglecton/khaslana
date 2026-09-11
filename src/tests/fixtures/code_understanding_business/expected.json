@@ -122,6 +122,98 @@
         "countLocked 的 JPQL 未被登录流程调用，不应算作登录的数据访问",
         "不能执行 JPQL 或声明查询结果"
       ]
+    },
+    {
+      "id": "B04",
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "allowed_entries": [
+        "com.example.report.web.LoginController#login(LoginRequest)",
+        "com.example.report.legacy.LegacyJspLogin#handleLogin(String,String)",
+        "com.example.report.plugin.PluginLoginBridge#signIn(String,String,Properties)"
+      ],
+      "core_method": "com.example.report.service.AuthService#authenticate(String,String)",
+      "direct_callers": [
+        "com.example.report.web.LoginController#login(LoginRequest)（普通调用，索引可解析）",
+        "com.example.report.legacy.LegacyJspLogin#handleLogin(String,String)（反射调用，索引无调用边，只能靠 search_code / read_file 文本搜索发现）",
+        "com.example.report.plugin.PluginLoginBridge#signIn(String,String,Properties)（反射调用且配置开关 report.auth.plugin.enabled=true 才生效）"
+      ],
+      "data_accesses": [
+        {
+          "object": "report_user",
+          "operations": ["read"],
+          "conditions": ["UserMapper.findByUsername 按用户名读取，含 status 字段但登录分支未使用 status 过滤"]
+        },
+        {
+          "object": "report_login_log",
+          "operations": ["insert"],
+          "conditions": ["USER_NOT_FOUND / BAD_PASSWORD / SUCCESS 三个分支都插入（LoginLogMapper.xml 的 insert）"]
+        }
+      ],
+      "branch_notes": [
+        "用户不存在：只记 USER_NOT_FOUND 日志，不读用户行后续操作",
+        "密码错误：只记 BAD_PASSWORD 日志（本样例不更新用户表的失败计数）",
+        "成功：记 SUCCESS 日志并返回 session-<id>（服务内构造，无独立会话存储）"
+      ],
+      "unknowns": [
+        "PasswordVerifier 代表样例内的校验边界，不推断真实哈希算法",
+        "LegacyJspLogin / PluginLoginBridge 经反射调用 AuthService，静态索引没有这两条调用边；答案需要说明检索方式与范围限制",
+        "插件入口仅在 report.auth.plugin.enabled=true 时生效，运行配置不可见"
+      ]
+    },
+    {
+      "id": "B05",
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "allowed_entries": ["com.example.portal.web.AuthController#authenticate(AuthRequest)"],
+      "core_method": "com.example.portal.service.AuthService#authenticate(String,String)",
+      "direct_callers": ["com.example.portal.web.AuthController#authenticate(AuthRequest)"],
+      "data_accesses": [
+        {
+          "object": "portal_user_${month}（按月分表，如 portal_user_202609）",
+          "operations": ["read"],
+          "conditions": ["findActive 按用户名+status=1 读取；物理表名由运行时月份拼接，源码无法确定唯一表名"],
+          "state_requirement": "物理表名必须标 unknown 或说明动态拼接，不得把 portal_user 当作已确认的物理表"
+        },
+        {
+          "object": "portal_login_event_${month}（按月分表）",
+          "operations": ["insert"],
+          "conditions": ["BAD_PASSWORD 与 SUCCESS 分支都插入；物理表名动态拼接"],
+          "state_requirement": "同上，物理表名未知"
+        },
+        {
+          "object": "sp_archive_inactive_users 存储过程",
+          "category": "db_object",
+          "operations": ["unknown"],
+          "conditions": ["archiveInactiveUsers 经 CALLABLE 调用存储过程；未被登录主流程调用，内部读写的表源码不可见"],
+          "state_requirement": "存储过程内部行为必须标 unknown，不得编造其读写的表"
+        },
+        {
+          "object": "MQ 消息（auth.login.succeeded / auth.login.failed 路由键）",
+          "category": "message",
+          "operations": ["insert", "unknown"],
+          "operations_note": "消息发送语义：成功与失败分支各发一条；如工具语义不含消息写则标 unknown",
+          "conditions": ["不是数据库表，不得混进表清单"]
+        },
+        {
+          "object": "SSO 认证中心",
+          "category": "external",
+          "operations": ["unknown"],
+          "conditions": ["sso: 前缀用户名走 SsoAuthPort.exchangeToken；接口无实现，外部内部行为未知"]
+        }
+      ],
+      "branch_notes": [
+        "sso: 前缀：走外部 SSO token 交换，不读本地用户表",
+        "用户不存在/停用：抛异常，不写登录事件、不发消息",
+        "密码错误：写 BAD_PASSWORD 登录事件 + 发失败消息",
+        "成功：写 SUCCESS 登录事件 + 发成功消息 + 返回 token-<id>",
+        "密码哈希经 CredentialChecker 接口计算；两个实现（local/legacy）按配置 portal.auth.mode 选择，源码无法确定实际用哪个"
+      ],
+      "unknowns": [
+        "portal_user_${month} / portal_login_event_${month} 的具体物理表名由运行时月份决定，未知",
+        "sp_archive_inactive_users 存储过程内部读写哪些表源码不可见，未知",
+        "CredentialChecker 两个实现（LocalCredentialChecker / LegacyCredentialChecker）哪个生效由配置决定，未知",
+        "SsoAuthPort 无实现类，SSO token 交换的内部行为未知",
+        "StatsMapper.countActiveLogins 是运营统计查询，不在登录主流程中；其 CTE active_users 与表别名 u/e 不是物理表，实际读的是分月表"
+      ]
     }
   ]
 }

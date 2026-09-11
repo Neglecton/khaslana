@@ -692,6 +692,14 @@ fn invalid_output_triggers_one_format_repair() {
     assert!(
         last.iter().any(|message| matches!(
             message,
+            AgentChatMessage::User(text)
+                if text.contains("合法 source_id 白名单") && text.contains("sr1:")
+        )),
+        "修复指令应明确列出本问合法来源"
+    );
+    assert!(
+        last.iter().any(|message| matches!(
+            message,
             AgentChatMessage::Assistant { content, .. } if content.contains("我读了 AuthService")
         )),
         "中间正文应回填为 assistant 消息"
