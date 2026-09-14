@@ -952,6 +952,36 @@ mod queries_tests {
     }
 
     #[test]
+    fn jls_t0_baseline_index_cannot_disambiguate_login_by_source_position() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/fixtures/java_semantic/maven-multi");
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("jls-t0-baseline.db");
+        match run_index(&fixture, &db_path, true, &mut no_cancel_options()).unwrap() {
+            RunOutcome::Completed(_) => {}
+            other => panic!("{other:?}"),
+        }
+        let stats = read_index_stats(&db_path)
+            .unwrap()
+            .expect("应有基础索引统计");
+        println!(
+            "JLS-T0 基础索引: files={}, symbols={}, nodes={}, edges={}, calls={}, duration_ms={}",
+            stats.files, stats.symbols, stats.nodes, stats.edges, stats.calls, stats.duration_ms
+        );
+
+        match trace_calls(&db_path, "login", TraceDirection::Both, 1, 100).unwrap() {
+            TraceOutcome::Ambiguous(candidates) => {
+                println!("JLS-T0 基础索引 login 候选数: {}", candidates.len());
+                assert!(
+                    candidates.len() >= 5,
+                    "同名和重载样例应暴露基础名称查询的歧义，实际: {candidates:?}"
+                );
+            }
+            other => panic!("基础索引不能按调用位置消歧 login，实际: {other:?}"),
+        }
+    }
+
+    #[test]
     fn trace_calls_multi_hop_risk_decays() {
         let (_tmp, db_path) = build_query_fixture();
         // 从 helper 向上游追踪两跳：main 在 hop2，风险应为 HIGH。

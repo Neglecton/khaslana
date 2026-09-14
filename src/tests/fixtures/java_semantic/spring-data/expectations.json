@@ -1,0 +1,24 @@
+{
+  "project": "spring-data",
+  "ready_symbol": "AuthService",
+  "queries": [
+    {
+      "id": "spring-mybatis-definition",
+      "operation": "definition",
+      "file": "src/main/java/com/example/spring/AuthService.java",
+      "anchor": "mapper.findByUsername(username)",
+      "symbol": "findByUsername",
+      "expect_files": ["src/main/java/com/example/spring/UserMapper.java"],
+      "expect_count": 1
+    },
+    {
+      "id": "spring-jpa-definition",
+      "operation": "definition",
+      "file": "src/main/java/com/example/spring/AuthService.java",
+      "anchor": "auditRepository.save",
+      "symbol": "save",
+      "expect_files": ["src/main/java/com/example/spring/LoginAuditRepository.java"],
+      "expect_count": 1
+    }
+  ]
+}

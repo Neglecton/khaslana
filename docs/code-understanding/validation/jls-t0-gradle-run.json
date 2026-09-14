@@ -1,0 +1,1262 @@
+{
+  "schema": 1,
+  "timestamp": "2026-09-11T22:51:10+0800",
+  "platform": {
+    "os": "nt",
+    "sys_platform": "win32",
+    "architecture": "AMD64"
+  },
+  "paths": {
+    "jdk": "D:\\khaslana\\jdk-21.0.12.1+1",
+    "jdt": "D:\\khaslana\\jdt-language-server",
+    "project": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-gradle-fullmem",
+    "workspace": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-gradle-fullmem"
+  },
+  "artifacts": {
+    "launcher": "org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "launcher_sha256": "9b3b1da60813ac5fa09dd5c198f1884be7076d0a5daec54faa3f351a787e34b7",
+    "jdt_archive": {
+      "path": "D:\\khaslana\\jdt-language-server-1.61.0-202609031315 (1).tar.gz",
+      "bytes": 51037522,
+      "sha256": "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
+    },
+    "jdk_archive": {
+      "path": "D:\\khaslana\\OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "bytes": 205073461,
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+    }
+  },
+  "command": [
+    "D:\\khaslana\\jdk-21.0.12.1+1\\bin\\java.exe",
+    "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+    "-Dosgi.bundles.defaultStartLevel=4",
+    "-Declipse.product=org.eclipse.jdt.ls.core.product",
+    "-Dlog.level=ALL",
+    "-Xmx1G",
+    "--add-modules=ALL-SYSTEM",
+    "--add-opens",
+    "java.base/java.util=ALL-UNNAMED",
+    "--add-opens",
+    "java.base/java.lang=ALL-UNNAMED",
+    "-jar",
+    "D:\\khaslana\\jdt-language-server\\plugins\\org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "-configuration",
+    "D:\\khaslana\\jdt-language-server\\config_win",
+    "-data",
+    "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-gradle-fullmem"
+  ],
+  "project_before": {
+    "build.gradle": {
+      "bytes": 134,
+      "sha256": "25a3e619d6b5f7ba8dc79af80d59a912dc1e2dc0aa9a5945485453d0c6cebf3d"
+    },
+    "expectations.json": {
+      "bytes": 800,
+      "sha256": "1b2b08a75545710e621b3b633fa74de48b29ab970627c299a0102eef9f50c836"
+    },
+    "settings.gradle": {
+      "bytes": 40,
+      "sha256": "e89942d5c47501954f947787c181699b4aebf08502d2937e12dbda46ed97e45f"
+    },
+    "src/main/java/com/example/gradle/GradleApp.java": {
+      "bytes": 206,
+      "sha256": "e54316921e35bb3a0ee966c5e7713961c08c3f4f2ea8dc04e8f4faac65d597cc"
+    },
+    "src/main/java/com/example/gradle/GradleGreeter.java": {
+      "bytes": 143,
+      "sha256": "da1b0995be282b88138e661942b7b518cc5ea7692cc2c015a93cbe66a99bd7cb"
+    }
+  },
+  "workspace_before": {
+    "files": 0,
+    "bytes": 0
+  },
+  "initialize_ms": 2459.406,
+  "server_capabilities": {
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 2,
+      "save": {
+        "includeText": true
+      }
+    },
+    "hoverProvider": true,
+    "completionProvider": {
+      "resolveProvider": true,
+      "triggerCharacters": [
+        ".",
+        "@",
+        "#",
+        "*",
+        " "
+      ]
+    },
+    "signatureHelpProvider": {
+      "triggerCharacters": [
+        "(",
+        ","
+      ]
+    },
+    "definitionProvider": true,
+    "typeDefinitionProvider": true,
+    "implementationProvider": true,
+    "referencesProvider": true,
+    "documentHighlightProvider": true,
+    "documentSymbolProvider": true,
+    "workspaceSymbolProvider": true,
+    "codeActionProvider": {
+      "codeActionKinds": [],
+      "resolveProvider": false
+    },
+    "codeLensProvider": {
+      "resolveProvider": true
+    },
+    "documentFormattingProvider": true,
+    "documentRangeFormattingProvider": true,
+    "documentOnTypeFormattingProvider": {
+      "firstTriggerCharacter": ";",
+      "moreTriggerCharacter": [
+        "\n",
+        "}"
+      ]
+    },
+    "renameProvider": {
+      "prepareProvider": true
+    },
+    "foldingRangeProvider": true,
+    "declarationProvider": true,
+    "executeCommandProvider": {
+      "commands": [
+        "java.project.import",
+        "java.project.changeImportedProjects",
+        "java.navigate.openTypeHierarchy",
+        "java.project.resolveStackTraceLocation",
+        "java.edit.handlePasteEvent",
+        "java.edit.stringFormatting",
+        "java.project.getSettings",
+        "java.project.resolveWorkspaceSymbol",
+        "java.project.upgradeGradle",
+        "java.project.createModuleInfo",
+        "java.vm.getAllInstalls",
+        "java.edit.organizeImports",
+        "java.project.refreshDiagnostics",
+        "java.getFullyQualifiedName",
+        "java.project.removeFromSourcePath",
+        "java.project.listSourcePaths",
+        "java.project.updateSettings",
+        "java.project.getAll",
+        "java.reloadBundles",
+        "java.project.isTestFile",
+        "java.project.resolveText",
+        "java.project.getClasspaths",
+        "java.navigate.resolveTypeHierarchy",
+        "java.getTroubleshootingInfo",
+        "java.edit.smartSemicolonDetection",
+        "java.project.updateSourceAttachment",
+        "java.project.updateClassPaths",
+        "java.decompile",
+        "java.protobuf.generateSources",
+        "java.project.resolveSourceAttachment",
+        "java.project.updateJdk",
+        "java.project.addToSourcePath",
+        "java.completion.onDidSelect"
+      ]
+    },
+    "workspace": {
+      "workspaceFolders": {
+        "supported": true,
+        "changeNotifications": true
+      },
+      "textDocumentContent": {
+        "schemes": [
+          "jdt"
+        ]
+      }
+    },
+    "typeHierarchyProvider": true,
+    "callHierarchyProvider": true,
+    "selectionRangeProvider": true,
+    "semanticTokensProvider": {
+      "legend": {
+        "tokenTypes": [
+          "namespace",
+          "class",
+          "interface",
+          "enum",
+          "enumMember",
+          "type",
+          "typeParameter",
+          "method",
+          "property",
+          "variable",
+          "parameter",
+          "modifier",
+          "keyword",
+          "decorator",
+          "annotationMember",
+          "record",
+          "recordComponent"
+        ],
+        "tokenModifiers": [
+          "abstract",
+          "static",
+          "readonly",
+          "deprecated",
+          "declaration",
+          "documentation",
+          "public",
+          "private",
+          "protected",
+          "native",
+          "generic",
+          "typeArgument",
+          "importDeclaration",
+          "constructor"
+        ]
+      },
+      "range": false,
+      "full": {
+        "delta": false
+      },
+      "documentSelector": [
+        {
+          "language": "java",
+          "scheme": "file"
+        },
+        {
+          "language": "java",
+          "scheme": "jdt"
+        }
+      ]
+    },
+    "inlayHintProvider": true
+  },
+  "import": {
+    "ready": true,
+    "attempts": 1,
+    "workspace_symbols": 1
+  },
+  "import_ms": 9106.761,
+  "queries": [
+    {
+      "id": "gradle-definition",
+      "operation": "definition",
+      "count": 1,
+      "files": [
+        "src/main/java/com/example/gradle/GradleGreeter.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 25.609,
+      "rpc_count": 1
+    },
+    {
+      "id": "gradle-references",
+      "operation": "references",
+      "count": 2,
+      "files": [
+        "src/main/java/com/example/gradle/GradleApp.java",
+        "src/main/java/com/example/gradle/GradleGreeter.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 128.372,
+      "rpc_count": 1
+    }
+  ],
+  "hot_queries": {
+    "count": 20,
+    "p50_ms": 11.074,
+    "p95_ms": 17.018,
+    "max_ms": 17.018,
+    "samples_ms": [
+      11.912,
+      15.495,
+      5.117,
+      13.331,
+      4.681,
+      12.731,
+      5.258,
+      12.294,
+      4.543,
+      11.467,
+      4.524,
+      17.018,
+      4.79,
+      11.973,
+      4.227,
+      11.005,
+      4.723,
+      11.143,
+      4.725,
+      11.864
+    ]
+  },
+  "cancellation": {
+    "sent": true,
+    "outcome": "response"
+  },
+  "rpc_count_initial_queries": 2,
+  "lifecycle": {
+    "shutdown_response": true,
+    "exit_code": 0
+  },
+  "memory": {
+    "available": true,
+    "sampler": "psutil 7.2.2",
+    "sample_interval_ms": 100,
+    "samples": 116,
+    "peak_rss_bytes": 1374330880,
+    "peak_process_count": 3,
+    "peak_process_names": [
+      "conhost.exe",
+      "java.exe"
+    ]
+  },
+  "total_ms": 12404.079,
+  "notifications": [
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is started"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 Started org.eclipse.buildship.core 29ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 Started org.eclipse.m2e.core 1ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 Main thread is waiting"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 >> initialize"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 Initializing JDT Language Server (Standard)\n\t- Version: 1.61.0-SNAPSHOT (OSGi 1.61.0.202609031315)\n\t- Git Commit: 08eafe6 - CHANGELOG for 1.61.0"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:12 ProjectRegistryRefreshJob finished 585ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1bbcec89-6c9a-43b5-8fd2-d05b1acc0636",
+        "task": "Repository registry initialization",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "7191dbff-3686-41cc-95d0-4c708954133b",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "7191dbff-3686-41cc-95d0-4c708954133b",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ed498a30-199d-41f4-b676-b311b6f24c0b",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ed498a30-199d-41f4-b676-b311b6f24c0b",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "32857d95-f93c-4605-95d0-e8dda81e6dd8",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "32857d95-f93c-4605-95d0-e8dda81e6dd8",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 Setting D:\\khaslana\\jdk-21.0.12.1+1 as 'JavaSE-21' environment (id:1789138272698)"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 JVM Runtimes changed, saving new configuration"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5823b5ac-f3d0-489f-954b-dd57d1e0b78b",
+        "task": "Detect installed JVMs",
+        "status": "0% ",
+        "totalWork": 2,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5823b5ac-f3d0-489f-954b-dd57d1e0b78b",
+        "task": "D:\\Program Files\\Java\\jdk1.8.0_121",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5823b5ac-f3d0-489f-954b-dd57d1e0b78b",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5823b5ac-f3d0-489f-954b-dd57d1e0b78b",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5823b5ac-f3d0-489f-954b-dd57d1e0b78b",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 Static Commands: []"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 Non-Static Commands: [java.project.import, java.project.changeImportedProjects, java.navigate.openTypeHierarchy, java.project.resolveStackTraceLocation, java.edit.handlePasteEvent, java.edit.stringFormatting, java.project.getSettings, java.project.resolveWorkspaceSymbol, java.project.upgradeGradle, java.project.createModuleInfo, java.vm.getAllInstalls, java.edit.organizeImports, java.project.refreshDiagnostics, java.getFullyQualifiedName, java.project.removeFromSourcePath, java.project.listSourcePaths, java.project.updateSettings, java.project.getAll, java.reloadBundles, java.project.isTestFile, java.project.resolveText, java.project.getClasspaths, java.navigate.resolveTypeHierarchy, java.getTroubleshootingInfo, java.edit.smartSemicolonDetection, java.project.updateSourceAttachment, java.project.updateClassPaths, java.decompile, java.protobuf.generateSources, java.project.resolveSourceAttachment, java.project.updateJdk, java.project.addToSourcePath, java.completion.onDidSelect]"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "Init..."
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "0% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Initialize Workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 RepositoryRegistryUpdateJob finished 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 >> initialized"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 Importers: GradleProjectImporter, MavenProjectImporter, EclipseProjectImporter, InvisibleProjectImporter"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 Importing Gradle project(s)"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "45% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing Gradle project(s)",
+        "status": "45% ",
+        "totalWork": 1000,
+        "workDone": 454,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:13 No previous Gradle project at D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-gradle-fullmem, it must be synchronized"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Refreshing '/jls-t0-project-gradle-fullmem'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Refreshing '/jls-t0-project-gradle-fullmem'.",
+        "status": "70% Refreshing '/jls-t0-project-gradle-fullmem'.",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Build"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Build",
+        "status": "70% Build",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:15 Progressive import: reporting 1 new project(s)"
+      }
+    },
+    {
+      "method": "language/eventNotification",
+      "params": {
+        "eventType": 200,
+        "data": [
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-gradle-fullmem/"
+        ]
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Starting Gradle Daemon"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Starting Gradle Daemon",
+        "status": "70% Starting Gradle Daemon",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Build"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Build",
+        "status": "70% Build",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Run build"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Run build",
+        "status": "70% Run build",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Run init scripts"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Run init scripts",
+        "status": "70% Run init scripts",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Evaluate settings"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Evaluate settings",
+        "status": "70% Evaluate settings",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Configure project :"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Importing root project",
+        "subTask": "Configure project :",
+        "status": "70% Configure project :",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 jls-gradle-fixture-jls-t0-project-gradle-fullmem was modified since last time the workspace was opened, must be synchronized"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Synchronizing Gradle build at D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-gradle-fullmem",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "70% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 1000,
+        "workDone": 697,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 Progressive import: reporting 1 new project(s)"
+      }
+    },
+    {
+      "method": "language/eventNotification",
+      "params": {
+        "eventType": 200,
+        "data": [
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-gradle-fullmem/"
+        ]
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ProjectStatus",
+        "message": "OK"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "100% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Synchronizing Gradle build at D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-gradle-fullmem",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "100% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1000% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1000% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1005% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1005% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1005,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1010% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1010% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1010,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1100% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1100% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 Workspace initialized in 6426ms"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Started",
+        "message": "Ready"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "status": "1100% Synchronize Gradle project jls-gradle-fixture-jls-t0-project-gradle-fullmem with workspace project",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 >> initialization job finished"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ServiceReady",
+        "message": "ServiceReady"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 >> build jobs finished"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:19 >> registerWatchers'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ef35f1fc-5ec2-4060-9fd0-5de7fce9dd59",
+        "task": "Searching...",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09fa6297-d507-4e9a-b415-e3e813ec98cb",
+        "task": "Refreshing workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-gradle-fullmem/",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09fa6297-d507-4e9a-b415-e3e813ec98cb",
+        "task": "Refreshing workspace",
+        "subTask": "Refreshing '/jls-gradle-fixture-jls-t0-project-gradle-fullmem/src/main/java/com/example/gradle'.",
+        "status": "7% Refreshing '/jls-gradle-fixture-jls-t0-project-gradle-fullmem/src/main/java/com/example/gradle'.",
+        "totalWork": 1000,
+        "workDone": 67,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "1b1b0e9a-627b-441a-a673-ed807ef33ad0",
+        "task": "Creating link.",
+        "subTask": "",
+        "status": "1100% ",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b5b5bd17-39e9-407f-9b6e-fd19b9fd7e67",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:20 Reconciled 2. Took 0 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b5b5bd17-39e9-407f-9b6e-fd19b9fd7e67",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "93a45e24-d1b1-4325-9243-d274c6f9d69f",
+        "task": "Publish Diagnostics",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:21 begin problem for /GradleGreeter.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:21 0 problems reported for /GradleGreeter.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-gradle-fullmem/src/main/java/com/example/gradle/GradleGreeter.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:21 begin problem for /GradleApp.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:21 0 problems reported for /GradleApp.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-gradle-fullmem/src/main/java/com/example/gradle/GradleApp.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:21 Validated 2. Took 114 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "93a45e24-d1b1-4325-9243-d274c6f9d69f",
+        "task": "Publish Diagnostics",
+        "status": "67% ",
+        "totalWork": 1000,
+        "workDone": 666,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ef35f1fc-5ec2-4060-9fd0-5de7fce9dd59",
+        "task": "Searching...",
+        "subTask": "2 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "status": "80% 2 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "totalWork": 1000,
+        "workDone": 798,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ef35f1fc-5ec2-4060-9fd0-5de7fce9dd59",
+        "task": "Searching...",
+        "subTask": "3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "status": "100% 3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ef35f1fc-5ec2-4060-9fd0-5de7fce9dd59",
+        "task": "Searching...",
+        "subTask": "3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "status": "100% 3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ef35f1fc-5ec2-4060-9fd0-5de7fce9dd59",
+        "task": "Searching...",
+        "subTask": "3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "status": "100% 3 files to index (/jls-gradle-fixture-jls-t0-project-gradle-fullmem)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:22 >> shutdown"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:22 >> exit"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:22 Shutdown received... waking up main thread"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:51:22 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is stopping:"
+      }
+    }
+  ],
+  "server_requests": [],
+  "reader_error": null,
+  "project_changes": {
+    "added": [
+      ".classpath",
+      ".gradle/8.9/checksums/checksums.lock",
+      ".gradle/8.9/dependencies-accessors/gc.properties",
+      ".gradle/8.9/executionHistory/executionHistory.lock",
+      ".gradle/8.9/fileChanges/last-build.bin",
+      ".gradle/8.9/fileHashes/fileHashes.lock",
+      ".gradle/8.9/gc.properties",
+      ".gradle/buildOutputCleanup/buildOutputCleanup.lock",
+      ".gradle/buildOutputCleanup/cache.properties",
+      ".gradle/vcs-1/gc.properties",
+      ".project",
+      ".settings/org.eclipse.buildship.core.prefs",
+      ".settings/org.eclipse.jdt.core.prefs"
+    ],
+    "removed": [],
+    "modified": []
+  },
+  "workspace_after": {
+    "files": 33,
+    "bytes": 42872643
+  },
+  "passed": true
+}

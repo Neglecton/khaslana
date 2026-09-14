@@ -1,0 +1,564 @@
+{
+  "task": "JLS-T2",
+  "case": "B01",
+  "enhanced": false,
+  "run": 2,
+  "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+  "model": "gpt-5.6-luna",
+  "temperature": 0.30000001192092896,
+  "max_tokens": 4000,
+  "elapsed_ms": 152813,
+  "assessment": {
+    "independent_expected_checks": {
+      "login_controller_caller": true,
+      "admin_probe_caller": true,
+      "app_user": true,
+      "login_attempt": true,
+      "session_is_not_db_table": true
+    },
+    "tool_calls": 20,
+    "recorded_tool_result_head_chars": 7550,
+    "model_input_tokens": null,
+    "semantic_tool_calls": 0,
+    "semantic_trace_calls": 0
+  },
+  "analysis": {
+    "version": 1,
+    "context": {
+      "project_key": "28cd9ac6",
+      "request_id": "jls-t2-B01-off-2",
+      "index_generation": 1,
+      "question": "登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？",
+      "scope": "src/com/example/login；搜索词 login、password；重点查看 LoginController.java、AuthService.java、UserRepository.java、LoginAttemptRepository.java、PasswordVerifier.java、PasswordHashLibrary.java、SessionService.java、AdminLoginProbe.java"
+    },
+    "summary": "登录入口是 LoginController.login，核心由 AuthService.authenticate 完成用户查询、密码校验、失败记录或成功建会话，并读写 app_user 与 login_attempt。",
+    "coverage_note": "已检索 src/com/example/login 下的登录控制器、认证服务、用户仓储、登录尝试仓储、密码校验、会话服务及 AdminLoginProbe；未发现更上层 HTTP 路由或对象组装代码。",
+    "findings": [
+      {
+        "text": "LoginController.login(username, password) 是已定位到的业务入口，直接调用 AuthService.authenticate 并返回其生成的 sessionId。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:5616b8e7"
+        ]
+      },
+      {
+        "text": "AuthService.authenticate 首先调用 UserRepository.findActiveByUsername，查询 username 匹配且 enabled = TRUE 的用户，并取得 id 与 password_hash。",
+        "state": "observed",
+        "condition": "用户不存在或未启用时返回 null。",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "text": "用户不存在时，向 login_attempt 插入 succeeded=false、reason=USER_NOT_FOUND，然后抛出 LoginRejectedException，错误消息为“账号或密码错误”。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "text": "密码校验由 PasswordVerifier.matches 委托 PasswordHashLibrary.verify 完成；当前实现比较 passwordHash 是否等于“hash:”加明文 password。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:e9b60b09",
+          "sr1:9c9b3283"
+        ]
+      },
+      {
+        "text": "密码错误时，先将 app_user.failed_attempts 自增 1，再向 login_attempt 插入 succeeded=false、reason=BAD_PASSWORD，然后抛出 LoginRejectedException。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "text": "密码正确时，调用 SessionService.create 生成 UUID 会话 ID，并将 sessionId 到 userId 的映射写入进程内 ConcurrentHashMap；随后更新成功登录状态、记录 SUCCESS 并返回 sessionId。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:5f607982"
+        ]
+      },
+      {
+        "text": "成功登录会更新 app_user.last_login_at 为 CURRENT_TIMESTAMP，并将 failed_attempts 重置为 0；同时向 login_attempt 插入 succeeded=true、reason=SUCCESS。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:3cb3cc1d",
+          "sr1:a550ae35",
+          "sr1:4f7b4120"
+        ]
+      },
+      {
+        "text": "JDBC 查询或更新发生 SQLException 时，分别抛出 IllegalStateException，消息为“读取用户失败”“更新用户失败”或“记录登录尝试失败”。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:3cb3cc1d",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "text": "AdminLoginProbe.verify 也调用 AuthService.authenticate；认证成功返回 true，捕获 LoginRejectedException 时返回 false。",
+        "state": "observed",
+        "condition": null,
+        "source_ids": [
+          "sr1:f3bdf279"
+        ]
+      }
+    ],
+    "callers": [
+      {
+        "name": "LoginController.login",
+        "relative_path": "src/com/example/login/LoginController.java",
+        "detail": "直接调用 AuthService.authenticate(username, password)。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:5616b8e7"
+        ]
+      },
+      {
+        "name": "AdminLoginProbe.verify",
+        "relative_path": "src/com/example/login/AdminLoginProbe.java",
+        "detail": "调用 AuthService.authenticate；成功返回 true，LoginRejectedException 返回 false。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:f3bdf279"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "UserRepository.findActiveByUsername",
+        "relative_path": "src/com/example/login/UserRepository.java",
+        "detail": "按用户名查询启用用户的 id 和 password_hash。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "name": "PasswordVerifier.matches",
+        "relative_path": "src/com/example/login/PasswordVerifier.java",
+        "detail": "委托 PasswordHashLibrary.verify 比较密码与密码哈希。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:e9b60b09",
+          "sr1:9c9b3283"
+        ]
+      },
+      {
+        "name": "UserRepository.incrementFailedAttempts",
+        "relative_path": "src/com/example/login/UserRepository.java",
+        "detail": "密码错误时更新 app_user.failed_attempts。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "name": "LoginAttemptRepository.record",
+        "relative_path": "src/com/example/login/LoginAttemptRepository.java",
+        "detail": "记录 USER_NOT_FOUND、BAD_PASSWORD 和 SUCCESS 三类登录结果。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "name": "SessionService.create",
+        "relative_path": "src/com/example/login/SessionService.java",
+        "detail": "成功认证后生成 UUID 并写入内存会话映射。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:5f607982"
+        ]
+      },
+      {
+        "name": "UserRepository.markLoginSuccess",
+        "relative_path": "src/com/example/login/UserRepository.java",
+        "detail": "成功认证后更新最后登录时间并清零失败次数。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "name": "LoginRejectedException",
+        "relative_path": "src/com/example/login/LoginRejectedException.java",
+        "detail": "用户不存在或密码错误时抛出。",
+        "kind": "direct",
+        "source_ids": [
+          "sr1:4f7b4120"
+        ]
+      }
+    ],
+    "data_accesses": [
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "read"
+        ],
+        "conditions": [
+          "每次认证开始时按 username 查询",
+          "只查询 enabled = TRUE 的用户"
+        ],
+        "access_method": "SELECT id, password_hash FROM app_user WHERE username = ? AND enabled = TRUE",
+        "state": "observed",
+        "source_ids": [
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "update"
+        ],
+        "conditions": [
+          "用户存在但密码校验失败时"
+        ],
+        "access_method": "UPDATE app_user SET failed_attempts = failed_attempts + 1 WHERE id = ?",
+        "state": "observed",
+        "source_ids": [
+          "sr1:3cb3cc1d",
+          "sr1:4f7b4120"
+        ]
+      },
+      {
+        "object": "app_user",
+        "category": "db_object",
+        "operations": [
+          "update"
+        ],
+        "conditions": [
+          "密码校验成功时"
+        ],
+        "access_method": "UPDATE app_user SET last_login_at = CURRENT_TIMESTAMP, failed_attempts = 0 WHERE id = ?",
+        "state": "observed",
+        "source_ids": [
+          "sr1:3cb3cc1d",
+          "sr1:4f7b4120"
+        ]
+      },
+      {
+        "object": "login_attempt",
+        "category": "db_object",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "用户不存在时写入 USER_NOT_FOUND",
+          "密码错误时写入 BAD_PASSWORD",
+          "认证成功时写入 SUCCESS"
+        ],
+        "access_method": "INSERT INTO login_attempt(username, succeeded, reason) VALUES (?, ?, ?)",
+        "state": "observed",
+        "source_ids": [
+          "sr1:a550ae35",
+          "sr1:4f7b4120"
+        ]
+      },
+      {
+        "object": "SessionService.sessions",
+        "category": "cache",
+        "operations": [
+          "insert"
+        ],
+        "conditions": [
+          "密码校验成功后创建会话"
+        ],
+        "access_method": "sessions.put(sessionId, userId)",
+        "state": "observed",
+        "source_ids": [
+          "sr1:5f607982"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "S1",
+        "title": "进入登录控制器",
+        "detail": "接收 username 和 password，调用认证服务。",
+        "source_ids": [
+          "sr1:5616b8e7"
+        ]
+      },
+      {
+        "id": "S2",
+        "title": "查询启用用户",
+        "detail": "从 app_user 查询用户 ID 和密码哈希。",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "id": "S3",
+        "title": "处理用户不存在",
+        "detail": "记录 USER_NOT_FOUND 登录失败并抛出登录拒绝异常。",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "id": "S4",
+        "title": "校验密码",
+        "detail": "通过 PasswordVerifier 和 PasswordHashLibrary 比较密码。",
+        "source_ids": [
+          "sr1:e9b60b09",
+          "sr1:9c9b3283"
+        ]
+      },
+      {
+        "id": "S5",
+        "title": "处理密码错误",
+        "detail": "增加 app_user.failed_attempts，记录 BAD_PASSWORD，并抛出登录拒绝异常。",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:3cb3cc1d",
+          "sr1:a550ae35"
+        ]
+      },
+      {
+        "id": "S6",
+        "title": "创建会话",
+        "detail": "生成 UUID 并把会话 ID 映射到用户 ID 的内存会话表。",
+        "source_ids": [
+          "sr1:5f607982"
+        ]
+      },
+      {
+        "id": "S7",
+        "title": "更新成功登录状态",
+        "detail": "更新 app_user 的最后登录时间并清零失败次数。",
+        "source_ids": [
+          "sr1:3cb3cc1d"
+        ]
+      },
+      {
+        "id": "S8",
+        "title": "记录并返回成功",
+        "detail": "向 login_attempt 插入 SUCCESS，并返回 sessionId。",
+        "source_ids": [
+          "sr1:4f7b4120",
+          "sr1:a550ae35"
+        ]
+      }
+    ],
+    "links": [
+      {
+        "from": "S1",
+        "to": "S2",
+        "kind": "call",
+        "label": "调用 AuthService.authenticate"
+      },
+      {
+        "from": "S2",
+        "to": "S3",
+        "kind": "branch",
+        "label": "用户不存在或未启用"
+      },
+      {
+        "from": "S2",
+        "to": "S4",
+        "kind": "sequence_hint",
+        "label": "找到启用用户"
+      },
+      {
+        "from": "S4",
+        "to": "S5",
+        "kind": "branch",
+        "label": "密码错误"
+      },
+      {
+        "from": "S4",
+        "to": "S6",
+        "kind": "branch",
+        "label": "密码正确"
+      },
+      {
+        "from": "S6",
+        "to": "S7",
+        "kind": "sequence_hint",
+        "label": null
+      },
+      {
+        "from": "S7",
+        "to": "S8",
+        "kind": "sequence_hint",
+        "label": null
+      }
+    ],
+    "unknowns": [
+      "当前源码范围未发现 LoginController 的 HTTP 路由、Servlet/Spring 注解或实际更上层调用方，因此无法确认外部请求入口及运行时装配方式。",
+      "未查证数据库事务边界；源码未显示用户更新、登录尝试记录和会话创建是否处于同一事务。",
+      "会话仅确认存储在当前进程内 ConcurrentHashMap，未发现过期、删除、持久化或分布式共享逻辑。",
+      "未发现真实密码算法或外部认证服务调用。"
+    ],
+    "completion": "complete"
+  },
+  "steps": [
+    {
+      "kind": "tool_call",
+      "name": "get_file_tree",
+      "args": "get_file_tree /",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_zQoMhgpyv5ty2TYYwHL0cjIY\",\"index_generation\":1,\"data\":{\"entries\":[{\"relative_path\":\"src\",\"kind\":\"directory\"},{\"relative_path\":\"src/com\",\"kind\":\"directory\"},{\"relative_path\":\"src/com/example\",\"kind\":\"directory\"},{\"relative_path\":\"src/com/example/login\",\"kind\":\"directory\"}],\"truncated\":false,\"truncation_reason\":null},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_zLdofuEfSaILVHGCXf2FRiL2\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.LoginController.java.LoginController.login\",\"relative_path\":\"src/com/example/login/LoginController.java\",\"start_line\":10},{\"candidate_id\":\"sc1:2\",\"name\":\"LoginController\",\"label\":\"Method\",\"qualified_name\":\"b01.s"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code login",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_f07XX9BSxShnsUHMQOCXwG5u\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/com/example/login/AdminLoginProbe.java\",\"line_number\":1,\"line_text\":\"package com.example.login;\"},{\"relative_path\":\"src/com/example/login/AuthService.java\",\"line_number\":1,\"line_text\":\"package com.example.login;\"},{\"relative_path\":\"src/com/example/login/LoginAttemptRepository.java\",\"line_num"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code password",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_BhMQ82Ti9BigPWKZwuzEAqWP\",\"index_generation\":1,\"data\":{\"matches\":[{\"relative_path\":\"src/com/example/login/AdminLoginProbe.java\",\"line_number\":10,\"line_text\":\"    public boolean verify(String username, String password) {\"},{\"relative_path\":\"src/com/example/login/AdminLoginProbe.java\",\"line_number\":12,\"line_text\":\"            authService.authenticate(username, password);\"},{\"rela"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:1",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_BllI2bDOeHiNAGeBzcR1Da19\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:1\",\"name\":\"login\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.LoginController.java.LoginController.login\",\"relative_path\":\"src/com/example/login/LoginController.java\",\"start_line\":10,\"end_line\":12,\"callers\":[],\"callees\":[{\"name\":\"authenticate\",\"qualified_name\":\"b01.src.com.example.login."
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:29",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_sTFQltNBk1he9qchjQ7iYkDw\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:29\",\"name\":\"authenticate\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.AuthService.java.AuthService.authenticate\",\"relative_path\":\"src/com/example/login/AuthService.java\",\"start_line\":20,\"end_line\":36,\"callers\":[{\"name\":\"verify\",\"qualified_name\":\"b01.src.com.example.login.AdminLoginProbe."
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:36",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_CQSzikRy6wsThrsJEjP3cIZl\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:36\",\"name\":\"UserRepository\",\"label\":\"Class\",\"qualified_name\":\"b01.src.com.example.login.UserRepository.java.UserRepository\",\"relative_path\":\"src/com/example/login/UserRepository.java\",\"start_line\":8,\"end_line\":49,\"callers\":[],\"callees\":[],\"source\":{\"source_id\":\"sr1:3cb3cc1d\",\"source_ref\":{\"project_key\":\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:31",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_HzgARCJysTEqk8XEBontqkLa\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:31\",\"name\":\"matches\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.PasswordVerifier.java.PasswordVerifier.matches\",\"relative_path\":\"src/com/example/login/PasswordVerifier.java\",\"start_line\":4,\"end_line\":6,\"callers\":[{\"name\":\"authenticate\",\"qualified_name\":\"b01.src.com.example.login.AuthSer"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:34",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_jzUeQwUUS613cq6qIxg4xPee\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:34\",\"name\":\"create\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.SessionService.java.SessionService.create\",\"relative_path\":\"src/com/example/login/SessionService.java\",\"start_line\":10,\"end_line\":14,\"callers\":[{\"name\":\"authenticate\",\"qualified_name\":\"b01.src.com.example.login.AuthService.j"
+    },
+    {
+      "kind": "tool_call",
+      "name": "get_symbol",
+      "args": "get_symbol sc1:12",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_eBw5nqb0kVhS4jV825J3qb66\",\"index_generation\":1,\"data\":{\"candidate_id\":\"sc1:12\",\"name\":\"verify\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.AdminLoginProbe.java.AdminLoginProbe.verify\",\"relative_path\":\"src/com/example/login/AdminLoginProbe.java\",\"start_line\":10,\"end_line\":17,\"callers\":[],\"callees\":[{\"name\":\"authenticate\",\"qualified_name\":\"b01.src.com.example.log"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols findByUsername",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_lByapRpbaJDPdTsYQrvNEGGr\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:51\",\"name\":\"findActiveByUsername\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.UserRepository.java.UserRepository.findActiveByUsername\",\"relative_path\":\"src/com/example/login/UserRepository.java\",\"start_line\":22}],\"matched_before_scope_filter\":1},\"truncated\":false,\"truncati"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_symbols",
+      "args": "search_symbols create",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_hTBaSe718xYrrGZujXL2Zl1T\",\"index_generation\":1,\"data\":{\"candidates\":[{\"candidate_id\":\"sc1:34\",\"name\":\"create\",\"label\":\"Method\",\"qualified_name\":\"b01.src.com.example.login.SessionService.java.SessionService.create\",\"relative_path\":\"src/com/example/login/SessionService.java\",\"start_line\":10}],\"matched_before_scope_filter\":1},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/com/example/login/AuthService.java:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_NkwjQBdDWXr6AsRopZzpioNV\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:4f7b4120\",\"source_ref\":{\"project_key\":\"28cd9ac6\",\"generation\":1,\"relative_path\":\"src/com/example/login/AuthService.java\",\"content_sha256\":\"86a55e8b9f92e0785c6e58ae4232d9d5b8beeded371919f5d1b2c7602d7982cf\",\"start_byte\":0,\"end_byte\":1349,\"start_line\":1,\"end_line\":37},\"lines\":[{\"line_number\":1,\"text\":\"package "
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/com/example/login/LoginAttemptRepository.java:1-80",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_W3i1NFpEgQ31E68CU045vHS7\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:a550ae35\",\"source_ref\":{\"project_key\":\"28cd9ac6\",\"generation\":1,\"relative_path\":\"src/com/example/login/LoginAttemptRepository.java\",\"content_sha256\":\"eb48af83bf2a50fcecbd1389001753717f18a38bc60f8d0dbdcef90680ef9a75\",\"start_byte\":0,\"end_byte\":928,\"start_line\":1,\"end_line\":27},\"lines\":[{\"line_number\":1,\"text\""
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/com/example/login/PasswordHashLibrary.java:1-40",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_oprnyg8ofIOq6MI7HZed6Dw4\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:9c9b3283\",\"source_ref\":{\"project_key\":\"28cd9ac6\",\"generation\":1,\"relative_path\":\"src/com/example/login/PasswordHashLibrary.java\",\"content_sha256\":\"b98d150bad9a66d156f8b9af0c1fc3205f5a586da253c868b4823e3344863e4e\",\"start_byte\":0,\"end_byte\":243,\"start_line\":1,\"end_line\":9},\"lines\":[{\"line_number\":1,\"text\":\"pa"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/com/example/login/SessionService.java:1-50",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_HLeJtIaLmt0JWoj4SpD0wdFK\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:5f607982\",\"source_ref\":{\"project_key\":\"28cd9ac6\",\"generation\":1,\"relative_path\":\"src/com/example/login/SessionService.java\",\"content_sha256\":\"cf80191cee70428a10e751b621f2e349668188c6e28d8b996bceff04e82ee99e\",\"start_byte\":0,\"end_byte\":403,\"start_line\":1,\"end_line\":15},\"lines\":[{\"line_number\":1,\"text\":\"packag"
+    },
+    {
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "read_file src/com/example/login/LoginController.java:1-40",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_s4S0k29ryVgmfhGU3XKkazFr\",\"index_generation\":1,\"data\":{\"source_id\":\"sr1:5616b8e7\",\"source_ref\":{\"project_key\":\"28cd9ac6\",\"generation\":1,\"relative_path\":\"src/com/example/login/LoginController.java\",\"content_sha256\":\"9f3f8e152615b7a3738004221286c595326cb46ba1c6611d03f82a82a2fef13f\",\"start_byte\":0,\"end_byte\":338,\"start_line\":1,\"end_line\":13},\"lines\":[{\"line_number\":1,\"text\":\"packa"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code new LoginController",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_rcBjIKaqUOvS7GztRrnzjR3D\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "search_code",
+      "args": "search_code new AdminLoginProbe",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_TRWhHMkrLnImh3mBxlphqS6y\",\"index_generation\":1,\"data\":{\"matches\":[],\"scanned_files\":10,\"truncated\":false,\"truncation_reasons\":[]},\"truncated\":false,\"truncation_reasons\":[]}"
+    },
+    {
+      "kind": "tool_call",
+      "name": "trace_calls",
+      "args": "trace_calls sc1:29 (both)",
+      "error": false,
+      "result_head": "{\"request_id\":\"call_5ISlGiWotSb8T1Bt7Q8cWdFB\",\"index_generation\":1,\"data\":{\"function\":\"authenticate\",\"direction\":\"both\",\"callers\":[{\"name\":\"verify\",\"qualified_name\":\"b01.src.com.example.login.AdminLoginProbe.java.AdminLoginProbe.verify\",\"relative_path\":\"src/com/example/login/AdminLoginProbe.java\",\"hop\":1},{\"name\":\"login\",\"qualified_name\":\"b01.src.com.example.login.LoginController.java.LoginControl"
+    },
+    {
+      "kind": "message",
+      "text": "{\n  \"version\": 1,\n  \"summary\": \"登录入口是 LoginController.login，核心由 AuthService.authenticate 完成用户查询、密码校验、失败记录或成功建会话，并更新 app_user 与 login_attempt。\",\n  \"coverage_note\": \"已检索 src/com/example/login 下的登录控制器、认证服务、用户仓储、登录尝试仓储、密码校验、会话服务及 AdminLoginProbe；未发现更上层 HTTP/Spring 路由或对象组装代码。\",\n  \"context\": {\n    \"question\": \"登录逻辑怎么实现的？调用了什么，被什么调用？读写哪些表？\",\n    \"scope\": \"目录 src/com/example/login；搜索词 login、password；重点读取 LoginController.java、AuthService.java、UserRepository.java、LoginAttemptRepository.java、PasswordVerifier.java、PasswordHashLibrary.java、SessionService.java、AdminLoginProbe.java\"\n  },\n  \"findings\": [\n    {\n      \"text\": \"业务入口为 LoginController.login(username, password)，该方法直接把用户名和密码转交给 AuthService.authenticate，并返回其生成的字符串会话 ID。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:5616b8e7\"\n      ]\n    },\n    {\n      \"text\": \"AuthService.authenticate 首先调用 UserRepository.findActiveByUsername；SQL 仅查询 username 匹配且 enabled = TRUE 的用户，返回 id 和 password_hash。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"condition\": \"用户不存在或未启用时返回 null。\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"text\": \"用户不存在时，系统向 login_attempt 写入 succeeded=false、reason=USER_NOT_FOUND，然后抛出 LoginRejectedException，错误消息为“账号或密码错误”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"text\": \"密码校验由 PasswordVerifier.matches 调用 PasswordHashLibrary.verify 完成；当前实现通过比较 passwordHash 是否等于字符串“hash:”加明文密码来判断匹配。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:e9b60b09\",\n        \"sr1:9c9b3283\"\n      ]\n    },\n    {\n      \"text\": \"密码错误时，系统先更新 app_user.failed_attempts 自增 1，再向 login_attempt 写入 succeeded=false、reason=BAD_PASSWORD，随后抛出同样的 LoginRejectedException。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"text\": \"密码正确时，系统调用 SessionService.create 创建 UUID 会话 ID，并将 sessionId 到 userId 的映射写入进程内 ConcurrentHashMap；随后更新用户成功登录状态，记录成功尝试，并返回 sessionId。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:5f607982\"\n      ]\n    },\n    {\n      \"text\": \"成功登录会更新 app_user.last_login_at= CURRENT_TIMESTAMP，并将 failed_attempts 重置为 0；同时向 login_attempt 插入 succeeded=true、reason=SUCCESS。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\",\n        \"sr1:a550ae35\",\n        \"sr1:4f7b4120\"\n      ]\n    },\n    {\n      \"text\": \"UserRepository 和 LoginAttemptRepository 使用 JDBC PreparedStatement 执行 SQL；查询或更新发生 SQLException 时分别抛出 IllegalStateException，消息为“读取用户失败”“更新用户失败”或“记录登录尝试失败”。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"text\": \"除 LoginController.login 外，AdminLoginProbe.verify 也直接调用 AuthService.authenticate；认证成功返回 true，捕获 LoginRejectedException 时返回 false。\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:f3bdf279\",\n        \"sr1:4f7b4120\"\n      ]\n    }\n  ],\n  \"callers\": [\n    {\n      \"name\": \"LoginController.login\",\n      \"relative_path\": \"src/com/example/login/LoginController.java\",\n      \"detail\": \"登录控制器方法直接调用 AuthService.authenticate(username, password)。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:5616b8e7\"\n      ]\n    },\n    {\n      \"name\": \"AdminLoginProbe.verify\",\n      \"relative_path\": \"src/com/example/login/AdminLoginProbe.java\",\n      \"detail\": \"调用 AuthService.authenticate；成功转为 true，LoginRejectedException 转为 false。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:f3bdf279\"\n      ]\n    },\n    {\n      \"name\": \"AuthService 的外部实例化或框架调用方\",\n      \"relative_path\": \"src/com/example/login/AuthService.java\",\n      \"detail\": \"当前检索范围未发现更上层 HTTP 路由、Spring 配置或对象组装代码。\",\n      \"kind\": \"candidate\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\"\n      ]\n    }\n  ],\n  \"callees\": [\n    {\n      \"name\": \"UserRepository.findActiveByUsername\",\n      \"relative_path\": \"src/com/example/login/UserRepository.java\",\n      \"detail\": \"按用户名查询启用用户的 id 和 password_hash。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"name\": \"PasswordVerifier.matches\",\n      \"relative_path\": \"src/com/example/login/PasswordVerifier.java\",\n      \"detail\": \"委托 PasswordHashLibrary.verify 比较密码与密码哈希。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:e9b60b09\",\n        \"sr1:9c9b3283\"\n      ]\n    },\n    {\n      \"name\": \"UserRepository.incrementFailedAttempts\",\n      \"relative_path\": \"src/com/example/login/UserRepository.java\",\n      \"detail\": \"密码错误时更新 app_user.failed_attempts。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"name\": \"LoginAttemptRepository.record\",\n      \"relative_path\": \"src/com/example/login/LoginAttemptRepository.java\",\n      \"detail\": \"记录用户不存在、密码错误和登录成功三类尝试结果。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"name\": \"SessionService.create\",\n      \"relative_path\": \"src/com/example/login/SessionService.java\",\n      \"detail\": \"成功认证后生成 UUID 并写入内存会话映射。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:5f607982\"\n      ]\n    },\n    {\n      \"name\": \"UserRepository.markLoginSuccess\",\n      \"relative_path\": \"src/com/example/login/UserRepository.java\",\n      \"detail\": \"成功认证后更新最后登录时间并清零失败次数。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"name\": \"LoginRejectedException\",\n      \"relative_path\": \"src/com/example/login/LoginRejectedException.java\",\n      \"detail\": \"用户不存在或密码错误时抛出，用于表示登录拒绝。\",\n      \"kind\": \"direct\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\"\n      ]\n    }\n  ],\n  \"data_accesses\": [\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"read\"\n      ],\n      \"conditions\": [\n        \"每次认证开始时按 username 查询\",\n        \"仅选择 enabled = TRUE 的用户\"\n      ],\n      \"access_method\": \"SELECT id, password_hash FROM app_user WHERE username = ? AND enabled = TRUE\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"update\"\n      ],\n      \"conditions\": [\n        \"用户存在但密码校验失败时\"\n      ],\n      \"access_method\": \"UPDATE app_user SET failed_attempts = failed_attempts + 1 WHERE id = ?\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\",\n        \"sr1:4f7b4120\"\n      ]\n    },\n    {\n      \"object\": \"app_user\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"update\"\n      ],\n      \"conditions\": [\n        \"密码校验成功时\"\n      ],\n      \"access_method\": \"UPDATE app_user SET last_login_at = CURRENT_TIMESTAMP, failed_attempts = 0 WHERE id = ?\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\",\n        \"sr1:4f7b4120\"\n      ]\n    },\n    {\n      \"object\": \"login_attempt\",\n      \"category\": \"db_object\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"用户不存在时插入 USER_NOT_FOUND\",\n        \"密码错误时插入 BAD_PASSWORD\",\n        \"认证成功时插入 SUCCESS\"\n      ],\n      \"access_method\": \"INSERT INTO login_attempt(username, succeeded, reason) VALUES (?, ?, ?)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:a550ae35\",\n        \"sr1:4f7b4120\"\n      ]\n    },\n    {\n      \"object\": \"SessionService.sessions（ConcurrentHashMap<String, Long>）\",\n      \"category\": \"cache\",\n      \"operations\": [\n        \"insert\"\n      ],\n      \"conditions\": [\n        \"密码校验成功后创建会话\"\n      ],\n      \"access_method\": \"sessions.put(sessionId, userId)\",\n      \"state\": {\n        \"type\": \"observed\"\n      },\n      \"source_ids\": [\n        \"sr1:5f607982\"\n      ]\n    }\n  ],\n  \"steps\": [\n    {\n      \"id\": \"S1\",\n      \"title\": \"进入登录控制器\",\n      \"detail\": \"接收 username 和 password，调用认证服务。\",\n      \"source_ids\": [\n        \"sr1:5616b8e7\"\n      ]\n    },\n    {\n      \"id\": \"S2\",\n      \"title\": \"查询启用用户\",\n      \"detail\": \"从 app_user 查询用户 ID 和密码哈希。\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"id\": \"S3\",\n      \"title\": \"处理用户不存在\",\n      \"detail\": \"记录 USER_NOT_FOUND 登录失败并抛出登录拒绝异常。\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"id\": \"S4\",\n      \"title\": \"校验密码\",\n      \"detail\": \"通过 PasswordVerifier 和 PasswordHashLibrary 比较密码。\",\n      \"source_ids\": [\n        \"sr1:e9b60b09\",\n        \"sr1:9c9b3283\"\n      ]\n    },\n    {\n      \"id\": \"S5\",\n      \"title\": \"处理密码错误\",\n      \"detail\": \"增加 app_user.failed_attempts，记录 BAD_PASSWORD，并抛出登录拒绝异常。\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:3cb3cc1d\",\n        \"sr1:a550ae35\"\n      ]\n    },\n    {\n      \"id\": \"S6\",\n      \"title\": \"创建会话\",\n      \"detail\": \"生成 UUID 并把会话 ID 映射到用户 ID 的内存会话表。\",\n      \"source_ids\": [\n        \"sr1:5f607982\"\n      ]\n    },\n    {\n      \"id\": \"S7\",\n      \"title\": \"更新成功登录状态\",\n      \"detail\": \"更新 app_user 的最后登录时间并清零失败次数。\",\n      \"source_ids\": [\n        \"sr1:3cb3cc1d\"\n      ]\n    },\n    {\n      \"id\": \"S8\",\n      \"title\": \"记录并返回成功\",\n      \"detail\": \"向 login_attempt 插入 SUCCESS，并返回 sessionId。\",\n      \"source_ids\": [\n        \"sr1:4f7b4120\",\n        \"sr1:a550ae35\"\n      ]\n    }\n  ],\n  \"links\": [\n    {\n      \"from\": \"S1\",\n      \"to\": \"S2\",\n      \"kind\": \"call\"\n    },\n    {\n      \"from\": \"S2\",\n      \"to\": \"S3\",\n      \"kind\": \"branch\",\n      \"label\": \"用户不存在或未启用\"\n    },\n    {\n      \"from\": \"S2\",\n      \"to\": \"S4\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"找到启用用户\"\n    },\n    {\n      \"from\": \"S4\",\n      \"to\": \"S5\",\n      \"kind\": \"branch\",\n      \"label\": \"密码错误\"\n    },\n    {\n      \"from\": \"S4\",\n      \"to\": \"S6\",\n      \"kind\": \"branch\",\n      \"label\": \"密码正确\"\n    },\n    {\n      \"from\": \"S5\",\n      \"to\": \"S8\",\n      \"kind\": \"sequence_hint\",\n      \"label\": \"失败分支终止于异常，成功记录步骤不执行\"\n    },\n    {\n      \"from\": \"S6\",\n      \"to\": \"S7\",\n      \"kind\": \"sequence_hint\"\n    },\n    {\n      \"from\": \"S7\",\n      \"to\": \"S8\",\n      \"kind\": \"sequence_hint\"\n    }\n  ],\n  \"unknowns\": [\n    \"当前源码范围未发现 LoginController 的 HTTP 路由、Servlet/Spring 注解或实际调用方，因此无法确认外部请求入口及运行时装配方式。\",\n    \"未查证数据库事务边界；源码未显示登录失败记录、用户更新和会话创建是否处于同一事务。\",\n    \"会话仅确认存储在当前进程内 ConcurrentHashMap，未发现过期、删除、持久化或分布式共享逻辑。\",\n    \"密码哈希实现当前是简单的“hash:”字符串比较；未发现真实密码算法或外部认证服务调用。\"\n  ],\n  \"completion\": \"complete\"\n}"
+    }
+  ]
+}

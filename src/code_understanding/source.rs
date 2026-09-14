@@ -667,7 +667,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 /// 用一个短摘要而非 64 位完整 SHA-256：真实模型实测会把长串抄错一位
 /// （多发/漏发一个字符），导致本来有效的证据被拒。`SourceRef` 本身仍保存
 /// 完整内容 hash，ID 只是模型可引用的把手。
-pub(crate) fn source_id_of(source_ref: &SourceRef) -> String {
+pub fn source_id_of(source_ref: &SourceRef) -> String {
     source_id(source_ref)
 }
 

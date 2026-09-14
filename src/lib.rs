@@ -4,6 +4,7 @@ pub mod code_understanding;
 pub mod credentials;
 pub mod external_merge;
 pub mod git;
+pub mod lsp;
 pub mod proxy;
 pub mod storage;
 pub mod syntax;

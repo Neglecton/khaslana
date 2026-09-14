@@ -1,12 +1,18 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
 use super::*;
 use crate::ai::review_store::repo_key;
 use crate::code_index::{PipelineOptions, ProjectContext, RunOutcome, run_index};
+use crate::code_understanding::tools::JavaSemanticBackend;
+use crate::lsp::{
+    Availability, CallEndpoint, EnginePackageStatus, PluginState, RequestCancellation,
+    SemanticAnchor, SemanticItem, SemanticLocation, SemanticOperation, SemanticQueryResult,
+    SemanticServiceError, ServiceStatus,
+};
 
 fn write_file(root: &Path, relative_path: &str, content: &[u8]) {
     let path = root.join(relative_path);
@@ -198,6 +204,140 @@ fn indexed_fixture() -> (TempDir, PathBuf, PathBuf) {
         other => panic!("索引未完成：{other:?}"),
     }
     (temp, root, db_path)
+}
+
+fn java_indexed_fixture() -> (TempDir, PathBuf, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("java-indexed-project");
+    std::fs::create_dir_all(&root).unwrap();
+    git2::Repository::init(&root).unwrap();
+    write_file(
+        &root,
+        "src/LoginService.java",
+        b"class LoginService {\n  boolean login(String name) {\n    return validate(name);\n  }\n  boolean validate(String name) { return name != null; }\n}\n",
+    );
+    let db_path = temp.path().join("index.db");
+    let mut options = PipelineOptions::new(Arc::new(AtomicBool::new(false)), Box::new(|_| {}));
+    match run_index(&root, &db_path, true, &mut options).unwrap() {
+        RunOutcome::Completed(_) => {}
+        other => panic!("索引未完成：{other:?}"),
+    }
+    (temp, root, db_path)
+}
+
+struct FakeSemanticBackend {
+    enabled: Mutex<bool>,
+    status: Mutex<ServiceStatus>,
+    rpc_budgets: Mutex<Vec<usize>>,
+}
+
+impl FakeSemanticBackend {
+    fn ready() -> Self {
+        Self {
+            enabled: Mutex::new(true),
+            status: Mutex::new(ServiceStatus::Ready),
+            rpc_budgets: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl JavaSemanticBackend for FakeSemanticBackend {
+    fn plugin_state(&self) -> PluginState {
+        PluginState {
+            plugin_id: "java-jdtls".to_string(),
+            registered: true,
+            enabled: *self.enabled.lock().unwrap(),
+            package_status: EnginePackageStatus::ManualConfigured,
+        }
+    }
+
+    fn status(&self, _: &str) -> ServiceStatus {
+        *self.status.lock().unwrap()
+    }
+
+    fn register_source_anchor(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<SemanticAnchor, SemanticServiceError> {
+        let source = source_service
+            .validate_source(source_id)
+            .map_err(|error| SemanticServiceError::SourceValidation(error.to_string()))?;
+        Ok(SemanticAnchor {
+            anchor_id: format!("sa1:{line}:{column}"),
+            project_key: source.project_key,
+            generation: source.generation,
+            relative_path: source.relative_path,
+            content_sha256: source.content_sha256,
+            line,
+            column,
+            allowed_start_byte: source.start_byte,
+            allowed_end_byte: source.end_byte,
+        })
+    }
+
+    fn register_source_symbol_anchors(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        approximate_line: u32,
+        _: Option<&str>,
+        _: &RequestCancellation,
+    ) -> Result<Vec<SemanticAnchor>, SemanticServiceError> {
+        self.register_source_anchor(source_service, source_id, approximate_line, 11)
+            .map(|anchor| vec![anchor])
+    }
+
+    fn query(
+        &self,
+        _: &str,
+        operation: SemanticOperation,
+        _: Option<usize>,
+        rpc_budget: usize,
+        _: &RequestCancellation,
+    ) -> Result<SemanticQueryResult, SemanticServiceError> {
+        self.rpc_budgets.lock().unwrap().push(rpc_budget);
+        let location = SemanticLocation {
+            relative_path: Some("src/LoginService.java".to_string()),
+            external_uri_hint: None,
+            line: 3,
+            column: 12,
+            end_line: 3,
+            end_column: 20,
+            start_byte: None,
+            end_byte: None,
+        };
+        let endpoint = CallEndpoint {
+            name: "validate".to_string(),
+            detail: Some("boolean validate(String)".to_string()),
+            location: location.clone(),
+        };
+        Ok(SemanticQueryResult {
+            project_key: String::new(),
+            request_id: 1,
+            session_epoch: 1,
+            workspace_revision: 1,
+            provider: "jdtls".to_string(),
+            plugin_id: "java-jdtls".to_string(),
+            engine_version: "fake".to_string(),
+            operation,
+            availability: Availability::Ready,
+            coverage: Vec::new(),
+            items: vec![SemanticItem {
+                target: location.clone(),
+                caller: Some(endpoint.clone()),
+                callee: Some(endpoint),
+                call_site: Some(location),
+                recursive: false,
+            }],
+            truncated: false,
+            reason: None,
+            rpc_count: rpc_budget,
+            cache_hit: false,
+        })
+    }
 }
 
 /// 含一个类节点的索引样例：验证非可调用候选的 trace 报错。
@@ -531,4 +671,155 @@ fn candidate_ids_are_short_and_accept_a_unique_prefix() {
         .unwrap_err();
     assert_eq!(unknown.code, ErrorCode::AmbiguousSymbol);
     assert!(unknown.message.contains("不是本次会话搜索结果"));
+}
+
+#[test]
+fn java_semantic_tool_uses_registered_anchor_and_issues_safe_sources() {
+    let (_temp, root, db_path) = java_indexed_fixture();
+    let backend = Arc::new(FakeSemanticBackend::ready());
+    let tools =
+        UnderstandingTools::open_with_backend(&root, &db_path, Some(backend.clone())).unwrap();
+    assert!(tools.semantic_tool_enabled());
+    assert_eq!(tool_schemas().len(), 6);
+    assert_eq!(tool_schemas_with_java_semantics().len(), 7);
+
+    let search = tools
+        .search_symbols(
+            "search",
+            SearchSymbolsArgs {
+                query: "login".to_string(),
+                language: Some("java".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let candidate_id = search.data.candidates[0].candidate_id.clone();
+    let result = tools
+        .query_java_semantics(
+            "semantic",
+            QueryJavaSemanticsArgs {
+                operation: SemanticOperation::Definition,
+                anchor: JavaSemanticAnchor::Candidate {
+                    candidate_id: candidate_id.clone(),
+                },
+                limit: Some(20),
+            },
+        )
+        .unwrap();
+    assert_eq!(result.data.availability, Availability::Ready);
+    let semantic = result.data.semantic.unwrap();
+    assert_eq!(semantic.provider, "jdtls");
+    assert_eq!(semantic.plugin_id, "java-jdtls");
+    assert_eq!(semantic.rpc_count, 5);
+    assert!(result.data.source_links.iter().all(|link| {
+        link.source_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("sr1:"))
+    }));
+    assert_eq!(backend.rpc_budgets.lock().unwrap().as_slice(), &[5]);
+
+    let trace = tools
+        .trace_calls(
+            "trace",
+            TraceCallsArgs {
+                candidate_id,
+                direction: CallTraceDirection::Both,
+                depth: Some(3),
+                limit: Some(20),
+            },
+        )
+        .unwrap();
+    let semantic = trace.data.semantic.expect("Java trace 应附加语义部分");
+    assert_eq!(semantic.depth, 1);
+    assert!(semantic.inbound.unwrap().semantic.is_some());
+    assert!(semantic.outbound.unwrap().semantic.is_some());
+    assert!(semantic.note.contains("分别保留"));
+    assert_eq!(backend.rpc_budgets.lock().unwrap().as_slice(), &[5, 3, 3]);
+}
+
+#[test]
+fn java_semantic_tool_freezes_schema_limits_rpc_and_suppresses_repeat_failures() {
+    let (_temp, root, db_path) = java_indexed_fixture();
+    let backend = Arc::new(FakeSemanticBackend::ready());
+    let tools =
+        UnderstandingTools::open_with_backend(&root, &db_path, Some(backend.clone())).unwrap();
+    let source = tools
+        .read_file(
+            "source",
+            ReadFileArgs {
+                path: "src/LoginService.java".to_string(),
+                start_line: Some(2),
+                end_line: Some(3),
+            },
+        )
+        .unwrap();
+    let args = QueryJavaSemanticsArgs {
+        operation: SemanticOperation::References,
+        anchor: JavaSemanticAnchor::Source {
+            source_id: source.data.source_id,
+            line: 2,
+            column: 11,
+        },
+        limit: Some(20),
+    };
+    for index in 0..7 {
+        let result = tools
+            .query_java_semantics(&format!("query-{index}"), args.clone())
+            .unwrap();
+        assert!(result.data.semantic.is_some());
+    }
+    let exhausted = tools
+        .query_java_semantics("query-exhausted", args.clone())
+        .unwrap();
+    assert!(exhausted.data.semantic.is_none());
+    assert_eq!(exhausted.data.rpc_budget_remaining, 0);
+    assert_eq!(
+        backend.rpc_budgets.lock().unwrap().as_slice(),
+        &[6, 6, 6, 6, 6, 6, 4]
+    );
+
+    let invalid = tools
+        .query_java_semantics(
+            "invalid-limit",
+            QueryJavaSemanticsArgs {
+                limit: Some(41),
+                ..args.clone()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(invalid.code, ErrorCode::AnswerInvalid);
+
+    // 新问题开始时冻结 schema：服务随后禁用只改变响应，不删除工具或尝试重配。
+    let backend = Arc::new(FakeSemanticBackend::ready());
+    let frozen_tools =
+        UnderstandingTools::open_with_backend(&root, &db_path, Some(backend.clone())).unwrap();
+    let frozen_source = frozen_tools
+        .read_file(
+            "frozen-source",
+            ReadFileArgs {
+                path: "src/LoginService.java".to_string(),
+                start_line: Some(2),
+                end_line: Some(3),
+            },
+        )
+        .unwrap();
+    let frozen_args = QueryJavaSemanticsArgs {
+        operation: SemanticOperation::References,
+        anchor: JavaSemanticAnchor::Source {
+            source_id: frozen_source.data.source_id,
+            line: 2,
+            column: 11,
+        },
+        limit: Some(20),
+    };
+    *backend.enabled.lock().unwrap() = false;
+    assert!(frozen_tools.semantic_tool_enabled());
+    let first = frozen_tools
+        .query_java_semantics("disabled-1", frozen_args.clone())
+        .unwrap();
+    let second = frozen_tools
+        .query_java_semantics("disabled-2", frozen_args)
+        .unwrap();
+    assert!(first.data.message.contains("禁用"));
+    assert!(second.data.message.contains("连续不可用"));
 }

@@ -7,14 +7,16 @@
 //
 // V2 在严格静态图协议之外增加只读源码、工具会话与 AI 业务问答：
 // - source.rs：固定允许文件清单、有限读取、来源 ID 发放与 hash 复验；
-// - tools.rs：六个只读工具（符号/源码检索、文件读取、目录树、调用线索）；
+// - tools.rs：六个基础只读工具及可选 Java 语义查询（仍由 SourceService 发放来源）；
 // - analysis.rs：会话级业务答案 `AnalysisResult` 与来源/结构校验；
 // - agent.rs：单问题 agent 闭环（轮次/工具/HTTP 预算、格式修复、取消）。
 // - session.rs：追问历史、请求代际、取消/分离与旧来源复验。
+// - history_store.rs：本地完成历史持久化（只存结构有效的 Completed/终态 Partial）。
 // AI 业务发现不会写回 GraphSlice，也不会把会话推断伪装成索引权威关系。
 
 mod agent;
 mod analysis;
+mod history_store;
 mod session;
 mod source;
 mod tools;
@@ -25,7 +27,8 @@ pub use agent::{
     UNDERSTANDING_MAX_TOOL_RESULT_CHARS, UNDERSTANDING_MAX_TOOL_ROUNDS,
     UNDERSTANDING_MAX_TOTAL_RESULT_CHARS, UnderstandingAgentInput, UnderstandingAnswer,
     UnderstandingEvent, UnderstandingStep, UnderstandingTurnProvider, run_understanding_agent,
-    run_understanding_agent_with_context,
+    run_understanding_agent_with_context, run_understanding_agent_with_context_and_semantics,
+    run_understanding_agent_with_semantics,
 };
 pub use analysis::{
     ANALYSIS_MAX_LINKS, ANALYSIS_MAX_STEPS, ANALYSIS_PROTOCOL_VERSION, AnalysisCompletion,
@@ -34,6 +37,11 @@ pub use analysis::{
     FlowStep, analysis_json_schema, analysis_output_protocol, analysis_system_prompt,
     parse_analysis_result, validate_analysis_result,
 };
+pub use history_store::{
+    UNDERSTANDING_HISTORY_FORMAT_VERSION, UNDERSTANDING_HISTORY_LIST_LIMIT,
+    UNDERSTANDING_HISTORY_MAX_RECORDS, UnderstandingHistoryRecord, UnderstandingSourceRecord,
+    list_understanding_history_records, save_understanding_history_record,
+};
 pub use session::{
     UNDERSTANDING_PROMPT_HISTORY_LIMIT, UNDERSTANDING_PROMPT_HISTORY_MAX_CHARS,
     UNDERSTANDING_SESSION_HISTORY_LIMIT, UnderstandingHistoryEntry, UnderstandingHistorySummary,
@@ -41,6 +49,7 @@ pub use session::{
     UnderstandingSession, UnderstandingSessionEvent, UnderstandingSessionStatus,
     validate_history_source,
 };
+pub use source::source_id_of;
 pub use source::{
     FileTreeEntry, FileTreeEntryKind, FileTreeResult, SOURCE_FILE_MAX_BYTES, SOURCE_READ_MAX_CHARS,
     SOURCE_READ_MAX_LINES, SOURCE_SEARCH_MAX_FILES, SOURCE_SEARCH_MAX_RESULTS,
@@ -48,10 +57,12 @@ pub use source::{
     SourceSearchResult, SourceService, UnderstandingResult,
 };
 pub use tools::{
-    CallTraceDirection, GetFileTreeArgs, GetSymbolArgs, ReadFileArgs, SearchCodeArgs,
-    SearchSymbolsArgs, SearchSymbolsResult, SymbolCandidateView, SymbolDetailView,
+    CallTraceDirection, GetFileTreeArgs, GetSymbolArgs, JAVA_SEMANTIC_MAX_RPC_PER_QUESTION,
+    JAVA_SEMANTIC_MAX_RPC_PER_TOOL, JavaSemanticAnchor, JavaSemanticQueryResult,
+    QueryJavaSemanticsArgs, ReadFileArgs, SearchCodeArgs, SearchSymbolsArgs, SearchSymbolsResult,
+    SemanticSourceLink, SemanticTraceResult, SymbolCandidateView, SymbolDetailView,
     SymbolRelationView, ToolEnvelope, TraceCallsArgs, TraceCallsResult, UnderstandingTools,
-    tool_schemas,
+    tool_schemas, tool_schemas_with_java_semantics,
 };
 
 pub use types::{

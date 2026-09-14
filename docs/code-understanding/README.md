@@ -12,6 +12,8 @@
 | [设计文档](design.md) | 索引导航、AI 阅读工具、读写表分析、回答与简图 |
 | [开发文档](development.md) | CU2 开发任务与登录闭环测试 |
 | [范围调整记录](scope-change-v2.md) | 旧 DEV 工作如何保留、哪些任务停止扩展 |
+| [JDT LS 接入设计](jdtls-integration.md) | 1.1官方可选LSP插件：公共客户端/JDT适配器、查询来源、AI与视图、独立引擎包 |
+| [JDT LS 开发文档](jdtls-development.md) | JLS-T0～T5任务、插件验收与交接模板；T4服务层完成（托管安装+真实官方包验收），下一项T3原生语义视图（等CU2-T5），不是CU2首版前置条件 |
 
 实现交接：[CU2-T0 复用盘点](validation/cu2-t0-handoff.md)、[CU2-T1 只读工具](validation/cu2-t1-handoff.md)、[CU2-T2/T3 agent 闭环与业务答案](validation/cu2-t2-handoff.md)、[CU2-T3 真实模型验收](validation/cu2-t3-live-acceptance.md)。
 
@@ -21,7 +23,7 @@
 - 普通 Java 和 Spring Boot 都要能回答真实业务问题，采用按需读源码、注解、Mapper XML、SQL、实体映射的方式。
 - 用户重点关心：入口在哪里、调用了什么、被什么调用、读取/写入哪些表、校验与异常分支，以及缓存、会话、外部请求等相关逻辑。
 - 索引没有某条关系时，AI 可以通过搜索与源码查证补充本次回答，不要求先升级静态分析器。
-- 不加入 Git 融合，不执行项目或 SQL，不连接真实数据库。
+- 不加入 Git 融合，不运行应用或 SQL，不连接真实数据库。CU2基础模式不执行项目构建；可选JDT LS的可信项目导入边界见[接入设计第6节](jdtls-integration.md#6-运行环境与导入边界)。
 - 先做可测试的 AI 理解服务，再做简约的原生页面；首版可视化为本次回答的流程简图，不做全仓库图谱工作台。
 
 ## 已有工作的处理
@@ -31,3 +33,5 @@
 [旧版文档归档](archive/v1/README.md)及 [DEV-05 进度记录](validation/dev05-progress.md)保留历史。其“下一步继续语句提取/框架语义”等排期已被本版替代。旧 DEV 编号不重命名，当前工作统一使用 CU2-T* 编号。
 
 后续 agent 先读根 [AGENTS.md](../../AGENTS.md)和上述 CU2 交接，直接推进 **CU2-T5：简约原生页面**（T4 交接见 [validation/cu2-t4-handoff.md](validation/cu2-t4-handoff.md)）；不要先完成旧 DEV-05/06 的全部静态语义任务。真实模型验收已完成 B01～B05（各两遍，B04/B05 边界样例含检索缺口与动态/外部边界的诚实标注），结论见 [cu2-t3-live-acceptance.md](validation/cu2-t3-live-acceptance.md)。
+
+若本次接手的是 **JDT LS接入任务**，先读[JLS开发状态与依赖](jdtls-development.md#2-顺序依赖与交付等级)和[T4交接](validation/jls-t4-handoff.md)；T3（原生语义视图）仍以CU2-T5基础源码视图为前置——当前主线是先完成 **CU2-T5：简约原生页面**。T2已完成AI语义工具、trace一跳增强和同模型开关对照；T4已完成引擎包托管安装（CNB镜像+官方源兜底）与真实官方包验收；后续仍需源码视图、插件卡与一键安装UI。适配器随主程序发布，引擎包独立安装；第三方插件市场、动态DLL/脚本宿主和其他语言均不在本版范围。不能把手动环境验证当最终用户交付。

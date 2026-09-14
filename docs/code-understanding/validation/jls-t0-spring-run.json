@@ -1,0 +1,1175 @@
+{
+  "schema": 1,
+  "timestamp": "2026-09-11T22:48:23+0800",
+  "platform": {
+    "os": "nt",
+    "sys_platform": "win32",
+    "architecture": "AMD64"
+  },
+  "paths": {
+    "jdk": "D:\\khaslana\\jdk-21.0.12.1+1",
+    "jdt": "D:\\khaslana\\jdt-language-server",
+    "project": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-spring-mem",
+    "workspace": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-spring-mem"
+  },
+  "artifacts": {
+    "launcher": "org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "launcher_sha256": "9b3b1da60813ac5fa09dd5c198f1884be7076d0a5daec54faa3f351a787e34b7",
+    "jdt_archive": {
+      "path": "D:\\khaslana\\jdt-language-server-1.61.0-202609031315 (1).tar.gz",
+      "bytes": 51037522,
+      "sha256": "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
+    },
+    "jdk_archive": {
+      "path": "D:\\khaslana\\OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "bytes": 205073461,
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+    }
+  },
+  "command": [
+    "D:\\khaslana\\jdk-21.0.12.1+1\\bin\\java.exe",
+    "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+    "-Dosgi.bundles.defaultStartLevel=4",
+    "-Declipse.product=org.eclipse.jdt.ls.core.product",
+    "-Dlog.level=ALL",
+    "-Xmx1G",
+    "--add-modules=ALL-SYSTEM",
+    "--add-opens",
+    "java.base/java.util=ALL-UNNAMED",
+    "--add-opens",
+    "java.base/java.lang=ALL-UNNAMED",
+    "-jar",
+    "D:\\khaslana\\jdt-language-server\\plugins\\org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "-configuration",
+    "D:\\khaslana\\jdt-language-server\\config_win",
+    "-data",
+    "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-spring-mem"
+  ],
+  "project_before": {
+    "expectations.json": {
+      "bytes": 746,
+      "sha256": "a789b21fd30466ceedcdb6271ab8b284890b150898ff040f7545068ba7d45b07"
+    },
+    "pom.xml": {
+      "bytes": 901,
+      "sha256": "20d7d30dc310eab4b92fc35e43f3cc24fa83d6c975fb9d81f1d77277d60e8b19"
+    },
+    "src/main/java/com/example/spring/AuthService.java": {
+      "bytes": 571,
+      "sha256": "ae9cd6fb3727a4817def32cf1003f037183d474d7ebcf2c497df63d655fc1f65"
+    },
+    "src/main/java/com/example/spring/LoginAudit.java": {
+      "bytes": 266,
+      "sha256": "193b47714d0c8480a57a705572d7476c940b55ec3c8d1f70325c693913cf13dd"
+    },
+    "src/main/java/com/example/spring/LoginAuditRepository.java": {
+      "bytes": 110,
+      "sha256": "be58a3b791818fc725378b2ac7c9226cc1db4ba1e08886456b0e27ef5b45edae"
+    },
+    "src/main/java/com/example/spring/UserEntity.java": {
+      "bytes": 184,
+      "sha256": "4a0ddef717d9aff6cb631e2400a0b1a10fffe6c26a40fe02eb45ef75c9f8fc23"
+    },
+    "src/main/java/com/example/spring/UserMapper.java": {
+      "bytes": 230,
+      "sha256": "f515b7eb70dc93bbc9a61dff9ab68c52f1e35dc9aa71bfc7d4cb460c20a79f90"
+    }
+  },
+  "workspace_before": {
+    "files": 0,
+    "bytes": 0
+  },
+  "initialize_ms": 2480.187,
+  "server_capabilities": {
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 2,
+      "save": {
+        "includeText": true
+      }
+    },
+    "hoverProvider": true,
+    "completionProvider": {
+      "resolveProvider": true,
+      "triggerCharacters": [
+        ".",
+        "@",
+        "#",
+        "*",
+        " "
+      ]
+    },
+    "signatureHelpProvider": {
+      "triggerCharacters": [
+        "(",
+        ","
+      ]
+    },
+    "definitionProvider": true,
+    "typeDefinitionProvider": true,
+    "implementationProvider": true,
+    "referencesProvider": true,
+    "documentHighlightProvider": true,
+    "documentSymbolProvider": true,
+    "workspaceSymbolProvider": true,
+    "codeActionProvider": {
+      "codeActionKinds": [],
+      "resolveProvider": false
+    },
+    "codeLensProvider": {
+      "resolveProvider": true
+    },
+    "documentFormattingProvider": true,
+    "documentRangeFormattingProvider": true,
+    "documentOnTypeFormattingProvider": {
+      "firstTriggerCharacter": ";",
+      "moreTriggerCharacter": [
+        "\n",
+        "}"
+      ]
+    },
+    "renameProvider": {
+      "prepareProvider": true
+    },
+    "foldingRangeProvider": true,
+    "declarationProvider": true,
+    "executeCommandProvider": {
+      "commands": [
+        "java.project.import",
+        "java.project.changeImportedProjects",
+        "java.navigate.openTypeHierarchy",
+        "java.project.resolveStackTraceLocation",
+        "java.edit.handlePasteEvent",
+        "java.edit.stringFormatting",
+        "java.project.getSettings",
+        "java.project.resolveWorkspaceSymbol",
+        "java.project.upgradeGradle",
+        "java.project.createModuleInfo",
+        "java.vm.getAllInstalls",
+        "java.edit.organizeImports",
+        "java.project.refreshDiagnostics",
+        "java.getFullyQualifiedName",
+        "java.project.removeFromSourcePath",
+        "java.project.listSourcePaths",
+        "java.project.updateSettings",
+        "java.project.getAll",
+        "java.reloadBundles",
+        "java.project.isTestFile",
+        "java.project.resolveText",
+        "java.project.getClasspaths",
+        "java.navigate.resolveTypeHierarchy",
+        "java.getTroubleshootingInfo",
+        "java.edit.smartSemicolonDetection",
+        "java.project.updateSourceAttachment",
+        "java.project.updateClassPaths",
+        "java.decompile",
+        "java.protobuf.generateSources",
+        "java.project.resolveSourceAttachment",
+        "java.project.updateJdk",
+        "java.project.addToSourcePath",
+        "java.completion.onDidSelect"
+      ]
+    },
+    "workspace": {
+      "workspaceFolders": {
+        "supported": true,
+        "changeNotifications": true
+      },
+      "textDocumentContent": {
+        "schemes": [
+          "jdt"
+        ]
+      }
+    },
+    "typeHierarchyProvider": true,
+    "callHierarchyProvider": true,
+    "selectionRangeProvider": true,
+    "semanticTokensProvider": {
+      "legend": {
+        "tokenTypes": [
+          "namespace",
+          "class",
+          "interface",
+          "enum",
+          "enumMember",
+          "type",
+          "typeParameter",
+          "method",
+          "property",
+          "variable",
+          "parameter",
+          "modifier",
+          "keyword",
+          "decorator",
+          "annotationMember",
+          "record",
+          "recordComponent"
+        ],
+        "tokenModifiers": [
+          "abstract",
+          "static",
+          "readonly",
+          "deprecated",
+          "declaration",
+          "documentation",
+          "public",
+          "private",
+          "protected",
+          "native",
+          "generic",
+          "typeArgument",
+          "importDeclaration",
+          "constructor"
+        ]
+      },
+      "range": false,
+      "full": {
+        "delta": false
+      },
+      "documentSelector": [
+        {
+          "language": "java",
+          "scheme": "file"
+        },
+        {
+          "language": "java",
+          "scheme": "jdt"
+        }
+      ]
+    },
+    "inlayHintProvider": true
+  },
+  "import": {
+    "ready": true,
+    "attempts": 1,
+    "workspace_symbols": 1
+  },
+  "import_ms": 4054.905,
+  "queries": [
+    {
+      "id": "spring-mybatis-definition",
+      "operation": "definition",
+      "count": 1,
+      "files": [
+        "src/main/java/com/example/spring/UserMapper.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 26.34,
+      "rpc_count": 1
+    },
+    {
+      "id": "spring-jpa-definition",
+      "operation": "definition",
+      "count": 1,
+      "files": [
+        "src/main/java/com/example/spring/LoginAuditRepository.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 8.333,
+      "rpc_count": 1
+    }
+  ],
+  "hot_queries": {
+    "count": 20,
+    "p50_ms": 5.565,
+    "p95_ms": 10.725,
+    "max_ms": 10.725,
+    "samples_ms": [
+      6.454,
+      5.907,
+      6.131,
+      5.883,
+      5.664,
+      5.524,
+      5.21,
+      5.184,
+      5.369,
+      10.725,
+      6.348,
+      5.611,
+      5.385,
+      5.787,
+      5.173,
+      5.332,
+      5.263,
+      5.479,
+      5.606,
+      5.196
+    ]
+  },
+  "cancellation": {
+    "sent": true,
+    "outcome": "response"
+  },
+  "rpc_count_initial_queries": 2,
+  "lifecycle": {
+    "shutdown_response": true,
+    "exit_code": 0
+  },
+  "memory": {
+    "available": true,
+    "sampler": "psutil 7.2.2",
+    "sample_interval_ms": 100,
+    "samples": 67,
+    "peak_rss_bytes": 1019801600,
+    "peak_process_count": 2,
+    "peak_process_names": [
+      "conhost.exe",
+      "java.exe"
+    ]
+  },
+  "total_ms": 7179.053,
+  "notifications": [
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is started"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 Started org.eclipse.buildship.core 29ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 Started org.eclipse.m2e.core 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 Main thread is waiting"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 >> initialize"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 Initializing JDT Language Server (Standard)\n\t- Version: 1.61.0-SNAPSHOT (OSGi 1.61.0.202609031315)\n\t- Git Commit: 08eafe6 - CHANGELOG for 1.61.0"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:25 ProjectRegistryRefreshJob finished 579ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "6ad7f8d5-103a-42ae-84b1-e2779c05df95",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "6ad7f8d5-103a-42ae-84b1-e2779c05df95",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9d33e5dc-08f6-4768-bf59-1ca421b157ef",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9d33e5dc-08f6-4768-bf59-1ca421b157ef",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "18a4ad42-db49-4dc1-a64c-b287d23b985b",
+        "task": "Repository registry initialization",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c0ed73f6-c159-48e1-80a1-f83497a36d62",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c0ed73f6-c159-48e1-80a1-f83497a36d62",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 Setting D:\\khaslana\\jdk-21.0.12.1+1 as 'JavaSE-21' environment (id:1789138105979)"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 JVM Runtimes changed, saving new configuration"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09838b25-686b-425d-9fee-589d3b4571bf",
+        "task": "Detect installed JVMs",
+        "status": "0% ",
+        "totalWork": 2,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09838b25-686b-425d-9fee-589d3b4571bf",
+        "task": "D:\\Program Files\\Java\\jdk1.8.0_121",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09838b25-686b-425d-9fee-589d3b4571bf",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09838b25-686b-425d-9fee-589d3b4571bf",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "09838b25-686b-425d-9fee-589d3b4571bf",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 Static Commands: []"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 Non-Static Commands: [java.project.import, java.project.changeImportedProjects, java.navigate.openTypeHierarchy, java.project.resolveStackTraceLocation, java.edit.handlePasteEvent, java.edit.stringFormatting, java.project.getSettings, java.project.resolveWorkspaceSymbol, java.project.upgradeGradle, java.project.createModuleInfo, java.vm.getAllInstalls, java.edit.organizeImports, java.project.refreshDiagnostics, java.getFullyQualifiedName, java.project.removeFromSourcePath, java.project.listSourcePaths, java.project.updateSettings, java.project.getAll, java.reloadBundles, java.project.isTestFile, java.project.resolveText, java.project.getClasspaths, java.navigate.resolveTypeHierarchy, java.getTroubleshootingInfo, java.edit.smartSemicolonDetection, java.project.updateSourceAttachment, java.project.updateClassPaths, java.decompile, java.protobuf.generateSources, java.project.resolveSourceAttachment, java.project.updateJdk, java.project.addToSourcePath, java.completion.onDidSelect]"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "Init..."
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "0% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Initialize Workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 RepositoryRegistryUpdateJob finished 1ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 >> initialized"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 Importers: GradleProjectImporter, MavenProjectImporter, EclipseProjectImporter, InvisibleProjectImporter"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:26 Importing Maven project(s)"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "a721f9d5-bc63-4a0b-98c0-89668804ea44",
+        "task": "LookupJDKToolchainsJob",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "50% Starting Java Language Server - Project 'jls-spring-data-fixture'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Importing Maven project(s)",
+        "subTask": "Project 'jls-spring-data-fixture'",
+        "status": "Importing Maven project(s) - Project 'jls-spring-data-fixture'",
+        "totalWork": 1000,
+        "workDone": 496,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "70% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Resolve plugin dependency",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "70% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 1000,
+        "workDone": 704,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 Progressive import: reporting 1 new project(s)"
+      }
+    },
+    {
+      "method": "language/eventNotification",
+      "params": {
+        "eventType": 200,
+        "data": [
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/"
+        ]
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ProjectStatus",
+        "message": "OK"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "100% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Resolve plugin dependency",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "100% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1000% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1000% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1005% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1005% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1005,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1010% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1010% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1010,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1100% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1100% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 Workspace initialized in 1011ms"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Started",
+        "message": "Ready"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/jls-spring-data-fixture/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b4fc971f-601f-4803-a97c-95e80e89fb97",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "status": "1100% Refreshing '/jls-spring-data-fixture/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 >> initialization job finished"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ServiceReady",
+        "message": "ServiceReady"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 >> build jobs finished"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 >> registerWatchers'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "730b547a-ee53-449b-831c-70d0045704ba",
+        "task": "Refreshing workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "730b547a-ee53-449b-831c-70d0045704ba",
+        "task": "Refreshing workspace",
+        "subTask": "Refreshing '/jls-spring-data-fixture/src/main/java/com/example/spring'.",
+        "status": "6% Refreshing '/jls-spring-data-fixture/src/main/java/com/example/spring'.",
+        "totalWork": 1000,
+        "workDone": 58,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3aa4c2a9-7699-4c81-94c8-6b2ff9558a6d",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:27 Reconciled 5. Took 0 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3aa4c2a9-7699-4c81-94c8-6b2ff9558a6d",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "693a6db3-5964-436c-b5ed-617fc2721b1f",
+        "task": "Publish Diagnostics",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 begin problem for /LoginAudit.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 0 problems reported for /LoginAudit.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/src/main/java/com/example/spring/LoginAudit.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 begin problem for /LoginAuditRepository.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 0 problems reported for /LoginAuditRepository.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/src/main/java/com/example/spring/LoginAuditRepository.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 begin problem for /AuthService.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 0 problems reported for /AuthService.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/src/main/java/com/example/spring/AuthService.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "693a6db3-5964-436c-b5ed-617fc2721b1f",
+        "task": "Publish Diagnostics",
+        "status": "58% ",
+        "totalWork": 1000,
+        "workDone": 583,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 begin problem for /UserMapper.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 0 problems reported for /UserMapper.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/src/main/java/com/example/spring/UserMapper.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 begin problem for /UserEntity.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 0 problems reported for /UserEntity.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-spring-mem/src/main/java/com/example/spring/UserEntity.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:28 Validated 5. Took 240 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "693a6db3-5964-436c-b5ed-617fc2721b1f",
+        "task": "Publish Diagnostics",
+        "status": "83% ",
+        "totalWork": 1000,
+        "workDone": 833,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "12 files to index (C:\\Users\\chen\\.m2\\repository\\org\\springframework\\spring-context\\6.2.11\\spring-context-6.2.11.jar)",
+        "status": "79% 12 files to index (C:\\Users\\chen\\.m2\\repository\\org\\springframework\\spring-context\\6.2.11\\spring-context-6.2.11.jar)",
+        "totalWork": 1000,
+        "workDone": 790,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "9 files to index (C:\\Users\\chen\\.m2\\repository\\org\\springframework\\spring-core\\6.2.11\\spring-core-6.2.11.jar)",
+        "status": "79% 9 files to index (C:\\Users\\chen\\.m2\\repository\\org\\springframework\\spring-core\\6.2.11\\spring-core-6.2.11.jar)",
+        "totalWork": 1000,
+        "workDone": 792,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "4 files to index (C:\\Users\\chen\\.m2\\repository\\org\\mybatis\\mybatis\\3.5.19\\mybatis-3.5.19.jar)",
+        "status": "80% 4 files to index (C:\\Users\\chen\\.m2\\repository\\org\\mybatis\\mybatis\\3.5.19\\mybatis-3.5.19.jar)",
+        "totalWork": 1000,
+        "workDone": 795,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "6 files to index (/jls-spring-data-fixture)",
+        "status": "80% 6 files to index (/jls-spring-data-fixture)",
+        "totalWork": 1000,
+        "workDone": 799,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "6 files to index (/jls-spring-data-fixture)",
+        "status": "100% 6 files to index (/jls-spring-data-fixture)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "6 files to index (/jls-spring-data-fixture)",
+        "status": "100% 6 files to index (/jls-spring-data-fixture)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ce91de16-5aa4-407a-8627-0c5affa556ac",
+        "task": "Searching...",
+        "subTask": "6 files to index (/jls-spring-data-fixture)",
+        "status": "100% 6 files to index (/jls-spring-data-fixture)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:30 >> shutdown"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:30 >> exit"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:30 Shutdown received... waking up main thread"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:30 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is stopping:"
+      }
+    }
+  ],
+  "server_requests": [],
+  "reader_error": null,
+  "project_changes": {
+    "added": [
+      ".classpath",
+      ".project",
+      ".settings/org.eclipse.jdt.apt.core.prefs",
+      ".settings/org.eclipse.jdt.core.prefs",
+      ".settings/org.eclipse.m2e.core.prefs"
+    ],
+    "removed": [],
+    "modified": []
+  },
+  "workspace_after": {
+    "files": 49,
+    "bytes": 50658943
+  },
+  "passed": true
+}

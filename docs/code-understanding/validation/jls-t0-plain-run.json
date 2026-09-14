@@ -1,0 +1,856 @@
+{
+  "schema": 1,
+  "timestamp": "2026-09-11T22:40:53+0800",
+  "platform": {
+    "os": "nt",
+    "sys_platform": "win32",
+    "architecture": "AMD64"
+  },
+  "paths": {
+    "jdk": "D:\\khaslana\\jdk-21.0.12.1+1",
+    "jdt": "D:\\khaslana\\jdt-language-server",
+    "project": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-plain",
+    "workspace": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-plain"
+  },
+  "artifacts": {
+    "launcher": "org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "launcher_sha256": "9b3b1da60813ac5fa09dd5c198f1884be7076d0a5daec54faa3f351a787e34b7",
+    "jdt_archive": {
+      "path": "D:\\khaslana\\jdt-language-server-1.61.0-202609031315 (1).tar.gz",
+      "bytes": 51037522,
+      "sha256": "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
+    },
+    "jdk_archive": {
+      "path": "D:\\khaslana\\OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "bytes": 205073461,
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+    }
+  },
+  "command": [
+    "D:\\khaslana\\jdk-21.0.12.1+1\\bin\\java.exe",
+    "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+    "-Dosgi.bundles.defaultStartLevel=4",
+    "-Declipse.product=org.eclipse.jdt.ls.core.product",
+    "-Dlog.level=ALL",
+    "-Xmx1G",
+    "--add-modules=ALL-SYSTEM",
+    "--add-opens",
+    "java.base/java.util=ALL-UNNAMED",
+    "--add-opens",
+    "java.base/java.lang=ALL-UNNAMED",
+    "-jar",
+    "D:\\khaslana\\jdt-language-server\\plugins\\org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "-configuration",
+    "D:\\khaslana\\jdt-language-server\\config_win",
+    "-data",
+    "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-plain"
+  ],
+  "project_before": {
+    "expectations.json": {
+      "bytes": 609,
+      "sha256": "5ec16d7fddc3439ae4ca1bed7e207f46f9d56267e7039383beb1f3856b320b0c"
+    },
+    "src/App.java": {
+      "bytes": 141,
+      "sha256": "4a77a5e0a78058ff1259d1c86e3576348dcc093e9554c89d1b04224b8ae9ba1a"
+    },
+    "src/Greeting.java": {
+      "bytes": 124,
+      "sha256": "bb99a68191ff1e438dff022814838e9d3c053fe8b888b940d1c625fa4ee9e0a8"
+    }
+  },
+  "workspace_before": {
+    "files": 0,
+    "bytes": 0
+  },
+  "initialize_ms": 2755.526,
+  "server_capabilities": {
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 2,
+      "save": {
+        "includeText": true
+      }
+    },
+    "hoverProvider": true,
+    "completionProvider": {
+      "resolveProvider": true,
+      "triggerCharacters": [
+        ".",
+        "@",
+        "#",
+        "*",
+        " "
+      ]
+    },
+    "signatureHelpProvider": {
+      "triggerCharacters": [
+        "(",
+        ","
+      ]
+    },
+    "definitionProvider": true,
+    "typeDefinitionProvider": true,
+    "implementationProvider": true,
+    "referencesProvider": true,
+    "documentHighlightProvider": true,
+    "documentSymbolProvider": true,
+    "workspaceSymbolProvider": true,
+    "codeActionProvider": {
+      "codeActionKinds": [],
+      "resolveProvider": false
+    },
+    "codeLensProvider": {
+      "resolveProvider": true
+    },
+    "documentFormattingProvider": true,
+    "documentRangeFormattingProvider": true,
+    "documentOnTypeFormattingProvider": {
+      "firstTriggerCharacter": ";",
+      "moreTriggerCharacter": [
+        "\n",
+        "}"
+      ]
+    },
+    "renameProvider": {
+      "prepareProvider": true
+    },
+    "foldingRangeProvider": true,
+    "declarationProvider": true,
+    "executeCommandProvider": {
+      "commands": [
+        "java.project.import",
+        "java.project.changeImportedProjects",
+        "java.navigate.openTypeHierarchy",
+        "java.project.resolveStackTraceLocation",
+        "java.edit.handlePasteEvent",
+        "java.edit.stringFormatting",
+        "java.project.getSettings",
+        "java.project.resolveWorkspaceSymbol",
+        "java.project.upgradeGradle",
+        "java.project.createModuleInfo",
+        "java.vm.getAllInstalls",
+        "java.edit.organizeImports",
+        "java.project.refreshDiagnostics",
+        "java.getFullyQualifiedName",
+        "java.project.removeFromSourcePath",
+        "java.project.listSourcePaths",
+        "java.project.updateSettings",
+        "java.project.getAll",
+        "java.reloadBundles",
+        "java.project.isTestFile",
+        "java.project.resolveText",
+        "java.project.getClasspaths",
+        "java.navigate.resolveTypeHierarchy",
+        "java.getTroubleshootingInfo",
+        "java.edit.smartSemicolonDetection",
+        "java.project.updateSourceAttachment",
+        "java.project.updateClassPaths",
+        "java.decompile",
+        "java.protobuf.generateSources",
+        "java.project.resolveSourceAttachment",
+        "java.project.updateJdk",
+        "java.project.addToSourcePath",
+        "java.completion.onDidSelect"
+      ]
+    },
+    "workspace": {
+      "workspaceFolders": {
+        "supported": true,
+        "changeNotifications": true
+      },
+      "textDocumentContent": {
+        "schemes": [
+          "jdt"
+        ]
+      }
+    },
+    "typeHierarchyProvider": true,
+    "callHierarchyProvider": true,
+    "selectionRangeProvider": true,
+    "semanticTokensProvider": {
+      "legend": {
+        "tokenTypes": [
+          "namespace",
+          "class",
+          "interface",
+          "enum",
+          "enumMember",
+          "type",
+          "typeParameter",
+          "method",
+          "property",
+          "variable",
+          "parameter",
+          "modifier",
+          "keyword",
+          "decorator",
+          "annotationMember",
+          "record",
+          "recordComponent"
+        ],
+        "tokenModifiers": [
+          "abstract",
+          "static",
+          "readonly",
+          "deprecated",
+          "declaration",
+          "documentation",
+          "public",
+          "private",
+          "protected",
+          "native",
+          "generic",
+          "typeArgument",
+          "importDeclaration",
+          "constructor"
+        ]
+      },
+      "range": false,
+      "full": {
+        "delta": false
+      },
+      "documentSelector": [
+        {
+          "language": "java",
+          "scheme": "file"
+        },
+        {
+          "language": "java",
+          "scheme": "jdt"
+        }
+      ]
+    },
+    "inlayHintProvider": true
+  },
+  "import": {
+    "ready": true,
+    "attempts": 1,
+    "workspace_symbols": 1
+  },
+  "import_ms": 3542.702,
+  "queries": [
+    {
+      "id": "plain-jdk-definition",
+      "operation": "definition",
+      "count": 1,
+      "files": [
+        "src/Greeting.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 24.408,
+      "rpc_count": 1
+    },
+    {
+      "id": "plain-jdk-references",
+      "operation": "references",
+      "count": 2,
+      "files": [
+        "src/App.java",
+        "src/Greeting.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 43.226,
+      "rpc_count": 1
+    }
+  ],
+  "hot_queries": {
+    "count": 20,
+    "p50_ms": 11.36,
+    "p95_ms": 20.955,
+    "max_ms": 20.955,
+    "samples_ms": [
+      6.793,
+      16.641,
+      5.113,
+      18.101,
+      7.306,
+      17.212,
+      6.013,
+      16.641,
+      6.108,
+      14.69,
+      6.655,
+      16.353,
+      8.031,
+      20.955,
+      6.82,
+      19.821,
+      6.901,
+      16.825,
+      7.274,
+      18.065
+    ]
+  },
+  "cancellation": {
+    "sent": true,
+    "outcome": "response"
+  },
+  "rpc_count_initial_queries": 2,
+  "lifecycle": {
+    "shutdown_response": true,
+    "exit_code": 0
+  },
+  "total_ms": 7117.07,
+  "notifications": [
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is started"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 Started org.eclipse.buildship.core 29ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 Started org.eclipse.m2e.core 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 Main thread is waiting"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 >> initialize"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 Initializing JDT Language Server (Standard)\n\t- Version: 1.61.0-SNAPSHOT (OSGi 1.61.0.202609031315)\n\t- Git Commit: 08eafe6 - CHANGELOG for 1.61.0"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:55 ProjectRegistryRefreshJob finished 648ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "2f0234da-79a7-4082-8f80-2028e98e83b4",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "2f0234da-79a7-4082-8f80-2028e98e83b4",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d3280851-8265-4f29-9ad9-f32202b538c9",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d3280851-8265-4f29-9ad9-f32202b538c9",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "6ece8256-2d5c-42b8-b4d3-a551c68466f5",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "6ece8256-2d5c-42b8-b4d3-a551c68466f5",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Setting D:\\khaslana\\jdk-21.0.12.1+1 as 'JavaSE-21' environment (id:1789137655797)"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 JVM Runtimes changed, saving new configuration"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "64cb855c-c84e-46e6-aeb8-1e80d27c3421",
+        "task": "Detect installed JVMs",
+        "status": "0% ",
+        "totalWork": 2,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "64cb855c-c84e-46e6-aeb8-1e80d27c3421",
+        "task": "D:\\Program Files\\Java\\jdk1.8.0_121",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "64cb855c-c84e-46e6-aeb8-1e80d27c3421",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "64cb855c-c84e-46e6-aeb8-1e80d27c3421",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "64cb855c-c84e-46e6-aeb8-1e80d27c3421",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Static Commands: []"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Non-Static Commands: [java.project.import, java.project.changeImportedProjects, java.navigate.openTypeHierarchy, java.project.resolveStackTraceLocation, java.edit.handlePasteEvent, java.edit.stringFormatting, java.project.getSettings, java.project.resolveWorkspaceSymbol, java.project.upgradeGradle, java.project.createModuleInfo, java.vm.getAllInstalls, java.edit.organizeImports, java.project.refreshDiagnostics, java.getFullyQualifiedName, java.project.removeFromSourcePath, java.project.listSourcePaths, java.project.updateSettings, java.project.getAll, java.reloadBundles, java.project.isTestFile, java.project.resolveText, java.project.getClasspaths, java.navigate.resolveTypeHierarchy, java.getTroubleshootingInfo, java.edit.smartSemicolonDetection, java.project.updateSourceAttachment, java.project.updateClassPaths, java.decompile, java.protobuf.generateSources, java.project.resolveSourceAttachment, java.project.updateJdk, java.project.addToSourcePath, java.completion.onDidSelect]"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "Init..."
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "0% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b202587d-e0b3-4a0d-954d-d5e0dfa7f87d",
+        "task": "Initialize Workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 RepositoryRegistryUpdateJob finished 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 >> initialized"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Importers: GradleProjectImporter, MavenProjectImporter, EclipseProjectImporter, InvisibleProjectImporter"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ProjectStatus",
+        "message": "OK"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "100% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b202587d-e0b3-4a0d-954d-d5e0dfa7f87d",
+        "task": "Initialize Workspace",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Workspace initialized in 22ms"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Started",
+        "message": "Ready"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "100% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b202587d-e0b3-4a0d-954d-d5e0dfa7f87d",
+        "task": "Initialize Workspace",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 >> initialization job finished"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ServiceReady",
+        "message": "ServiceReady"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 >> build jobs finished"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 >> registerWatchers'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "981f1abd-09a4-477d-a811-defccb728d01",
+        "task": "Check JDK Index",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Try to create an invisible project for the workspace D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-plain"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Creating the Java project jls-t0-project-plain_c396bcd6"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Finished creating the Java project jls-t0-project-plain_c396bcd6"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:56 Successfully created a workspace invisible project jls-t0-project-plain_c396bcd6"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-workspace-plain/jls-t0-project-plain_c396bcd6/",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "45578c03-8e9a-43c6-8236-0e21134d1c37",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 Reconciled 2. Took 0 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "45578c03-8e9a-43c6-8236-0e21134d1c37",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 >> Updating classpath for project jls-t0-project-plain_c396bcd6"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "205acb29-995c-436e-a074-e569529a8826",
+        "task": "Update classpath Job",
+        "status": "0% ",
+        "totalWork": 1,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "205acb29-995c-436e-a074-e569529a8826",
+        "task": "Update classpath Job",
+        "status": "0% ",
+        "totalWork": 1,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "205acb29-995c-436e-a074-e569529a8826",
+        "task": "Update classpath Job",
+        "status": "0% ",
+        "totalWork": 1,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "81bdadd9-5923-4d1c-98cb-44775699bdf8",
+        "task": "Publish Diagnostics",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 begin problem for /App.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 0 problems reported for /App.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-plain/src/App.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 begin problem for /Greeting.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 0 problems reported for /Greeting.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-plain/src/Greeting.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:40:57 Validated 2. Took 62 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "81bdadd9-5923-4d1c-98cb-44775699bdf8",
+        "task": "Publish Diagnostics",
+        "status": "67% ",
+        "totalWork": 1000,
+        "workDone": 666,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:41:00 >> shutdown"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:41:00 >> exit"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:41:00 Shutdown received... waking up main thread"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:41:00 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is stopping:"
+      }
+    }
+  ],
+  "server_requests": [],
+  "reader_error": null,
+  "project_changes": {
+    "added": [],
+    "removed": [],
+    "modified": []
+  },
+  "workspace_after": {
+    "files": 30,
+    "bytes": 42869692
+  },
+  "passed": true
+}

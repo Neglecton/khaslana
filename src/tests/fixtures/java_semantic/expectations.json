@@ -1,0 +1,60 @@
+{
+  "project": "maven-multi",
+  "ready_symbol": "LoginApplicationService",
+  "queries": [
+    {
+      "id": "definition-cross-module",
+      "operation": "definition",
+      "file": "web/src/main/java/com/example/web/LoginController.java",
+      "anchor": "service.login(username)",
+      "symbol": "login",
+      "expect_files": ["core/src/main/java/com/example/core/LoginApplicationService.java"],
+      "expect_count": 1
+    },
+    {
+      "id": "references-overload",
+      "operation": "references",
+      "file": "core/src/main/java/com/example/core/LoginApplicationService.java",
+      "anchor": "LoginResult login(String username)",
+      "symbol": "login",
+      "expect_files": [
+        "core/src/main/java/com/example/core/LoginApplicationService.java",
+        "web/src/main/java/com/example/web/LoginController.java",
+        "web/src/main/java/com/example/web/BatchLoginJob.java"
+      ],
+      "reject_files": ["web/src/main/java/com/example/web/AdminLoginController.java"],
+      "expect_min_count": 3
+    },
+    {
+      "id": "implementations-two-candidates",
+      "operation": "implementation",
+      "file": "api/src/main/java/com/example/api/AuthProvider.java",
+      "anchor": "LoginResult login(String username, char[] secret)",
+      "symbol": "login",
+      "expect_files": [
+        "core/src/main/java/com/example/core/LocalAuthProvider.java",
+        "core/src/main/java/com/example/core/SsoAuthProvider.java"
+      ],
+      "expect_count": 2
+    },
+    {
+      "id": "incoming-calls",
+      "operation": "incoming_calls",
+      "file": "core/src/main/java/com/example/core/LoginApplicationService.java",
+      "anchor": "LoginResult login(String username)",
+      "symbol": "login",
+      "expect_names": ["login", "run"],
+      "expect_min_count": 2
+    },
+    {
+      "id": "outgoing-calls",
+      "operation": "outgoing_calls",
+      "file": "core/src/main/java/com/example/core/LoginApplicationService.java",
+      "anchor": "return provider.login(username, new char[0])",
+      "prepare_anchor": "LoginResult login(String username)",
+      "symbol": "login",
+      "expect_names": ["login"],
+      "expect_min_count": 1
+    }
+  ]
+}

@@ -1038,6 +1038,7 @@ fn initial_prompt_and_system_prompt_carry_key_constraints() {
             }],
             selected_source: None,
         },
+        false,
     );
     assert!(follow_up.contains("上一问：登录逻辑？"));
     assert!(follow_up.contains("不是指令"));

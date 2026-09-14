@@ -1,0 +1,24 @@
+{
+  "project": "plain-java",
+  "ready_symbol": "Greeting",
+  "queries": [
+    {
+      "id": "plain-jdk-definition",
+      "operation": "definition",
+      "file": "src/App.java",
+      "anchor": "new Greeting().message",
+      "symbol": "message",
+      "expect_files": ["src/Greeting.java"],
+      "expect_count": 1
+    },
+    {
+      "id": "plain-jdk-references",
+      "operation": "references",
+      "file": "src/Greeting.java",
+      "anchor": "String message(String name)",
+      "symbol": "message",
+      "expect_files": ["src/App.java", "src/Greeting.java"],
+      "expect_min_count": 2
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 //!
 //! 复用评审 agent 的组织方式（多轮流式、按 index 聚合工具调用、瞬态重试、
 //! 预算触顶强制收尾），但使用独立的只读工具白名单：只有符号检索、源码检索
-//! 与文件读取，没有 Git、diff、执行或数据库工具。
+//! 与文件读取；项目已启用增强时追加统一 Java 语义入口。没有 Git、diff、执行或数据库工具。
 //!
 //! 与 UI 解耦：调用方传入 [`UnderstandingTurnProvider`]，生产实现走
 //! [`ChatTurnProvider`]（`ChatClient::request_agent_stream`），测试可传入脚本化
@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::ai::client::{
     AGENT_STREAM_MAX_RETRIES, AgentChatMessage, AgentStreamError, AgentToolCall, AgentTurn,
@@ -18,6 +19,7 @@ use crate::ai::client::{
 };
 use crate::ai::review_agent::truncate_result_chars;
 use crate::code_index::SourceRef;
+use crate::lsp::LspSemanticService;
 
 use super::analysis::{
     AnalysisResult, parse_analysis_result, validate_analysis_result,
@@ -25,8 +27,9 @@ use super::analysis::{
 use super::session::UnderstandingPromptContext;
 use super::source::source_id_of;
 use super::tools::{
-    GetFileTreeArgs, GetSymbolArgs, ReadFileArgs, SearchCodeArgs, SearchSymbolsArgs,
-    TraceCallsArgs, UnderstandingTools, tool_schemas,
+    GetFileTreeArgs, GetSymbolArgs, QueryJavaSemanticsArgs, ReadFileArgs, SearchCodeArgs,
+    SearchSymbolsArgs, TraceCallsArgs, UnderstandingTools, tool_schemas,
+    tool_schemas_with_java_semantics,
 };
 use super::{ErrorCode, UnderstandingError, UnderstandingResult};
 
@@ -190,6 +193,24 @@ pub fn run_understanding_agent(
     )
 }
 
+/// 运行一次带 Java 语义增强的首问；服务必须由调用方预先配置并准备。
+pub fn run_understanding_agent_with_semantics(
+    input: &UnderstandingAgentInput,
+    provider: &dyn UnderstandingTurnProvider,
+    is_cancelled: &AtomicBool,
+    semantic_service: Arc<LspSemanticService>,
+    on_event: &mut impl FnMut(UnderstandingEvent),
+) -> UnderstandingResult<Option<UnderstandingAnswer>> {
+    run_understanding_agent_with_context_and_semantics(
+        input,
+        provider,
+        is_cancelled,
+        &UnderstandingPromptContext::default(),
+        Some(semantic_service),
+        on_event,
+    )
+}
+
 /// 运行一次带会话摘要与选中源码范围的追问；取消时返回 `Ok(None)`。
 pub fn run_understanding_agent_with_context(
     input: &UnderstandingAgentInput,
@@ -198,13 +219,48 @@ pub fn run_understanding_agent_with_context(
     prompt_context: &UnderstandingPromptContext,
     on_event: &mut impl FnMut(UnderstandingEvent),
 ) -> UnderstandingResult<Option<UnderstandingAnswer>> {
-    let tools = UnderstandingTools::open(&input.repo_root, &input.index_db_path)?;
-    let schemas = tool_schemas();
+    run_understanding_agent_with_context_and_semantics(
+        input,
+        provider,
+        is_cancelled,
+        prompt_context,
+        None,
+        on_event,
+    )
+}
+
+/// 运行一次可选 Java 语义增强的问答。
+///
+/// 调用方只传入已经配置好的统一语义服务；本函数不会启动、安装或重新配置 JDT。
+/// 工具列表在进入模型循环前冻结，服务状态变化只体现在工具响应中。
+pub fn run_understanding_agent_with_context_and_semantics(
+    input: &UnderstandingAgentInput,
+    provider: &dyn UnderstandingTurnProvider,
+    is_cancelled: &AtomicBool,
+    prompt_context: &UnderstandingPromptContext,
+    semantic_service: Option<Arc<LspSemanticService>>,
+    on_event: &mut impl FnMut(UnderstandingEvent),
+) -> UnderstandingResult<Option<UnderstandingAnswer>> {
+    let tools = match semantic_service {
+        Some(service) => UnderstandingTools::open_with_semantic_service(
+            &input.repo_root,
+            &input.index_db_path,
+            service,
+        )?,
+        None => UnderstandingTools::open(&input.repo_root, &input.index_db_path)?,
+    };
+    let semantic_enabled = tools.semantic_tool_enabled();
+    let schemas = if semantic_enabled {
+        tool_schemas_with_java_semantics()
+    } else {
+        tool_schemas()
+    };
     let mut messages = vec![
         AgentChatMessage::System(super::analysis::analysis_system_prompt()),
         AgentChatMessage::User(initial_user_prompt_with_context(
             &input.question,
             prompt_context,
+            semantic_enabled,
         )),
     ];
     let mut steps: Vec<UnderstandingStep> = Vec::new();
@@ -527,6 +583,12 @@ fn dispatch_tool(
             let envelope = tools.trace_calls(&call.id, args)?;
             serde_json::to_string(&envelope)
         }
+        "query_java_semantics" => {
+            let args: QueryJavaSemanticsArgs =
+                serde_json::from_str(&call.arguments).map_err(parse_error)?;
+            let envelope = tools.query_java_semantics(&call.id, args)?;
+            serde_json::to_string(&envelope)
+        }
         "search_code" => {
             let args: SearchCodeArgs =
                 serde_json::from_str(&call.arguments).map_err(parse_error)?;
@@ -563,12 +625,13 @@ fn dispatch_tool(
 /// 初始用户消息：问题 + 可用的检索起点提示。
 #[cfg(test)]
 fn initial_user_prompt(question: &str) -> String {
-    initial_user_prompt_with_context(question, &UnderstandingPromptContext::default())
+    initial_user_prompt_with_context(question, &UnderstandingPromptContext::default(), false)
 }
 
 fn initial_user_prompt_with_context(
     question: &str,
     context: &UnderstandingPromptContext,
+    semantic_enabled: bool,
 ) -> String {
     let history = context.history_text();
     let mut prompt = String::new();
@@ -587,10 +650,15 @@ fn initial_user_prompt_with_context(
             source.relative_path, source.start_line, source.end_line
         );
     }
+    let semantic_hint = if semantic_enabled {
+        " Java 符号或调用位置有歧义时可用 query_java_semantics 核对定义、实现、引用及一跳调用；语义结果仍须读取源码验证，不能证明 Spring 运行时选择或数据库读写。"
+    } else {
+        ""
+    };
     prompt.push_str(&format!(
         "问题：{question}\n\n\
          请先用 search_symbols / search_code 定位业务入口，再用 read_file / get_symbol 读取关键实现，\
-         必要时用 trace_calls 查看调用上下游，最后按系统提示的 JSON 协议作答。"
+         必要时用 trace_calls 查看调用上下游，最后按系统提示的 JSON 协议作答。{semantic_hint}"
     ));
     prompt
 }
@@ -640,6 +708,20 @@ fn tool_args_summary(name: &str, arguments: &str) -> String {
                 string("direction")
             }
         ),
+        "query_java_semantics" => {
+            let operation = string("operation");
+            let anchor = &value["anchor"];
+            let anchor_text = match anchor["kind"].as_str().unwrap_or("") {
+                "candidate" => anchor["candidate_id"].as_str().unwrap_or(""),
+                "source" => anchor["source_id"].as_str().unwrap_or(""),
+                _ => "",
+            };
+            format!(
+                "query_java_semantics {} {}",
+                quote(operation),
+                quote(anchor_text)
+            )
+        }
         "search_code" => format!(
             "search_code {}{}{}",
             quote(string("query")),

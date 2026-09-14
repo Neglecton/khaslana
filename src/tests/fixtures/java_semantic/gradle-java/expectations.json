@@ -1,0 +1,27 @@
+{
+  "project": "gradle-java",
+  "ready_symbol": "GradleGreeter",
+  "queries": [
+    {
+      "id": "gradle-definition",
+      "operation": "definition",
+      "file": "src/main/java/com/example/gradle/GradleApp.java",
+      "anchor": "greeter.greet(args[0])",
+      "symbol": "greet(",
+      "expect_files": ["src/main/java/com/example/gradle/GradleGreeter.java"],
+      "expect_count": 1
+    },
+    {
+      "id": "gradle-references",
+      "operation": "references",
+      "file": "src/main/java/com/example/gradle/GradleGreeter.java",
+      "anchor": "String greet(String name)",
+      "symbol": "greet",
+      "expect_files": [
+        "src/main/java/com/example/gradle/GradleApp.java",
+        "src/main/java/com/example/gradle/GradleGreeter.java"
+      ],
+      "expect_min_count": 2
+    }
+  ]
+}

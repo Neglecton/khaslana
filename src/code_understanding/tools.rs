@@ -1,11 +1,11 @@
-//! V2 代码理解 agent 的六个只读工具。
+//! V2 代码理解 agent 的六个基础只读工具与可选 Java 语义入口。
 //!
 //! 索引结果只用于导航；所有源码正文都通过 [`SourceService`] 重新校验并发放
 //! 来源 ID。候选 ID 属于本会话，模型不能用任意路径/行号伪造一个符号候选。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,10 @@ use crate::ai::review_store::repo_key;
 use crate::code_index::{
     DetailOutcome, ProjectContext, TraceDirection, TraceOutcome, open_read_only_if_exists,
     search_symbols_filtered, symbol_detail, trace_calls,
+};
+use crate::lsp::{
+    Availability, LspSemanticService, PluginState, RequestCancellation, SemanticAnchor,
+    SemanticOperation, SemanticQueryResult, SemanticServiceError, ServiceStatus,
 };
 
 use super::source::{
@@ -28,6 +32,8 @@ const TRACE_DEFAULT_DEPTH: u32 = 1;
 const TRACE_MAX_DEPTH: u32 = 3;
 const TRACE_DEFAULT_LIMIT: usize = 20;
 const TRACE_MAX_LIMIT: usize = 40;
+pub const JAVA_SEMANTIC_MAX_RPC_PER_TOOL: usize = 6;
+pub const JAVA_SEMANTIC_MAX_RPC_PER_QUESTION: usize = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolEnvelope<T> {
@@ -131,6 +137,58 @@ pub struct TraceCallsResult {
     pub callees: Vec<SymbolRelationView>,
     /// 明确提醒 agent：无边不等于无调用，关键关系仍需 read/search 查证。
     pub coverage_note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticTraceResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum JavaSemanticAnchor {
+    Candidate {
+        candidate_id: String,
+    },
+    Source {
+        source_id: String,
+        line: u32,
+        column: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryJavaSemanticsArgs {
+    pub operation: SemanticOperation,
+    pub anchor: JavaSemanticAnchor,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticSourceLink {
+    pub role: String,
+    pub relative_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub source_id: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JavaSemanticQueryResult {
+    pub status: ServiceStatus,
+    pub availability: Availability,
+    pub operation: SemanticOperation,
+    pub semantic: Option<SemanticQueryResult>,
+    pub source_links: Vec<SemanticSourceLink>,
+    pub message: String,
+    pub rpc_budget_remaining: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticTraceResult {
+    pub depth: u32,
+    pub inbound: Option<JavaSemanticQueryResult>,
+    pub outbound: Option<JavaSemanticQueryResult>,
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +231,11 @@ struct RegisteredCandidate {
     /// 索引标签（Class/Method/Field…）。`trace_calls` 只解析可调用符号，
     /// 需要据此把「不是函数/方法」与「候选已消失」区分开。
     label: String,
+    name: String,
+    relative_path: String,
+    start_line: u32,
+    end_line: u32,
+    semantic_anchors: Vec<SemanticAnchor>,
 }
 
 /// 会话候选注册表：对外用短序号 `sc1:N`，而不是 64 位内容摘要。
@@ -189,7 +252,15 @@ struct CandidateRegistry {
 }
 
 impl CandidateRegistry {
-    fn register(&mut self, qualified_name: &str, label: &str, file_path: &str) -> String {
+    fn register(
+        &mut self,
+        qualified_name: &str,
+        label: &str,
+        name: &str,
+        file_path: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> String {
         let key = (qualified_name.to_string(), file_path.to_string());
         if let Some(existing) = self.by_key.get(&key) {
             return existing.clone();
@@ -201,6 +272,11 @@ impl CandidateRegistry {
             RegisteredCandidate {
                 qualified_name: qualified_name.to_string(),
                 label: label.to_string(),
+                name: name.to_string(),
+                relative_path: file_path.to_string(),
+                start_line,
+                end_line,
+                semantic_anchors: Vec::new(),
             },
         );
         self.by_key.insert(key, id.clone());
@@ -214,6 +290,99 @@ impl CandidateRegistry {
     fn keys(&self) -> impl Iterator<Item = &String> {
         self.by_id.keys()
     }
+
+    fn set_semantic_anchors(&mut self, id: &str, anchors: Vec<SemanticAnchor>) {
+        if let Some(candidate) = self.by_id.get_mut(id) {
+            candidate.semantic_anchors = anchors;
+        }
+    }
+}
+
+pub(crate) trait JavaSemanticBackend: Send + Sync {
+    fn plugin_state(&self) -> PluginState;
+    fn status(&self, project_key: &str) -> ServiceStatus;
+    fn register_source_anchor(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<SemanticAnchor, SemanticServiceError>;
+    fn register_source_symbol_anchors(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        approximate_line: u32,
+        expected_name: Option<&str>,
+        cancellation: &RequestCancellation,
+    ) -> Result<Vec<SemanticAnchor>, SemanticServiceError>;
+    fn query(
+        &self,
+        anchor_id: &str,
+        operation: SemanticOperation,
+        limit: Option<usize>,
+        rpc_budget: usize,
+        cancellation: &RequestCancellation,
+    ) -> Result<SemanticQueryResult, SemanticServiceError>;
+}
+
+impl JavaSemanticBackend for LspSemanticService {
+    fn plugin_state(&self) -> PluginState {
+        self.plugin_state("java-jdtls")
+    }
+
+    fn status(&self, project_key: &str) -> ServiceStatus {
+        self.status(project_key, "java")
+    }
+
+    fn register_source_anchor(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<SemanticAnchor, SemanticServiceError> {
+        self.register_source_anchor(source_service, source_id, line, column)
+    }
+
+    fn register_source_symbol_anchors(
+        &self,
+        source_service: &SourceService,
+        source_id: &str,
+        approximate_line: u32,
+        expected_name: Option<&str>,
+        cancellation: &RequestCancellation,
+    ) -> Result<Vec<SemanticAnchor>, SemanticServiceError> {
+        self.register_source_symbol_anchors(
+            source_service,
+            source_id,
+            approximate_line,
+            expected_name,
+            cancellation,
+        )
+    }
+
+    fn query(
+        &self,
+        anchor_id: &str,
+        operation: SemanticOperation,
+        limit: Option<usize>,
+        rpc_budget: usize,
+        cancellation: &RequestCancellation,
+    ) -> Result<SemanticQueryResult, SemanticServiceError> {
+        self.query_with_rpc_budget(anchor_id, operation, limit, rpc_budget, cancellation)
+    }
+}
+
+#[derive(Default)]
+struct SemanticQuestionBudget {
+    rpc_calls: usize,
+    consecutive_failures: usize,
+}
+
+struct SemanticToolSession {
+    backend: Arc<dyn JavaSemanticBackend>,
+    budget: Mutex<SemanticQuestionBudget>,
 }
 
 /// 单个问题/同一索引代际内使用的工具会话。
@@ -224,10 +393,27 @@ pub struct UnderstandingTools {
     indexed_hashes: HashMap<String, String>,
     source: SourceService,
     candidates: Mutex<CandidateRegistry>,
+    semantic: Option<SemanticToolSession>,
 }
 
 impl UnderstandingTools {
     pub fn open(repo_root: &Path, index_db_path: &Path) -> UnderstandingResult<Self> {
+        Self::open_with_backend(repo_root, index_db_path, None)
+    }
+
+    pub fn open_with_semantic_service(
+        repo_root: &Path,
+        index_db_path: &Path,
+        service: Arc<LspSemanticService>,
+    ) -> UnderstandingResult<Self> {
+        Self::open_with_backend(repo_root, index_db_path, Some(service))
+    }
+
+    pub(crate) fn open_with_backend(
+        repo_root: &Path,
+        index_db_path: &Path,
+        backend: Option<Arc<dyn JavaSemanticBackend>>,
+    ) -> UnderstandingResult<Self> {
         let canonical_root = std::fs::canonicalize(repo_root).map_err(|error| {
             UnderstandingError::new(
                 ErrorCode::SourceMissing,
@@ -268,6 +454,16 @@ impl UnderstandingTools {
             index_db_path: index_db_path.to_string_lossy().into_owned(),
         };
         let source = SourceService::open(context.clone(), generation)?;
+        let semantic = backend.and_then(|backend| {
+            let plugin = backend.plugin_state();
+            let status = backend.status(&context.project_key);
+            (plugin.registered && plugin.enabled && status != ServiceStatus::Off).then_some(
+                SemanticToolSession {
+                    backend,
+                    budget: Mutex::new(SemanticQuestionBudget::default()),
+                },
+            )
+        });
         Ok(Self {
             context,
             index_db_path: index_db_path.to_path_buf(),
@@ -275,7 +471,12 @@ impl UnderstandingTools {
             indexed_hashes,
             source,
             candidates: Mutex::new(CandidateRegistry::default()),
+            semantic,
         })
+    }
+
+    pub fn semantic_tool_enabled(&self) -> bool {
+        self.semantic.is_some()
     }
 
     pub fn context(&self) -> &ProjectContext {
@@ -344,7 +545,14 @@ impl UnderstandingTools {
                 .candidates
                 .lock()
                 .expect("候选注册表锁被污染")
-                .register(&hit.qualified_name, &hit.label, &hit.file_path);
+                .register(
+                    &hit.qualified_name,
+                    &hit.label,
+                    &hit.name,
+                    &hit.file_path,
+                    hit.start_line,
+                    hit.start_line,
+                );
             scoped.push(SymbolCandidateView {
                 candidate_id,
                 name: hit.name,
@@ -507,6 +715,7 @@ impl UnderstandingTools {
         if hit_limit {
             reasons.push(format!("调用关系可能超过本次上限 {limit} 个"));
         }
+        let semantic = self.semantic_trace(&args.candidate_id, &candidate, args.direction, limit);
         Ok(envelope(
             request_id,
             self.generation,
@@ -516,9 +725,298 @@ impl UnderstandingTools {
                 callers: result.callers.into_iter().map(relation_view).collect(),
                 callees: result.callees.into_iter().map(relation_view).collect(),
                 coverage_note: "这是当前索引中的调用线索；无边不表示不存在调用，关键关系请继续读取调用位置或搜索源码。".to_string(),
+                semantic,
             },
             reasons,
         ))
+    }
+
+    pub fn query_java_semantics(
+        &self,
+        request_id: &str,
+        args: QueryJavaSemanticsArgs,
+    ) -> UnderstandingResult<ToolEnvelope<JavaSemanticQueryResult>> {
+        validate_request_id(request_id)?;
+        self.ensure_generation()?;
+        if args
+            .limit
+            .is_some_and(|limit| !(1..=TRACE_MAX_LIMIT).contains(&limit))
+        {
+            return Err(UnderstandingError::new(
+                ErrorCode::AnswerInvalid,
+                format!("query_java_semantics 的 limit 必须在 1 到 {TRACE_MAX_LIMIT} 之间"),
+            ));
+        }
+        let semantic = self.semantic.as_ref().ok_or_else(|| {
+            UnderstandingError::new(
+                ErrorCode::AnswerInvalid,
+                "本问开始时未启用 Java 语义工具；请继续使用基础索引和源码工具",
+            )
+        })?;
+        let result = self.run_semantic_query(
+            semantic,
+            args.operation,
+            &args.anchor,
+            args.limit,
+            JAVA_SEMANTIC_MAX_RPC_PER_TOOL,
+        )?;
+        let reasons = result
+            .semantic
+            .as_ref()
+            .map(|result| result.coverage.clone())
+            .unwrap_or_default();
+        Ok(envelope(request_id, self.generation, result, reasons))
+    }
+
+    fn semantic_trace(
+        &self,
+        candidate_id: &str,
+        candidate: &RegisteredCandidate,
+        direction: CallTraceDirection,
+        limit: usize,
+    ) -> Option<SemanticTraceResult> {
+        let semantic = self.semantic.as_ref()?;
+        if !candidate
+            .relative_path
+            .to_ascii_lowercase()
+            .ends_with(".java")
+        {
+            return None;
+        }
+        let anchor = JavaSemanticAnchor::Candidate {
+            candidate_id: candidate_id.to_string(),
+        };
+        let (inbound_budget, outbound_budget) = match direction {
+            CallTraceDirection::Inbound => (JAVA_SEMANTIC_MAX_RPC_PER_TOOL, 0),
+            CallTraceDirection::Outbound => (0, JAVA_SEMANTIC_MAX_RPC_PER_TOOL),
+            // 候选首次精确定位最多占 1 RPC，剩余额度在两个方向间分配。
+            CallTraceDirection::Both => (3, 3),
+        };
+        let inbound = (inbound_budget > 0).then(|| {
+            self.run_semantic_query(
+                semantic,
+                SemanticOperation::IncomingCalls,
+                &anchor,
+                Some(limit.div_ceil(2)),
+                inbound_budget,
+            )
+            .unwrap_or_else(|error| {
+                self.semantic_error_result(
+                    semantic,
+                    SemanticOperation::IncomingCalls,
+                    error.to_string(),
+                )
+            })
+        });
+        let outbound = (outbound_budget > 0).then(|| {
+            self.run_semantic_query(
+                semantic,
+                SemanticOperation::OutgoingCalls,
+                &anchor,
+                Some(limit.div_ceil(2)),
+                outbound_budget,
+            )
+            .unwrap_or_else(|error| {
+                self.semantic_error_result(
+                    semantic,
+                    SemanticOperation::OutgoingCalls,
+                    error.to_string(),
+                )
+            })
+        });
+        Some(SemanticTraceResult {
+            depth: 1,
+            inbound,
+            outbound,
+            note: "semantic 仅是一跳静态关系，和基础索引结果分别保留；冲突时必须读取 call_site，不得静默合并。".to_string(),
+        })
+    }
+
+    fn run_semantic_query(
+        &self,
+        semantic: &SemanticToolSession,
+        operation: SemanticOperation,
+        anchor_input: &JavaSemanticAnchor,
+        limit: Option<usize>,
+        tool_rpc_budget: usize,
+    ) -> UnderstandingResult<JavaSemanticQueryResult> {
+        let project_key = &self.context.project_key;
+        let status = semantic.backend.status(project_key);
+        let plugin = semantic.backend.plugin_state();
+        if !plugin.registered || !plugin.enabled {
+            return Ok(self.semantic_unavailable_result(
+                semantic,
+                operation,
+                status,
+                "Java 语义插件已禁用或不再可用；本问继续基础路径",
+            ));
+        }
+        if !matches!(status, ServiceStatus::Ready | ServiceStatus::Partial) {
+            return Ok(self.semantic_unavailable_result(
+                semantic,
+                operation,
+                status,
+                format!("Java 语义服务当前状态为 {status:?}；工具不会等待、启动或重配服务"),
+            ));
+        }
+
+        let mut used_by_tool = 0usize;
+        let anchor = match anchor_input {
+            JavaSemanticAnchor::Source {
+                source_id,
+                line,
+                column,
+            } => {
+                let source = self.source.validate_source(source_id)?;
+                if !source.relative_path.to_ascii_lowercase().ends_with(".java") {
+                    return Err(UnderstandingError::new(
+                        ErrorCode::AnswerInvalid,
+                        "query_java_semantics 的 source anchor 必须指向 Java 文件",
+                    ));
+                }
+                semantic
+                    .backend
+                    .register_source_anchor(&self.source, source_id, *line, *column)
+                    .map_err(semantic_input_error)?
+            }
+            JavaSemanticAnchor::Candidate { candidate_id } => {
+                let candidate = self.resolve_candidate(candidate_id)?;
+                if !candidate
+                    .relative_path
+                    .to_ascii_lowercase()
+                    .ends_with(".java")
+                {
+                    return Err(UnderstandingError::new(
+                        ErrorCode::AnswerInvalid,
+                        "query_java_semantics 的 candidate anchor 必须指向 Java 符号",
+                    ));
+                }
+                if let [only] = candidate.semantic_anchors.as_slice() {
+                    only.clone()
+                } else {
+                    if !candidate.semantic_anchors.is_empty() {
+                        return Ok(self.semantic_unavailable_result(
+                            semantic,
+                            operation,
+                            status,
+                            "候选对应多个同名/重载位置；请读取源码后使用带行列的 source anchor 消歧",
+                        ));
+                    }
+                    if !self.semantic_rpc_available(semantic, 1, tool_rpc_budget, used_by_tool) {
+                        return Ok(self.semantic_unavailable_result(
+                            semantic,
+                            operation,
+                            status,
+                            "Java 语义 RPC 预算已用尽；请继续基础路径",
+                        ));
+                    }
+                    let source = self.source.read_file(
+                        &candidate.relative_path,
+                        candidate.start_line.max(1),
+                        candidate.end_line.max(candidate.start_line).max(1),
+                    )?;
+                    if self
+                        .indexed_hashes
+                        .get(&candidate.relative_path)
+                        .is_some_and(|hash| hash != &source.source_ref.content_sha256)
+                    {
+                        return Ok(self.semantic_unavailable_result(
+                            semantic,
+                            operation,
+                            ServiceStatus::Partial,
+                            "[SourceChanged] 候选位置对应较旧文件版本；请更新索引或重新读取源码",
+                        ));
+                    }
+                    used_by_tool += 1;
+                    self.note_semantic_rpc(semantic, 1);
+                    let anchors = semantic
+                        .backend
+                        .register_source_symbol_anchors(
+                            &self.source,
+                            &source.source_id,
+                            candidate.start_line.max(1),
+                            Some(&candidate.name),
+                            &RequestCancellation::default(),
+                        )
+                        .map_err(semantic_input_error)?;
+                    self.candidates
+                        .lock()
+                        .expect("候选注册表锁被污染")
+                        .set_semantic_anchors(candidate_id, anchors.clone());
+                    match anchors.as_slice() {
+                        [only] => only.clone(),
+                        [] => {
+                            return Ok(self.semantic_unavailable_result(
+                                semantic,
+                                operation,
+                                ServiceStatus::Partial,
+                                "JDT 未在候选 selectionRange 找到精确位置；不得以行首或同名文本猜测",
+                            ));
+                        }
+                        _ => {
+                            return Ok(self.semantic_unavailable_result(
+                                semantic,
+                                operation,
+                                ServiceStatus::Partial,
+                                "候选对应多个同名/重载位置；请读取源码后使用带行列的 source anchor 消歧",
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+
+        let available_for_query = self.semantic_rpc_remaining(semantic);
+        let rpc_budget = tool_rpc_budget
+            .saturating_sub(used_by_tool)
+            .min(available_for_query);
+        if rpc_budget == 0 {
+            return Ok(self.semantic_unavailable_result(
+                semantic,
+                operation,
+                status,
+                "Java 语义 RPC 预算已用尽；请继续基础路径",
+            ));
+        }
+        let query = semantic.backend.query(
+            &anchor.anchor_id,
+            operation,
+            limit,
+            rpc_budget,
+            &RequestCancellation::default(),
+        );
+        let query = match query {
+            Ok(query) => {
+                self.note_semantic_rpc(semantic, query.rpc_count);
+                semantic
+                    .budget
+                    .lock()
+                    .expect("语义预算锁被污染")
+                    .consecutive_failures = 0;
+                query
+            }
+            Err(error) => {
+                // 失败响应无法可靠得知服务端已消费几次请求，按本次可用额度保守记账。
+                self.note_semantic_rpc(semantic, rpc_budget);
+                return Ok(self.semantic_error_result(semantic, operation, error.to_string()));
+            }
+        };
+        let source_links = self.issue_semantic_sources(&query);
+        let availability = query.availability;
+        let message = if query.items.is_empty() {
+            "语义查询未返回位置；这不是‘不存在调用/实现’的否定证明".to_string()
+        } else {
+            "语义位置是静态导航线索；业务结论仍须读取 source_links 指向的源码核对".to_string()
+        };
+        Ok(JavaSemanticQueryResult {
+            status,
+            availability,
+            operation,
+            semantic: Some(query),
+            source_links,
+            message,
+            rpc_budget_remaining: self.semantic_rpc_remaining(semantic),
+        })
     }
 
     pub fn search_code(
@@ -584,6 +1082,124 @@ impl UnderstandingTools {
             truncation_reasons: reasons,
             data,
         })
+    }
+
+    fn issue_semantic_sources(&self, result: &SemanticQueryResult) -> Vec<SemanticSourceLink> {
+        let mut locations = Vec::new();
+        for item in &result.items {
+            locations.push(("target", &item.target));
+            if let Some(caller) = item.caller.as_ref() {
+                locations.push(("caller", &caller.location));
+            }
+            if let Some(callee) = item.callee.as_ref() {
+                locations.push(("callee", &callee.location));
+            }
+            if let Some(call_site) = item.call_site.as_ref() {
+                locations.push(("call_site", call_site));
+            }
+        }
+        let mut links = Vec::new();
+        for (role, location) in locations {
+            let Some(path) = location.relative_path.as_ref() else {
+                continue;
+            };
+            let start_line = location.line.max(1);
+            let end_line = location.end_line.max(start_line);
+            let (source_id, unavailable_reason) =
+                match self.source.read_file(path, start_line, end_line) {
+                    Ok(source) => (Some(source.source_id), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            links.push(SemanticSourceLink {
+                role: role.to_string(),
+                relative_path: path.clone(),
+                start_line,
+                end_line,
+                source_id,
+                unavailable_reason,
+            });
+        }
+        links.sort_by(|left, right| {
+            left.relative_path
+                .cmp(&right.relative_path)
+                .then(left.start_line.cmp(&right.start_line))
+                .then(left.role.cmp(&right.role))
+        });
+        links.dedup_by(|left, right| {
+            left.role == right.role
+                && left.relative_path == right.relative_path
+                && left.start_line == right.start_line
+                && left.end_line == right.end_line
+        });
+        links
+    }
+
+    fn semantic_unavailable_result(
+        &self,
+        semantic: &SemanticToolSession,
+        operation: SemanticOperation,
+        status: ServiceStatus,
+        message: impl Into<String>,
+    ) -> JavaSemanticQueryResult {
+        let message = self.note_semantic_failure(semantic, message.into());
+        JavaSemanticQueryResult {
+            status,
+            availability: Availability::Unavailable,
+            operation,
+            semantic: None,
+            source_links: Vec::new(),
+            message,
+            rpc_budget_remaining: self.semantic_rpc_remaining(semantic),
+        }
+    }
+
+    fn semantic_error_result(
+        &self,
+        semantic: &SemanticToolSession,
+        operation: SemanticOperation,
+        message: String,
+    ) -> JavaSemanticQueryResult {
+        let status = semantic.backend.status(&self.context.project_key);
+        self.semantic_unavailable_result(
+            semantic,
+            operation,
+            status,
+            semantic_service_message(&message),
+        )
+    }
+
+    fn note_semantic_failure(&self, semantic: &SemanticToolSession, message: String) -> String {
+        let mut budget = semantic.budget.lock().expect("语义预算锁被污染");
+        budget.consecutive_failures = budget.consecutive_failures.saturating_add(1);
+        if budget.consecutive_failures == 1 {
+            message
+        } else {
+            "Java 语义增强连续不可用，详细原因已在上一条语义结果说明；本问不要重复调用，继续基础索引与源码路径。".to_string()
+        }
+    }
+
+    fn semantic_rpc_available(
+        &self,
+        semantic: &SemanticToolSession,
+        needed: usize,
+        tool_limit: usize,
+        tool_used: usize,
+    ) -> bool {
+        needed <= tool_limit.saturating_sub(tool_used)
+            && needed <= self.semantic_rpc_remaining(semantic)
+    }
+
+    fn note_semantic_rpc(&self, semantic: &SemanticToolSession, count: usize) {
+        let mut budget = semantic.budget.lock().expect("语义预算锁被污染");
+        budget.rpc_calls = budget
+            .rpc_calls
+            .saturating_add(count)
+            .min(JAVA_SEMANTIC_MAX_RPC_PER_QUESTION);
+    }
+
+    fn semantic_rpc_remaining(&self, semantic: &SemanticToolSession) -> usize {
+        JAVA_SEMANTIC_MAX_RPC_PER_QUESTION
+            .saturating_sub(semantic.budget.lock().expect("语义预算锁被污染").rpc_calls)
     }
 
     fn resolve_candidate(&self, candidate_id: &str) -> UnderstandingResult<RegisteredCandidate> {
@@ -722,6 +1338,51 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
     ]
 }
 
+pub fn tool_schemas_with_java_semantics() -> Vec<ToolSchema> {
+    let mut schemas = tool_schemas();
+    schemas.push(ToolSchema {
+        name: "query_java_semantics",
+        description: "对本问已登记的 Java 候选或 sr1 源码位置执行一次有界语义查询。结果是静态导航线索；不会安装、启动、等待或重配服务。",
+        parameters: serde_json::json!({
+            "type":"object",
+            "properties":{
+                "operation":{
+                    "type":"string",
+                    "enum":["definition","implementations","references","incoming_calls","outgoing_calls"]
+                },
+                "anchor":{
+                    "oneOf":[
+                        {
+                            "type":"object",
+                            "properties":{
+                                "kind":{"const":"candidate"},
+                                "candidate_id":{"type":"string","description":"来自本问 search_symbols 的 sc1 候选"}
+                            },
+                            "required":["kind","candidate_id"],
+                            "additionalProperties":false
+                        },
+                        {
+                            "type":"object",
+                            "properties":{
+                                "kind":{"const":"source"},
+                                "source_id":{"type":"string","description":"来自本问 read_file/get_symbol 的 sr1 来源"},
+                                "line":{"type":"integer","minimum":1,"description":"一基源码行"},
+                                "column":{"type":"integer","minimum":1,"description":"一基 Unicode 标量列"}
+                            },
+                            "required":["kind","source_id","line","column"],
+                            "additionalProperties":false
+                        }
+                    ]
+                },
+                "limit":{"type":"integer","minimum":1,"maximum":40,"description":"默认20，最大40"}
+            },
+            "required":["operation","anchor"],
+            "additionalProperties":false
+        }),
+    });
+    schemas
+}
+
 fn envelope<T>(
     request_id: &str,
     generation: u64,
@@ -800,4 +1461,28 @@ fn index_error(error: crate::types::GitError) -> UnderstandingError {
         ErrorCode::IndexBusy
     };
     UnderstandingError::new(code, message)
+}
+
+fn semantic_input_error(error: SemanticServiceError) -> UnderstandingError {
+    let code = match error {
+        SemanticServiceError::SourceChanged(_) => ErrorCode::SourceChanged,
+        SemanticServiceError::InvalidAnchor
+        | SemanticServiceError::ProjectMismatch
+        | SemanticServiceError::InvalidPosition(_)
+        | SemanticServiceError::InvalidLimit { .. }
+        | SemanticServiceError::UnsafeSource(_)
+        | SemanticServiceError::SourceValidation(_) => ErrorCode::AnswerInvalid,
+        _ => ErrorCode::ProviderUnavailable,
+    };
+    UnderstandingError::new(code, error.to_string())
+}
+
+fn semantic_service_message(message: &str) -> String {
+    if message.contains("源码已变化") {
+        format!("[SourceChanged] {message}；请重新读取源码后建立新锚点")
+    } else if message.contains("不受支持") {
+        format!("{message}；本次有效能力不包含该操作，请继续基础路径")
+    } else {
+        format!("Java 语义查询不可用：{message}；本问继续基础路径")
+    }
 }

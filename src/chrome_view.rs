@@ -349,6 +349,13 @@ impl RepositoryView {
             self.main_mode == MainMode::Workflow,
             MainMode::Workflow,
         ));
+        entries.push((
+            "nav-understanding",
+            ToolbarIcon::Understanding,
+            "代码理解",
+            self.main_mode == MainMode::CodeUnderstanding,
+            MainMode::CodeUnderstanding,
+        ));
         entries
     }
 

@@ -1,0 +1,2285 @@
+{
+  "schema": 1,
+  "timestamp": "2026-09-11T22:47:58+0800",
+  "platform": {
+    "os": "nt",
+    "sys_platform": "win32",
+    "architecture": "AMD64"
+  },
+  "paths": {
+    "jdk": "D:\\khaslana\\jdk-21.0.12.1+1",
+    "jdt": "D:\\khaslana\\jdt-language-server",
+    "project": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-project-maven-mem",
+    "workspace": "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-maven-mem"
+  },
+  "artifacts": {
+    "launcher": "org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "launcher_sha256": "9b3b1da60813ac5fa09dd5c198f1884be7076d0a5daec54faa3f351a787e34b7",
+    "jdt_archive": {
+      "path": "D:\\khaslana\\jdt-language-server-1.61.0-202609031315 (1).tar.gz",
+      "bytes": 51037522,
+      "sha256": "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
+    },
+    "jdk_archive": {
+      "path": "D:\\khaslana\\OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "bytes": 205073461,
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+    }
+  },
+  "command": [
+    "D:\\khaslana\\jdk-21.0.12.1+1\\bin\\java.exe",
+    "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+    "-Dosgi.bundles.defaultStartLevel=4",
+    "-Declipse.product=org.eclipse.jdt.ls.core.product",
+    "-Dlog.level=ALL",
+    "-Xmx1G",
+    "--add-modules=ALL-SYSTEM",
+    "--add-opens",
+    "java.base/java.util=ALL-UNNAMED",
+    "--add-opens",
+    "java.base/java.lang=ALL-UNNAMED",
+    "-jar",
+    "D:\\khaslana\\jdt-language-server\\plugins\\org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+    "-configuration",
+    "D:\\khaslana\\jdt-language-server\\config_win",
+    "-data",
+    "D:\\workspace\\CodeX-workspace\\khaslana\\target\\jls-t0-workspace-maven-mem"
+  ],
+  "project_before": {
+    "pom.xml": {
+      "bytes": 707,
+      "sha256": "29fb8426e8436023f9e6c5f2788e24ac9586d867718ab49a3304b98158afdbbe"
+    },
+    "api/pom.xml": {
+      "bytes": 482,
+      "sha256": "f6359c04058b0d06a923991ed5ffc70f05731c1b96929bde531b7c0b891b0f1d"
+    },
+    "core/pom.xml": {
+      "bytes": 635,
+      "sha256": "f5a8b23d268ea5ec86d1238ba2be9ebbf8bb4722dbd5d44f9e0a858b6be71f02"
+    },
+    "web/pom.xml": {
+      "bytes": 635,
+      "sha256": "fdd7746a68fde5036d47475ef9f58f45ee8deb619f3e21bfe90a035217ccedda"
+    },
+    "web/src/main/java/com/example/web/AdminLoginController.java": {
+      "bytes": 201,
+      "sha256": "bf0d5d9654379ef7d9018d49e8f2898db9bf1686329eaa7713d8bb6dfd922745"
+    },
+    "web/src/main/java/com/example/web/BatchLoginJob.java": {
+      "bytes": 331,
+      "sha256": "7166d5b1f69363ef1c780b6c2a630ea03833b6dac352e48de4dd2e8c35ea51ff"
+    },
+    "web/src/main/java/com/example/web/LoginController.java": {
+      "bytes": 430,
+      "sha256": "fc825591c8ab21922fa8f25c708b79206c92b161101942f0f956f7c21eb4858f"
+    },
+    "core/src/main/java/com/example/core/LocalAuthProvider.java": {
+      "bytes": 302,
+      "sha256": "f01096a0029834deda691c72c0b3d48b4b92bbf7eb1472e6a6e199a0feee0e10"
+    },
+    "core/src/main/java/com/example/core/LoginApplicationService.java": {
+      "bytes": 574,
+      "sha256": "52115b942bc66176eee00b70f67bff59f61a65ed06f8d932f7ddf02526d36f5b"
+    },
+    "core/src/main/java/com/example/core/SsoAuthProvider.java": {
+      "bytes": 298,
+      "sha256": "14dd09b7847eec43023c689bf11d199ddbfe84682343b1f8c58ae8c20a30613e"
+    },
+    "api/src/main/java/com/example/api/AuthProvider.java": {
+      "bytes": 159,
+      "sha256": "766da20f2efdee7a3b5614ff1ef8654bcbfec349f924e45299b5b593d3f71927"
+    },
+    "api/src/main/java/com/example/api/LoginResult.java": {
+      "bytes": 236,
+      "sha256": "2b8bb448138b5ff2d1b716efef2ad29cfae4473bffa945faa9d08a95490fc1c3"
+    }
+  },
+  "workspace_before": {
+    "files": 0,
+    "bytes": 0
+  },
+  "initialize_ms": 2435.12,
+  "server_capabilities": {
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 2,
+      "save": {
+        "includeText": true
+      }
+    },
+    "hoverProvider": true,
+    "completionProvider": {
+      "resolveProvider": true,
+      "triggerCharacters": [
+        ".",
+        "@",
+        "#",
+        "*",
+        " "
+      ]
+    },
+    "signatureHelpProvider": {
+      "triggerCharacters": [
+        "(",
+        ","
+      ]
+    },
+    "definitionProvider": true,
+    "typeDefinitionProvider": true,
+    "implementationProvider": true,
+    "referencesProvider": true,
+    "documentHighlightProvider": true,
+    "documentSymbolProvider": true,
+    "workspaceSymbolProvider": true,
+    "codeActionProvider": {
+      "codeActionKinds": [],
+      "resolveProvider": false
+    },
+    "codeLensProvider": {
+      "resolveProvider": true
+    },
+    "documentFormattingProvider": true,
+    "documentRangeFormattingProvider": true,
+    "documentOnTypeFormattingProvider": {
+      "firstTriggerCharacter": ";",
+      "moreTriggerCharacter": [
+        "\n",
+        "}"
+      ]
+    },
+    "renameProvider": {
+      "prepareProvider": true
+    },
+    "foldingRangeProvider": true,
+    "declarationProvider": true,
+    "executeCommandProvider": {
+      "commands": [
+        "java.project.import",
+        "java.project.changeImportedProjects",
+        "java.navigate.openTypeHierarchy",
+        "java.project.resolveStackTraceLocation",
+        "java.edit.handlePasteEvent",
+        "java.edit.stringFormatting",
+        "java.project.getSettings",
+        "java.project.resolveWorkspaceSymbol",
+        "java.project.upgradeGradle",
+        "java.project.createModuleInfo",
+        "java.vm.getAllInstalls",
+        "java.edit.organizeImports",
+        "java.project.refreshDiagnostics",
+        "java.getFullyQualifiedName",
+        "java.project.removeFromSourcePath",
+        "java.project.listSourcePaths",
+        "java.project.updateSettings",
+        "java.project.getAll",
+        "java.reloadBundles",
+        "java.project.isTestFile",
+        "java.project.resolveText",
+        "java.project.getClasspaths",
+        "java.navigate.resolveTypeHierarchy",
+        "java.getTroubleshootingInfo",
+        "java.edit.smartSemicolonDetection",
+        "java.project.updateSourceAttachment",
+        "java.project.updateClassPaths",
+        "java.decompile",
+        "java.protobuf.generateSources",
+        "java.project.resolveSourceAttachment",
+        "java.project.updateJdk",
+        "java.project.addToSourcePath",
+        "java.completion.onDidSelect"
+      ]
+    },
+    "workspace": {
+      "workspaceFolders": {
+        "supported": true,
+        "changeNotifications": true
+      },
+      "textDocumentContent": {
+        "schemes": [
+          "jdt"
+        ]
+      }
+    },
+    "typeHierarchyProvider": true,
+    "callHierarchyProvider": true,
+    "selectionRangeProvider": true,
+    "semanticTokensProvider": {
+      "legend": {
+        "tokenTypes": [
+          "namespace",
+          "class",
+          "interface",
+          "enum",
+          "enumMember",
+          "type",
+          "typeParameter",
+          "method",
+          "property",
+          "variable",
+          "parameter",
+          "modifier",
+          "keyword",
+          "decorator",
+          "annotationMember",
+          "record",
+          "recordComponent"
+        ],
+        "tokenModifiers": [
+          "abstract",
+          "static",
+          "readonly",
+          "deprecated",
+          "declaration",
+          "documentation",
+          "public",
+          "private",
+          "protected",
+          "native",
+          "generic",
+          "typeArgument",
+          "importDeclaration",
+          "constructor"
+        ]
+      },
+      "range": false,
+      "full": {
+        "delta": false
+      },
+      "documentSelector": [
+        {
+          "language": "java",
+          "scheme": "file"
+        },
+        {
+          "language": "java",
+          "scheme": "jdt"
+        }
+      ]
+    },
+    "inlayHintProvider": true
+  },
+  "import": {
+    "ready": true,
+    "attempts": 1,
+    "workspace_symbols": 1
+  },
+  "import_ms": 2513.051,
+  "queries": [
+    {
+      "id": "definition-cross-module",
+      "operation": "definition",
+      "count": 1,
+      "files": [
+        "core/src/main/java/com/example/core/LoginApplicationService.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 25.161,
+      "rpc_count": 1
+    },
+    {
+      "id": "references-overload",
+      "operation": "references",
+      "count": 3,
+      "files": [
+        "core/src/main/java/com/example/core/LoginApplicationService.java",
+        "web/src/main/java/com/example/web/BatchLoginJob.java",
+        "web/src/main/java/com/example/web/LoginController.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 125.848,
+      "rpc_count": 1
+    },
+    {
+      "id": "implementations-two-candidates",
+      "operation": "implementation",
+      "count": 2,
+      "files": [
+        "core/src/main/java/com/example/core/LocalAuthProvider.java",
+        "core/src/main/java/com/example/core/SsoAuthProvider.java"
+      ],
+      "names": [],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 139.052,
+      "rpc_count": 1
+    },
+    {
+      "id": "incoming-calls",
+      "operation": "incoming_calls",
+      "count": 2,
+      "files": [
+        "web/src/main/java/com/example/web/BatchLoginJob.java",
+        "web/src/main/java/com/example/web/LoginController.java"
+      ],
+      "names": [
+        "login(String) : LoginResult",
+        "run() : void"
+      ],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 43.756,
+      "rpc_count": 2
+    },
+    {
+      "id": "outgoing-calls",
+      "operation": "outgoing_calls",
+      "count": 1,
+      "files": [
+        "api/src/main/java/com/example/api/AuthProvider.java"
+      ],
+      "names": [
+        "login(String, char[]) : LoginResult"
+      ],
+      "passed": true,
+      "failures": [],
+      "elapsed_ms": 22.863,
+      "rpc_count": 2
+    }
+  ],
+  "hot_queries": {
+    "count": 20,
+    "p50_ms": 18.397,
+    "p95_ms": 58.163,
+    "max_ms": 58.163,
+    "samples_ms": [
+      5.344,
+      23.577,
+      58.163,
+      29.49,
+      18.659,
+      5.132,
+      16.723,
+      54.787,
+      31.807,
+      13.216,
+      4.927,
+      18.135,
+      44.076,
+      28.095,
+      10.222,
+      3.809,
+      13.654,
+      41.261,
+      25.049,
+      16.774
+    ]
+  },
+  "cancellation": {
+    "sent": true,
+    "outcome": "response"
+  },
+  "rpc_count_initial_queries": 7,
+  "lifecycle": {
+    "shutdown_response": true,
+    "exit_code": 0
+  },
+  "memory": {
+    "available": true,
+    "sampler": "psutil 7.2.2",
+    "sample_interval_ms": 100,
+    "samples": 74,
+    "peak_rss_bytes": 1019191296,
+    "peak_process_count": 2,
+    "peak_process_names": [
+      "conhost.exe",
+      "java.exe"
+    ]
+  },
+  "total_ms": 7966.247,
+  "notifications": [
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is started"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 Started org.eclipse.buildship.core 25ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 Started org.eclipse.m2e.core 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 Main thread is waiting"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 >> initialize"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 Initializing JDT Language Server (Standard)\n\t- Version: 1.61.0-SNAPSHOT (OSGi 1.61.0.202609031315)\n\t- Git Commit: 08eafe6 - CHANGELOG for 1.61.0"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:00 ProjectRegistryRefreshJob finished 568ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c9549474-c39d-408e-858f-cfb3587a9335",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c9549474-c39d-408e-858f-cfb3587a9335",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "e110ab0b-658d-4648-b75d-6131d7b26951",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "e110ab0b-658d-4648-b75d-6131d7b26951",
+        "task": "Synchronizing projects",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "6fa8c729-e1ef-473b-823a-f38356aae20e",
+        "task": "Repository registry initialization",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c368688e-45c7-43b9-87ce-401aa6ecd138",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "c368688e-45c7-43b9-87ce-401aa6ecd138",
+        "task": "Building",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 Setting D:\\khaslana\\jdk-21.0.12.1+1 as 'JavaSE-21' environment (id:1789138080829)"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 JVM Runtimes changed, saving new configuration"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3875cccc-bba3-468c-92a1-66b156882b7f",
+        "task": "Detect installed JVMs",
+        "status": "0% ",
+        "totalWork": 2,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3875cccc-bba3-468c-92a1-66b156882b7f",
+        "task": "D:\\Program Files\\Java\\jdk1.8.0_121",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3875cccc-bba3-468c-92a1-66b156882b7f",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3875cccc-bba3-468c-92a1-66b156882b7f",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3875cccc-bba3-468c-92a1-66b156882b7f",
+        "task": "C:\\Program Files\\Java\\jdk-21",
+        "status": "200% ",
+        "totalWork": 1000,
+        "workDone": 2000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 Static Commands: []"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 Non-Static Commands: [java.project.import, java.project.changeImportedProjects, java.navigate.openTypeHierarchy, java.project.resolveStackTraceLocation, java.edit.handlePasteEvent, java.edit.stringFormatting, java.project.getSettings, java.project.resolveWorkspaceSymbol, java.project.upgradeGradle, java.project.createModuleInfo, java.vm.getAllInstalls, java.edit.organizeImports, java.project.refreshDiagnostics, java.getFullyQualifiedName, java.project.removeFromSourcePath, java.project.listSourcePaths, java.project.updateSettings, java.project.getAll, java.reloadBundles, java.project.isTestFile, java.project.resolveText, java.project.getClasspaths, java.navigate.resolveTypeHierarchy, java.getTroubleshootingInfo, java.edit.smartSemicolonDetection, java.project.updateSourceAttachment, java.project.updateClassPaths, java.decompile, java.protobuf.generateSources, java.project.resolveSourceAttachment, java.project.updateJdk, java.project.addToSourcePath, java.completion.onDidSelect]"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "Init..."
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "0% Starting Java Language Server"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Initialize Workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 RepositoryRegistryUpdateJob finished 0ms"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 >> initialized"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 Importers: GradleProjectImporter, MavenProjectImporter, EclipseProjectImporter, InvisibleProjectImporter"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:01 Importing Maven project(s)"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "27% Starting Java Language Server - Project 'java-semantic-parent'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Importing Maven project(s)",
+        "subTask": "Project 'java-semantic-parent'",
+        "status": "Importing Maven project(s) - Project 'java-semantic-parent'",
+        "totalWork": 1000,
+        "workDone": 272,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "7ee5a60c-bbbb-4853-b91d-a5e6f6e411b6",
+        "task": "LookupJDKToolchainsJob",
+        "status": "",
+        "totalWork": 0,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "44% Starting Java Language Server - Project 'api'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Importing Maven project(s)",
+        "subTask": "Project 'api'",
+        "status": "Importing Maven project(s) - Project 'api'",
+        "totalWork": 1000,
+        "workDone": 440,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "56% Starting Java Language Server - Refreshing '/api/src/main/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Configuring java project api",
+        "subTask": "Refreshing '/api/src/main/java'.",
+        "status": "56% Refreshing '/api/src/main/java'.",
+        "totalWork": 1000,
+        "workDone": 563,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "56% Starting Java Language Server - Updating configuration for core"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Resolve plugin dependency",
+        "subTask": "Updating configuration for core",
+        "status": "56% Updating configuration for core",
+        "totalWork": 1000,
+        "workDone": 563,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 Progressive import: reporting 4 new project(s)"
+      }
+    },
+    {
+      "method": "language/eventNotification",
+      "params": {
+        "eventType": 200,
+        "data": [
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/api/",
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/core/",
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/",
+          "file:/D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/web/"
+        ]
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ProjectStatus",
+        "message": "OK"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "100% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Resolve plugin dependency",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "100% Refreshing '/web/src/test/java'.",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1000% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1000% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1005% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1005% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1005,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1010% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1010% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1010,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1100% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1100% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1100% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1100% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1100,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1105% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1105% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1105,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1110% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1110% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1110,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1200% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1200% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1200,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1200% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1200% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1200,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1200% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1200% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1200,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1205% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1205% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1205,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1210% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1210% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1210,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1300% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1300% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1300,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1300% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1300% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1300,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1300% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1300% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1300,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1305% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1305% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1305,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1310% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1310% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1310,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1400% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1400% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1400,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1400% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1400% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1400,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 Workspace initialized in 1196ms"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Started",
+        "message": "Ready"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "Starting",
+        "message": "1400% Starting Java Language Server - Refreshing '/web/src/test/java'."
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f6d6c363-1099-49cb-a31e-9e6c34369b55",
+        "task": "Creating link.",
+        "subTask": "Refreshing '/web/src/test/java'.",
+        "status": "1400% Refreshing '/web/src/test/java'.",
+        "totalWork": 100,
+        "workDone": 1400,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 >> initialization job finished"
+      }
+    },
+    {
+      "method": "language/status",
+      "params": {
+        "type": "ServiceReady",
+        "message": "ServiceReady"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 >> build jobs finished"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 >> registerWatchers'"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "60edf2e4-2fff-4424-80f8-6dd433a4f724",
+        "task": "Searching...",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "85af753d-6003-4cce-806c-4b655592eb9a",
+        "task": "Refreshing workspace",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/pom.xml",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "85af753d-6003-4cce-806c-4b655592eb9a",
+        "task": "Refreshing workspace",
+        "subTask": "Refreshing '/api/src/main/java/com/example/api'.",
+        "status": "29% Refreshing '/api/src/main/java/com/example/api'.",
+        "totalWork": 1000,
+        "workDone": 289,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "a7e26fa6-902a-4542-b6f0-9d5714d5e8a2",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:02 Reconciled 8. Took 0 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "a7e26fa6-902a-4542-b6f0-9d5714d5e8a2",
+        "task": "Validate documents",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "7eef3103-b0b7-4baf-a549-839958efcc49",
+        "task": "Publish Diagnostics",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /LoginApplicationService.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /LoginApplicationService.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/core/src/main/java/com/example/core/LoginApplicationService.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /LoginController.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /LoginController.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/web/src/main/java/com/example/web/LoginController.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /LocalAuthProvider.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /LocalAuthProvider.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/core/src/main/java/com/example/core/LocalAuthProvider.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /SsoAuthProvider.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /SsoAuthProvider.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/core/src/main/java/com/example/core/SsoAuthProvider.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /LoginResult.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /LoginResult.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/api/src/main/java/com/example/api/LoginResult.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /BatchLoginJob.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /BatchLoginJob.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/web/src/main/java/com/example/web/BatchLoginJob.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /AuthProvider.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /AuthProvider.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/api/src/main/java/com/example/api/AuthProvider.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 begin problem for /AdminLoginController.java"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 0 problems reported for /AdminLoginController.java"
+      }
+    },
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "file:///D:/workspace/CodeX-workspace/khaslana/target/jls-t0-project-maven-mem/web/src/main/java/com/example/web/AdminLoginController.java",
+        "diagnostics": []
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:03 Validated 8. Took 201 ms"
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "7eef3103-b0b7-4baf-a549-839958efcc49",
+        "task": "Publish Diagnostics",
+        "status": "89% ",
+        "totalWork": 1000,
+        "workDone": 888,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "60edf2e4-2fff-4424-80f8-6dd433a4f724",
+        "task": "Searching...",
+        "subTask": "5 files to index (/api)",
+        "status": "80% 5 files to index (/api)",
+        "totalWork": 1000,
+        "workDone": 796,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "60edf2e4-2fff-4424-80f8-6dd433a4f724",
+        "task": "Searching...",
+        "subTask": "11 files to index (/api)",
+        "status": "100% 11 files to index (/api)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "60edf2e4-2fff-4424-80f8-6dd433a4f724",
+        "task": "Searching...",
+        "subTask": "11 files to index (/api)",
+        "status": "100% 11 files to index (/api)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "60edf2e4-2fff-4424-80f8-6dd433a4f724",
+        "task": "Searching...",
+        "subTask": "11 files to index (/api)",
+        "status": "100% 11 files to index (/api)",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f7de991f-4cd3-4210-91fe-c8d962f51483",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "f7de991f-4cd3-4210-91fe-c8d962f51483",
+        "task": "Searching for implementors of 'com.example.api.AuthProvider.login(...)'...",
+        "subTask": "",
+        "status": "0% ",
+        "totalWork": 10,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "87eaec9b-155d-43bd-a73d-3428554a1539",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "87eaec9b-155d-43bd-a73d-3428554a1539",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "87eaec9b-155d-43bd-a73d-3428554a1539",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "4fd87033-ba47-4ccf-96e1-1affaef71eb4",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "4fd87033-ba47-4ccf-96e1-1affaef71eb4",
+        "task": "Background task",
+        "subTask": "Locating Java matches...",
+        "status": "100% Locating Java matches...",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d400387e-d8e7-4775-9015-5fa13931f4aa",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d400387e-d8e7-4775-9015-5fa13931f4aa",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d400387e-d8e7-4775-9015-5fa13931f4aa",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "21df7f95-5a6e-4e38-8566-85440c59735c",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "21df7f95-5a6e-4e38-8566-85440c59735c",
+        "task": "Background task",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5009c0bc-f780-41ad-8d7a-62001de90a51",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "5009c0bc-f780-41ad-8d7a-62001de90a51",
+        "task": "Searching for implementors of 'com.example.api.AuthProvider.login(...)'...",
+        "subTask": "",
+        "status": "0% ",
+        "totalWork": 10,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b0093528-1c39-4488-b597-f8fb55dea735",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b0093528-1c39-4488-b597-f8fb55dea735",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b0093528-1c39-4488-b597-f8fb55dea735",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d949875d-feaa-4eab-8fb7-dc507311d569",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d949875d-feaa-4eab-8fb7-dc507311d569",
+        "task": "Background task",
+        "subTask": "Locating Java matches...",
+        "status": "100% Locating Java matches...",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ba5ae045-61e0-4785-9c95-98fdba3b41fe",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ba5ae045-61e0-4785-9c95-98fdba3b41fe",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ba5ae045-61e0-4785-9c95-98fdba3b41fe",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "0b2a58d0-7663-4679-a2cd-5a5e2f096584",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "0b2a58d0-7663-4679-a2cd-5a5e2f096584",
+        "task": "Background task",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "49053ecc-6dc7-4f38-92b5-61034a35fe4e",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "49053ecc-6dc7-4f38-92b5-61034a35fe4e",
+        "task": "Searching for implementors of 'com.example.api.AuthProvider.login(...)'...",
+        "subTask": "",
+        "status": "0% ",
+        "totalWork": 10,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "e7607cf2-ec42-472b-a351-03b6b48df7c9",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "e7607cf2-ec42-472b-a351-03b6b48df7c9",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "e7607cf2-ec42-472b-a351-03b6b48df7c9",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ace80774-b128-45e9-bd3f-445cd01c3eab",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ace80774-b128-45e9-bd3f-445cd01c3eab",
+        "task": "Background task",
+        "subTask": "Locating Java matches...",
+        "status": "100% Locating Java matches...",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9fed89bd-89f7-41ab-953e-8e73ef47977e",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9fed89bd-89f7-41ab-953e-8e73ef47977e",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9fed89bd-89f7-41ab-953e-8e73ef47977e",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b939ce19-3542-4aa6-aab7-1043a3c3ef68",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b939ce19-3542-4aa6-aab7-1043a3c3ef68",
+        "task": "Background task",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ee88fd9b-d01f-4665-b1a6-b1c542692bb0",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "ee88fd9b-d01f-4665-b1a6-b1c542692bb0",
+        "task": "Searching for implementors of 'com.example.api.AuthProvider.login(...)'...",
+        "subTask": "",
+        "status": "0% ",
+        "totalWork": 10,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d080c7f9-7e85-45fb-9df2-30026d789341",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d080c7f9-7e85-45fb-9df2-30026d789341",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "d080c7f9-7e85-45fb-9df2-30026d789341",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "4035ddec-fd09-4344-a2e5-aa131e59597f",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "4035ddec-fd09-4344-a2e5-aa131e59597f",
+        "task": "Background task",
+        "subTask": "Locating Java matches...",
+        "status": "100% Locating Java matches...",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3fb242b5-38f7-45dc-926a-f736cb3175f7",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3fb242b5-38f7-45dc-926a-f736cb3175f7",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "3fb242b5-38f7-45dc-926a-f736cb3175f7",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9d0cf795-b951-4590-9121-ecd78a7aa7a5",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "9d0cf795-b951-4590-9121-ecd78a7aa7a5",
+        "task": "Background task",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "2c712aee-a1ff-42cd-8f05-6b2a26ab3654",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "2c712aee-a1ff-42cd-8f05-6b2a26ab3654",
+        "task": "Searching for implementors of 'com.example.api.AuthProvider.login(...)'...",
+        "subTask": "",
+        "status": "0% ",
+        "totalWork": 10,
+        "workDone": 0,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "90189cd3-4005-4855-9a9c-4a4e364809f4",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "90189cd3-4005-4855-9a9c-4a4e364809f4",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "90189cd3-4005-4855-9a9c-4a4e364809f4",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "a395e69b-3b42-40b5-ae99-de5344dd2234",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "a395e69b-3b42-40b5-ae99-de5344dd2234",
+        "task": "Background task",
+        "subTask": "Locating Java matches...",
+        "status": "100% Locating Java matches...",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b8ed0985-6bc6-4507-a63d-f2ee5559c480",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b8ed0985-6bc6-4507-a63d-f2ee5559c480",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "b8ed0985-6bc6-4507-a63d-f2ee5559c480",
+        "task": "Reconciling...",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "cd5e9770-e0ca-484f-9a28-60a1aa57f880",
+        "task": "Background task",
+        "status": "0% ",
+        "totalWork": 1000,
+        "workDone": 0,
+        "complete": false
+      }
+    },
+    {
+      "method": "language/progressReport",
+      "params": {
+        "id": "cd5e9770-e0ca-484f-9a28-60a1aa57f880",
+        "task": "Background task",
+        "status": "100% ",
+        "totalWork": 1000,
+        "workDone": 1000,
+        "complete": true
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:05 >> shutdown"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:05 >> exit"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:05 Shutdown received... waking up main thread"
+      }
+    },
+    {
+      "method": "window/logMessage",
+      "params": {
+        "type": 3,
+        "message": "2026年9月11日 22:48:05 class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is stopping:"
+      }
+    }
+  ],
+  "server_requests": [],
+  "reader_error": null,
+  "project_changes": {
+    "added": [
+      ".project",
+      ".settings/org.eclipse.core.resources.prefs",
+      ".settings/org.eclipse.m2e.core.prefs",
+      "api/.classpath",
+      "api/.project",
+      "api/.settings/org.eclipse.core.resources.prefs",
+      "api/.settings/org.eclipse.jdt.apt.core.prefs",
+      "api/.settings/org.eclipse.jdt.core.prefs",
+      "api/.settings/org.eclipse.m2e.core.prefs",
+      "core/.classpath",
+      "core/.project",
+      "core/.settings/org.eclipse.core.resources.prefs",
+      "core/.settings/org.eclipse.jdt.apt.core.prefs",
+      "core/.settings/org.eclipse.jdt.core.prefs",
+      "core/.settings/org.eclipse.m2e.core.prefs",
+      "web/.classpath",
+      "web/.project",
+      "web/.settings/org.eclipse.core.resources.prefs",
+      "web/.settings/org.eclipse.jdt.apt.core.prefs",
+      "web/.settings/org.eclipse.jdt.core.prefs",
+      "web/.settings/org.eclipse.m2e.core.prefs"
+    ],
+    "removed": [],
+    "modified": []
+  },
+  "workspace_after": {
+    "files": 71,
+    "bytes": 42949447
+  },
+  "passed": true
+}

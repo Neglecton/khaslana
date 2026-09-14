@@ -1,0 +1,15 @@
+{
+  "project": "maven-java21",
+  "ready_symbol": "ModernGreeting",
+  "queries": [
+    {
+      "id": "java21-target-definition",
+      "operation": "definition",
+      "file": "src/main/java/com/example/java21/ModernApp.java",
+      "anchor": "greeting.message(args[0])",
+      "symbol": "message",
+      "expect_files": ["src/main/java/com/example/java21/ModernGreeting.java"],
+      "expect_count": 1
+    }
+  ]
+}

@@ -1173,6 +1173,14 @@ fn conflict_editor_always_uses_scrollable_multiline_viewport() {
         FieldId::CommitMessage,
         "short"
     ));
+    assert_eq!(
+        multiline_input_visible_lines(FieldId::CodeUnderstandingQuestion),
+        2
+    );
+    assert!(multiline_input_should_scroll(
+        FieldId::CodeUnderstandingQuestion,
+        "第一行\n第二行\n第三行"
+    ));
 }
 
 #[test]

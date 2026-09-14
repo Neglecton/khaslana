@@ -8,6 +8,7 @@ mod browse_view;
 mod chrome_view;
 mod code_index_view;
 mod code_palette_view;
+mod code_understanding_view;
 mod commit_graph_view;
 mod conflicts;
 mod diff_view;
@@ -495,6 +496,8 @@ enum FieldId {
     CodeIndexFilter,
     /// 全局符号搜索面板（Ctrl+P）的输入框。
     CodePaletteSearch,
+    /// 代码理解页的业务问题输入框（Enter 发送、Shift+Enter 换行）。
+    CodeUnderstandingQuestion,
     StashMessage,
     WorkflowInput(usize),
     /// 工作流模板编辑器的动态字段（模板名/文件名/步骤参数/变量行），
@@ -607,6 +610,10 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     (FieldId::CodePaletteSearch, |view: &RepositoryView| {
         &view.code_palette_search
     }),
+    (
+        FieldId::CodeUnderstandingQuestion,
+        |view: &RepositoryView| &view.understanding_question,
+    ),
 ];
 
 /// 全部 FieldId 变体（与枚举同步维护；tests 断言 DEDICATED_FIELDS 全覆盖，
@@ -646,6 +653,7 @@ pub(crate) const ALL_FIELD_IDS: &[FieldId] = &[
     FieldId::ExternalMergeIntellijPath,
     FieldId::CodeIndexFilter,
     FieldId::CodePaletteSearch,
+    FieldId::CodeUnderstandingQuestion,
     FieldId::StashMessage,
 ];
 
@@ -1260,13 +1268,23 @@ fn dialog_parent_should_stop_mouse_event(event_name: &str) -> bool {
 }
 
 fn multiline_input_should_scroll(id: FieldId, value: &str) -> bool {
-    id == FieldId::ConflictEditor || visual_line_count(value) > MULTILINE_MIN_LINES
+    id == FieldId::ConflictEditor || visual_line_count(value) > multiline_input_visible_lines(id)
+}
+
+fn multiline_input_visible_lines(id: FieldId) -> usize {
+    if id == FieldId::CodeUnderstandingQuestion {
+        2
+    } else {
+        MULTILINE_MIN_LINES
+    }
 }
 
 /// 多行输入字段的滚动容器句柄 id（提交信息框与冲突编辑器各一个）。
 pub(crate) fn multiline_scroll_handle_id(id: FieldId) -> &'static str {
     if id == FieldId::ConflictEditor {
         CONFLICT_RESULT_SCROLL_HANDLE_ID
+    } else if id == FieldId::CodeUnderstandingQuestion {
+        "understanding-question-input-scroll"
     } else {
         "commit-message-input-scroll"
     }
@@ -1960,6 +1978,8 @@ pub(crate) enum ResizeTarget {
     HistoryDetails,
     HistoryGraph,
     BrowseFiles,
+    /// 代码理解页来源侧栏宽度（280–480）。
+    UnderstandingSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1974,6 +1994,9 @@ pub(crate) enum MainMode {
     /// 提交图谱页（专用模式）：拓扑专注型，主历史页「图谱」按钮进入，
     /// 关闭/跳转返回 History。切换模式不重置图谱状态（无损往返）。
     CommitGraph,
+    /// 代码理解页（专用模式，CU2-T5）：问题框 + 回答主区 + 来源侧栏；
+    /// 任务注册表独立于本模式，切页面/仓库只分离显示不取消。
+    CodeUnderstanding,
 }
 
 /// Context Navigator 偏好：单一展开状态跨工作区/历史/工作流/图谱与**所有仓库**
@@ -1998,7 +2021,8 @@ impl ContextNavigatorPreferences {
             | MainMode::Stash
             | MainMode::Browse
             | MainMode::Blame
-            | MainMode::CommitGraph => false,
+            | MainMode::CommitGraph
+            | MainMode::CodeUnderstanding => false,
         }
     }
 
@@ -2011,7 +2035,8 @@ impl ContextNavigatorPreferences {
             | MainMode::Stash
             | MainMode::Browse
             | MainMode::Blame
-            | MainMode::CommitGraph => {}
+            | MainMode::CommitGraph
+            | MainMode::CodeUnderstanding => {}
         }
     }
 }
@@ -2393,6 +2418,48 @@ pub(crate) enum UiEvent {
     CodeIndexStatsLoaded {
         repo_path: String,
         stats: Option<khaslana::code_index::IndexStats>,
+    },
+    /// 代码理解 agent 进度（CU2-T5；全部按 (project_key, generation) 路由守卫）。
+    UnderstandingProgress {
+        project_key: String,
+        generation: u64,
+        message: String,
+    },
+    /// 代码理解当前轮流式增量（正文/思考链）。
+    UnderstandingDelta {
+        project_key: String,
+        generation: u64,
+        content_delta: Option<String>,
+        reasoning_delta: Option<String>,
+    },
+    /// 代码理解一个已落定的时间线步骤。
+    UnderstandingStepAdded {
+        project_key: String,
+        generation: u64,
+        step: khaslana::code_understanding::UnderstandingStep,
+    },
+    /// 代码理解完成（Completed 或结构有效的终态 Partial；saved = 本地历史写入结果）。
+    UnderstandingFinished {
+        project_key: String,
+        generation: u64,
+        answer: khaslana::code_understanding::UnderstandingAnswer,
+        saved: bool,
+    },
+    /// 代码理解失败（不写历史）。
+    UnderstandingFailed {
+        project_key: String,
+        generation: u64,
+        error: String,
+    },
+    /// 代码理解任务已确认取消退出（此时才释放 AI 名额）。
+    UnderstandingCancelled {
+        project_key: String,
+        generation: u64,
+    },
+    /// 代码理解本地完成历史加载完成。
+    UnderstandingHistoryLoaded {
+        project_key: String,
+        records: Vec<khaslana::code_understanding::UnderstandingHistoryRecord>,
     },
     OpenRepositoryFolderSelected {
         path: Option<PathBuf>,
@@ -3200,6 +3267,8 @@ pub(crate) struct RepositoryView {
     history_details_top_hint: Arc<Cell<f32>>,
     pub(crate) browse_tree_width: f32,
     pub(crate) history_graph_width: f32,
+    /// 代码理解页来源侧栏宽度（内存态；默认 336，范围 280–480）。
+    pub(crate) understanding_source_width: f32,
     resizing_sidebar_width: Option<ResizeState>,
     resizing_changes_width: Option<ResizeState>,
     resizing_workflow_templates_width: Option<ResizeState>,
@@ -3208,6 +3277,7 @@ pub(crate) struct RepositoryView {
     resizing_history_details_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
     resizing_history_graph_width: Option<ResizeState>,
+    resizing_understanding_source_width: Option<ResizeState>,
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
     uniform_scroll_handles: RefCell<HashMap<String, UniformListScrollHandle>>,
     /// 差异区域最宽行扫描的单槽缓存（见 `cached_widest_diff_row_index`）。
@@ -3399,6 +3469,12 @@ pub(crate) struct RepositoryView {
     pub(crate) code_search_palette: Option<CodeSearchPaletteState>,
     /// 面板输入框（面板关闭后保留输入内容，重开可续用）。
     pub(crate) code_palette_search: TextFieldState,
+    /// 代码理解页业务问题输入框（S2 发送后清空）。
+    pub(crate) understanding_question: TextFieldState,
+    /// 代码理解任务注册表（per-仓库会话与显示状态，独立于主模式/标签页）。
+    pub(crate) understanding_tasks: code_understanding_view::UnderstandingTaskRegistry,
+    /// 代码理解页 S2 可行动提示（AI 未配置 / 无索引 / 名额满）。
+    pub(crate) understanding_notice: Option<(String, code_understanding_view::NoticeAction)>,
     /// 面板查询请求序号（每按键 +1，事件携带，乱序丢弃）。
     pub(crate) code_palette_search_seq: u64,
     /// 面板详情请求序号（随选中变化 +1）。
@@ -3422,7 +3498,11 @@ pub(crate) struct RepositoryView {
 fn inheritable_main_mode(previous: Option<MainMode>) -> Option<MainMode> {
     match previous {
         mode @ Some(
-            MainMode::Worktree | MainMode::History | MainMode::Workflow | MainMode::CommitGraph,
+            MainMode::Worktree
+            | MainMode::History
+            | MainMode::Workflow
+            | MainMode::CommitGraph
+            | MainMode::CodeUnderstanding,
         ) => mode,
         _ => None,
     }
@@ -3538,6 +3618,8 @@ impl RepositoryView {
             resizing_history_details_height: None,
             resizing_browse_tree_width: None,
             resizing_history_graph_width: None,
+            resizing_understanding_source_width: None,
+            understanding_source_width: code_understanding_view::UNDERSTANDING_SOURCE_DEFAULT_WIDTH,
             scroll_handles: RefCell::new(HashMap::new()),
             uniform_scroll_handles: RefCell::new(HashMap::new()),
             widest_diff_row_cache: RefCell::new(WidestDiffRowCache::default()),
@@ -3666,6 +3748,12 @@ impl RepositoryView {
             code_index_progress_message: String::new(),
             code_search_palette: None,
             code_palette_search: TextFieldState::new(cx, "搜索符号或类型名…"),
+            understanding_question: TextFieldState::new(
+                cx,
+                "输入业务问题，例如：登录逻辑怎么实现的？",
+            ),
+            understanding_tasks: code_understanding_view::UnderstandingTaskRegistry::default(),
+            understanding_notice: None,
             code_palette_search_seq: 0,
             code_palette_detail_seq: 0,
             code_index_enabled_cache: {
@@ -6010,6 +6098,62 @@ impl RepositoryView {
                     state.error = Some(error);
                 }
             }
+            // ── 代码理解（CU2-T5）：事件在 view 模块内按 (project_key, generation) 守卫 ──
+            UiEvent::UnderstandingProgress {
+                project_key,
+                generation,
+                message,
+            } => {
+                self.handle_understanding_progress(project_key, generation, message, cx);
+            }
+            UiEvent::UnderstandingDelta {
+                project_key,
+                generation,
+                content_delta,
+                reasoning_delta,
+            } => {
+                self.handle_understanding_delta(
+                    project_key,
+                    generation,
+                    content_delta,
+                    reasoning_delta,
+                    cx,
+                );
+            }
+            UiEvent::UnderstandingStepAdded {
+                project_key,
+                generation,
+                step,
+            } => {
+                self.handle_understanding_step(project_key, generation, step, cx);
+            }
+            UiEvent::UnderstandingFinished {
+                project_key,
+                generation,
+                answer,
+                saved,
+            } => {
+                self.handle_understanding_finished(project_key, generation, answer, saved, cx);
+            }
+            UiEvent::UnderstandingFailed {
+                project_key,
+                generation,
+                error,
+            } => {
+                self.handle_understanding_failed(project_key, generation, error, cx);
+            }
+            UiEvent::UnderstandingCancelled {
+                project_key,
+                generation,
+            } => {
+                self.handle_understanding_cancelled(project_key, generation, cx);
+            }
+            UiEvent::UnderstandingHistoryLoaded {
+                project_key,
+                records,
+            } => {
+                self.handle_understanding_history_loaded(project_key, records, cx);
+            }
             UiEvent::AiConflictMergeProgress {
                 path,
                 segment,
@@ -6945,6 +7089,7 @@ impl RepositoryView {
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
             FieldId::CodeIndexFilter => &mut self.code_index_filter,
             FieldId::CodePaletteSearch => &mut self.code_palette_search,
+            FieldId::CodeUnderstandingQuestion => &mut self.understanding_question,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
             FieldId::SidebarLocalBranchSearch => &mut self.sidebar_local_branch_search,
@@ -10285,6 +10430,9 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = Some(state),
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = Some(state),
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = Some(state),
+            ResizeTarget::UnderstandingSource => {
+                self.resizing_understanding_source_width = Some(state)
+            }
         }
     }
 
@@ -10329,6 +10477,13 @@ impl RepositoryView {
                     .clamp(MIN_HISTORY_GRAPH_WIDTH, MAX_HISTORY_GRAPH_WIDTH);
                 self.set_column_width(target, width);
             }
+            ResizeTarget::UnderstandingSource => {
+                let width = (resize.start_width + delta).clamp(
+                    code_understanding_view::UNDERSTANDING_SOURCE_MIN_WIDTH,
+                    code_understanding_view::UNDERSTANDING_SOURCE_MAX_WIDTH,
+                );
+                self.set_column_width(target, width);
+            }
             ResizeTarget::Sidebar | ResizeTarget::Changes => {
                 let width = (resize.start_width + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
                 self.set_column_width(target, width);
@@ -10348,6 +10503,7 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = None,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
+            ResizeTarget::UnderstandingSource => self.resizing_understanding_source_width = None,
         }
         // 拖拽结束：布局已定型，同步落库（重启恢复）。
         self.save_layout_preferences();
@@ -10369,6 +10525,10 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => self.history_details_height = None,
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
             ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
+            ResizeTarget::UnderstandingSource => {
+                self.understanding_source_width =
+                    code_understanding_view::UNDERSTANDING_SOURCE_DEFAULT_WIDTH
+            }
         }
         // finish_resize_column 已保存一次；复位改写了默认值后再保存最终状态。
         self.save_layout_preferences();
@@ -10384,6 +10544,7 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => 0.0,
             ResizeTarget::BrowseFiles => self.browse_tree_width,
             ResizeTarget::HistoryGraph => self.history_graph_width,
+            ResizeTarget::UnderstandingSource => self.understanding_source_width,
         }
     }
 
@@ -10397,6 +10558,7 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => {}
             ResizeTarget::BrowseFiles => self.browse_tree_width = width,
             ResizeTarget::HistoryGraph => self.history_graph_width = width,
+            ResizeTarget::UnderstandingSource => self.understanding_source_width = width,
         }
     }
 
@@ -10411,7 +10573,8 @@ impl RepositoryView {
             | ResizeTarget::HistoryFiles
             | ResizeTarget::HistoryInspectorFiles
             | ResizeTarget::BrowseFiles
-            | ResizeTarget::HistoryGraph => 0.0,
+            | ResizeTarget::HistoryGraph
+            | ResizeTarget::UnderstandingSource => 0.0,
         }
     }
 
@@ -10424,7 +10587,8 @@ impl RepositoryView {
             | ResizeTarget::HistoryFiles
             | ResizeTarget::HistoryInspectorFiles
             | ResizeTarget::BrowseFiles
-            | ResizeTarget::HistoryGraph => {}
+            | ResizeTarget::HistoryGraph
+            | ResizeTarget::UnderstandingSource => {}
         }
     }
 
@@ -10438,6 +10602,7 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => self.resizing_history_details_height,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width,
+            ResizeTarget::UnderstandingSource => self.resizing_understanding_source_width,
         }
     }
 
@@ -10476,6 +10641,11 @@ impl RepositoryView {
         }
         if self.main_mode == MainMode::History || self.main_mode == MainMode::CommitGraph {
             self.ensure_history_loaded();
+        }
+        if self.main_mode == MainMode::CodeUnderstanding {
+            // 进入理解页：补齐当前仓库的索引统计投影与本地完成历史（懒加载一次）。
+            self.ensure_understanding_index_stats();
+            self.ensure_understanding_history_loaded();
         }
     }
 
@@ -12435,6 +12605,8 @@ impl RepositoryView {
                 | FieldId::TagMessage
                 // 工作流模板 AI 功能需求描述（编辑器弹窗内多行输入）。
                 | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::AiDescription)
+                // 代码理解问题框：多行输入，Enter 发送 / Shift+Enter 换行。
+                | FieldId::CodeUnderstandingQuestion
         )
     }
 
@@ -12545,10 +12717,16 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let field = self.field(id);
         let focused = field.focus.is_focused(window);
+        let visible_lines = multiline_input_visible_lines(id);
+        let frame_size = if id == FieldId::CodeUnderstandingQuestion {
+            InputFrameSize::Regular
+        } else {
+            InputFrameSize::Multiline
+        };
         // 溢出判定综合逻辑行数与上帧自动换行行数（长行换行后同样超高）。
         let multiline_overflows = multiline_input_should_scroll(id, &field.value)
-            || field.last_wrapped_line_count > MULTILINE_MIN_LINES;
-        input_frame(format!("field-{id:?}"), focused, InputFrameSize::Multiline)
+            || field.last_wrapped_line_count > visible_lines;
+        input_frame(format!("field-{id:?}"), focused, frame_size)
             .track_focus(&field.focus)
             .key_context("TextInput")
             .on_action(cx.listener(Self::text_backspace))
@@ -12575,6 +12753,22 @@ impl RepositoryView {
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.platform
                 {
+                    // 代码理解问题框：Enter 发送、Shift+Enter 换行；
+                    // IME 组合期间 Enter 只确认候选（不拦截，交给输入法）。
+                    if id == FieldId::CodeUnderstandingQuestion {
+                        if this.field(id).marked_range.is_some() {
+                            return;
+                        }
+                        if event.keystroke.modifiers.shift {
+                            this.field_mut(id).insert_text("\n", true);
+                            cx.stop_propagation();
+                            cx.notify();
+                        } else {
+                            this.submit_understanding_question(cx);
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
                     this.field_mut(id).insert_text("\n", true);
                     cx.stop_propagation();
                     cx.notify();
@@ -12628,7 +12822,7 @@ impl RepositoryView {
                 let scroll_id = if id == FieldId::ConflictEditor {
                     "conflict-editor-scroll"
                 } else {
-                    "commit-message-input-scroll"
+                    multiline_scroll_handle_id(id)
                 };
                 let content = div()
                     .id(scroll_id)
@@ -12656,12 +12850,13 @@ impl RepositoryView {
                     // 冲突编辑器随冲突面板高度伸缩。
                     frame.into_any_element()
                 } else {
-                    // 提交信息框固定可视高度（约 MULTILINE_MIN_LINES 行），
+                    // 普通多行输入固定可视高度；问题框按设计稿压缩为两行，
+                    // 其余输入仍使用 MULTILINE_MIN_LINES。
                     // 内容超出后滚动，不再随内容无限撑高。
                     div()
                         .flex()
                         .flex_col()
-                        .h(px(MULTILINE_LINE_HEIGHT * MULTILINE_MIN_LINES as f32))
+                        .h(px(MULTILINE_LINE_HEIGHT * visible_lines as f32))
                         .child(frame)
                         .into_any_element()
                 }
@@ -14798,8 +14993,24 @@ impl RepositoryView {
             .child(label)
     }
 
-    fn render_status(&self) -> impl IntoElement {
+    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let status_label = if self.busy { "运行中" } else { "就绪" };
+        // 代码理解后台任务条（CU2-T5）：任务运行中且已从当前页面分离时显示，
+        // 提供查看进度与取消入口；后台完成只提示一次（toast 在事件处理侧）。
+        let understanding_tasks = self
+            .understanding_tasks
+            .iter()
+            .filter(|(key, state)| {
+                state.session.has_active_request() && self.understanding_task_detached_from(key)
+            })
+            .map(|(key, state)| {
+                (
+                    key.clone(),
+                    state.display.question.clone(),
+                    state.cancel_pending,
+                )
+            })
+            .collect::<Vec<_>>();
         let branch = self
             .snapshot
             .as_ref()
@@ -14855,6 +15066,62 @@ impl RepositoryView {
                         format!("{}...", self.status)
                     } else {
                         self.status.clone()
+                    }),
+            )
+            .children(
+                understanding_tasks
+                    .iter()
+                    .map(|(project_key, question, cancel_pending)| {
+                        let repo_name = Path::new(project_key)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| project_key.clone());
+                        let question = question.clone();
+                        let cancel_pending = *cancel_pending;
+                        let key_for_view = project_key.clone();
+                        let key_for_cancel = project_key.clone();
+                        div()
+                            .id(format!("understanding-taskbar-{project_key}"))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(6.0))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                            .text_color(rgb(ui_theme::PRIMARY))
+                            .child(div().max_w(px(280.0)).truncate().child(if cancel_pending {
+                                format!("代码理解·取消中：{repo_name}")
+                            } else {
+                                format!(
+                                    "代码理解：{repo_name} · {}",
+                                    code_understanding_view::excerpt_line(&question, 24)
+                                )
+                            }))
+                            .child(
+                                div()
+                                    .id(format!("understanding-taskbar-view-{project_key}"))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(ui_theme::CONTENT_PRIMARY)))
+                                    .child("查看")
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.show_understanding_task(key_for_view.clone(), cx);
+                                    })),
+                            )
+                            .when(!cancel_pending, |this| {
+                                this.child(
+                                    div()
+                                        .id(format!("understanding-taskbar-cancel-{project_key}"))
+                                        .cursor_pointer()
+                                        .hover(|this| {
+                                            this.text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                        })
+                                        .child("取消")
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.cancel_understanding_task_for(&key_for_cancel, cx);
+                                        })),
+                                )
+                            })
                     }),
             )
             .when_some(self.last_error.clone(), |this, error| {
@@ -17917,6 +18184,9 @@ impl Render for RepositoryView {
                         MainMode::CommitGraph => {
                             self.render_commit_graph_view(window, cx).into_any_element()
                         }
+                        MainMode::CodeUnderstanding => {
+                            self.render_code_understanding_view(window, cx).into_any_element()
+                        }
                     })
                     // 窄窗 Navigator 覆盖层最后挂载（盖在主体内容之上）。
                     .when(
@@ -17924,7 +18194,7 @@ impl Render for RepositoryView {
                         |this| this.child(self.render_context_navigator_overlay(window, cx)),
                     ),
             )
-            .child(self.render_status())
+            .child(self.render_status(cx))
             .child(self.render_branch_context_menu(cx))
             .child(self.render_remote_context_menu(cx))
             .child(self.render_change_context_menu(cx))

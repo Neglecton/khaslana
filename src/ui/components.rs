@@ -41,7 +41,7 @@ pub(crate) struct FeedbackMessage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ButtonTone {
+pub(crate) enum ButtonTone {
     Neutral,
     Primary,
     Danger,
@@ -1276,7 +1276,7 @@ impl RepositoryView {
         self.app_button(label, None, None, ButtonTone::Danger, enabled, on_click, cx)
     }
 
-    fn app_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
+    pub(crate) fn app_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
         &self,
         label: &'static str,
         icon: Option<ToolbarIcon>,

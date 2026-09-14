@@ -1,0 +1,15 @@
+{
+  "project": "maven-java8",
+  "ready_symbol": "LegacyGreeting",
+  "queries": [
+    {
+      "id": "java8-target-definition",
+      "operation": "definition",
+      "file": "src/main/java/com/example/java8/LegacyApp.java",
+      "anchor": "greeting.message(args[0])",
+      "symbol": "message",
+      "expect_files": ["src/main/java/com/example/java8/LegacyGreeting.java"],
+      "expect_count": 1
+    }
+  ]
+}

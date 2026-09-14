@@ -22,10 +22,14 @@ use crate::code_understanding::{
     AnalysisResult, CallTraceDirection, ChatTurnProvider, DataObjectCategory, SearchCodeArgs,
     SearchSymbolsArgs, TraceCallsArgs, UnderstandingAgentInput, UnderstandingAnswer,
     UnderstandingEvent, UnderstandingStep, UnderstandingTools, run_understanding_agent,
+    run_understanding_agent_with_semantics,
 };
 use crate::code_understanding::ReadFileArgs;
+use crate::ai::review_store::repo_key;
 use crate::ai::{AiProviderSettings, ChatClient};
-use crate::code_index::{PipelineOptions, RunOutcome, run_index};
+use crate::code_index::{PipelineOptions, ProjectContext, RunOutcome, run_index};
+use crate::lsp::providers::jdtls::{JdtLsProvider, ManualJdtLsConfig};
+use crate::lsp::{LspSemanticService, ServiceLimits, ServiceStatus};
 use crate::storage::AppStorage;
 
 fn copy_dir(source: &Path, target: &Path) {
@@ -654,6 +658,167 @@ fn live_once(case: &str, run: usize) -> Option<UnderstandingAnswer> {
     Some(answer)
 }
 
+fn jls_live_service(
+    temp: &TempDir,
+    root: &Path,
+    db_path: &Path,
+) -> Result<Arc<LspSemanticService>, String> {
+    let java_home = std::env::var_os("KHASLANA_TEST_JAVA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"D:\khaslana\jdk-21.0.12.1+1"));
+    let jdtls_home = std::env::var_os("KHASLANA_TEST_JDTLS_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"D:\khaslana\jdt-language-server"));
+    let provider = JdtLsProvider::new(ManualJdtLsConfig {
+        java_home,
+        jdtls_home,
+        workspace_root: temp.path().join("jdt-workspaces"),
+        project_runtimes: Vec::new(),
+    })
+    .map_err(|error| error.to_string())?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let project_key = repo_key(&canonical_root.to_string_lossy());
+    let service = Arc::new(
+        LspSemanticService::with_limits(
+            Arc::new(provider),
+            ServiceLimits {
+                query_timeout: Duration::from_secs(5),
+                import_timeout: Duration::from_secs(60),
+                ..ServiceLimits::default()
+            },
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    service
+        .configure_project(
+            ProjectContext {
+                project_key: project_key.clone(),
+                canonical_root: canonical_root.to_string_lossy().into_owned(),
+                index_db_path: db_path.to_string_lossy().into_owned(),
+            },
+            true,
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+    service
+        .acquire(&project_key, "jls-t2-live")
+        .map_err(|error| error.to_string())?;
+    let status = service
+        .ensure_started(&project_key, "java")
+        .map_err(|error| error.to_string())?;
+    if !matches!(status, ServiceStatus::Ready | ServiceStatus::Partial) {
+        return Err(format!("JDT LS 未进入可查询状态：{status:?}"));
+    }
+    Ok(service)
+}
+
+fn jls_t2_assessment(answer: &UnderstandingAnswer) -> serde_json::Value {
+    let caller_text = answer
+        .analysis
+        .callers
+        .iter()
+        .map(|caller| caller.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let objects = answer
+        .analysis
+        .data_accesses
+        .iter()
+        .map(|access| access.object.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "independent_expected_checks": {
+            "login_controller_caller": caller_text.contains("LoginController"),
+            "admin_probe_caller": caller_text.contains("AdminLoginProbe"),
+            "app_user": objects.iter().any(|object| object.contains("app_user")),
+            "login_attempt": objects.iter().any(|object| object.contains("login_attempt")),
+            "session_is_not_db_table": answer.analysis.data_accesses.iter().any(|access| {
+                access.object.to_ascii_lowercase().contains("session")
+                    && access.category != DataObjectCategory::DbObject
+            }),
+        },
+        "tool_calls": answer.steps.iter().filter(|step| matches!(step, UnderstandingStep::ToolCall { .. })).count(),
+        "tool_result_chars": answer.steps.iter().filter_map(|step| match step {
+            UnderstandingStep::ToolCall { result_excerpt, .. } => Some(result_excerpt.chars().count()),
+            _ => None,
+        }).sum::<usize>(),
+        "semantic_tool_calls": answer.steps.iter().filter(|step| matches!(
+            step,
+            UnderstandingStep::ToolCall { name, .. } if name == "query_java_semantics"
+        )).count(),
+        "semantic_trace_calls": answer.steps.iter().filter(|step| matches!(
+            step,
+            UnderstandingStep::ToolCall { name, result_excerpt, .. }
+                if name == "trace_calls" && result_excerpt.contains("\"semantic\"")
+        )).count(),
+    })
+}
+
+fn jls_t2_live_once(enhanced: bool, run: usize) -> Option<UnderstandingAnswer> {
+    let (settings, proxy) = match live_settings() {
+        Ok(value) => value,
+        Err(reason) => {
+            eprintln!(
+                "跳过 JLS-T2 B01 {} run{run}：{reason}",
+                if enhanced { "on" } else { "off" }
+            );
+            return None;
+        }
+    };
+    let (temp, root, db_path) = prepared_fixture("B01");
+    let semantic_service = if enhanced {
+        Some(
+            jls_live_service(&temp, &root, &db_path)
+                .unwrap_or_else(|error| panic!("JLS-T2 B01 on run{run} 无法准备 JDT LS：{error}")),
+        )
+    } else {
+        None
+    };
+    let client = ChatClient::new(settings.clone(), proxy);
+    let provider = ChatTurnProvider::new(&client);
+    let mode = if enhanced { "on" } else { "off" };
+    let question = case_question("B01");
+    let input = UnderstandingAgentInput {
+        repo_root: root,
+        index_db_path: db_path,
+        request_id: format!("jls-t2-B01-{mode}-{run}"),
+        question: question.clone(),
+    };
+    let cancel = AtomicBool::new(false);
+    let started = Instant::now();
+    let outcome = match semantic_service {
+        Some(service) => {
+            run_understanding_agent_with_semantics(&input, &provider, &cancel, service, &mut |_| {})
+        }
+        None => run_understanding_agent(&input, &provider, &cancel, &mut |_| {}),
+    }
+    .unwrap_or_else(|error| panic!("JLS-T2 B01 {mode} run{run} 失败：{error}"))
+    .expect("实况问答不应取消");
+    let elapsed = started.elapsed();
+    let assessment = jls_t2_assessment(&outcome);
+    let out_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/code-understanding/validation/live-runs");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let report = serde_json::json!({
+        "task": "JLS-T2",
+        "case": "B01",
+        "enhanced": enhanced,
+        "run": run,
+        "question": question,
+        "model": settings.model,
+        "temperature": settings.temperature,
+        "max_tokens": settings.max_tokens,
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "assessment": assessment,
+        "analysis": &outcome.analysis,
+        "steps": describe_steps(&outcome.steps),
+    });
+    let path = out_dir.join(format!("JLS-T2-B01-{mode}-run{run}.json"));
+    std::fs::write(path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    print_answer(&format!("JLS-T2-B01-{mode}-run{run}"), &outcome.analysis);
+    Some(outcome)
+}
+
 // 每个主样例的主问题跑两遍（开发文档 §7：至少两遍、保留两遍结果，不能只展示最好一次）。
 // 因此每问两个独立 `#[ignore]` 测试，便于分批执行与单独重试。
 
@@ -715,4 +880,28 @@ fn live_b05_boundary_run1() {
 #[ignore = "实况：调用本机已配置的 AI 供应商"]
 fn live_b05_boundary_run2() {
     live_once("B05", 2);
+}
+
+#[test]
+#[ignore = "JLS-T2 实况：B01 关闭 Java 增强，第 1 遍"]
+fn live_jls_t2_b01_off_run1() {
+    jls_t2_live_once(false, 1);
+}
+
+#[test]
+#[ignore = "JLS-T2 实况：B01 关闭 Java 增强，第 2 遍"]
+fn live_jls_t2_b01_off_run2() {
+    jls_t2_live_once(false, 2);
+}
+
+#[test]
+#[ignore = "JLS-T2 实况：B01 开启 Java 增强，第 1 遍"]
+fn live_jls_t2_b01_on_run1() {
+    jls_t2_live_once(true, 1);
+}
+
+#[test]
+#[ignore = "JLS-T2 实况：B01 开启 Java 增强，第 2 遍"]
+fn live_jls_t2_b01_on_run2() {
+    jls_t2_live_once(true, 2);
 }
