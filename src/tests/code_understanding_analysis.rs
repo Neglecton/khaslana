@@ -80,6 +80,41 @@ fn parse_rejects_json_without_required_fields() {
 }
 
 #[test]
+fn parse_accepts_type_as_the_evidence_state_field() {
+    // 回归：模型会把证据字段按 JSON Schema 习惯写成 type（schema 正文里满是
+    // "type": "string"）。取值域被枚举限死，语义无歧义，因此兼容接受。
+    let raw = serde_json::json!({
+        "summary": "登录入口是 LoginController",
+        "findings": [{"text": "读取 app_user", "type": "inferred", "source_ids": ["sr1:abc"]}],
+        "data_accesses": [{
+            "object": "app_user",
+            "category": "db_object",
+            "operations": ["read"],
+            "type": "observed",
+            "source_ids": ["sr1:abc"]
+        }],
+        "steps": [{"id": "s1", "title": "读取", "source_ids": ["sr1:abc"]}],
+        "completion": "partial"
+    })
+    .to_string();
+    let result = parse_analysis_result(&raw).unwrap();
+    assert_eq!(result.findings[0].state, AnalysisEvidenceState::Inferred);
+    assert_eq!(result.data_accesses[0].state, AnalysisEvidenceState::Observed);
+    // 仍然拒绝取值域外的状态值。
+    let bad = raw.replace("\"inferred\"", "\"probably\"");
+    assert!(parse_analysis_result(&bad).is_err());
+}
+
+#[test]
+fn protocol_names_the_evidence_state_field_explicitly() {
+    let protocol = analysis_output_protocol();
+    assert!(
+        protocol.contains("证据状态字段名是 state"),
+        "协议必须点明字段名，避免模型按 JSON Schema 习惯写成 type：{protocol}"
+    );
+}
+
+#[test]
 fn schema_and_protocol_are_serializable_and_consistent() {
     let schema = analysis_json_schema();
     assert_eq!(schema["version"], ANALYSIS_PROTOCOL_VERSION);

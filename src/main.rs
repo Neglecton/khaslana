@@ -1274,13 +1274,24 @@ fn dialog_parent_should_stop_mouse_event(event_name: &str) -> bool {
     event_name == "mouse_down"
 }
 
-fn multiline_input_should_scroll(id: FieldId, value: &str) -> bool {
-    id == FieldId::ConflictEditor || visual_line_count(value) > multiline_input_visible_lines(id)
+/// 代码理解问题框的最大可视行数：默认单行随内容增长，超过后在框内滚动。
+pub(crate) const QUESTION_INPUT_MAX_LINES: usize = 6;
+
+fn multiline_input_should_scroll(id: FieldId, value: &str, last_wrapped_lines: usize) -> bool {
+    id == FieldId::ConflictEditor
+        || visual_line_count(value) > multiline_input_visible_lines(id, value, last_wrapped_lines)
+        || last_wrapped_lines > multiline_input_visible_lines(id, value, last_wrapped_lines)
 }
 
-fn multiline_input_visible_lines(id: FieldId) -> usize {
+/// 多行输入框的可视行数。
+///
+/// 代码理解问题框默认单行、随内容自增（逻辑行与上次测量出的自动换行行数取大，
+/// 钳在 `1..=QUESTION_INPUT_MAX_LINES`），超过上限后框内滚动；其余多行框保持固定高度。
+fn multiline_input_visible_lines(id: FieldId, value: &str, last_wrapped_lines: usize) -> usize {
     if id == FieldId::CodeUnderstandingQuestion {
-        2
+        visual_line_count(value)
+            .max(last_wrapped_lines)
+            .clamp(1, QUESTION_INPUT_MAX_LINES)
     } else {
         MULTILINE_MIN_LINES
     }
@@ -2001,7 +2012,7 @@ pub(crate) enum MainMode {
     /// 提交图谱页（专用模式）：拓扑专注型，主历史页「图谱」按钮进入，
     /// 关闭/跳转返回 History。切换模式不重置图谱状态（无损往返）。
     CommitGraph,
-    /// 代码理解页（专用模式，CU2-T5）：问题框 + 回答主区 + 来源侧栏；
+    /// 代码理解页（主模式，CU2-T5）：问题框 + 回答主区 + 来源侧栏；
     /// 任务注册表独立于本模式，切页面/仓库只分离显示不取消。
     CodeUnderstanding,
 }
@@ -2023,27 +2034,29 @@ impl Default for ContextNavigatorPreferences {
 impl ContextNavigatorPreferences {
     pub(crate) const fn is_visible(self, mode: MainMode) -> bool {
         match mode {
-            MainMode::Worktree | MainMode::History | MainMode::Workflow => self.visible,
+            MainMode::Worktree
+            | MainMode::History
+            | MainMode::Workflow
+            | MainMode::CodeUnderstanding => self.visible,
             MainMode::Conflict
             | MainMode::Stash
             | MainMode::Browse
             | MainMode::Blame
-            | MainMode::CommitGraph
-            | MainMode::CodeUnderstanding => false,
+            | MainMode::CommitGraph => false,
         }
     }
 
     pub(crate) fn toggle(&mut self, mode: MainMode) {
         match mode {
-            MainMode::Worktree | MainMode::History | MainMode::Workflow => {
-                self.visible = !self.visible
-            }
+            MainMode::Worktree
+            | MainMode::History
+            | MainMode::Workflow
+            | MainMode::CodeUnderstanding => self.visible = !self.visible,
             MainMode::Conflict
             | MainMode::Stash
             | MainMode::Browse
             | MainMode::Blame
-            | MainMode::CommitGraph
-            | MainMode::CodeUnderstanding => {}
+            | MainMode::CommitGraph => {}
         }
     }
 }
@@ -3720,7 +3733,8 @@ impl Render for RepositoryView {
                         },
                     )
                     .when(
-                        context_presentation == chrome_view::ContextNavigatorPresentation::Docked,
+                        context_presentation == chrome_view::ContextNavigatorPresentation::Docked
+                            && self.main_mode != MainMode::CodeUnderstanding,
                         |this| this.child(self.render_column_splitter(ResizeTarget::Sidebar, cx)),
                     )
                     .child(match self.main_mode {
@@ -3750,6 +3764,9 @@ impl Render for RepositoryView {
                         |this| this.child(self.render_context_navigator_overlay(window, cx)),
                     ),
             )
+            // 代码理解后台任务条（CU2-T5 B2）：任务已从当前页面分离时，
+            // 在中央工作区下方常驻，任何主模式下都能查看进度或取消。
+            .child(self.render_understanding_task_bar(cx))
             .child(self.render_status(cx))
             .child(self.render_branch_context_menu(cx))
             .child(self.render_remote_context_menu(cx))

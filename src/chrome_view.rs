@@ -23,6 +23,7 @@ use crate::{
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 520.0;
 pub(crate) const STATUS_BAR_HEIGHT: f32 = 24.0;
+pub(crate) const CODE_UNDERSTANDING_NAVIGATOR_WIDTH: f32 = 248.0;
 pub(crate) const NARROW_LAYOUT_WIDTH: f32 = 1120.0;
 pub(crate) const COMFORTABLE_LAYOUT_WIDTH: f32 = 1440.0;
 
@@ -99,11 +100,11 @@ fn chrome_action_disabled_reason(
     None
 }
 
-/// 只有主工作台页面承载仓库上下文；专用模式保留完整画布，不显示无意义的展开入口。
+/// 只有使用仓库上下文的主页面承载 Navigator；专用检查页保留完整画布。
 pub(crate) const fn context_navigator_supported_mode(mode: MainMode) -> bool {
     matches!(
         mode,
-        MainMode::Worktree | MainMode::History | MainMode::Workflow
+        MainMode::Worktree | MainMode::History | MainMode::Workflow | MainMode::CodeUnderstanding
     )
 }
 
@@ -530,10 +531,17 @@ impl RepositoryView {
             .flex()
             .flex_none()
             .flex_col()
-            .w(px(self.sidebar_width))
+            .w(px(if self.main_mode == MainMode::CodeUnderstanding {
+                CODE_UNDERSTANDING_NAVIGATOR_WIDTH
+            } else {
+                self.sidebar_width
+            }))
             .h_full()
             .min_h(px(0.0))
             .bg(rgb(theme::SURFACE_BASE))
+            .when(self.main_mode == MainMode::CodeUnderstanding, |this| {
+                this.border_r_1().border_color(rgb(theme::BORDER_MUTED))
+            })
             .child(
                 div()
                     .flex()
@@ -552,6 +560,83 @@ impl RepositoryView {
             )
             .child(mode_buttons)
             .child(self.render_sidebar(window, cx))
+            .when(self.main_mode == MainMode::CodeUnderstanding, |this| {
+                // 与索引库目录、`code_index_stats`、`code_index_preferences` 同一套键：
+                // 必须走 `normalize_repo_path`（canonicalize + 小写）。用原始路径会因
+                // 分隔符、大小写与 Windows `\\?\` 前缀差异查不到已经建好的索引。
+                let repo_key = self
+                    .repo_path
+                    .as_ref()
+                    .map(|path| crate::normalize_repo_path(path));
+                let stats = repo_key
+                    .as_deref()
+                    .and_then(|key| self.code_index_stats.get(key));
+                let indexing = repo_key.as_deref().is_some_and(|key| {
+                    self.code_index_task
+                        .as_ref()
+                        .is_some_and(|task| task.repo_path == key)
+                });
+                let enabled = repo_key
+                    .as_deref()
+                    .is_some_and(|key| self.code_index_enabled_cache.contains(key));
+                let (label, detail, tone) = if indexing {
+                    (
+                        "代码索引建立中",
+                        "正在提取符号与关系".to_string(),
+                        theme::PRIMARY,
+                    )
+                } else if let Some(stats) = stats {
+                    (
+                        if enabled {
+                            "代码索引就绪"
+                        } else {
+                            "代码索引已停用"
+                        },
+                        format!("{} 符号 · {} 关系", stats.symbols, stats.edges),
+                        if enabled {
+                            theme::REF_LOCAL_TEXT
+                        } else {
+                            theme::CONTENT_TERTIARY
+                        },
+                    )
+                } else {
+                    (
+                        "代码索引未就绪",
+                        "前往设置建立基础索引".to_string(),
+                        theme::REF_TAG_TEXT,
+                    )
+                };
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .h(px(48.0))
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .bg(rgb(theme::SURFACE_SUNKEN))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(px(10.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgb(theme::CONTENT_PRIMARY))
+                                .child(div().size(px(7.0)).rounded_full().bg(rgb(tone)))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(9.5))
+                                .font_family("JetBrains Mono")
+                                .text_color(rgb(theme::CONTENT_TERTIARY))
+                                .child(detail),
+                        ),
+                )
+            })
     }
 
     pub(crate) fn render_context_navigator_overlay(

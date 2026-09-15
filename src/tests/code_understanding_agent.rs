@@ -587,9 +587,118 @@ fn tool_budget_exhaustion_stops_with_budget_error() {
     );
 }
 
+/// 模型对话里是否出现过某段文本（任意角色）。
+fn any_message_text(messages: &[AgentChatMessage], needle: &str) -> bool {
+    messages.iter().any(|message| match message {
+        AgentChatMessage::System(text)
+        | AgentChatMessage::User(text)
+        | AgentChatMessage::Assistant { content: text, .. } => text.contains(needle),
+        AgentChatMessage::Tool { content, .. } => content.contains(needle),
+    })
+}
+
+/// 回归：收尾轮的 JSON 格式错误同样得到一次修复机会。
+///
+/// 真实运行里最容易出现的组合是「累计结果体积触顶 + 模型在催促下写错字段」：
+/// 此前 `force_finish` 分支直接跳过了格式修复，一次字段名写错就让整轮分析作废，
+/// 连 partial 都拿不到（用户实测报错即为此）。
 #[test]
-fn duplicate_call_ids_are_not_executed_twice() {
+fn forced_finish_still_gets_one_format_repair() {
     let (_temp, root, db_path) = b01_fixture();
+    // 造一个够大的可索引文件：单条工具结果被截断到 8K，读十几次就能累计触顶。
+    let big_relative = "src/com/example/login/BigSource.java";
+    let body: String = (0..1400)
+        .map(|index| format!("// filler {index:04} {}", "x".repeat(80)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(root.join(big_relative), body).unwrap();
+    reindex(&root, &db_path);
+
+    let input = input(&root, &db_path, "登录逻辑？");
+    // 脚本按对话状态自适应：未触顶就继续读大文件；进入收尾轮先给不合法 JSON，
+    // 收到修复指令后给出合法 JSON。这样不依赖「第几轮触顶」的精确推算。
+    let step = |index: usize| -> ScriptStep {
+        Box::new(move |messages: &[AgentChatMessage]| {
+            if any_message_text(messages, "不是可用的最终结果") {
+                let source_id = read_source_ids(messages)
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
+                let answer = serde_json::json!({
+                    "summary": "已读取的范围内未发现与登录相关的实现。",
+                    "findings": [{
+                        "text": "所读文件是填充内容，没有登录逻辑。",
+                        "state": "observed",
+                        "source_ids": [source_id]
+                    }],
+                    "steps": [{"id": "s1", "title": "读取大文件", "source_ids": [source_id]}],
+                    "links": [],
+                    "completion": "partial"
+                });
+                return Ok(turn(&answer.to_string(), Vec::new()));
+            }
+            if any_message_text(messages, "工具调用预算已用尽") {
+                return Ok(turn("{\"summary\": \"预算已用尽\", \"findings\": [", Vec::new()));
+            }
+            // 首轮先做一次小范围读取：超长结果会被截成半截 JSON（模型与校验都无法
+            // 直视），需要留下一条可解析的工具结果作为合法来源。
+            if index == 0 {
+                return Ok(turn(
+                    "",
+                    vec![tool_call(
+                        "small-0",
+                        "read_file",
+                        serde_json::json!({"path": AUTH_SERVICE, "start_line": 1, "end_line": 8}),
+                    )],
+                ));
+            }
+            let start = 1 + (index % 4) * 200;
+            Ok(turn(
+                "",
+                vec![tool_call(
+                    &format!("big-{index}"),
+                    "read_file",
+                    serde_json::json!({
+                        "path": big_relative,
+                        "start_line": start,
+                        "end_line": start + 399
+                    }),
+                )],
+            ))
+        }) as ScriptStep
+    };
+    let steps: Vec<ScriptStep> = (0..24).map(step).collect();
+    let (provider, log) = ScriptedProvider::new(steps);
+    let cancel = AtomicBool::new(false);
+    let (outcome, events) = run(&input, &provider, &cancel);
+
+    let answer = outcome
+        .expect("收尾轮的格式错误应被修复，而不是直接让整轮分析作废")
+        .expect("未取消应有答案");
+    assert_eq!(answer.analysis.completion, AnalysisCompletion::Partial);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, UnderstandingEvent::Done(_))),
+        "修复成功后应发出完成事件"
+    );
+    let log = log.lock().expect("脚本记录锁被污染");
+    let repaired = log.last().expect("应有一次修复请求");
+    assert!(
+        any_message_text(repaired, "不是可用的最终结果"),
+        "修复请求必须带上具体的校验问题"
+    );
+    assert!(
+        matches!(
+            repaired.last(),
+            Some(AgentChatMessage::User(text)) if text.contains("不是可用的最终结果")
+        ),
+        "修复指令必须是最后一条消息：中间不应再插入工具调用"
+    );
+}
+
+#[test]
+fn duplicate_call_ids_are_not_executed_twice() {    let (_temp, root, db_path) = b01_fixture();
     let input = input(&root, &db_path, "登录逻辑？");
 
     let step_duplicate = Box::new(|_messages: &[AgentChatMessage]| {

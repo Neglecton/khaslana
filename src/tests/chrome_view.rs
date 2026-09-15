@@ -63,6 +63,9 @@ fn context_navigator_uses_docked_and_overlay_presentations() {
 #[test]
 fn context_navigator_rejects_specialized_modes() {
     assert!(context_navigator_supported_mode(MainMode::History));
+    assert!(context_navigator_supported_mode(
+        MainMode::CodeUnderstanding
+    ));
     assert!(!context_navigator_supported_mode(MainMode::Conflict));
     assert!(!context_navigator_supported_mode(MainMode::Stash));
     assert!(!context_navigator_supported_mode(MainMode::Browse));

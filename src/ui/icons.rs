@@ -33,6 +33,14 @@ pub(crate) enum ToolbarIcon {
     Keyboard,
     Info,
     Understanding,
+    CircleCheck,
+    ShieldCheck,
+    LogIn,
+    Database,
+    KeyRound,
+    FileCode,
+    Send,
+    ArrowRight,
 }
 
 impl ToolbarIcon {
@@ -67,6 +75,14 @@ impl ToolbarIcon {
             Self::Keyboard => "icons/keyboard.svg",
             Self::Info => "icons/info.svg",
             Self::Understanding => "icons/understanding.svg",
+            Self::CircleCheck => "icons/circle-check.svg",
+            Self::ShieldCheck => "icons/shield-check.svg",
+            Self::LogIn => "icons/log-in.svg",
+            Self::Database => "icons/database.svg",
+            Self::KeyRound => "icons/key-round.svg",
+            Self::FileCode => "icons/file-code.svg",
+            Self::Send => "icons/send.svg",
+            Self::ArrowRight => "icons/arrow-right.svg",
         }
     }
 }

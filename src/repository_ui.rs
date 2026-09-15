@@ -200,16 +200,30 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let field = self.field(id);
         let focused = field.focus.is_focused(window);
-        let visible_lines = multiline_input_visible_lines(id);
+        let visible_lines =
+            multiline_input_visible_lines(id, &field.value, field.last_wrapped_line_count);
         let frame_size = if id == FieldId::CodeUnderstandingQuestion {
             InputFrameSize::Regular
         } else {
             InputFrameSize::Multiline
         };
         // 溢出判定综合逻辑行数与上帧自动换行行数（长行换行后同样超高）。
-        let multiline_overflows = multiline_input_should_scroll(id, &field.value)
-            || field.last_wrapped_line_count > visible_lines;
-        input_frame(format!("field-{id:?}"), focused, frame_size)
+        let multiline_overflows =
+            multiline_input_should_scroll(id, &field.value, field.last_wrapped_line_count);
+        let frame = if id == FieldId::CodeUnderstandingQuestion {
+            div()
+                .id(format!("field-{id:?}"))
+                .relative()
+                .w_full()
+                .min_h(px(34.0))
+                .bg(rgb(ui_theme::SURFACE_BASE))
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .cursor(CursorStyle::IBeam)
+        } else {
+            input_frame(format!("field-{id:?}"), focused, frame_size)
+        };
+        frame
             .track_focus(&field.focus)
             .key_context("TextInput")
             .on_action(cx.listener(Self::text_backspace))
@@ -333,9 +347,9 @@ impl RepositoryView {
                     // 冲突编辑器随冲突面板高度伸缩。
                     frame.into_any_element()
                 } else {
-                    // 普通多行输入固定可视高度；问题框按设计稿压缩为两行，
-                    // 其余输入仍使用 MULTILINE_MIN_LINES。
-                    // 内容超出后滚动，不再随内容无限撑高。
+                    // 普通多行输入固定可视高度（提交信息框 5 行）；问题框按内容
+                    // 自适应行数（默认 1 行，上限 QUESTION_INPUT_MAX_LINES）。
+                    // 内容超出后框内滚动，不再随内容无限撑高。
                     div()
                         .flex()
                         .flex_col()
@@ -348,8 +362,11 @@ impl RepositoryView {
 
     fn conflict_editor_input(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let field = self.field(FieldId::ConflictEditor);
-        let multiline_overflows =
-            multiline_input_should_scroll(FieldId::ConflictEditor, &field.value);
+        let multiline_overflows = multiline_input_should_scroll(
+            FieldId::ConflictEditor,
+            &field.value,
+            field.last_wrapped_line_count,
+        );
         div()
             .flex()
             .flex_col()
@@ -2482,24 +2499,19 @@ impl RepositoryView {
             .child(label)
     }
 
-    pub(crate) fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_status(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let status_label = if self.busy { "运行中" } else { "就绪" };
-        // 代码理解后台任务条（CU2-T5）：任务运行中且已从当前页面分离时显示，
-        // 提供查看进度与取消入口；后台完成只提示一次（toast 在事件处理侧）。
-        let understanding_tasks = self
+        // 代码理解运行指示（CU2-T5 B2）：状态栏只显示「运行中」与全局 AI 名额，
+        // 查看进度/取消由中央工作区下方的后台任务条提供。
+        let understanding_running = self
             .understanding_tasks
             .iter()
-            .filter(|(key, state)| {
-                state.session.has_active_request() && self.understanding_task_detached_from(key)
-            })
-            .map(|(key, state)| {
-                (
-                    key.clone(),
-                    state.display.question.clone(),
-                    state.cancel_pending,
-                )
-            })
-            .collect::<Vec<_>>();
+            .any(|(_, state)| state.session.has_active_request());
+        let ai_task_label = format!(
+            "AI 任务 {}/{}",
+            self.ai_review_running_tasks,
+            crate::MAX_CONCURRENT_AI_REVIEWS
+        );
         let branch = self
             .snapshot
             .as_ref()
@@ -2557,62 +2569,28 @@ impl RepositoryView {
                         self.status.clone()
                     }),
             )
-            .children(
-                understanding_tasks
-                    .iter()
-                    .map(|(project_key, question, cancel_pending)| {
-                        let repo_name = Path::new(project_key)
-                            .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| project_key.clone());
-                        let question = question.clone();
-                        let cancel_pending = *cancel_pending;
-                        let key_for_view = project_key.clone();
-                        let key_for_cancel = project_key.clone();
-                        div()
-                            .id(format!("understanding-taskbar-{project_key}"))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(6.0))
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
-                            .text_color(rgb(ui_theme::PRIMARY))
-                            .child(div().max_w(px(280.0)).truncate().child(if cancel_pending {
-                                format!("代码理解·取消中：{repo_name}")
-                            } else {
-                                format!(
-                                    "代码理解：{repo_name} · {}",
-                                    code_understanding_view::excerpt_line(&question, 24)
-                                )
-                            }))
-                            .child(
-                                div()
-                                    .id(format!("understanding-taskbar-view-{project_key}"))
-                                    .cursor_pointer()
-                                    .hover(|this| this.text_color(rgb(ui_theme::CONTENT_PRIMARY)))
-                                    .child("查看")
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.show_understanding_task(key_for_view.clone(), cx);
-                                    })),
-                            )
-                            .when(!cancel_pending, |this| {
-                                this.child(
-                                    div()
-                                        .id(format!("understanding-taskbar-cancel-{project_key}"))
-                                        .cursor_pointer()
-                                        .hover(|this| {
-                                            this.text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                        })
-                                        .child("取消")
-                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.cancel_understanding_task_for(&key_for_cancel, cx);
-                                        })),
-                                )
-                            })
-                    }),
-            )
+            .when(understanding_running, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .px(px(6.0))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .child("代码理解运行中"),
+                )
+            })
+            .when(self.ai_review_running_tasks > 0, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .child(ai_task_label),
+                )
+            })
             .when_some(self.last_error.clone(), |this, error| {
                 this.child(
                     div()

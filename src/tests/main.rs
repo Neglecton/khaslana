@@ -303,18 +303,21 @@ fn context_navigator_preferences_are_shared_across_modes() {
     assert!(preferences.is_visible(MainMode::Worktree));
     assert!(preferences.is_visible(MainMode::History));
     assert!(preferences.is_visible(MainMode::Workflow));
+    assert!(preferences.is_visible(MainMode::CodeUnderstanding));
 
     // 任一主模式收起后，切换到其它主模式保持收起，不随页面切换回弹。
     preferences.toggle(MainMode::Worktree);
     assert!(!preferences.is_visible(MainMode::Worktree));
     assert!(!preferences.is_visible(MainMode::History));
     assert!(!preferences.is_visible(MainMode::Workflow));
+    assert!(!preferences.is_visible(MainMode::CodeUnderstanding));
 
     // 在历史页重新展开，工作区/工作流同样保持展开。
     preferences.toggle(MainMode::History);
     assert!(preferences.is_visible(MainMode::Worktree));
     assert!(preferences.is_visible(MainMode::History));
     assert!(preferences.is_visible(MainMode::Workflow));
+    assert!(preferences.is_visible(MainMode::CodeUnderstanding));
 
     // 专用模式不承载 Navigator，也不能误改共享的展开状态。
     preferences.toggle(MainMode::Conflict);
@@ -1167,20 +1170,47 @@ fn conflict_editor_does_not_store_text_conflict_draft_when_result_is_document() 
 fn conflict_editor_always_uses_scrollable_multiline_viewport() {
     assert!(multiline_input_should_scroll(
         FieldId::ConflictEditor,
-        "short"
+        "short",
+        0
     ));
     assert!(!multiline_input_should_scroll(
         FieldId::CommitMessage,
-        "short"
+        "short",
+        0
     ));
+}
+
+/// 代码理解问题框默认单行，随内容（逻辑行或自动换行行）增长到上限，超出后框内滚动。
+#[test]
+fn question_input_grows_from_one_line_and_caps_at_the_limit() {
+    let id = FieldId::CodeUnderstandingQuestion;
+    assert_eq!(multiline_input_visible_lines(id, "", 1), 1);
+    assert_eq!(multiline_input_visible_lines(id, "一行", 1), 1);
+    // 自动换行把单行长文本折成 3 行时同步长高。
+    assert_eq!(multiline_input_visible_lines(id, "很长的一行", 3), 3);
+    // 逻辑行数优先，且不超过上限。
     assert_eq!(
-        multiline_input_visible_lines(FieldId::CodeUnderstandingQuestion),
-        2
+        multiline_input_visible_lines(id, "一\n二\n三", 1),
+        3
     );
-    assert!(multiline_input_should_scroll(
-        FieldId::CodeUnderstandingQuestion,
-        "第一行\n第二行\n第三行"
+    assert_eq!(
+        multiline_input_visible_lines(id, &"行\n".repeat(20), 1),
+        QUESTION_INPUT_MAX_LINES
+    );
+    // 未超过上限不滚动；达到上限后滚动。
+    assert!(!multiline_input_should_scroll(id, "一\n二", 1));
+    assert!(!multiline_input_should_scroll(
+        id,
+        &"行\n".repeat(QUESTION_INPUT_MAX_LINES - 1),
+        1
     ));
+    assert!(multiline_input_should_scroll(
+        id,
+        &"行\n".repeat(QUESTION_INPUT_MAX_LINES),
+        1
+    ));
+    // 已测量出的自动换行行数超出上限时同样滚动（长行折行场景）。
+    assert!(multiline_input_should_scroll(id, "一行", 9));
 }
 
 #[test]

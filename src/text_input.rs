@@ -576,6 +576,15 @@ impl TextFieldState {
         self
     }
 
+    /// 紧凑多行：默认单行、随内容自增（代码理解问题框）。
+    ///
+    /// `TextEditState::new` 的自动换行行数初值是 `MULTILINE_MIN_LINES`（固定高度框用），
+    /// 这里复位成 1，避免首帧就撑到 5 行。
+    pub(crate) fn with_compact_multiline(mut self) -> Self {
+        self.edit.last_wrapped_line_count = 1;
+        self
+    }
+
     pub(crate) fn secret(mut self) -> Self {
         self.edit.secret = true;
         self
@@ -848,11 +857,14 @@ impl Element for MultiLineInputElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let field = self.entity.read(cx).field(self.field_id);
-        // 视觉行数优先用上一次 prepaint 算出的自动换行行数；首次渲染时按逻辑行数估算，
-        // 至少保留 MIN_LINES 的高度。换行宽度变化后 prepaint 会更新该值并触发重排。
-        let logical = logical_line_ranges(&field.value)
-            .len()
-            .max(MULTILINE_MIN_LINES);
+        // 视觉行数优先用上一次 prepaint 算出的自动换行行数；首次渲染时按逻辑行数估算。
+        // 代码理解问题框默认单行随内容增长（最小 1 行），其余多行框至少保留 MIN_LINES。
+        let min_lines = if self.field_id == FieldId::CodeUnderstandingQuestion {
+            1
+        } else {
+            MULTILINE_MIN_LINES
+        };
+        let logical = logical_line_ranges(&field.value).len().max(min_lines);
         let line_count = field.last_wrapped_line_count.max(logical);
         let mut style = Style::default();
         style.size.width = relative(1.0).into();

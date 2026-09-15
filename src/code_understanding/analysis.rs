@@ -111,6 +111,9 @@ pub struct AnalysisContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisFinding {
     pub text: String,
+    /// 证据状态。模型偶尔按 JSON Schema 的习惯写成 `type`（schema 正文里满是
+    /// `"type": "string"` 这类关键字），值的取值域被枚举限死、语义无歧义，故兼容接受。
+    #[serde(alias = "type")]
     pub state: AnalysisEvidenceState,
     /// 该结论成立的条件（如「密码错误分支」）。
     #[serde(default)]
@@ -147,6 +150,8 @@ pub struct DataAccess {
     /// 触发访问的方法/SQL 位置等。
     #[serde(default)]
     pub access_method: Option<String>,
+    /// 证据状态；同时接受模型误写的 `type`（见 [`AnalysisFinding::state`]）。
+    #[serde(alias = "type")]
     pub state: AnalysisEvidenceState,
     #[serde(default)]
     pub source_ids: Vec<String>,
@@ -516,6 +521,8 @@ pub fn analysis_output_protocol() -> String {
          约定：\n\
          - source_ids 只能引用工具结果里出现过的 source_id（形如 sr1:…）；不要自己编造。\n\
          - 每条 finding、每个 caller/callee、每条 data_access、每个步骤都必须带至少一个来源。\n\
+         - 证据状态字段名是 state（取值 observed / inferred / unknown）。上面的 schema 里出现的 \
+         type 是 JSON Schema 自身的类型关键字，不要把它当字段名。\n\
          - steps 最多 {ANALYSIS_MAX_STEPS} 个、links 最多 {ANALYSIS_MAX_LINKS} 条，link 的 from/to 必须是 steps 的 id。\n\
          - 只有实体类名/方法名、没有看到映射时，物理表名写 unknown 并把索引/映射缺口写进 unknowns。\n\
          - 缓存、HTTP、消息等副作用用 cache/external/message 类别，不要混进 db_object；

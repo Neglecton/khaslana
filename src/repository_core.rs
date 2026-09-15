@@ -244,8 +244,9 @@ impl RepositoryView {
             code_palette_search: TextFieldState::new(cx, "搜索符号或类型名…"),
             understanding_question: TextFieldState::new(
                 cx,
-                "输入业务问题，例如：登录逻辑怎么实现的？",
-            ),
+                code_understanding_view::QUESTION_PLACEHOLDER,
+            )
+            .with_compact_multiline(),
             understanding_tasks: code_understanding_view::UnderstandingTaskRegistry::default(),
             understanding_notice: None,
             code_palette_search_seq: 0,
@@ -582,6 +583,13 @@ impl RepositoryView {
     pub(crate) fn inherit_main_mode(&mut self, previous: Option<MainMode>) {
         if let Some(mode) = inheritable_main_mode(previous) {
             self.main_mode = mode;
+            if mode == MainMode::CodeUnderstanding {
+                // 与 `set_main_mode` 对齐：切换/打开仓库后继承理解页时，
+                // 必须补齐新仓库的索引统计投影与本地完成历史，否则页头与
+                // 左侧导航器会停在上一仓库（或空）的状态上。
+                self.ensure_understanding_index_stats();
+                self.ensure_understanding_history_loaded();
+            }
         }
     }
 

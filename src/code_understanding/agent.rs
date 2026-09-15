@@ -175,6 +175,15 @@ impl ToolBudget {
     pub fn note_result(&mut self, chars: usize) {
         self.result_chars = self.result_chars.saturating_add(chars);
     }
+
+    /// 是否还能再补一轮「格式修复」请求。
+    ///
+    /// 轮次上限是硬约束（`rounds <= calls + 1`）：轮次触顶后连收尾轮都可能没有，
+    /// 不能再追加请求；其余限额（工具次数／结果体积／HTTP 尝试）触顶时轮次通常
+    /// 仍有大量余量，此时补一轮纯文本修复的代价可控。
+    pub fn has_repair_round_headroom(&self) -> bool {
+        self.rounds < UNDERSTANDING_MAX_TOOL_ROUNDS
+    }
 }
 
 /// 运行一次代码理解问答；取消时返回 `Ok(None)`。
@@ -321,7 +330,10 @@ pub fn run_understanding_agent_with_context_and_semantics(
                     break (result, turn.reasoning);
                 }
                 Err(error) => {
-                    if force_finish || repairs_used >= MAX_FORMAT_REPAIRS {
+                    // 收尾轮同样补一次格式修复：此时模型正被要求「立即输出 JSON」，
+                    // 一个字段名写错就让整轮分析作废、连 partial 都拿不到，代价过高。
+                    // 仅当轮次上限仍有余量时才补（轮次触顶时不能再发请求）。
+                    if repairs_used >= MAX_FORMAT_REPAIRS || !budget.has_repair_round_headroom() {
                         return Err(limit_error(&budget, error));
                     }
                     repairs_used += 1;

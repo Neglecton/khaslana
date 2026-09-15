@@ -18,16 +18,20 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::tasks::TaskKind;
-use crate::ui::components::{ButtonTone, command_group, dialog_overlay, dialog_panel};
-use crate::ui::icons::ToolbarIcon;
+use crate::ui::components::{
+    ButtonTone, command_group, dialog_overlay, dialog_panel, icon_command_button,
+};
+use crate::ui::icons::{ToolbarIcon, toolbar_icon_with_size};
 use crate::ui::theme::{self as ui_theme, rgb};
 use crate::{FieldId, MainMode, RepositoryView, ResizeTarget, UiEvent, send_ui_event};
-use gpui::{AnyElement, Context, IntoElement, ScrollHandle, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, IntoElement, ScrollHandle, Window, canvas, div, point, prelude::*, px,
+};
 use khaslana::ai::ChatClient;
 use khaslana::code_index::read_index_stats;
 use khaslana::code_understanding::{
-    AnalysisCompletion, AnalysisEvidenceState, AnalysisResult, CallRelation, CallRelationKind,
-    ChatTurnProvider, DataObjectCategory, DataOperationKind, FlowLinkKind, SourceLine,
+    AnalysisCompletion, AnalysisEvidenceState, AnalysisResult, ChatTurnProvider,
+    DataObjectCategory, DataOperationKind, FlowLinkKind, SourceLine,
     UNDERSTANDING_HISTORY_FORMAT_VERSION, UNDERSTANDING_HISTORY_LIST_LIMIT,
     UnderstandingAgentInput, UnderstandingAnswer, UnderstandingError, UnderstandingEvent,
     UnderstandingHistoryEntry, UnderstandingHistoryRecord, UnderstandingRequestKey,
@@ -37,7 +41,7 @@ use khaslana::code_understanding::{
 };
 // ── 布局常量 ──────────────────────────────────────────────
 /// 宽窗来源侧栏默认宽度。
-pub(crate) const UNDERSTANDING_SOURCE_DEFAULT_WIDTH: f32 = 336.0;
+pub(crate) const UNDERSTANDING_SOURCE_DEFAULT_WIDTH: f32 = 360.0;
 /// 来源侧栏可拖拽范围。
 pub(crate) const UNDERSTANDING_SOURCE_MIN_WIDTH: f32 = 280.0;
 pub(crate) const UNDERSTANDING_SOURCE_MAX_WIDTH: f32 = 480.0;
@@ -46,12 +50,14 @@ pub(crate) const UNDERSTANDING_NARROW_ANSWER_WIDTH: f32 = 720.0;
 /// 来源侧栏在引用范围外额外显示的上下文行数。
 const SOURCE_CONTEXT_LINES: u32 = 10;
 
-/// S1 空态的示例问题（点击填入输入框）。
-const EXAMPLE_QUESTIONS: [&str; 3] = [
-    "登录逻辑是怎么实现的？调用了什么，又被谁调用？",
-    "密码校验失败时会发生什么，会写哪些数据？",
-    "这段流程读写了哪些表？哪些是推断出来的？",
-];
+/// S1 空态问题框占位文案（Pencil 节点 ggnTD · S1）。
+///
+/// 同时用于问题框自身的 placeholder（`repository_core::new`），因此处为唯一来源。
+pub(crate) const QUESTION_PLACEHOLDER: &str = "例如：登录逻辑怎么实现的？调用了什么，读写了哪些表？";
+/// 问题框快捷键提示。
+const QUESTION_SHORTCUT_HINT: &str = "Enter 发送 · Shift+Enter 换行";
+/// S1 本地历史内联展示条数（完整列表见页头「基础分析」弹窗，最多 20 条）。
+const LOCAL_HISTORY_INLINE_LIMIT: usize = 5;
 
 // ── 页面状态模型 ──────────────────────────────────────────
 /// 页面可见状态（渲染时由注册表条目推导；S2 校验态为发送动作内的瞬时检查）。
@@ -80,6 +86,8 @@ pub(crate) struct UnderstandingDisplay {
     pub(crate) progress: Option<String>,
     pub(crate) answer: Option<UnderstandingAnswer>,
     pub(crate) error: Option<String>,
+    /// 本次请求开始时刻（生成态耗时徽标；分离后仍随时间推进）。
+    pub(crate) started_at: Option<Instant>,
     /// 完成时任务线程写本地历史的结果；None = 未结束。
     pub(crate) saved_to_history: Option<bool>,
 }
@@ -112,6 +120,8 @@ pub(crate) struct UnderstandingRepoState {
     pub(crate) display: UnderstandingDisplay,
     /// 完成态简图折叠开关（per-repo 保留）。
     pub(crate) flow_collapsed: bool,
+    /// 生成态时间线的钉底跟随状态（超行数后只滚动时间线本身）。
+    pub(crate) timeline_follow: Arc<UnderstandingTimelineFollowState>,
     pub(crate) source_panel: Option<UnderstandingSourcePanel>,
     /// 「解释此处」追问聚焦的来源。
     pub(crate) focused_source: Option<khaslana::code_index::SourceRef>,
@@ -151,6 +161,9 @@ impl UnderstandingTaskRegistry {
                     cancel_pending: false,
                     display: UnderstandingDisplay::default(),
                     flow_collapsed: false,
+                    timeline_follow: Arc::new(UnderstandingTimelineFollowState {
+                        last_key: std::cell::Cell::new(0),
+                    }),
                     source_panel: None,
                     focused_source: None,
                     history: UnderstandingHistoryState::default(),
@@ -190,6 +203,196 @@ pub(crate) fn understanding_page_phase(
         UnderstandingPagePhase::Failed
     } else {
         UnderstandingPagePhase::Empty
+    }
+}
+/// 索引状态投影（Pencil 稿：页头「索引就绪」徽标与 S1 上下文行共用一份判定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnderstandingIndexState {
+    /// 未打开仓库。
+    NoRepo,
+    /// 正在建立索引。
+    Busy,
+    /// 已索引且偏好启用：可以提问。
+    Ready,
+    /// 索引已停用但留有数据：仍可基于现有数据提问，提示可能过期。
+    Disabled,
+    /// 尚未建立索引。
+    Missing,
+}
+impl UnderstandingIndexState {
+    /// 徽标文案。
+    pub(crate) fn badge_label(self) -> &'static str {
+        match self {
+            Self::NoRepo => "未打开仓库",
+            Self::Busy => "索引中",
+            Self::Ready => "索引就绪",
+            Self::Disabled => "索引已停用",
+            Self::Missing => "索引未就绪",
+        }
+    }
+    /// 徽标配色 (底色, 前景)。
+    fn palette(self) -> (u32, u32) {
+        match self {
+            Self::Ready => (ui_theme::REF_LOCAL_BG, ui_theme::REF_LOCAL_TEXT),
+            Self::Busy => (ui_theme::PRIMARY_SUBTLE, ui_theme::PRIMARY),
+            Self::Disabled | Self::Missing => (ui_theme::REF_TAG_BG, ui_theme::REF_TAG_TEXT),
+            Self::NoRepo => (ui_theme::SURFACE_SUNKEN, ui_theme::CONTENT_TERTIARY),
+        }
+    }
+}
+/// 时间线单行高度与行间距（Pencil 稿 Timeline）。
+const TIMELINE_ROW_HEIGHT: f32 = 25.0;
+const TIMELINE_ROW_GAP: f32 = 2.0;
+/// 生成态时间线最多占据的行数：超出后时间线自己滚动并钉住最新一行，
+/// 不再把下方「正在生成回答」一路往下挤（§9.5 要求已有区块不整体跳动）。
+const TIMELINE_MAX_VISIBLE_ROWS: usize = 5;
+/// 时间线可视高度。
+const TIMELINE_MAX_HEIGHT: f32 =
+    TIMELINE_ROW_HEIGHT * TIMELINE_MAX_VISIBLE_ROWS as f32 + TIMELINE_ROW_GAP * 4.0;
+
+/// 生成态时间线的钉底跟随状态：prepaint 期按「时间线行数」变化键门控滚动
+/// （键不变说明是用户自己滚动，不回弹抢视口）。与 AI 思考弹窗同一套模式。
+pub(crate) struct UnderstandingTimelineFollowState {
+    pub(crate) last_key: std::cell::Cell<usize>,
+}
+
+/// 时间线行的状态色调。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimelineTone {
+    /// 已完成（绿）。
+    Done,
+    /// 进行中（主题色）。
+    Active,
+    /// 失败（红）。
+    Failed,
+}
+/// 时间线单行：17px 圆角动作标记 + 面向用户文案（Pencil 稿 Timeline）。
+fn timeline_row(
+    icon: ToolbarIcon,
+    label: &str,
+    detail: Option<&str>,
+    tone: TimelineTone,
+) -> AnyElement {
+    let (mark_bg, mark_fg, text_color) = match tone {
+        TimelineTone::Done => (
+            ui_theme::REF_LOCAL_BG,
+            ui_theme::REF_LOCAL_TEXT,
+            ui_theme::CONTENT_SECONDARY,
+        ),
+        TimelineTone::Active => (
+            ui_theme::PRIMARY_SUBTLE,
+            ui_theme::PRIMARY,
+            ui_theme::PRIMARY,
+        ),
+        TimelineTone::Failed => (
+            ui_theme::FEEDBACK_ERROR_BG,
+            ui_theme::FEEDBACK_ERROR_TEXT,
+            ui_theme::FEEDBACK_ERROR_TEXT,
+        ),
+    };
+    let detail = detail.map(str::to_string);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .min_h(px(TIMELINE_ROW_HEIGHT))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(17.0))
+                .rounded(px(5.0))
+                .bg(rgb(mark_bg))
+                .child(toolbar_icon_with_size(icon, mark_fg, 9.0, 9.0)),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(9.8))
+                .text_color(rgb(text_color))
+                .child(label.to_string()),
+        )
+        .when_some(detail, |this, detail| {
+            this.child(
+                div()
+                    .flex_none()
+                    .max_w(px(260.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(9.0))
+                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                    .child(detail),
+            )
+        })
+        .into_any_element()
+}
+/// 时间线步骤的面向用户动作（§9.5：不显示工具名、工具 JSON 或模型内部推理）。
+pub(crate) struct UnderstandingStepAction {
+    pub(crate) icon: ToolbarIcon,
+    /// 面向用户的主文案，如「阅读源码 src/git/service.rs」。
+    pub(crate) label: String,
+    /// 参数或结果摘要，失败时是失败原因。
+    pub(crate) detail: Option<String>,
+}
+/// 工具名 → 面向用户动作（保持与 `code_understanding` 工具契约同名）。
+fn understanding_tool_action(name: &str) -> (&'static str, ToolbarIcon) {
+    match name {
+        "search_symbols" => ("查找符号", ToolbarIcon::Search),
+        "search_code" => ("检索代码", ToolbarIcon::Search),
+        "read_file" => ("阅读源码", ToolbarIcon::FileCode),
+        "get_file_tree" => ("浏览文件树", ToolbarIcon::Worktree),
+        "get_symbol" => ("核对符号", ToolbarIcon::FileCode),
+        "trace_calls" => ("核对调用关系", ToolbarIcon::ArrowRight),
+        "query_java_semantics" => ("核对 Java 语义", ToolbarIcon::ShieldCheck),
+        _ => ("执行分析动作", ToolbarIcon::Understanding),
+    }
+}
+/// 步骤 → 面向用户动作。工具参数摘要由 agent 层按展示格式生成，
+/// 这里剥掉开头的工具名，只保留参数部分。
+pub(crate) fn understanding_step_action(step: &UnderstandingStep) -> UnderstandingStepAction {
+    match step {
+        UnderstandingStep::Reasoning { text } => UnderstandingStepAction {
+            icon: ToolbarIcon::Understanding,
+            label: "思考".to_string(),
+            detail: Some(excerpt_line(text, 90)),
+        },
+        UnderstandingStep::Message { text } => UnderstandingStepAction {
+            icon: ToolbarIcon::CircleCheck,
+            label: "组织回答".to_string(),
+            detail: Some(excerpt_line(text, 120)),
+        },
+        UnderstandingStep::ToolCall {
+            name,
+            args_summary,
+            result_excerpt,
+            error,
+        } => {
+            let (action, icon) = understanding_tool_action(name);
+            let arguments = args_summary
+                .strip_prefix(name.as_str())
+                .map(str::trim)
+                .unwrap_or(args_summary.as_str());
+            let label = if arguments.is_empty() {
+                action.to_string()
+            } else {
+                format!("{action} {arguments}")
+            };
+            let detail = if *error {
+                Some(excerpt_line(result_excerpt, 90))
+            } else {
+                None
+            };
+            UnderstandingStepAction {
+                icon,
+                label: excerpt_line(&label, 92),
+                detail,
+            }
+        }
     }
 }
 // ── 展示纯函数（可单测） ──────────────────────────────────
@@ -232,110 +435,6 @@ pub(crate) fn evidence_state_label(state: AnalysisEvidenceState) -> &'static str
         AnalysisEvidenceState::Inferred => "推断",
         AnalysisEvidenceState::Unknown => "未知",
     }
-}
-/// 调用关系性质徽标。
-pub(crate) fn call_relation_kind_label(kind: CallRelationKind) -> &'static str {
-    match kind {
-        CallRelationKind::Direct => "直接",
-        CallRelationKind::Indirect => "间接",
-        CallRelationKind::Candidate => "候选",
-    }
-}
-/// 流程连接语义标签。
-pub(crate) fn flow_link_kind_label(kind: FlowLinkKind) -> &'static str {
-    match kind {
-        FlowLinkKind::Call => "调用",
-        FlowLinkKind::Branch => "分支",
-        FlowLinkKind::Read => "读取",
-        FlowLinkKind::Write => "写入",
-        FlowLinkKind::SequenceHint => "顺序",
-    }
-}
-/// 流程简图的线性渲染行：按回答顺序自上而下排布；相邻步骤之间的连接渲染
-/// 为箭头行，非相邻（分支/循环）连接汇总在末尾，不复制循环步骤、不做图布局。
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UnderstandingFlowRow {
-    Step {
-        title: String,
-        detail: Option<String>,
-        source_ids: Vec<String>,
-    },
-    /// 相邻步骤之间的连接（from → 下一个步骤）。
-    Link {
-        kind_label: &'static str,
-        label: Option<String>,
-    },
-    /// 非相邻连接（分支/循环），显示为「来源步骤 → 目标步骤」。
-    Detour {
-        from_title: String,
-        to_title: String,
-        kind_label: &'static str,
-        label: Option<String>,
-    },
-}
-pub(crate) fn understanding_flow_rows(result: &AnalysisResult) -> Vec<UnderstandingFlowRow> {
-    let mut rows = Vec::new();
-    if result.steps.is_empty() {
-        return rows;
-    }
-    let title_of = |id: &str| {
-        result
-            .steps
-            .iter()
-            .find(|step| step.id == id)
-            .map(|step| step.title.clone())
-            .unwrap_or_else(|| id.to_string())
-    };
-    for (index, step) in result.steps.iter().enumerate() {
-        if index > 0 {
-            let previous_id = result.steps[index - 1].id.as_str();
-            // 相邻对已有显式连接就用其语义/标签；否则按回答顺序显示普通顺序行。
-            match result
-                .links
-                .iter()
-                .find(|link| link.from == previous_id && link.to == step.id)
-            {
-                Some(link) => rows.push(UnderstandingFlowRow::Link {
-                    kind_label: flow_link_kind_label(link.kind),
-                    label: link.label.clone(),
-                }),
-                None => rows.push(UnderstandingFlowRow::Link {
-                    kind_label: flow_link_kind_label(FlowLinkKind::SequenceHint),
-                    label: None,
-                }),
-            }
-        }
-        rows.push(UnderstandingFlowRow::Step {
-            title: step.title.clone(),
-            detail: step.detail.clone(),
-            source_ids: step.source_ids.clone(),
-        });
-    }
-    // 非相邻连接：to 不是 from 的直接后继才列出（分支 / 循环回边）。
-    let step_order: HashMap<&str, usize> = result
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| (step.id.as_str(), index))
-        .collect();
-    for link in &result.links {
-        let Some(&from_index) = step_order.get(link.from.as_str()) else {
-            continue;
-        };
-        let Some(&to_index) = step_order.get(link.to.as_str()) else {
-            continue;
-        };
-        if to_index == from_index + 1 {
-            continue;
-        }
-        rows.push(UnderstandingFlowRow::Detour {
-            from_title: title_of(&link.from),
-            to_title: title_of(&link.to),
-            kind_label: flow_link_kind_label(link.kind),
-            label: link.label.clone(),
-        });
-    }
-    rows
 }
 /// 「复制结论」的纯文本形态：摘要 + 业务发现 + 数据读写 + 未知项 + 范围说明。
 pub(crate) fn understanding_plain_text(result: &AnalysisResult) -> String {
@@ -399,6 +498,51 @@ pub(crate) fn understanding_plain_text(result: &AnalysisResult) -> String {
     blocks.join("\n\n")
 }
 // ── 内部辅助 ──────────────────────────────────────────────
+/// Java 语义能力（B4 降级语义）。T5 只预留接口：语义服务接入 UI 之前
+/// `ready` 恒为 false，页面保留页签结构并把不可用原因与设置入口讲清楚。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JavaSemanticCapability {
+    /// 语义动作是否可用。
+    pub(crate) ready: bool,
+    /// 不可用标题。
+    pub(crate) title: String,
+    /// 不可用原因与仍然可用的能力。
+    pub(crate) detail: String,
+}
+/// 来源路径 → Java 语义能力；非 Java 文件返回 None（不显示语义区）。
+///
+/// 引擎是否已安装读 LSP 安装登记表，用于区分「未安装」与「已安装未就绪」。
+fn understanding_java_capability(relative_path: &str) -> Option<JavaSemanticCapability> {
+    if !relative_path.to_ascii_lowercase().ends_with(".java") {
+        return None;
+    }
+    let engine_installed = khaslana::lsp::lsp_data_root()
+        .ok()
+        .and_then(|root| khaslana::lsp::load_registry(&root).ok())
+        .and_then(|registry| {
+            registry
+                .plugins
+                .get("java-jdtls")
+                .map(|record| record.engine.is_some())
+        })
+        .unwrap_or(false);
+    let (title, detail) = if engine_installed {
+        (
+            "Java 语义增强尚未就绪",
+            "语言支持引擎已安装但语义服务尚未接入；仍可阅读当前源码，定义、引用和调用关系暂时禁用。",
+        )
+    } else {
+        (
+            "Java 语义增强暂不可用",
+            "未安装 Java 语言支持引擎；仍可阅读当前源码，定义、引用和调用关系暂时禁用。",
+        )
+    };
+    Some(JavaSemanticCapability {
+        ready: false,
+        title: title.to_string(),
+        detail: detail.to_string(),
+    })
+}
 /// 索引库路径（与设置页同一解析：数据目录 + 仓库哈希 8 位）。
 fn understanding_index_db_path(project_key: &str) -> Option<PathBuf> {
     let data_dir = khaslana::storage::active_data_dir()?;
@@ -457,10 +601,12 @@ pub(crate) enum NoticeAction {
 // ── RepositoryView 动作 ───────────────────────────────────
 impl RepositoryView {
     /// 当前仓库键（未打开仓库返回 None）。
+    ///
+    /// 必须与索引/偏好共用的 `normalize_repo_path` 保持一致：索引库目录、
+    /// `code_index_stats`、`code_index_enabled_cache` 都以该键寻址，直接用
+    /// 原始路径（分隔符、大小写、`\\?\` 前缀都可能不同）会查不到已建好的索引。
     fn understanding_project_key(&self) -> Option<String> {
-        self.repo_path
-            .as_ref()
-            .map(|path| path.display().to_string())
+        self.repo_path.as_ref().map(|path| crate::normalize_repo_path(path))
     }
 
     fn understanding_state(&self) -> Option<&UnderstandingRepoState> {
@@ -476,7 +622,7 @@ impl RepositoryView {
     /// 任务是否已从当前页面分离（不在理解页，或页面显示的不是该仓库）。
     pub(crate) fn understanding_task_detached_from(&self, project_key: &str) -> bool {
         self.main_mode != MainMode::CodeUnderstanding
-            || self.repo_path.as_ref().map(Path::new) != Some(Path::new(project_key))
+            || self.understanding_project_key().as_deref() != Some(project_key)
     }
 
     /// S2 提交：同步校验后创建请求并派发后台任务；失败留在当前态并给出可行动提示。
@@ -560,12 +706,12 @@ impl RepositoryView {
         state.cancel_pending = false;
         state.display = UnderstandingDisplay {
             question: question.clone(),
+            started_at: Some(Instant::now()),
             ..UnderstandingDisplay::default()
         };
         state.source_panel = None;
         state.history.viewing = None;
         self.understanding_notice = None;
-        self.understanding_question.clear();
         self.status = "正在分析代码".into();
         cx.notify();
         self.spawn_understanding_task(repo_root, index_db_path, ticket, question);
@@ -756,11 +902,7 @@ impl RepositoryView {
         let tab_id = self
             .tabs
             .iter()
-            .find(|tab| {
-                tab.repo_path
-                    .as_ref()
-                    .is_some_and(|path| path.display().to_string() == project_key)
-            })
+            .find(|tab| tab.path_key().as_deref() == Some(project_key.as_str()))
             .map(|tab| tab.id);
         if let Some(tab_id) = tab_id {
             self.activate_tab(tab_id);
@@ -1079,20 +1221,29 @@ impl RepositoryView {
         finished_at_millis: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.understanding_state_mut() else {
-            return;
+        let question = {
+            let Some(state) = self.understanding_state_mut() else {
+                return;
+            };
+            let record = state
+                .history
+                .records
+                .iter()
+                .find(|record| record.finished_at_millis == finished_at_millis)
+                .cloned();
+            if let Some(record) = record {
+                let question = Some(record.question.clone());
+                state.history.viewing = Some(record);
+                state.history.open = false;
+                state.source_panel = None;
+                state.focused_source = None;
+                question
+            } else {
+                None
+            }
         };
-        if let Some(record) = state
-            .history
-            .records
-            .iter()
-            .find(|record| record.finished_at_millis == finished_at_millis)
-            .cloned()
-        {
-            state.history.viewing = Some(record);
-            state.history.open = false;
-            state.source_panel = None;
-            state.focused_source = None;
+        if let Some(question) = question {
+            self.understanding_question.set_value(question);
         }
         cx.notify();
     }
@@ -1252,6 +1403,16 @@ fn understanding_time_label(millis: u64) -> String {
         })
         .unwrap_or_default()
 }
+/// 生成态耗时徽标（`mm:ss`；超过一小时显示 `h:mm:ss`）。
+fn understanding_elapsed_label(elapsed: std::time::Duration) -> String {
+    let total = elapsed.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
 /// 证据状态徽标（浅底深字，随主题切换）。
 fn evidence_state_badge(state: AnalysisEvidenceState) -> impl IntoElement {
     let (label, bg, fg) = match state {
@@ -1288,10 +1449,79 @@ fn completion_badge(completion: AnalysisCompletion) -> impl IntoElement {
     };
     crate::ui::components::status_pill_badge(label, bg, fg)
 }
+
+fn understanding_step_icon(
+    step: &khaslana::code_understanding::FlowStep,
+    index: usize,
+) -> ToolbarIcon {
+    let text = format!(
+        "{} {}",
+        step.title.to_lowercase(),
+        step.detail.as_deref().unwrap_or_default().to_lowercase()
+    );
+    if text.contains("请求") || text.contains("入口") || text.contains("controller") {
+        ToolbarIcon::LogIn
+    } else if text.contains("数据库")
+        || text.contains("读取")
+        || text.contains("查询")
+        || text.contains("mapper")
+        || text.contains("repository")
+    {
+        ToolbarIcon::Database
+    } else if text.contains("密码") || text.contains("校验") || text.contains("认证") {
+        ToolbarIcon::ShieldCheck
+    } else if text.contains("会话") || text.contains("session") || text.contains("token") {
+        ToolbarIcon::KeyRound
+    } else {
+        [
+            ToolbarIcon::LogIn,
+            ToolbarIcon::Database,
+            ToolbarIcon::ShieldCheck,
+            ToolbarIcon::KeyRound,
+        ]
+        .get(index)
+        .copied()
+        .unwrap_or(ToolbarIcon::Understanding)
+    }
+}
+
+fn understanding_source_label(source_id: &str, sources: &[UnderstandingSourceRecord]) -> String {
+    sources
+        .iter()
+        .find(|source| source.source_id() == source_id)
+        .and_then(|source| Path::new(&source.relative_path).file_stem())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "查看来源".to_string())
+}
+
 impl RepositoryView {
-    /// 当前仓库来源侧栏宽度（布局字段，默认 336）。
+    /// 当前仓库来源侧栏宽度（布局字段，默认 360）。
     pub(crate) fn understanding_source_width(&self) -> f32 {
         self.column_width(ResizeTarget::UnderstandingSource)
+    }
+
+    /// 当前仓库的索引状态（徽标与空态上下文行共用）。
+    fn understanding_index_state(&self) -> UnderstandingIndexState {
+        let Some(key) = self.understanding_project_key() else {
+            return UnderstandingIndexState::NoRepo;
+        };
+        if self
+            .code_index_task
+            .as_ref()
+            .is_some_and(|task| task.repo_path == key)
+        {
+            return UnderstandingIndexState::Busy;
+        }
+        if self.code_index_stats.contains_key(&key) {
+            if self.code_index_enabled_cache.contains(&key) {
+                UnderstandingIndexState::Ready
+            } else {
+                UnderstandingIndexState::Disabled
+            }
+        } else {
+            UnderstandingIndexState::Missing
+        }
     }
 
     /// 页头副标题：分支 + 索引状态投影。
@@ -1299,28 +1529,44 @@ impl RepositoryView {
         let Some(repo_path) = self.repo_path.as_ref() else {
             return "未打开仓库".to_string();
         };
-        let key = repo_path.display().to_string();
+        let key = crate::normalize_repo_path(repo_path);
         let branch = self
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.head.clone())
             .unwrap_or_else(|| "未知分支".to_string());
-        let indexing = self
-            .code_index_task
-            .as_ref()
-            .is_some_and(|task| task.repo_path == key);
-        let index_part = if indexing {
-            "索引建立中".to_string()
-        } else if let Some(stats) = self.code_index_stats.get(&key) {
-            if self.code_index_enabled_cache.contains(&key) {
-                format!("已索引 {} 文件 · {} 符号", stats.files, stats.symbols)
-            } else {
-                format!("索引已停用（已有 {} 文件数据）", stats.files)
-            }
-        } else {
-            "未建立代码索引".to_string()
+        let index_part = match self.understanding_index_state() {
+            UnderstandingIndexState::NoRepo => "未打开仓库".to_string(),
+            UnderstandingIndexState::Busy => "索引建立中".to_string(),
+            UnderstandingIndexState::Ready => self
+                .code_index_stats
+                .get(&key)
+                .map(|stats| format!("已索引 {} 文件 · {} 符号", stats.files, stats.symbols))
+                .unwrap_or_else(|| "已建立代码索引".to_string()),
+            UnderstandingIndexState::Disabled => self
+                .code_index_stats
+                .get(&key)
+                .map(|stats| format!("索引已停用（已有 {} 文件数据）", stats.files))
+                .unwrap_or_else(|| "索引已停用".to_string()),
+            UnderstandingIndexState::Missing => "未建立代码索引".to_string(),
         };
         format!("{branch} · {index_part}")
+    }
+
+    /// 仓库上下文一行：`<仓库名> · <分支>`。
+    fn understanding_repo_context_text(&self) -> String {
+        let repo_name = self
+            .repo_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "未打开仓库".to_string());
+        let branch = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.head.clone())
+            .unwrap_or_else(|| "未知分支".to_string());
+        format!("{repo_name} · {branch}")
     }
 
     pub(crate) fn render_code_understanding_view(
@@ -1337,7 +1583,7 @@ impl RepositoryView {
         let presentation = self.context_navigator_presentation(window);
         let nav_width = if presentation == crate::chrome_view::ContextNavigatorPresentation::Docked
         {
-            self.column_width(ResizeTarget::Sidebar)
+            crate::chrome_view::CODE_UNDERSTANDING_NAVIGATOR_WIDTH
         } else {
             ui_theme::NAVIGATOR_COLLAPSED_WIDTH
         };
@@ -1391,13 +1637,166 @@ impl RepositoryView {
         })
     }
 
+    /// 是否有在途代码理解任务（计时徽标与后台任务条需要周期性重绘）。
+    pub(crate) fn understanding_tasks_active(&self) -> bool {
+        self.understanding_tasks
+            .iter()
+            .any(|(_, state)| state.session.has_active_request())
+    }
+
+    /// B2 后台任务条：任务运行且已从当前页面分离时，常驻中央工作区下方，
+    /// 提供查看进度与取消（Pencil 稿 B2 Background Task Bar）。
+    pub(crate) fn render_understanding_task_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let detached = self
+            .understanding_tasks
+            .iter()
+            .filter(|(key, state)| {
+                state.session.has_active_request() && self.understanding_task_detached_from(key)
+            })
+            .map(|(key, state)| {
+                (
+                    key.clone(),
+                    state.display.progress.clone(),
+                    state
+                        .display
+                        .steps
+                        .iter()
+                        .rev()
+                        .find_map(|step| match step {
+                            UnderstandingStep::ToolCall { error, .. } if !*error => {
+                                Some(understanding_step_action(step).label)
+                            }
+                            _ => None,
+                        }),
+                    state.display.started_at,
+                    state.cancel_pending,
+                )
+            })
+            .collect::<Vec<_>>();
+        if detached.is_empty() {
+            return div().into_any_element();
+        }
+        let rows = detached
+            .into_iter()
+            .map(
+                |(project_key, progress, last_action, started_at, cancel_pending)| {
+                    let repo_name = Path::new(&project_key)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| project_key.clone());
+                    let elapsed = started_at
+                        .map(|start| understanding_elapsed_label(start.elapsed()))
+                        .unwrap_or_else(|| "00:00".to_string());
+                    // 当前动作优先用最后一条已完成动作；没有动作时退回 agent 进度、再退回通用文案。
+                    let current = last_action
+                        .or(progress)
+                        .unwrap_or_else(|| format!("正在分析 {repo_name}"));
+                    let detail = format!("{} · {elapsed}", excerpt_line(&current, 52));
+                    let key_for_view = project_key.clone();
+                    let key_for_cancel = project_key.clone();
+                    div()
+                        .id(format!("understanding-taskbar-{project_key}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(9.0))
+                        .h(px(56.0))
+                        .px(px(10.0))
+                        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                        .border_t_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(28.0))
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .bg(rgb(ui_theme::SURFACE_BASE))
+                                .child(toolbar_icon_with_size(
+                                    ToolbarIcon::Understanding,
+                                    ui_theme::PRIMARY,
+                                    14.0,
+                                    14.0,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(10.5))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                        .child(if cancel_pending {
+                                            "代码理解正在安全取消".to_string()
+                                        } else {
+                                            "代码理解正在后台分析".to_string()
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(9.3))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                        .child(detail),
+                                ),
+                        )
+                        .child(
+                            command_group()
+                                .child(self.app_button(
+                                    "查看进度",
+                                    None,
+                                    None,
+                                    ButtonTone::Primary,
+                                    true,
+                                    move |this, _window, cx| {
+                                        this.show_understanding_task(key_for_view.clone(), cx);
+                                    },
+                                    cx,
+                                ))
+                                .child(self.app_button(
+                                    "取消",
+                                    None,
+                                    None,
+                                    ButtonTone::Neutral,
+                                    !cancel_pending,
+                                    move |this, _window, cx| {
+                                        this.cancel_understanding_task_for(&key_for_cancel, cx);
+                                    },
+                                    cx,
+                                )),
+                        )
+                },
+            )
+            .collect::<Vec<_>>();
+        div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .children(rows)
+            .into_any_element()
+    }
+
     fn render_understanding_header(
         &self,
         index_line: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // 副标题是动态字符串（分支/索引状态），不走 page_header 的
-        // `&'static str` description 槽位，结构与 page_header 保持一致。
+        let index_state = self.understanding_index_state();
+        let (index_badge_bg, index_badge_fg) = index_state.palette();
+        let index_label = index_state.badge_label();
         div()
             .flex()
             .flex_none()
@@ -1428,29 +1827,81 @@ impl RepositoryView {
                             .truncate()
                             .text_size(px(ui_theme::TYPE_BODY))
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(index_line.to_string()),
+                            .child("用源码回答业务问题"),
                     ),
             )
             .child(
-                command_group()
-                    .child(self.app_button(
-                        "历史",
-                        Some(ToolbarIcon::History),
-                        None,
-                        ButtonTone::Neutral,
-                        true,
-                        |this, _window, cx| this.open_understanding_history(cx),
-                        cx,
-                    ))
-                    .child(self.app_button(
-                        "索引设置",
-                        Some(ToolbarIcon::Search),
-                        None,
-                        ButtonTone::Neutral,
-                        true,
-                        |this, _window, cx| this.open_understanding_index_settings(cx),
-                        cx,
-                    )),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_theme::SPACE_2))
+                    .child(
+                        div()
+                            .id("understanding-index-status")
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_theme::SPACE_1))
+                            .h(px(24.0))
+                            .px(px(ui_theme::SPACE_2))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(index_badge_bg))
+                            .text_size(px(10.0))
+                            .text_color(rgb(index_badge_fg))
+                            .cursor_pointer()
+                            .tooltip({
+                                let detail = index_line.to_string();
+                                move |_window, cx| {
+                                    crate::ui::components::tooltip_text(detail.clone(), cx)
+                                }
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.open_understanding_index_settings(cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(rgb(index_badge_fg)),
+                            )
+                            .child(index_label),
+                    )
+                    .child(
+                        div()
+                            .id("understanding-history-toggle")
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_theme::SPACE_1))
+                            .h(px(24.0))
+                            .px(px(ui_theme::SPACE_2))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::PRIMARY))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                            .tooltip(move |_window, cx| {
+                                crate::ui::components::tooltip_text("查看分析历史", cx)
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                let viewing_history = this
+                                    .understanding_state()
+                                    .and_then(|state| state.history.viewing.as_ref())
+                                    .is_some();
+                                if viewing_history {
+                                    this.close_understanding_history_view(cx);
+                                } else {
+                                    this.open_understanding_history(cx);
+                                }
+                            }))
+                            .child(toolbar_icon_with_size(
+                                ToolbarIcon::Understanding,
+                                ui_theme::PRIMARY,
+                                12.0,
+                                12.0,
+                            ))
+                            .child("基础分析"),
+                    ),
             )
     }
 
@@ -1527,7 +1978,7 @@ impl RepositoryView {
                 .into_any_element(),
         }
     }
-    /// S3 生成态 / CancelPending：问题复显 + 进度 + 步骤时间线 + 动作条。
+    /// S3 生成态 / CancelPending：问题条 + 动作时间线 + 增量正文 + 底部动作条。
     fn render_understanding_running(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(state) = self.understanding_state() else {
             return div().into_any_element();
@@ -1535,6 +1986,23 @@ impl RepositoryView {
         let display = &state.display;
         let question = display.question.clone();
         let cancel_pending = state.cancel_pending;
+        let elapsed = display
+            .started_at
+            .map(|start| understanding_elapsed_label(start.elapsed()))
+            .unwrap_or_else(|| "00:00".to_string());
+        let read_sources = display
+            .steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step,
+                    UnderstandingStep::ToolCall { name, error, .. }
+                        if name == "read_file" && !error
+                )
+            })
+            .count();
+        let live = display.live_content.clone();
+        let timeline = self.render_understanding_timeline();
         let handle = self.scroll_handle("understanding-answer-scroll");
         div()
             .flex()
@@ -1556,14 +2024,58 @@ impl RepositoryView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(ui_theme::SPACE_3))
+                            .gap(px(8.0))
                             .p(px(ui_theme::SPACE_4))
-                            .child(self.render_question_card(&question))
-                            .children(self.render_understanding_timeline()),
+                            .child(self.render_question_strip(&question, Some(elapsed)))
+                            .child(self.render_timeline_viewport(timeline))
+                            .child(div().flex_none().h(px(1.0)).bg(rgb(ui_theme::BORDER_MUTED)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_theme::SPACE_2))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                            .child("正在生成回答"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .h(px(21.0))
+                                            .px(px(6.0))
+                                            .rounded(px(5.0))
+                                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                                            .text_size(px(9.0))
+                                            .text_color(rgb(ui_theme::PRIMARY))
+                                            .child(format!("已读取 {read_sources} 个来源")),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.8))
+                                    .line_height(px(15.0))
+                                    .text_color(rgb(if live.is_empty() {
+                                        ui_theme::CONTENT_TERTIARY
+                                    } else {
+                                        ui_theme::CONTENT_SECONDARY
+                                    }))
+                                    .child(if live.is_empty() {
+                                        "正在等待模型返回正文…".to_string()
+                                    } else {
+                                        excerpt_line(&live, 480)
+                                    }),
+                            ),
                     ),
             )
             .child(
                 div()
+                    .id("understanding-running-actions")
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1576,12 +2088,12 @@ impl RepositoryView {
                     .bg(rgb(ui_theme::SURFACE_BASE))
                     .child(
                         div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .text_size(px(9.0))
+                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                             .child(if cancel_pending {
                                 "正在安全取消：任务将在工具或模型轮次边界退出"
                             } else {
-                                "切换页面或仓库不会中断任务，可点「后台运行」先去处理其他工作"
+                                "切换页面不会停止任务"
                             }),
                     )
                     .child(
@@ -1606,10 +2118,7 @@ impl RepositoryView {
                                 ButtonTone::Neutral,
                                 !cancel_pending,
                                 |this, _window, cx| {
-                                    let project_key = this
-                                        .repo_path
-                                        .as_ref()
-                                        .map(|path| path.display().to_string());
+                                    let project_key = this.understanding_project_key();
                                     if let Some(project_key) = project_key {
                                         this.cancel_understanding_task_for(&project_key, cx);
                                     }
@@ -1621,172 +2130,138 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    fn render_question_card(&self, question: &str) -> AnyElement {
+    /// 生成态时间线视口：最多 `TIMELINE_MAX_VISIBLE_ROWS` 行，超出后只滚动时间线
+    /// 本身并钉住最新一行，避免执行过程把下方内容一路挤下去。
+    fn render_timeline_viewport(&self, rows: Vec<AnyElement>) -> AnyElement {
+        if rows.is_empty() {
+            return div().into_any_element();
+        }
+        let key = rows.len();
+        let follow = self
+            .understanding_state()
+            .map(|state| Arc::clone(&state.timeline_follow));
+        let handle = self.scroll_handle("understanding-timeline-scroll");
+        let follow_handle = handle.clone();
         div()
-            .flex_none()
+            .id("understanding-timeline-scroll")
+            .relative()
             .flex()
             .flex_col()
-            .gap(px(ui_theme::SPACE_2))
-            .px(px(ui_theme::SPACE_4))
-            .py(px(ui_theme::SPACE_3))
-            .bg(rgb(ui_theme::SURFACE_BASE))
+            .w_full()
+            .min_w(px(0.0))
+            .max_h(px(TIMELINE_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&handle)
             .child(
                 div()
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("已提交的问题"),
+                    .flex()
+                    .flex_col()
+                    .gap(px(TIMELINE_ROW_GAP))
+                    .children(rows),
             )
-            .child(
-                div()
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
-                    .rounded(px(ui_theme::RADIUS_SM))
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                    .child(question.to_string()),
-            )
+            // 钉底跟随：末位零绘制 canvas 的 prepaint 按行数变化键门控 set_offset
+            // （同帧生效 + refresh_windows 补一帧）。事件时机里 max_offset 还是上一帧的，
+            // 会恒落后一帧；键不变（用户滚动引发的重绘）不回调抢视口。
+            .when_some(follow, |this, follow_state| {
+                this.child(
+                    canvas(
+                        move |_, _, cx| {
+                            if follow_state.last_key.get() != key {
+                                follow_state.last_key.set(key);
+                                let max_offset =
+                                    f32::from(follow_handle.max_offset().height).max(0.0);
+                                follow_handle.set_offset(point(px(0.0), px(-max_offset)));
+                                cx.refresh_windows();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(1.0)),
+                )
+            })
             .into_any_element()
     }
 
-    /// 生成态时间线：已落定步骤 + 当前轮 live 文本。只显示面向用户的动作。
+    /// 生成/失败态的问题条（Pencil 稿：sunken 单行，右侧可选耗时或状态徽标）。
+    fn render_question_strip(
+        &self,
+        question: &str,
+        trailing: Option<String>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(ui_theme::SPACE_2))
+            .min_h(px(34.0))
+            .px(px(9.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(9.8))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .child(question.to_string()),
+            )
+            .when_some(trailing, |this, label| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(21.0))
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .bg(rgb(ui_theme::SURFACE_BASE))
+                        .text_size(px(9.0))
+                        .font_family("JetBrains Mono")
+                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                        .child(label),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 生成态时间线：已落定步骤 + 当前动作/思考。只显示面向用户的动作，
+    /// 不展示工具名、工具 JSON 或模型内部推理（§9.5）。
     fn render_understanding_timeline(&self) -> Vec<AnyElement> {
         let Some(state) = self.understanding_state() else {
             return Vec::new();
         };
         let display = &state.display;
         let mut rows = Vec::new();
-        for (index, step) in display.steps.iter().enumerate() {
-            rows.push(self.render_understanding_step_row(step, index));
+        for step in display.steps.iter() {
+            let action = understanding_step_action(step);
+            let tone = match step {
+                UnderstandingStep::ToolCall { error, .. } if *error => TimelineTone::Failed,
+                _ => TimelineTone::Done,
+            };
+            rows.push(timeline_row(
+                action.icon,
+                &action.label,
+                action.detail.as_deref(),
+                tone,
+            ));
         }
         if !display.live_reasoning.is_empty() {
-            let reasoning = display.live_reasoning.clone();
-            rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(ui_theme::SPACE_1))
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(ui_theme::PRIMARY))
-                            .child("思考中…"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                            .child(excerpt_line(&reasoning, 220)),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if !display.live_content.is_empty() {
-            let content = display.live_content.clone();
-            rows.push(
-                div()
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(excerpt_line(&content, 400))
-                    .into_any_element(),
-            );
-        }
-        if let Some(progress) = display.progress.as_ref() {
-            let progress = progress.clone();
-            rows.push(
-                div()
-                    .text_size(px(ui_theme::TYPE_META))
-                    .text_color(rgb(ui_theme::PRIMARY))
-                    .child(progress)
-                    .into_any_element(),
-            );
+            let excerpt = excerpt_line(&display.live_reasoning, 80);
+            rows.push(timeline_row(
+                ToolbarIcon::Understanding,
+                "思考中…",
+                Some(excerpt.as_str()),
+                TimelineTone::Active,
+            ));
         }
         rows
     }
 
-    fn render_understanding_step_row(&self, step: &UnderstandingStep, _index: usize) -> AnyElement {
-        let row = match step {
-            UnderstandingStep::Reasoning { text } => div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .child(format!("思考：{}", excerpt_line(text, 60))),
-                )
-                .child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                        .child(excerpt_line(text, 160)),
-                ),
-            UnderstandingStep::Message { text } => div()
-                .text_size(px(ui_theme::TYPE_BODY))
-                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                .child(text.clone()),
-            UnderstandingStep::ToolCall {
-                args_summary,
-                result_excerpt,
-                error,
-                ..
-            } => {
-                let (dot_color, result_color) = if *error {
-                    (ui_theme::GIT_REMOVED, ui_theme::FEEDBACK_ERROR_TEXT)
-                } else {
-                    (ui_theme::GIT_ADDED, ui_theme::CONTENT_TERTIARY)
-                };
-                let summary = excerpt_line(args_summary, 120);
-                let excerpt = excerpt_line(result_excerpt, 180);
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(ui_theme::SPACE_1))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui_theme::SPACE_2))
-                            .child(div().size(px(6.0)).rounded_full().bg(rgb(dot_color)))
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(ui_theme::TYPE_BODY))
-                                    .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child(summary),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pl(px(ui_theme::SPACE_4))
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(result_color))
-                            .child(excerpt),
-                    )
-            }
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(ui_theme::SPACE_1))
-            .px(px(ui_theme::SPACE_3))
-            .py(px(ui_theme::SPACE_2))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(rgb(ui_theme::SURFACE_BASE))
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .child(row)
-            .into_any_element()
-    }
-
-    /// Failed：错误卡 + 保留的问题与已完成步骤 + 重试。
+    /// B3 失败态：保留问题与已完成步骤，尾部给出错误原因、复制详情与重试。
     fn render_understanding_failed(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(state) = self.understanding_state() else {
             return div().into_any_element();
@@ -1794,6 +2269,18 @@ impl RepositoryView {
         let question = state.display.question.clone();
         let error = state.display.error.clone().unwrap_or_default();
         let steps = state.display.steps.clone();
+        let timeline = steps
+            .iter()
+            .map(|step| {
+                let action = understanding_step_action(step);
+                let tone = match step {
+                    UnderstandingStep::ToolCall { error, .. } if *error => TimelineTone::Failed,
+                    _ => TimelineTone::Done,
+                };
+                timeline_row(action.icon, &action.label, action.detail.as_deref(), tone)
+            })
+            .collect::<Vec<_>>();
+        let error_for_copy = error.clone();
         let handle = self.scroll_handle("understanding-answer-scroll");
         div()
             .flex()
@@ -1815,54 +2302,114 @@ impl RepositoryView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(ui_theme::SPACE_3))
+                            .gap(px(8.0))
                             .p(px(ui_theme::SPACE_4))
-                            .child(self.render_question_card(&question))
+                            .child(self.render_question_strip(&question, None))
+                            .child(self.render_timeline_viewport(timeline))
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(ui_theme::SPACE_2))
-                                    .p(px(ui_theme::SPACE_3))
+                                    .gap(px(6.0))
+                                    .p(px(10.0))
                                     .rounded(px(ui_theme::RADIUS_SM))
                                     .bg(rgb(ui_theme::FEEDBACK_ERROR_BG))
                                     .border_1()
                                     .border_color(rgb(ui_theme::FEEDBACK_ERROR_BORDER))
                                     .child(
                                         div()
-                                            .text_size(px(ui_theme::TYPE_BODY))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
-                                            .child("分析失败，已保留问题与已完成步骤"),
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(7.0))
+                                            .child(toolbar_icon_with_size(
+                                                ToolbarIcon::Info,
+                                                ui_theme::FEEDBACK_ERROR_TEXT,
+                                                13.0,
+                                                13.0,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
+                                                    .child("本次分析未完成"),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(ui_theme::TYPE_META))
+                                            .text_size(px(9.7))
+                                            .line_height(px(14.0))
                                             .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
                                             .child(excerpt_line(&error, 400)),
                                     )
-                                    .child(self.app_button(
-                                        "重试",
-                                        None,
-                                        None,
-                                        ButtonTone::Primary,
-                                        true,
-                                        |this, _window, cx| this.retry_understanding_question(cx),
-                                        cx,
-                                    )),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap(px(ui_theme::SPACE_2))
+                                            .child(self.app_button(
+                                                "复制错误详情",
+                                                None,
+                                                None,
+                                                ButtonTone::Neutral,
+                                                true,
+                                                move |this, _window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        gpui::ClipboardItem::new_string(
+                                                            error_for_copy.clone(),
+                                                        ),
+                                                    );
+                                                    this.notify_success("已复制错误详情", cx);
+                                                },
+                                                cx,
+                                            ))
+                                            .child(self.app_button(
+                                                "重试",
+                                                None,
+                                                None,
+                                                ButtonTone::Primary,
+                                                true,
+                                                |this, _window, cx| {
+                                                    this.retry_understanding_question(cx)
+                                                },
+                                                cx,
+                                            )),
+                                    ),
                             )
-                            .children(
-                                steps
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(index, step)| {
-                                        self.render_understanding_step_row(step, index)
-                                    })
-                                    .collect::<Vec<_>>(),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .min_h(px(27.0))
+                                    .px(px(8.0))
+                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                                    .text_size(px(9.3))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child(toolbar_icon_with_size(
+                                        ToolbarIcon::CircleCheck,
+                                        ui_theme::REF_LOCAL_TEXT,
+                                        11.0,
+                                        11.0,
+                                    ))
+                                    .child("问题已保留；失败结果不会写入历史"),
                             ),
                     ),
             )
-            .child(self.render_understanding_input_area(window, cx))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_3))
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
+                    .child(self.render_understanding_input_area(window, cx, "提问", false)),
+            )
             .into_any_element()
     }
 
@@ -1889,25 +2436,16 @@ impl RepositoryView {
         };
         // 数据源三选一：历史查看记录 → 内存答案；二者都无则回退空态内容。
         let viewing = state.history.viewing.clone();
-        let saved_label = state.display.saved_to_history;
         let flow_collapsed = state.flow_collapsed;
-        let (question, answer, sources) = if let Some(record) = viewing.as_ref() {
-            (
-                record.analysis.context.question.clone(),
-                record.analysis.clone(),
-                record.sources.clone(),
-            )
+        let (answer, sources) = if let Some(record) = viewing.as_ref() {
+            (record.analysis.clone(), record.sources.clone())
         } else if let Some(memory) = state.display.answer.as_ref() {
             let sources = memory
                 .sources
                 .iter()
                 .map(UnderstandingSourceRecord::from_source_ref)
                 .collect();
-            (
-                memory.analysis.context.question.clone(),
-                memory.analysis.clone(),
-                sources,
-            )
+            (memory.analysis.clone(), sources)
         } else {
             return div().into_any_element();
         };
@@ -1922,20 +2460,51 @@ impl RepositoryView {
             .as_ref()
             .map(|record| record.steps.len())
             .unwrap_or(state.display.steps.len());
-        let answer_meta = format!(
-            "{} 个来源 · {} 个分析步骤",
-            sources.len(),
-            analysis_step_count
+        let answer_meta = viewing.as_ref().map_or_else(
+            || {
+                format!(
+                    "{} 个来源 · {} 次工具调用",
+                    sources.len(),
+                    analysis_step_count
+                )
+            },
+            |record| {
+                format!(
+                    "{} 个来源 · {} 次工具调用 · {}s",
+                    sources.len(),
+                    analysis_step_count,
+                    record.duration_secs
+                )
+            },
         );
+        let saved_to_history = viewing.is_none() && state.display.saved_to_history == Some(true);
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            // Pencil 稿中的已提交问题固定在回答区顶部，不随长回答滚走。
-            .child(self.render_question_card(&question))
-            .child(div().flex_none().h(px(1.0)).bg(rgb(ui_theme::BORDER_MUTED)))
+            // Pencil 稿中的唯一提问区固定在顶部；完成后保留问题，可直接修改再提问。
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .px(px(ui_theme::SPACE_4))
+                    .py(px(ui_theme::SPACE_3))
+                    .border_b_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("向当前仓库提问"),
+                    )
+                    .child(self.render_understanding_input_area(window, cx, "提问", false)),
+            )
             .child(
                 div()
                     .id(answer_scroll_id)
@@ -1950,8 +2519,9 @@ impl RepositoryView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(ui_theme::SPACE_4))
-                            .p(px(ui_theme::SPACE_4))
+                            .gap(px(12.0))
+                            .px(px(16.0))
+                            .py(px(12.0))
                             // ── 完成状态与次级动作 ──
                             .child(
                                 div()
@@ -1959,79 +2529,60 @@ impl RepositoryView {
                                     .flex_wrap()
                                     .items_center()
                                     .justify_between()
-                                    .gap(px(ui_theme::SPACE_2))
+                                    .gap(px(8.0))
+                                    .h(px(26.0))
                                     .child(
                                         div()
+                                            .id("understanding-copy-conclusion")
                                             .flex()
                                             .items_center()
-                                            .gap(px(ui_theme::SPACE_2))
-                                            .child(
-                                                div()
-                                                    .text_size(px(ui_theme::TYPE_META))
-                                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                                    .text_color(rgb(
-                                                        ui_theme::FEEDBACK_SUCCESS_TEXT,
-                                                    ))
-                                                    .child("分析完成"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(ui_theme::TYPE_META))
-                                                    .font_family("Consolas, monospace")
-                                                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                                                    .child(answer_meta),
-                                            )
-                                            .when_some(saved_label, |this, saved| {
-                                                this.child(
-                                                    div()
-                                                        .text_size(px(ui_theme::TYPE_META))
-                                                        .text_color(rgb(if saved {
-                                                            ui_theme::CONTENT_TERTIARY
-                                                        } else {
-                                                            ui_theme::FEEDBACK_WARNING_TEXT
-                                                        }))
-                                                        .child(if saved {
-                                                            "已保存"
-                                                        } else {
-                                                            "历史保存失败"
-                                                        }),
+                                            .gap(px(6.0))
+                                            .cursor_pointer()
+                                            .tooltip(move |_window, cx| {
+                                                crate::ui::components::tooltip_text(
+                                                    "复制分析结论",
+                                                    cx,
                                                 )
                                             })
-                                            .when(is_history, |this| {
-                                                this.child(
-                                                    div()
-                                                        .text_size(px(ui_theme::TYPE_META))
-                                                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                                                        .child("历史记录（只读）"),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        command_group()
-                                            .child(self.app_button(
-                                                "复制结论",
-                                                None,
-                                                None,
-                                                ButtonTone::Neutral,
-                                                true,
-                                                |this, _window, cx| {
-                                                    this.copy_understanding_conclusion(cx);
-                                                },
-                                                cx,
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.copy_understanding_conclusion(cx);
+                                            }))
+                                            .child(toolbar_icon_with_size(
+                                                ToolbarIcon::CircleCheck,
+                                                ui_theme::REF_LOCAL_TEXT,
+                                                13.0,
+                                                13.0,
                                             ))
-                                            .when(is_history, |this| {
-                                                this.child(self.app_button(
-                                                    "关闭历史",
-                                                    None,
-                                                    None,
-                                                    ButtonTone::Neutral,
-                                                    true,
-                                                    |this, _window, cx| {
-                                                        this.close_understanding_history_view(cx);
-                                                    },
-                                                    cx,
-                                                ))
-                                            }),
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(rgb(ui_theme::REF_LOCAL_TEXT))
+                                                    .child("分析完成"),
+                                            ),
+                                    )
+                                    .when(saved_to_history, |this| {
+                                        this.child(
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .h(px(20.0))
+                                                .px(px(6.0))
+                                                .rounded(px(5.0))
+                                                .bg(rgb(ui_theme::REF_LOCAL_BG))
+                                                .text_size(px(9.0))
+                                                .text_color(rgb(ui_theme::REF_LOCAL_TEXT))
+                                                .child("已保存到本地历史"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .font_family("JetBrains Mono")
+                                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                                            .child(answer_meta),
                                     ),
                             )
                             // ── 摘要 ──
@@ -2039,9 +2590,11 @@ impl RepositoryView {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(ui_theme::SPACE_2))
-                                    .p(px(ui_theme::SPACE_3))
-                                    .rounded(px(ui_theme::RADIUS_SM))
+                                    .gap(px(7.0))
+                                    .min_h(px(84.0))
+                                    .px(px(12.0))
+                                    .py(px(10.0))
+                                    .rounded(px(ui_theme::RADIUS_XS))
                                     .bg(rgb(ui_theme::SURFACE_SUNKEN))
                                     .child(
                                         div()
@@ -2055,96 +2608,80 @@ impl RepositoryView {
                                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                                     .child("结论概述"),
                                             )
-                                            .child(completion_badge(completion)),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .h(px(20.0))
+                                                    .px(px(6.0))
+                                                    .rounded(px(5.0))
+                                                    .bg(rgb(
+                                                        if completion
+                                                            == AnalysisCompletion::Complete
+                                                        {
+                                                            ui_theme::REF_LOCAL_BG
+                                                        } else {
+                                                            ui_theme::REF_TAG_BG
+                                                        },
+                                                    ))
+                                                    .text_size(px(9.5))
+                                                    .text_color(rgb(
+                                                        if completion
+                                                            == AnalysisCompletion::Complete
+                                                        {
+                                                            ui_theme::REF_LOCAL_TEXT
+                                                        } else {
+                                                            ui_theme::REF_TAG_TEXT
+                                                        },
+                                                    ))
+                                                    .child(toolbar_icon_with_size(
+                                                        ToolbarIcon::ShieldCheck,
+                                                        if completion
+                                                            == AnalysisCompletion::Complete
+                                                        {
+                                                            ui_theme::REF_LOCAL_TEXT
+                                                        } else {
+                                                            ui_theme::REF_TAG_TEXT
+                                                        },
+                                                        11.0,
+                                                        11.0,
+                                                    ))
+                                                    .child(
+                                                        if completion
+                                                            == AnalysisCompletion::Complete
+                                                        {
+                                                            "已查证"
+                                                        } else {
+                                                            "部分完成"
+                                                        },
+                                                    ),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(ui_theme::TYPE_BODY))
+                                            .text_size(px(11.5))
+                                            .line_height(px(16.5))
                                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                             .child(answer.summary.clone()),
                                     ),
                             )
                             // ── 业务流程 ──
                             .when(!answer.steps.is_empty(), |this| {
-                                this.child(self.render_flow_section(&answer, flow_collapsed, cx))
+                                this.child(self.render_flow_section(
+                                    &answer,
+                                    flow_collapsed,
+                                    cx,
+                                ))
                             })
-                            // ── 调用上下游 ──
-                            .when(
-                                !answer.callers.is_empty() || !answer.callees.is_empty(),
-                                |this| {
-                                    this.child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(ui_theme::SPACE_2))
-                                            .child(self.render_section_title("调用上下游"))
-                                            .when(!answer.callers.is_empty(), |this| {
-                                                this.child(
-                                                    div()
-                                                        .text_size(px(ui_theme::TYPE_META))
-                                                        .text_color(rgb(
-                                                            ui_theme::CONTENT_SECONDARY,
-                                                        ))
-                                                        .child("被这些代码调用"),
-                                                )
-                                                .children(answer.callers.iter().enumerate().map(
-                                                    |(index, relation)| {
-                                                        self.render_call_relation_row(
-                                                            relation, index, cx,
-                                                        )
-                                                    },
-                                                ))
-                                            })
-                                            .when(!answer.callees.is_empty(), |this| {
-                                                this.child(
-                                                    div()
-                                                        .text_size(px(ui_theme::TYPE_META))
-                                                        .text_color(rgb(
-                                                            ui_theme::CONTENT_SECONDARY,
-                                                        ))
-                                                        .child("调用了这些代码"),
-                                                )
-                                                .children(answer.callees.iter().enumerate().map(
-                                                    |(index, relation)| {
-                                                        self.render_call_relation_row(
-                                                            relation, index, cx,
-                                                        )
-                                                    },
-                                                ))
-                                            }),
-                                    )
-                                },
-                            )
                             // ── 数据读写 ──
                             .when(!answer.data_accesses.is_empty(), |this| {
-                                this.child(self.render_data_section(&answer, cx))
+                                this.child(self.render_data_section(&answer, &sources, cx))
                             })
-                            // ── 其他副作用与未知项 ──
-                            .when(
-                                !answer.unknowns.is_empty() || !answer.coverage_note.is_empty(),
-                                |this| this.child(self.render_unknowns_section(&answer)),
-                            )
-                            // ── 来源 ──
-                            .when(!sources.is_empty(), |this| {
-                                this.child(self.render_sources_section(&sources, cx))
-                            }),
+                            // ── 调用入口与未确认范围 ──
+                            .child(self.render_boundary_note(&answer)),
                     ),
             )
-            // 追问输入（历史只读查看时同样允许基于该内容继续提问）。
-            .child(self.render_understanding_input_area(window, cx))
-            .into_any_element()
-    }
-
-    fn render_section_title(&self, title: &'static str) -> AnyElement {
-        div()
-            .flex_none()
-            .text_size(px(ui_theme::TYPE_BODY))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-            .pb(px(ui_theme::SPACE_1))
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .child(title)
             .into_any_element()
     }
 
@@ -2164,42 +2701,40 @@ impl RepositoryView {
         let flow_meta = if branch_count == 0 {
             format!("{} 步", answer.steps.len())
         } else {
-            format!("{} 步 · {} 个分支", answer.steps.len(), branch_count)
+            format!("{} 步 · {} 个失败分支", answer.steps.len(), branch_count)
         };
         let header = div()
             .id("understanding-flow-toggle")
             .flex()
             .items_center()
             .justify_between()
-            .pb(px(ui_theme::SPACE_1))
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .h(px(22.0))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+            .tooltip(move |_window, cx| {
+                crate::ui::components::tooltip_text("展开或收起业务步骤", cx)
+            })
             .on_click(cx.listener(|this, _event, _window, cx| {
                 this.toggle_understanding_flow(cx);
             }))
             .child(
                 div()
-                    .text_size(px(ui_theme::TYPE_BODY))
+                    .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child("业务步骤"),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_META))
+                    .text_size(px(9.5))
+                    .font_family("JetBrains Mono")
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(flow_meta)
-                    .child(if collapsed { "展开" } else { "收起" }),
+                    .child(flow_meta),
             );
-        let mut section = div()
+        let section = div()
             .flex()
             .flex_col()
-            .gap(px(ui_theme::SPACE_2))
+            .gap(px(8.0))
+            .min_h(px(140.0))
             .child(header);
         if collapsed {
             return section.into_any_element();
@@ -2207,52 +2742,35 @@ impl RepositoryView {
         let mut step_elements = Vec::new();
         for (index, step) in answer.steps.iter().enumerate() {
             if index > 0 {
-                let previous = &answer.steps[index - 1];
-                let link = answer
-                    .links
-                    .iter()
-                    .find(|link| link.from == previous.id && link.to == step.id);
-                let kind_label = link
-                    .map(|link| flow_link_kind_label(link.kind))
-                    .unwrap_or_else(|| flow_link_kind_label(FlowLinkKind::SequenceHint));
-                let link_label = link.and_then(|link| link.label.clone());
                 step_elements.push(
                     div()
                         .flex_none()
                         .flex()
-                        .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(ui_theme::SPACE_1))
-                        .w(px(54.0))
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                        .child("→")
-                        .child(kind_label)
-                        .when_some(link_label, |this, label| {
-                            this.child(
-                                div()
-                                    .max_w(px(54.0))
-                                    .truncate()
-                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                    .child(label),
-                            )
-                        })
+                        .w(px(13.0))
+                        .child(toolbar_icon_with_size(
+                            ToolbarIcon::ArrowRight,
+                            ui_theme::CONTENT_TERTIARY,
+                            13.0,
+                            13.0,
+                        ))
                         .into_any_element(),
                 );
             }
             let first_source = step.source_ids.first().cloned();
+            let icon = understanding_step_icon(step, index);
             step_elements.push(
                 div()
                     .id(format!("understanding-flow-step-{index}"))
-                    .flex_none()
                     .flex()
                     .flex_col()
-                    .gap(px(ui_theme::SPACE_2))
-                    .w(px(180.0))
-                    .min_h(px(88.0))
-                    .p(px(ui_theme::SPACE_3))
-                    .rounded(px(ui_theme::RADIUS_SM))
+                    .flex_1()
+                    .min_w(px(145.0))
+                    .gap(px(8.0))
+                    .h(px(88.0))
+                    .p(px(10.0))
+                    .rounded(px(ui_theme::RADIUS_XS))
                     .bg(rgb(if index == 0 {
                         ui_theme::PRIMARY_SUBTLE
                     } else {
@@ -2266,23 +2784,41 @@ impl RepositoryView {
                     }))
                     .child(
                         div()
-                            .text_size(px(ui_theme::TYPE_BODY))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child(format!("{}. {}", index + 1, step.title)),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(toolbar_icon_with_size(
+                                icon,
+                                if index == 0 {
+                                    ui_theme::PRIMARY
+                                } else {
+                                    ui_theme::CONTENT_SECONDARY
+                                },
+                                13.0,
+                                13.0,
+                            ))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .child(step.title.clone()),
+                            ),
                     )
                     .when_some(step.detail.clone(), |this, detail| {
                         this.child(
                             div()
-                                .text_size(px(ui_theme::TYPE_META))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .truncate()
+                                .text_size(px(9.5))
+                                .font_family("JetBrains Mono")
+                                .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                 .child(detail),
                         )
                     })
                     .when_some(first_source, |this, source_id| {
-                        this.child(self.render_source_chip(
+                        this.child(self.render_flow_source_link(
                             format!("understanding-flow-src-{index}"),
-                            "查看来源",
                             source_id,
                             cx,
                         ))
@@ -2290,118 +2826,28 @@ impl RepositoryView {
                     .into_any_element(),
             );
         }
-        let detours = understanding_flow_rows(answer)
-            .into_iter()
-            .filter_map(|row| match row {
-                UnderstandingFlowRow::Detour {
-                    from_title,
-                    to_title,
-                    kind_label,
-                    label,
-                } => Some(match label {
-                    Some(label) => format!("{from_title} —{kind_label}（{label}）→ {to_title}"),
-                    None => format!("{from_title} —{kind_label}→ {to_title}"),
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        section = section
+        section
             .child(
                 div()
                     .id("understanding-flow-horizontal")
                     .flex()
                     .items_center()
-                    .gap(px(ui_theme::SPACE_2))
+                    .gap(px(8.0))
+                    .h(px(106.0))
                     .overflow_x_scroll()
                     .children(step_elements),
             )
-            .when(!detours.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(ui_theme::SPACE_1))
-                        .p(px(ui_theme::SPACE_2))
-                        .rounded(px(ui_theme::RADIUS_XS))
-                        .bg(rgb(ui_theme::FEEDBACK_WARNING_BG))
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
-                        .children(detours),
-                )
-            });
-        section.into_any_element()
-    }
-
-    fn render_call_relation_row(
-        &self,
-        relation: &CallRelation,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let kind = call_relation_kind_label(relation.kind);
-        let first_source = relation.source_ids.first().cloned();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(ui_theme::SPACE_1))
-            .px(px(ui_theme::SPACE_3))
-            .py(px(ui_theme::SPACE_2))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(rgb(ui_theme::SURFACE_BASE))
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(ui_theme::SPACE_2))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(ui_theme::TYPE_BODY))
-                            .font_family("Consolas, monospace")
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child(relation.name.clone()),
-                    )
-                    .child(crate::ui::components::status_pill_badge(
-                        kind,
-                        ui_theme::SURFACE_SUNKEN,
-                        ui_theme::CONTENT_SECONDARY,
-                    )),
-            )
-            .when_some(relation.detail.as_ref(), |this, detail| {
-                this.child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .child(detail.clone()),
-                )
-            })
-            .when_some(relation.relative_path.as_ref(), |this, path| {
-                this.child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .font_family("Consolas, monospace")
-                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                        .child(path.clone()),
-                )
-            })
-            .when_some(first_source, |this, source_id| {
-                this.child(self.render_source_chip(
-                    format!("understanding-call-src-{index}"),
-                    "查看来源",
-                    source_id,
-                    cx,
-                ))
-            })
             .into_any_element()
     }
 
     /// 数据读写区：按 Pencil 稿使用紧凑表格，类别通过行底色与标签区分，
     /// 避免每条记录都变成一张独立卡片。
-    fn render_data_section(&self, answer: &AnalysisResult, cx: &mut Context<Self>) -> AnyElement {
+    fn render_data_section(
+        &self,
+        answer: &AnalysisResult,
+        sources: &[UnderstandingSourceRecord],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let rows = answer
             .data_accesses
             .iter()
@@ -2416,52 +2862,47 @@ impl RepositoryView {
                     access.conditions.join("；")
                 };
                 let first_source = access.source_ids.first().cloned();
-                let row_bg = if access.category == DataObjectCategory::DbObject {
-                    ui_theme::SURFACE_BASE
+                let source_label = first_source
+                    .as_deref()
+                    .map(|source_id| understanding_source_label(source_id, sources));
+                let is_cache = access.category == DataObjectCategory::Cache;
+                let row_bg = if is_cache {
+                    ui_theme::REF_LOCAL_BG
                 } else {
-                    ui_theme::FEEDBACK_SUCCESS_BG
+                    ui_theme::SURFACE_BASE
+                };
+                let operation_color = if is_cache {
+                    ui_theme::REF_LOCAL_TEXT
+                } else {
+                    ui_theme::CONTENT_SECONDARY
                 };
                 div()
                     .flex()
                     .items_center()
                     .gap(px(ui_theme::SPACE_2))
                     .min_h(px(40.0))
-                    .px(px(ui_theme::SPACE_3))
+                    .px(px(10.0))
                     .border_t_1()
                     .border_color(rgb(ui_theme::BORDER_MUTED))
                     .bg(rgb(row_bg))
                     .child(
                         div()
                             .flex_none()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .w(px(160.0))
+                            .w(px(150.0))
                             .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child(access.object.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(9.0))
-                                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                                    .child(data_object_category_label(access.category)),
-                            ),
+                            .truncate()
+                            .text_size(px(9.5))
+                            .font_family("JetBrains Mono")
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child(access.object.clone()),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .w(px(96.0))
+                            .w(px(88.0))
                             .truncate()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(ui_theme::PRIMARY))
+                            .text_size(px(10.0))
+                            .text_color(rgb(operation_color))
                             .child(data_operations_label(&access.operations)),
                     )
                     .child(
@@ -2469,7 +2910,7 @@ impl RepositoryView {
                             .flex_1()
                             .min_w(px(0.0))
                             .truncate()
-                            .text_size(px(ui_theme::TYPE_META))
+                            .text_size(px(10.0))
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(conditions),
                     )
@@ -2479,14 +2920,18 @@ impl RepositoryView {
                             .flex()
                             .items_center()
                             .justify_end()
-                            .w(px(104.0))
+                            .w(px(96.0))
                             .when_some(first_source.clone(), |this, source_id| {
-                                this.child(self.render_source_chip(
-                                    format!("understanding-data-src-{index}"),
-                                    "查看来源",
-                                    source_id,
-                                    cx,
-                                ))
+                                this.child(
+                                    self.render_data_source_chip(
+                                        format!("understanding-data-src-{index}"),
+                                        source_label
+                                            .clone()
+                                            .unwrap_or_else(|| "查看来源".to_string()),
+                                        source_id,
+                                        cx,
+                                    ),
+                                )
                             })
                             .when(first_source.is_none(), |this| {
                                 this.child(evidence_state_badge(access.state))
@@ -2497,13 +2942,13 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap(px(ui_theme::SPACE_2))
+            .gap(px(8.0))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .rounded(px(ui_theme::RADIUS_SM))
+                    .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
                     .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
@@ -2512,20 +2957,20 @@ impl RepositoryView {
                             .items_center()
                             .justify_between()
                             .min_h(px(36.0))
-                            .px(px(ui_theme::SPACE_3))
+                            .px(px(10.0))
                             .bg(rgb(ui_theme::SURFACE_SUNKEN))
                             .child(
                                 div()
-                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child("数据读写"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(ui_theme::TYPE_META))
+                                    .text_size(px(9.5))
                                     .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                                    .child("数据库、缓存与外部调用分开标记"),
+                                    .child("数据库、缓存与外部调用分开呈现"),
                             ),
                     )
                     .child(
@@ -2534,15 +2979,15 @@ impl RepositoryView {
                             .items_center()
                             .gap(px(ui_theme::SPACE_2))
                             .min_h(px(28.0))
-                            .px(px(ui_theme::SPACE_3))
+                            .px(px(10.0))
                             .bg(rgb(ui_theme::SURFACE_BASE))
-                            .text_size(px(ui_theme::TYPE_META))
+                            .text_size(px(9.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                            .child(div().flex_none().w(px(160.0)).child("对象"))
-                            .child(div().flex_none().w(px(96.0)).child("操作"))
+                            .child(div().flex_none().w(px(150.0)).child("对象"))
+                            .child(div().flex_none().w(px(88.0)).child("操作"))
                             .child(div().flex_1().min_w(px(0.0)).child("发生条件"))
-                            .child(div().flex_none().w(px(104.0)).text_right().child("来源")),
+                            .child(div().flex_none().w(px(96.0)).child("来源")),
                     )
                     .children(rows),
             )
@@ -2563,142 +3008,136 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    fn render_unknowns_section(&self, answer: &AnalysisResult) -> AnyElement {
-        let unknowns = answer
+    /// Pencil 稿中的收尾信息：把调用入口与尚未确认范围压成并排的轻量提示卡，
+    /// 不再展开成第二套大列表，避免答案区层级继续向下膨胀。
+    fn render_boundary_note(&self, answer: &AnalysisResult) -> AnyElement {
+        let entry = match (answer.callers.first(), answer.callees.first()) {
+            (Some(caller), Some(callee)) => format!("{} → {}", caller.name, callee.name),
+            (Some(caller), None) => caller.name.clone(),
+            (None, Some(callee)) => callee.name.clone(),
+            (None, None) => "当前分析未定位到明确调用入口".to_string(),
+        };
+        let unresolved = answer
             .unknowns
-            .iter()
-            .map(|unknown| {
-                div()
-                    .flex()
-                    .gap(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("·".to_string())
-                    .child(unknown.clone())
+            .first()
+            .cloned()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                (!answer.coverage_note.trim().is_empty()).then(|| answer.coverage_note.clone())
             })
-            .collect::<Vec<_>>();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(ui_theme::SPACE_2))
-            .child(self.render_section_title("未确认与范围"))
-            .when(!unknowns.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .child("以下内容无法由源码确认，AI 未编造结论："),
-                )
-                .children(unknowns)
-            })
-            .when(!answer.coverage_note.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                        .child(answer.coverage_note.clone()),
-                )
-            })
-            .into_any_element()
-    }
+            .unwrap_or_else(|| "当前检索范围内暂无未确认项".to_string());
 
-    /// 来源区：全部来源 chip 按钮；点击打开来源侧栏。
-    fn render_sources_section(
-        &self,
-        sources: &[UnderstandingSourceRecord],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let chips = sources
-            .iter()
-            .enumerate()
-            .filter_map(|(index, record)| {
-                let source_id = record.source_id();
-                if source_id.is_empty() {
-                    return None;
-                }
-                let label = format!(
-                    "{}:{}-{}",
-                    record.relative_path, record.start_line, record.end_line
-                );
-                Some(self.render_dynamic_source_chip(
-                    format!("understanding-source-{index}"),
-                    label,
-                    source_id,
-                    cx,
-                ))
-            })
-            .collect::<Vec<_>>();
         div()
             .flex()
-            .flex_col()
-            .gap(px(ui_theme::SPACE_2))
-            .child(self.render_section_title("来源"))
+            .gap(px(10.0))
+            .h(px(58.0))
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap(px(ui_theme::SPACE_1))
-                    .children(chips),
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .gap(px(4.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("调用入口"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(9.5))
+                            .font_family("JetBrains Mono")
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(entry),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .gap(px(4.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(ui_theme::RADIUS_XS))
+                    .bg(rgb(ui_theme::REF_TAG_BG))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui_theme::REF_TAG_TEXT))
+                            .child("尚未确认"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(9.5))
+                            .text_color(rgb(ui_theme::REF_TAG_TEXT))
+                            .child(unresolved),
+                    ),
             )
             .into_any_element()
     }
 
-    /// 来源 chip 文字按钮（动态标签版本）。
-    fn render_dynamic_source_chip(
+    fn render_flow_source_link(
+        &self,
+        id: String,
+        source_id: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(format!("cu-flow-source-{id}"))
+            .flex_none()
+            .truncate()
+            .text_size(px(9.5))
+            .text_color(rgb(ui_theme::PRIMARY))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.open_understanding_source(source_id.clone(), cx);
+            }))
+            .child("查看来源")
+            .into_any_element()
+    }
+
+    fn render_data_source_chip(
         &self,
         id: String,
         label: String,
         source_id: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let element_id = format!("cu-chip-{id}");
         div()
-            .id(element_id)
+            .id(format!("cu-data-source-{id}"))
             .flex_none()
-            .max_w(px(360.0))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .px(px(ui_theme::SPACE_2))
-            .py(px(ui_theme::SPACE_1))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
-            .text_size(px(ui_theme::TYPE_META))
-            .font_family("Consolas, monospace")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(96.0))
+            .h(px(24.0))
+            .px(px(6.0))
+            .rounded(px(5.0))
+            .bg(rgb(ui_theme::STATE_HOVER))
+            .text_size(px(9.0))
+            .font_family("JetBrains Mono")
             .text_color(rgb(ui_theme::PRIMARY))
             .cursor_pointer()
             .hover(|this| this.bg(rgb(ui_theme::STATE_SELECTION)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_understanding_source(source_id.clone(), cx);
             }))
-            .child(label)
-            .into_any_element()
-    }
-
-    /// 来源 chip 文字按钮（每个来源唯一元素 id）。
-    fn render_source_chip(
-        &self,
-        id: String,
-        label: &'static str,
-        source_id: String,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let element_id = format!("cu-chip-{id}");
-        div()
-            .id(element_id)
-            .flex_none()
-            .px(px(ui_theme::SPACE_2))
-            .py(px(ui_theme::SPACE_1))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
-            .text_size(px(ui_theme::TYPE_META))
-            .font_family("Consolas, monospace")
-            .text_color(rgb(ui_theme::PRIMARY))
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::STATE_SELECTION)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.open_understanding_source(source_id.clone(), cx);
-            }))
-            .child(label)
+            .child(div().truncate().child(label))
             .into_any_element()
     }
 
@@ -2735,6 +3174,30 @@ impl RepositoryView {
             .focused_source
             .as_ref()
             .map(|source| format!("L{}–{}", source.start_line, source.end_line));
+        let focus_range = state
+            .focused_source
+            .as_ref()
+            .map(|source| (source.start_line, source.end_line));
+        let support_text = state
+            .history
+            .viewing
+            .as_ref()
+            .map(|record| record.analysis.summary.as_str())
+            .or_else(|| {
+                state
+                    .display
+                    .answer
+                    .as_ref()
+                    .map(|memory| memory.analysis.summary.as_str())
+            })
+            .map(|summary| format!("支持结论：{}", excerpt_line(summary, 96)))
+            .unwrap_or_else(|| "支持结论：已定位到当前回答引用的源码范围".to_string());
+        // B4：Java 来源的语义能力（T5 只预留接口，接入 JLS-T3 前恒不可用）。
+        let java_capability = understanding_java_capability(&relative_path);
+        let semantics_ready = java_capability
+            .as_ref()
+            .map(|capability| capability.ready)
+            .unwrap_or(false);
         let width = if full {
             None
         } else {
@@ -2748,8 +3211,6 @@ impl RepositoryView {
             .min_h(px(0.0))
             .when_some(width, |this, width| this.w(px(width)))
             .when(full, |this| this.flex_1())
-            .border_l_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
             .bg(rgb(ui_theme::SURFACE_BASE))
             // 头部：文件名 + 返回/关闭
             .child(
@@ -2759,31 +3220,46 @@ impl RepositoryView {
                     .items_center()
                     .justify_between()
                     .gap(px(ui_theme::SPACE_2))
+                    .h(px(40.0))
                     .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
                     .border_b_1()
                     .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
                             .min_w(px(0.0))
                             .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .font_family("Consolas, monospace")
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(file_name),
+                            .child(toolbar_icon_with_size(
+                                ToolbarIcon::FileCode,
+                                ui_theme::PRIMARY,
+                                14.0,
+                                14.0,
+                            ))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .font_family("JetBrains Mono")
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(file_name),
+                            ),
                     )
-                    .child(command_group().child(self.app_button(
-                        if full { "返回回答" } else { "关闭" },
-                        None,
-                        None,
-                        ButtonTone::Neutral,
+                    .child(icon_command_button(
+                        "understanding-source-close".to_string(),
+                        if full {
+                            ToolbarIcon::ChevronLeft
+                        } else {
+                            ToolbarIcon::Close
+                        },
+                        if full { "返回回答" } else { "关闭来源" },
                         true,
                         |this, _window, cx| this.close_understanding_source(cx),
                         cx,
-                    ))),
+                    )),
             )
             // 路径与引用范围独立成轻量信息条，避免长路径挤压标题和操作。
             .when(!relative_path.is_empty(), |this| {
@@ -2794,8 +3270,8 @@ impl RepositoryView {
                         .items_center()
                         .justify_between()
                         .gap(px(ui_theme::SPACE_2))
+                        .h(px(38.0))
                         .px(px(ui_theme::SPACE_3))
-                        .py(px(ui_theme::SPACE_2))
                         .bg(rgb(ui_theme::SURFACE_SUNKEN))
                         .border_b_1()
                         .border_color(rgb(ui_theme::BORDER_MUTED))
@@ -2804,8 +3280,8 @@ impl RepositoryView {
                                 .min_w(px(0.0))
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(ui_theme::TYPE_META))
-                                .font_family("Consolas, monospace")
+                                .text_size(px(9.5))
+                                .font_family("JetBrains Mono")
                                 .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                 .child(parent_path),
                         )
@@ -2813,16 +3289,118 @@ impl RepositoryView {
                             this.child(
                                 div()
                                     .flex_none()
-                                    .px(px(ui_theme::SPACE_2))
-                                    .py(px(2.0))
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::PRIMARY_SUBTLE))
-                                    .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
-                                    .text_color(rgb(ui_theme::PRIMARY))
+                                    .text_size(px(9.5))
+                                    .font_family("JetBrains Mono")
+                                    .text_color(rgb(ui_theme::REF_LOCAL_TEXT))
                                     .child(label),
                             )
                         }),
+                )
+            })
+            .when(valid, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(36.0))
+                        .gap(px(4.0))
+                        .px(px(8.0))
+                        .border_b_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .children(
+                            ["定义", "实现", "引用", "调用方", "被调用方"]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, label)| {
+                                    let semantics_blocked =
+                                        java_capability.is_some() && !semantics_ready;
+                                    div()
+                                        .id(format!("understanding-semantic-tab-{index}"))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .h(px(24.0))
+                                        .px(px(7.0))
+                                        .rounded(px(5.0))
+                                        .bg(rgb(if index == 0 && !semantics_blocked {
+                                            ui_theme::PRIMARY_SUBTLE
+                                        } else {
+                                            ui_theme::SURFACE_BASE
+                                        }))
+                                        .text_size(px(9.5))
+                                        .text_color(rgb(if semantics_blocked {
+                                            ui_theme::MUTED_FOREGROUND
+                                        } else if index == 0 {
+                                            ui_theme::PRIMARY
+                                        } else {
+                                            ui_theme::CONTENT_SECONDARY
+                                        }))
+                                        .when(semantics_blocked, |this| {
+                                            this.tooltip(move |_window, cx| {
+                                                crate::ui::components::tooltip_text(
+                                                    format!("{label} · 不可用：Java 语义增强未就绪"),
+                                                    cx,
+                                                )
+                                            })
+                                        })
+                                        .child(label)
+                                }),
+                        ),
+                )
+            })
+            // B4：Java 语义不可用时解释原因并给出「前往语言支持」入口。
+            .when_some(java_capability.clone(), |this, capability| {
+                if capability.ready || !valid {
+                    return this;
+                }
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .mx(px(ui_theme::SPACE_3))
+                        .mt(px(ui_theme::SPACE_3))
+                        .px(px(9.0))
+                        .py(px(9.0))
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .bg(rgb(ui_theme::FEEDBACK_INFO_BG))
+                        .child(toolbar_icon_with_size(
+                            ToolbarIcon::Info,
+                            ui_theme::FEEDBACK_INFO_TEXT,
+                            12.0,
+                            12.0,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .text_size(px(9.8))
+                                        .text_color(rgb(ui_theme::FEEDBACK_INFO_TEXT))
+                                        .child(capability.title),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.2))
+                                        .text_color(rgb(ui_theme::FEEDBACK_INFO_TEXT))
+                                        .child(capability.detail),
+                                ),
+                        )
+                        .child(self.app_button(
+                            "前往语言支持",
+                            None,
+                            None,
+                            ButtonTone::Neutral,
+                            true,
+                            |this, _window, cx| this.open_understanding_index_settings(cx),
+                            cx,
+                        )),
                 )
             })
             // 失效状态条
@@ -2877,72 +3455,166 @@ impl RepositoryView {
                         .overflow_y_scroll()
                         .track_scroll(&scroll)
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .py(px(ui_theme::SPACE_2))
-                                .children(lines.iter().map(|line| self.render_source_line(line))),
+                            div().flex().flex_col().children(
+                                lines
+                                    .iter()
+                                    .map(|line| self.render_source_line(line, focus_range)),
+                            ),
                         ),
                 )
             })
-            // 底部：解释此处（追问聚焦）
+            // 底部：与 Pencil 稿一致显示复验状态与支持结论；整块可用于“解释此处”。
             .child(
                 div()
+                    .id("understanding-source-evidence")
                     .flex_none()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(6.0))
+                    .h(px(86.0))
+                    .px(px(12.0))
+                    .py(px(10.0))
                     .border_t_1()
                     .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                    .when(has_focused, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                    })
+                    .tooltip(move |_window, cx| crate::ui::components::tooltip_text("解释此处", cx))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.focus_understanding_source(cx);
+                    }))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(ui_theme::SPACE_1))
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(if valid {
-                                ui_theme::FEEDBACK_SUCCESS_TEXT
-                            } else {
-                                ui_theme::CONTENT_TERTIARY
-                            }))
-                            .child(if valid { "✓" } else { "·" })
-                            .child(if valid {
-                                "文件与行号已复验"
-                            } else {
-                                "来源等待重新分析"
+                            .justify_between()
+                            .gap(px(ui_theme::SPACE_2))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgb(if valid {
+                                        ui_theme::REF_LOCAL_TEXT
+                                    } else {
+                                        ui_theme::CONTENT_TERTIARY
+                                    }))
+                                    .child(toolbar_icon_with_size(
+                                        ToolbarIcon::ShieldCheck,
+                                        if valid {
+                                            ui_theme::REF_LOCAL_TEXT
+                                        } else {
+                                            ui_theme::CONTENT_TERTIARY
+                                        },
+                                        12.0,
+                                        12.0,
+                                    ))
+                                    .child(if valid {
+                                        "文件与行号已复验"
+                                    } else {
+                                        "来源等待重新分析"
+                                    }),
+                            )
+                            .when(has_focused, |this| {
+                                this.child(
+                                    div()
+                                        .id("understanding-explain-here")
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .h(px(22.0))
+                                        .px(px(8.0))
+                                        .rounded(px(5.0))
+                                        .bg(rgb(ui_theme::PRIMARY))
+                                        .text_size(px(9.5))
+                                        .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
+                                        .child("解释此处"),
+                                )
                             }),
                     )
-                    .child(self.app_button(
-                        "解释此处",
-                        None,
-                        None,
-                        ButtonTone::Neutral,
-                        has_focused,
-                        |this, _window, cx| this.focus_understanding_source(cx),
-                        cx,
-                    )),
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(14.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(support_text),
+                    )
+                    // S5：基础源码模式与语义能力状态（Java 未就绪时常驻说明）。
+                    .when(
+                        java_capability.is_some() && !semantics_ready && valid,
+                        |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_theme::SPACE_2))
+                                    .text_size(px(9.0))
+                                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                                    .child("基础源码模式 · 只读")
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .children(["定义 · 不可用", "引用 · 不可用"].map(
+                                                |label| {
+                                                    div()
+                                                        .flex_none()
+                                                        .flex()
+                                                        .items_center()
+                                                        .h(px(21.0))
+                                                        .px(px(6.0))
+                                                        .rounded(px(5.0))
+                                                        .bg(rgb(ui_theme::SURFACE_BASE))
+                                                        .text_size(px(9.0))
+                                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                                        .child(label)
+                                                },
+                                            )),
+                                    ),
+                            )
+                        },
+                    ),
             )
             .into_any_element()
     }
 
-    fn render_source_line(&self, line: &SourceLine) -> AnyElement {
+    fn render_source_line(&self, line: &SourceLine, focus_range: Option<(u32, u32)>) -> AnyElement {
         let number = line.line_number.to_string();
         let text = line.text.clone();
+        let selected = focus_range
+            .map(|(start, end)| line.line_number >= start && line.line_number <= end)
+            .unwrap_or(false);
         div()
             .flex()
             .flex_row()
-            .min_h(px(18.0))
+            .items_center()
+            .h(px(27.0))
+            .gap(px(10.0))
+            .px(px(10.0))
             .flex_none()
+            .bg(rgb(if selected {
+                ui_theme::PRIMARY_SUBTLE
+            } else {
+                ui_theme::SURFACE_BASE
+            }))
             .child(
                 div()
                     .flex_none()
-                    .w(px(48.0))
-                    .px(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                    .w(px(24.0))
+                    .text_size(px(9.0))
+                    .font_family("JetBrains Mono")
+                    .text_color(rgb(if selected {
+                        ui_theme::PRIMARY
+                    } else {
+                        ui_theme::CONTENT_TERTIARY
+                    }))
                     .text_right()
                     .child(number),
             )
@@ -2950,10 +3622,13 @@ impl RepositoryView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .pr(px(ui_theme::SPACE_3))
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .text_size(px(9.5))
+                    .font_family("JetBrains Mono")
+                    .text_color(rgb(if selected {
+                        ui_theme::PRIMARY
+                    } else {
+                        ui_theme::CONTENT_PRIMARY
+                    }))
                     .child(if text.is_empty() {
                         " ".to_string()
                     } else {
@@ -3096,17 +3771,17 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    /// S1 空态：欢迎说明、示例问题、最近完成记录与问题输入。
+    /// S1 空态：仓库上下文、提问引导、本地历史与问题输入。
     fn render_understanding_empty(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let handle = self.scroll_handle("understanding-answer-scroll");
-        let recent = self
+        let records = self
             .understanding_state()
             .map(|state| {
                 state
                     .history
                     .records
                     .iter()
-                    .take(3)
+                    .take(LOCAL_HISTORY_INLINE_LIMIT)
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -3124,188 +3799,299 @@ impl RepositoryView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(ui_theme::SPACE_4))
-                    .p(px(ui_theme::SPACE_6))
-                    .max_w(px(760.0))
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_TITLE))
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("用一句话问业务逻辑"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_BODY))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(
-                                "例如“登录逻辑怎么实现的？”——AI 会检索代码索引、按需阅读源码，给出入口、调用上下游、数据读写与来源，可继续追问。",
-                            ),
-                    )
-                    .child(self.render_example_questions(cx))
-                    .when(!recent.is_empty(), |this| {
-                        this.child(self.render_recent_history(recent, cx))
-                    })
-                    .child(self.render_understanding_input_area(window, cx)),
-            )
-            .into_any_element()
-    }
-
-    fn render_example_questions(&self, cx: &mut Context<Self>) -> AnyElement {
-        let chips = EXAMPLE_QUESTIONS
-            .iter()
-            .enumerate()
-            .map(|(index, question)| {
-                let question = question.to_string();
-                let question_for_click = question.clone();
-                div()
-                    .id(format!("understanding-example-{index}"))
-                    .flex_none()
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
-                    .rounded(px(ui_theme::RADIUS_PILL))
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::SURFACE_BASE))
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .cursor_pointer()
-                    .hover(|this| {
-                        this.bg(rgb(ui_theme::STATE_HOVER))
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                    })
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.understanding_question
-                            .set_value(question_for_click.clone());
-                        cx.notify();
-                    }))
-                    .child(question)
-            })
-            .collect::<Vec<_>>();
-        div()
-            .flex()
-            .flex_wrap()
-            .gap(px(ui_theme::SPACE_2))
-            .children(chips)
-            .into_any_element()
-    }
-
-    /// 空态的最近完成记录（点击进入只读完成态）。
-    fn render_recent_history(
-        &self,
-        records: Vec<UnderstandingHistoryRecord>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = records
-            .into_iter()
-            .map(|record| {
-                let millis = record.finished_at_millis;
-                let question = record.analysis.context.question.clone();
-                let completion = record.completion;
-                let model = record.model.clone();
-                div()
-                    .id(format!("understanding-recent-{millis}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(ui_theme::SPACE_1))
                     .w_full()
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
-                    .rounded(px(ui_theme::RADIUS_XS))
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::SURFACE_BASE))
-                    .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.view_understanding_history_record(millis, cx);
-                    }))
+                    .min_w(px(0.0))
+                    .gap(px(14.0))
+                    .p(px(ui_theme::SPACE_4))
+                    .child(self.render_understanding_context_row())
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap(px(ui_theme::SPACE_2))
+                            .flex_col()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .min_w(px(0.0))
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child(question),
+                                    .child("你想了解这个项目的什么？"),
                             )
-                            .child(completion_badge(completion)),
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child("AI 会按需搜索并阅读有限源码，不会后台上传整个仓库。"),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                            .child(format!("{} · {model}", understanding_time_label(millis))),
-                    )
-            })
-            .collect::<Vec<_>>();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(ui_theme::SPACE_2))
-            .child(
-                div()
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("最近完成记录"),
+                    .child(self.render_understanding_input_area(window, cx, "发送", true))
+                    .child(self.render_local_history(records, cx)),
             )
-            .children(rows)
             .into_any_element()
     }
 
-    /// 问题输入区（S1/Failed/Finished 共用；运行中不渲染）。
-    fn render_understanding_input_area(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let can_send = !self.understanding_question.value.trim().is_empty();
+    /// S1 上下文行：仓库引用 + 索引状态（Pencil 稿 S1 Context Row）。
+    fn render_understanding_context_row(&self) -> AnyElement {
+        let index_state = self.understanding_index_state();
+        let (badge_bg, badge_fg) = index_state.palette();
         div()
-            .flex_none()
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_between()
             .gap(px(ui_theme::SPACE_2))
-            .p(px(ui_theme::SPACE_3))
-            .rounded(px(ui_theme::RADIUS_SM))
-            .border_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::SURFACE_BASE))
-            .child(
-                div()
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("向当前仓库提问"),
-            )
-            .child(self.multi_line_input(FieldId::CodeUnderstandingQuestion, window, cx))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(ui_theme::SPACE_2))
+                    .gap(px(6.0))
+                    .min_w(px(0.0))
+                    .child(toolbar_icon_with_size(
+                        ToolbarIcon::Worktree,
+                        ui_theme::PRIMARY,
+                        12.0,
+                        12.0,
+                    ))
                     .child(
                         div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                            .child("Enter 发送 · Shift+Enter 换行；仅发送回答所需的代码片段"),
-                    )
-                    .child(self.app_button(
-                        "发送",
-                        None,
-                        None,
-                        ButtonTone::Primary,
-                        can_send,
-                        |this, _window, cx| this.submit_understanding_question(cx),
-                        cx,
-                    )),
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(10.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(self.understanding_repo_context_text()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .h(px(21.0))
+                    .px(px(6.0))
+                    .rounded(px(5.0))
+                    .bg(rgb(badge_bg))
+                    .text_size(px(9.0))
+                    .text_color(rgb(badge_fg))
+                    .child(index_state.badge_label()),
             )
             .into_any_element()
     }
+
+    /// S1 本地历史：本机完成记录（按仓库隔离）的可点选列表，点击恢复只读完成态。
+    /// 完整列表（最近 20 条）仍由页头「基础分析」弹窗提供。
+    fn render_local_history(
+        &self,
+        records: Vec<UnderstandingHistoryRecord>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(ui_theme::SPACE_2))
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                    .child("本地历史"),
+            )
+            .when(!records.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id("understanding-history-open-all")
+                        .flex_none()
+                        .text_size(px(9.0))
+                        .text_color(rgb(ui_theme::PRIMARY))
+                        .cursor_pointer()
+                        .hover(|this| this.text_color(rgb(ui_theme::CONTENT_PRIMARY)))
+                        .child("查看全部")
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.open_understanding_history(cx);
+                        })),
+                )
+            });
+        let body = if records.is_empty() {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(28.0))
+                .px(px(ui_theme::SPACE_2))
+                .rounded(px(5.0))
+                .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                .text_size(px(9.5))
+                .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                .child("本机还没有完成记录；完成一次分析后会出现在这里")
+                .into_any_element()
+        } else {
+            let rows = records
+                .into_iter()
+                .map(|record| {
+                    let millis = record.finished_at_millis;
+                    let question = record.analysis.context.question.clone();
+                    let sources = record.sources.len();
+                    let completion = record.completion;
+                    div()
+                        .id(format!("understanding-history-row-{millis}"))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_theme::SPACE_2))
+                        .min_h(px(30.0))
+                        .px(px(ui_theme::SPACE_2))
+                        .py(px(4.0))
+                        .rounded(px(5.0))
+                        .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.view_understanding_history_record(millis, cx);
+                        }))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(9.5))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .child(excerpt_line(&question, 72)),
+                        )
+                        .child(completion_badge(completion))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(8.8))
+                                .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                                .child(format!(
+                                    "{} · {sources} 个来源",
+                                    understanding_time_label(millis)
+                                )),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .children(rows)
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .gap(px(5.0))
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// 提问区的 32px 主按钮（Pencil 稿：一体化边框容器右侧）。
+    fn render_understanding_send_button(
+        &self,
+        label: &'static str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (bg, fg) = if enabled {
+            (ui_theme::PRIMARY, ui_theme::PRIMARY_FOREGROUND)
+        } else {
+            (ui_theme::ACCENT, ui_theme::MUTED_FOREGROUND)
+        };
+        div()
+            .id("understanding-send")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .h(px(32.0))
+            .px(px(11.0))
+            .rounded(px(ui_theme::RADIUS_XS))
+            .bg(rgb(bg))
+            .text_size(px(10.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgb(fg))
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.opacity(0.9))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.submit_understanding_question(cx);
+                    }))
+            })
+            .when(!enabled, |this| this.opacity(0.86))
+            .child(toolbar_icon_with_size(ToolbarIcon::Send, fg, 13.0, 13.0))
+            .child(label)
+            .into_any_element()
+    }
+
+    /// 问题输入区（S1/Failed/Finished 共用；运行中不渲染）。
+    ///
+    /// 一体化边框容器：左侧输入、右侧 32px 主按钮（§9.5）。S1 空态在容器内
+    /// 额外显示快捷键提示，按钮文案为「发送」；完成后固定为「提问」。
+    /// 占位文案由输入框自身渲染（`TextFieldState::placeholder`）。
+    fn render_understanding_input_area(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        send_label: &'static str,
+        show_hint: bool,
+    ) -> AnyElement {
+        let value = self.understanding_question.value.clone();
+        let can_send = !value.trim().is_empty();
+        let question_focused = self
+            .field(FieldId::CodeUnderstandingQuestion)
+            .focus
+            .is_focused(window);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(7.0))
+            .rounded(px(ui_theme::RADIUS_SM))
+            .border_1()
+            .border_color(rgb(if question_focused {
+                ui_theme::INPUT_BORDER_FOCUSED
+            } else {
+                ui_theme::INPUT_BORDER
+            }))
+            .bg(rgb(ui_theme::SURFACE_BASE))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .min_h(px(36.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.multi_line_input(
+                                FieldId::CodeUnderstandingQuestion,
+                                window,
+                                cx,
+                            )),
+                    )
+                    .child(self.render_understanding_send_button(send_label, can_send, cx)),
+            )
+            .when(show_hint, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .text_size(px(9.0))
+                        .text_color(rgb(ui_theme::CONTENT_TERTIARY))
+                        .child(QUESTION_SHORTCUT_HINT),
+                )
+            })
+            .into_any_element()
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/code_understanding_view.rs"]
+mod tests;

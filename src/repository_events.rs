@@ -29,6 +29,8 @@ impl RepositoryView {
                 if self.has_active_loading()
                     || self.active_operation_blocker_message().is_some()
                     || feedbacks_expired
+                    // 生成态耗时徽标与后台任务条计时随时间推进。
+                    || self.understanding_tasks_active()
                 {
                     cx.notify();
                 }
