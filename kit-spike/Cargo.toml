@@ -1,0 +1,16 @@
+[package]
+name = "kit-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 隔离验证工程（重构计划 M1）：只服务 GPUI Kit 原生样板，不属于主工程依赖图。
+[workspace]
+
+[dependencies]
+gpui-kit = "=0.6.4"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
