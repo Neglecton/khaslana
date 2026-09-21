@@ -3,8 +3,7 @@
 // 查询与详情均走 Short 任务池 + seq 代际守卫（乱序结果丢弃）。
 //
 // 键盘行为（↑↓ 切换 / Enter 确认 / Esc 关闭）在面板层 capture_key_down
-// 拦截——先于输入框的 TextUp/TextDown/提交处理；该例外已记入
-// AGENTS.md §8 键盘白名单。
+// 拦截——先于输入框的 TextUp/TextDown/提交处理，保持检索面板的列表导航语义。
 
 use gpui::{Context, IntoElement, KeyDownEvent, MouseButton, Window, div, prelude::*, px};
 
@@ -31,7 +30,7 @@ impl RepositoryView {
         self.close_popups();
         self.code_search_palette = Some(crate::CodeSearchPaletteState::default());
         // 面板打开即聚焦输入框（重开续用上次关键词，立即按现有输入查询）。
-        window.focus(&self.code_palette_search.focus);
+        window.focus(&self.code_palette_search.focus, cx);
         self.on_code_palette_input_changed();
         cx.notify();
     }

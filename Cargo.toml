@@ -12,7 +12,16 @@ chardetng = "1"
 directories = "6"
 encoding_rs = "0.8"
 git2 = { version = "0.21", features = ["https", "ssh"] }
-gpui = { package = "gpui-ce", version = "0.3" }
+# GPUI 运行时（M2 底层切换）：从 gpui-ce 换到 gpui-pre，靠 Cargo 别名让现有
+# `use gpui::…` 原样保留。gpui-ce 0.3.2/0.3.3 已在 crates.io 被 yank，任何重新
+# 解析都会失败，所以只能整体切换，不能两套并存。gpui-kit 是同一套 gpui-pre 的
+# 门面（component / assets / 平台后端），与别名指向同一个 crate 实例。
+#
+# 版本必须精确锁到 0.3.5：gpui-kit 0.6.4 的 component 层与 gpui-pre 0.3.6 不兼容
+# （gpui-component/src/inspector.rs 的 register_inspector_element 签名对不上，
+# 编译直接失败），而 `version = "0.3.5"` 在 Cargo 里是 ^0.3.5，会解析到 0.3.6。
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+gpui-kit = "=0.6.4"
 json5 = "1"
 keyring = "4"
 keyring-core = "1"
@@ -42,9 +51,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # socks-proxy 让 OAuth/AI/更新请求跟随用户的 SOCKS5 代理设置，缺失时 SOCKS 代理会静默退化为直连。
 ureq = { version = "3", features = ["json", "socks-proxy"] }
 unicode-segmentation = "1"
-# 0.3 改为 headless + renderer 架构（component 模块移除、Theme 结构重排），
-# 升级需重写组件接入层，暂留 0.2 系最新版本。
-yororen_ui = "0.2"
 # 代码索引引擎（src/code_index/）：tree-sitter AST 解析 + gitignore 感知目录遍历。
 # 各语言语法 crate 只导出 LanguageFn 常量（不链接 runtime），版本以共同编译为准。
 # Kotlin 用 tree-sitter-kotlin-ng：官方 tree-sitter-kotlin 0.3.8 依赖旧 runtime 0.21，

@@ -210,7 +210,7 @@ fn conflict_pane_viewport(
         bottom: top + height,
         offset_x: f32::from(offset.x),
         offset_y: f32::from(offset.y),
-        max_offset_y: f32::from(state.base_handle.max_offset().height).max(0.0),
+        max_offset_y: f32::from(state.base_handle.max_offset().y).max(0.0),
         row_height,
         handle: handle.clone(),
     })
@@ -640,7 +640,7 @@ impl RepositoryView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.conflict_editor.focus);
+                    window.focus(&this.conflict_editor.focus, cx);
                     this.main_mode = MainMode::Conflict;
                     this.select_conflict_file(path_for_select.clone());
                     cx.notify();
@@ -1298,7 +1298,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .p_3()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
@@ -1375,7 +1375,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .p_3()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
@@ -1569,7 +1569,7 @@ impl RepositoryView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                            window.focus(&this.conflict_editor.focus);
+                            window.focus(&this.conflict_editor.focus, cx);
                             this.main_mode = MainMode::Conflict;
                             this.select_conflict_file(path_for_switch.clone());
                             this.change_context_menu = None;
@@ -1581,7 +1581,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(24.0))
                             .text_size(px(ui_theme::TYPE_META))
-                            .font_family("monospace")
+                            .font_family("Consolas")
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("!"),
                     )

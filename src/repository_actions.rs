@@ -610,7 +610,11 @@ impl RepositoryView {
     }
 
     /// 图谱页分支高亮下拉的展开/收起（与编码菜单同一套防重开模式）。
-    pub(crate) fn toggle_commit_graph_branch_menu(&mut self, window: &mut Window) {
+    pub(crate) fn toggle_commit_graph_branch_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.commit_graph_branch_menu_closed_by_capture {
             self.commit_graph_branch_menu_closed_by_capture = false;
             self.commit_graph.branch_menu_open = false;
@@ -630,7 +634,7 @@ impl RepositoryView {
         if self.commit_graph.branch_menu_open {
             // 打开即清空上次搜索词并聚焦搜索框，输入即过滤（仓库切换下拉同款）。
             self.commit_graph_branch_search.clear();
-            window.focus(&self.commit_graph_branch_search.focus);
+            window.focus(&self.commit_graph_branch_search.focus, cx);
         }
     }
 

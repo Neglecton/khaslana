@@ -2,8 +2,8 @@ use std::ops::{Deref, DerefMut, Range};
 
 use gpui::{
     App, Bounds, Context, Element, ElementId, ElementInputHandler, FocusHandle, GlobalElementId,
-    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, Window,
-    fill, point, px, relative, size,
+    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextAlign, TextRun,
+    Window, fill, point, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -808,7 +808,7 @@ impl Element for SingleLineInputElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().unwrap_or_default();
-        let _ = line.paint(bounds.origin, window.line_height(), window, cx);
+        let _ = line.paint(bounds.origin, window.line_height(), TextAlign::Left, None, window, cx);
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
         }
@@ -1070,12 +1070,26 @@ impl Element for MultiLineInputElement {
             window.paint_quad(selection);
         }
         if let Some(placeholder) = prepaint.placeholder.take() {
-            let _ = placeholder.paint(bounds.origin, window.line_height(), window, cx);
+            let _ = placeholder.paint(
+                bounds.origin,
+                window.line_height(),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
         for line in &prepaint.lines {
             let _ = line
                 .line
-                .paint(line.bounds.origin, window.line_height(), window, cx);
+                .paint(
+                    line.bounds.origin,
+                    window.line_height(),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
         }
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);

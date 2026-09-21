@@ -265,7 +265,7 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
+                                    .font_family("Consolas")
                                     .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),
@@ -561,11 +561,10 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p(px(ui_theme::SPACE_3))
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
-            // 内容区行选择纯鼠标（拖选）；不设键盘上下文/焦点——键盘复制/全选
-            // 仅保留在文本框内（键盘白名单见 AGENTS.md §8）。
+            // 内容区是只读代码画布，行选择继续使用拖选；不伪装成文本输入控件。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {

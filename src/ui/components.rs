@@ -13,6 +13,7 @@ use gpui::{
     App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Render, Stateful, Window,
     div, prelude::*, px,
 };
+use gpui_kit::base::Button as BaseButton;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppToastKind {
@@ -257,9 +258,109 @@ pub(crate) fn app_panel() -> Div {
     flat_panel()
 }
 
-/// 应用外壳 — 纯色背景，去掉旧版渐变和玻璃态装饰
+/// 应用外壳 — 环境底色 + 窗口圆角；面板浮在其上（悬浮工作台视觉层，M3 起）。
+///
+/// 窗口背景是透明的（`WindowBackgroundAppearance::Transparent`），外壳自己就是那张
+/// 圆角卡片：根背景按 `window_radius()` 画圆角，`overflow_hidden` 只保证子元素不越出矩形，
+/// **圆角本身裁不住子元素**（gpui 的 `ContentMask` 只有 bounds），所以凡是铺满窗口的
+/// 子元素（顶栏、全屏遮罩）都必须自己带同样的圆角。
 pub(crate) fn app_shell_surface() -> Div {
-    div().relative().size_full().bg(rgb(theme::BACKGROUND))
+    div()
+        .relative()
+        .size_full()
+        .rounded(px(theme::window_radius()))
+        .overflow_hidden()
+        .bg(rgb(theme::WB_ENV))
+}
+
+/// 工作面板阴影：向下 5px、模糊 22px、冷色低透明度。
+///
+/// 阴影按面板数量增长，不能按行或代码块增长；行内与代码区不加阴影。
+pub(crate) fn panel_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow::new(px(0.0), px(5.0), rgba(theme::WB_SHADOW_PANEL).into())
+            .blur_radius(px(22.0)),
+    ]
+}
+
+/// 控件接触阴影：向下 2px、模糊 5px，用于顶栏命令与浮起的小实体。
+pub(crate) fn control_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow::new(px(0.0), px(2.0), rgba(theme::WB_SHADOW_CONTROL).into())
+            .blur_radius(px(5.0)),
+    ]
+}
+
+/// 悬浮面板 — 圆角抬起的独立实体（导航外壳、文件列表、差异外壳、提交区）。
+///
+/// 面板内需要裁掉子元素的方角（列表底、代码底色），所以这里直接带
+/// `overflow_hidden`；面板内容若要有自己的滚动容器，请放在面板内部而不是外层，
+/// 否则阴影会被父级裁切。
+pub(crate) fn floating_panel() -> Div {
+    div()
+        .rounded(px(theme::RADIUS_PANEL))
+        .bg(rgb(theme::WB_PANEL))
+        .shadow(panel_shadow())
+        .overflow_hidden()
+}
+
+/// 导航外壳 — 比工作面板大一档圆角、半透明底色（画板：75% 浅面）。
+pub(crate) fn navigator_panel() -> Div {
+    div()
+        .rounded(px(theme::RADIUS_NAV))
+        .bg(rgb(theme::WB_NAV))
+        .shadow(panel_shadow())
+        .overflow_hidden()
+}
+
+/// 设置页卡片 — 标题 + 一句说明 + 内容区（M3 设置页样板）。
+///
+/// 与 `floating_panel` 的区别：不裁子元素（设置页里的浮层、tooltip
+/// 不能被卡片边界切掉），卡片之间靠 16px 留白分隔。
+pub(crate) fn settings_card(title: &'static str, description: Option<&'static str>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w_full()
+        .gap(px(theme::SPACE_3))
+        .p(px(theme::SPACE_4))
+        .rounded(px(theme::RADIUS_PANEL))
+        .bg(rgb(theme::WB_PANEL))
+        .shadow(panel_shadow())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_1))
+                .child(
+                    div()
+                        .text_size(px(theme::TYPE_TITLE))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::CONTENT_PRIMARY))
+                        .child(title),
+                )
+                .when_some(description, |this, text| {
+                    this.child(
+                        div()
+                            .text_size(px(theme::TYPE_BODY))
+                            .line_height(px(18.0))
+                            .text_color(rgb(theme::CONTENT_SECONDARY))
+                            .child(text),
+                    )
+                }),
+        )
+}
+
+/// 设置页分段选择器外壳：浅凹底 + 内边距，里面放 `segmented_button`。
+pub(crate) fn settings_segmented_group() -> Div {
+    div()
+        .flex()
+        .w_full()
+        .gap(px(theme::SPACE_2))
+        .p(px(theme::SPACE_1))
+        .rounded(px(theme::RADIUS_MD))
+        .bg(rgb(theme::WB_INPUT_SURFACE))
 }
 
 /// 扁平面板 — 无装饰纯色容器，无边框无阴影
@@ -343,20 +444,22 @@ pub(crate) fn empty_state(title: &'static str, detail: &'static str) -> Div {
 }
 
 /// 通用图标按钮视觉底座。调用方追加 `on_click`；禁用态自动保留原因提示。
-/// 纯鼠标交互：按钮不持有 FocusHandle、不参与键盘导航/激活（键盘白名单见 AGENTS.md §8）。
+/// 使用 Kit 基础按钮承载焦点、Tab 导航及 Enter/Space 激活语义。
 pub(crate) fn icon_button(
     id: String,
     icon_kind: ToolbarIcon,
     label: &'static str,
     enabled: bool,
-) -> Stateful<Div> {
+) -> BaseButton {
     let tooltip = if enabled {
         label
     } else {
         "当前状态不可用"
     };
-    div()
-        .id(id)
+    BaseButton::new(id)
+        .disabled(!enabled)
+        .accessibility_label(label)
+        .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
         .flex_none()
         .size(px(theme::CONTROL_HEIGHT_REGULAR))
         .rounded(px(theme::RADIUS_XS))
@@ -394,10 +497,7 @@ fn icon_command_button_disabled_reason(label: &'static str) -> &'static str {
     }
 }
 
-/// 纯鼠标图标命令按钮：**不可聚焦、不参与键盘激活**。gpui-ce 会对「有焦点 +
-/// 有 on_click」的元素在 Enter/Space 松开时合成点击，且鼠标按下会自动聚焦
-/// 可聚焦元素——因此按钮一律不带 track_focus/tab_index，键盘只保留应用级
-/// 快捷键与文本框内的编辑/提交行为（见 AGENTS.md §8 键盘白名单）。
+/// 图标命令按钮：由 Kit 基础按钮统一提供焦点、Tab 导航及 Enter/Space 激活。
 pub(crate) fn icon_command_button(
     id: String,
     icon_kind: ToolbarIcon,
@@ -405,14 +505,16 @@ pub(crate) fn icon_command_button(
     enabled: bool,
     on_activate: impl Fn(&mut RepositoryView, &mut Window, &mut Context<RepositoryView>) + 'static,
     cx: &mut Context<RepositoryView>,
-) -> Stateful<Div> {
+) -> BaseButton {
     let tooltip = if enabled {
         label
     } else {
         icon_command_button_disabled_reason(label)
     };
-    div()
-        .id(id)
+    BaseButton::new(id)
+        .disabled(!enabled)
+        .accessibility_label(label)
+        .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
         .flex_none()
         .size(px(theme::CONTROL_HEIGHT_REGULAR))
         .rounded(px(theme::RADIUS_XS))
@@ -494,6 +596,8 @@ pub(crate) fn dialog_overlay() -> Div {
         .flex()
         .items_center()
         .justify_center()
+        // 遮罩铺满整窗，圆角必须与外壳一致，否则窗口圆角外会留下一圈灰色。
+        .rounded(px(theme::window_radius()))
         .bg(rgba(theme::DIALOG_OVERLAY))
         .cursor(CursorStyle::Arrow)
         .occlude()
@@ -605,9 +709,11 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
 }
 
 /// 分段按钮 — 旧版 segmented_button，保留接口但更新配色
-pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Stateful<Div> {
-    div()
-        .id(id)
+pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> BaseButton {
+    BaseButton::new(id)
+        .selected(selected)
+        .disabled(!enabled)
+        .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
         .flex_none()
         .min_h(px(28.0))
         .px_2()
@@ -645,37 +751,6 @@ pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Sta
         })
 }
 
-/// 复选框
-pub(crate) fn toggle_box(checked: bool) -> impl IntoElement {
-    div()
-        .size(px(14.0))
-        .rounded(px(theme::RADIUS_XS))
-        .border_1()
-        .border_color(if checked {
-            rgb(theme::PRIMARY)
-        } else {
-            rgb(theme::BORDER)
-        })
-        .bg(if checked {
-            rgb(theme::PRIMARY)
-        } else {
-            rgb(theme::CARD)
-        })
-        .child(
-            div()
-                .w_full()
-                .h_full()
-                // items_center/justify_center 需要 flex 布局才生效，
-                // 否则勾号贴在 14px 盒子的左上角。
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(checked, |this| this.child("✓"))
-                .text_color(rgb(theme::PRIMARY_FOREGROUND))
-                .text_size(px(10.0)),
-        )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ListRowVisualRule {
     background: u32,
@@ -706,7 +781,7 @@ pub(crate) fn list_row_surface(id: String, selected: bool) -> Stateful<Div> {
             if selected {
                 this.bg(rgb(theme::PRIMARY_SUBTLE))
             } else {
-                this.bg(rgb(theme::STATE_HOVER))
+                this.bg(rgb(theme::WB_ROW_HOVER))
             }
         })
         .when(rule.shows_selection_indicator, |this| {
@@ -1159,8 +1234,10 @@ impl RepositoryView {
         } else {
             theme::MUTED_FOREGROUND
         };
-        div()
-            .id(label)
+        BaseButton::new(label)
+            .disabled(!enabled)
+            .accessibility_label(label)
+            .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
             .flex_none()
             .size(px(22.0))
             .rounded(px(theme::RADIUS_XS))
@@ -1191,8 +1268,10 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // 设计图用 trash-2 图标，DESTRUCTIVE 色
-        div()
-            .id(label)
+        BaseButton::new(label)
+            .disabled(!enabled)
+            .accessibility_label(label)
+            .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
             .flex_none()
             .size(px(22.0))
             .rounded(px(theme::RADIUS_XS))
@@ -1225,8 +1304,10 @@ impl RepositoryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(label)
+        BaseButton::new(label)
+            .disabled(!enabled)
+            .accessibility_label(label)
+            .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
             .flex_none()
             .size(px(20.0))
             .rounded(px(theme::RADIUS_XS))
@@ -1317,8 +1398,10 @@ impl RepositoryView {
         } else {
             theme::MUTED_FOREGROUND
         };
-        div()
-            .id(label)
+        BaseButton::new(label)
+            .disabled(!enabled)
+            .accessibility_label(label)
+            .focus_visible(|this| this.border_color(rgb(theme::PRIMARY)))
             .relative()
             .flex()
             .items_center()

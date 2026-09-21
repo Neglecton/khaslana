@@ -3967,7 +3967,7 @@ impl RepositoryView {
                             .border_color(rgb(ui_theme::BORDER))
                             .rounded(px(ui_theme::RADIUS_MD))
                             .bg(rgb(ui_theme::TILE))
-                            .font_family("monospace")
+                            .font_family("Consolas")
                             .text_size(px(10.5))
                             .text_color(rgb(ui_theme::FOREGROUND))
                             .child(preview),

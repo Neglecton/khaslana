@@ -962,6 +962,8 @@ impl RepositoryView {
     pub(crate) fn open_tag_push_dialog(&mut self, tag: String) {
         self.close_popups();
         self.tag_push_remote = self.current_remote();
+        // 下拉展开态不能跨弹窗会话残留：clear/close_popups 都不覆盖这个字段，
+        // 不重置的话上次展开的下拉会在重开弹窗时保持展开。
         self.active_dialog = Some(DialogState::TagPush { tag });
         self.last_error = None;
     }

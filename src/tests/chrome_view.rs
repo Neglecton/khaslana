@@ -18,7 +18,11 @@ fn layout_policy_preserves_titlebar_at_required_bands() {
 
 #[test]
 fn minimum_window_size_keeps_native_controls_reachable() {
-    assert!(MIN_WINDOW_WIDTH >= 3.0 * 44.0);
+    // 顶栏三个窗口按钮必须始终放得下（32 × 32、间距 2、右边距 12）。
+    let controls_width = theme::WINDOW_CONTROL_SIZE * 3.0
+        + theme::WINDOW_CONTROL_GAP * 2.0
+        + theme::WINDOW_CONTROLS_RIGHT_INSET;
+    assert!(MIN_WINDOW_WIDTH >= controls_width);
     assert!(MIN_WINDOW_HEIGHT >= theme::TITLEBAR_HEIGHT + STATUS_BAR_HEIGHT);
     assert_eq!(
         shell_content_height(MIN_WINDOW_HEIGHT),

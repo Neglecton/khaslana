@@ -178,7 +178,7 @@ impl RepositoryView {
                         let key = (reasoning_len, content_len);
                         if follow_state.last_key.get() != key {
                             follow_state.last_key.set(key);
-                            let max_offset = f32::from(follow_handle.max_offset().height).max(0.0);
+                            let max_offset = f32::from(follow_handle.max_offset().y).max(0.0);
                             follow_handle.set_offset(point(px(0.0), px(-max_offset)));
                             cx.refresh_windows();
                         }
@@ -1633,7 +1633,7 @@ impl RepositoryView {
                                 .bg(rgb(ui_theme::TILE))
                                 .text_size(px(11.0))
                                 .line_height(px(16.0))
-                                .font_family("Consolas, monospace")
+                                .font_family("Consolas")
                                 .text_color(rgb(if is_error {
                                     ui_theme::DESTRUCTIVE
                                 } else {

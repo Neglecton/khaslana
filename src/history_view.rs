@@ -402,7 +402,7 @@ impl RepositoryView {
             .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(
                 div()
-                    .font_family("Consolas, monospace")
+                    .font_family("Consolas")
                     .child(commit.oid.clone()),
             )
             .child(
@@ -750,7 +750,7 @@ pub(crate) fn commit_row_content(
                 .child(
                     div()
                         .flex_none()
-                        .font_family("Consolas, monospace")
+                        .font_family("Consolas")
                         .text_color(rgb(ui_theme::PRIMARY))
                         .child(row_short_oid.clone()),
                 )

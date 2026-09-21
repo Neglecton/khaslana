@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -633,62 +634,50 @@ impl RepositoryView {
             )
             // 「后台执行」勾选框：默认不勾选（触发时跳转到工作流页并运行）；
             // 勾选后留在当前页后台运行（进度走状态栏，完成/失败走 toast）。
-            // 未绑定键位时不可勾选（无绑定即无触发语义）。
-            .child(
+            // 未绑定键位时不可开启（无绑定即无触发语义）。
+            .child({
+                let toggle: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)> = {
+                    let file = file.to_string();
+                    Rc::new(move |this, _window, cx| {
+                        if let Some(binding) =
+                            this.workflow_shortcut_bindings.bindings.get_mut(&file)
+                        {
+                            binding.background = !binding.background;
+                            this.persist_workflow_shortcut_bindings(cx);
+                        }
+                    })
+                };
+                let toggle_for_label = toggle.clone();
                 div()
-                    .id("workflow-shortcut-background-toggle")
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .when(binding.is_some(), |this| {
-                        this.cursor_pointer()
-                            .on_click(cx.listener({
-                                let file = file.to_string();
-                                move |this, _event, _window, cx| {
-                                    if let Some(binding) = this
-                                        .workflow_shortcut_bindings
-                                        .bindings
-                                        .get_mut(&file)
-                                    {
-                                        binding.background = !binding.background;
-                                        this.persist_workflow_shortcut_bindings(cx);
-                                    }
-                                }
-                            }))
-                    })
-                    .when(binding.is_none(), |this| {
-                        this.opacity(0.62).cursor_not_allowed()
-                    })
+                    .child(self.toggle_switch(
+                        "workflow-shortcut-background-toggle",
+                        background_checked,
+                        binding.is_none(),
+                        move |this, _next, window, cx| toggle(this, window, cx),
+                        cx,
+                    ))
                     .child(
                         div()
-                            .flex_none()
-                            .size(px(14.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .border_1()
-                            .border_color(rgb(if background_checked {
-                                ui_theme::PRIMARY
-                            } else {
-                                ui_theme::BORDER
-                            }))
-                            .bg(rgb(if background_checked {
-                                ui_theme::PRIMARY
-                            } else {
-                                ui_theme::SURFACE_BASE
-                            }))
-                            .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
-                            .when(background_checked, |this| this.child("✓")),
-                    )
-                    .child(
-                        div()
+                            .id("workflow-shortcut-background-label")
+                            .when(binding.is_some(), |this| {
+                                this.cursor_pointer().on_click(cx.listener(
+                                    move |this, _event, window, cx| {
+                                        toggle_for_label(this, window, cx);
+                                        cx.notify();
+                                    },
+                                ))
+                            })
+                            .when(binding.is_none(), |this| {
+                                this.opacity(0.62).cursor_not_allowed()
+                            })
                             .text_size(px(12.0))
                             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child("后台执行（触发时不切换到工作流页）"),
-                    ),
-            )
+                    )
+            })
             .child(
                 dialog_actions()
                     .child(
@@ -728,7 +717,7 @@ impl RepositoryView {
                                         // dispatch_path 经过 overlay），跳过全部快捷键
                                         // 绑定，按键直达根捕获层。
                                         this.recording_shortcut = Some(target.clone());
-                                        window.focus(&this.workflow_shortcut_binding_focus);
+                                        window.focus(&this.workflow_shortcut_binding_focus, cx);
                                         crate::register_all_key_bindings(
                                             &mut cx.deref_mut(),
                                             &this.shortcut_bindings,
@@ -1273,7 +1262,7 @@ impl RepositoryView {
                             .rounded(px(ui_theme::RADIUS_XS))
                             .bg(rgb(ui_theme::STATE_HOVER))
                             .text_size(px(10.0))
-                            .font_family("Consolas, monospace")
+                            .font_family("Consolas")
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(crate::shortcuts_view::format_keystroke(&keystroke)),
                     )

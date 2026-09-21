@@ -344,7 +344,7 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
+                                    .font_family("Consolas")
                                     .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),

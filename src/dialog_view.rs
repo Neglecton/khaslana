@@ -1,6 +1,7 @@
 //! RepositoryView 的应用级对话框渲染。
 
 use crate::*;
+use gpui_kit::component::{Disableable, button::Button, menu::DropdownMenu};
 
 impl RepositoryView {
     pub(crate) fn render_dialogs(
@@ -659,15 +660,11 @@ impl RepositoryView {
             .tag_push_remote
             .clone()
             .or_else(|| remotes.first().map(|remote| remote.name.clone()));
-        let options = remotes
-            .iter()
-            .map(|remote| {
-                select_option()
-                    .value(remote.name.clone())
-                    .label(remote.name.clone())
-            })
-            .collect::<Vec<_>>();
-        let entity = cx.entity();
+        let disabled = remotes.is_empty() || self.busy;
+        let trigger_label = selected_remote
+            .clone()
+            .unwrap_or_else(|| "选择远端".to_string());
+        let menu_remotes = remotes.clone();
         self.dialog_panel("推送标签", cx)
             .child(
                 div()
@@ -676,22 +673,28 @@ impl RepositoryView {
                     .child(format!("标签：{tag}")),
             )
             .child(
-                div().w_full().text_size(px(12.0)).child(
-                    select("tag-push-remote-select")
-                        .w_full()
-                        .h(px(34.0))
-                        .options(options)
-                        .placeholder("选择远端")
-                        .value(selected_remote.unwrap_or_default())
-                        .disabled(remotes.is_empty() || self.busy)
-                        .menu_width(px(320.0))
-                        .on_change(move |value, _window, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.tag_push_remote = Some(value.to_string());
-                                cx.notify();
-                            });
-                        }),
-                ),
+                Button::new("tag-push-remote-select")
+                    .label(trigger_label)
+                    .accessibility_label("选择远端")
+                    .outline()
+                    .dropdown_caret(true)
+                    .disabled(disabled)
+                    .w_full()
+                    .h(px(34.0))
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        menu_remotes.iter().fold(
+                            menu.scrollable(true).max_h(px(240.0)),
+                            |menu, remote| {
+                                menu.menu_with_check(
+                                    remote.name.clone(),
+                                    selected_remote.as_deref() == Some(remote.name.as_str()),
+                                    Box::new(SelectTagPushRemote {
+                                        remote: remote.name.clone(),
+                                    }),
+                                )
+                            },
+                        )
+                    }),
             )
             .child(
                 dialog_actions()
@@ -999,48 +1002,48 @@ impl RepositoryView {
                             .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                     ),
             )
-            .child(
-                div()
-                    .id("auto_check_update")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(12.0))
-                    .cursor(CursorStyle::PointingHand)
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.update_preferences.auto_check = !this.update_preferences.auto_check;
-                        this.save_update_preferences();
-                        cx.notify();
-                    }))
-                    .child(toggle_box(auto_check))
-                    .child(
-                        div()
-                            .text_color(rgb(ui_theme::FOREGROUND))
-                            .child("自动检查更新"),
-                    ),
-            )
+            .child(self.toggle_row(
+                "auto_check_update",
+                "自动检查更新",
+                auto_check,
+                |this, _, _| {
+                    this.update_preferences.auto_check = !this.update_preferences.auto_check;
+                    this.save_update_preferences();
+                },
+                cx,
+            ))
             // 测试版（Beta）更新渠道：勾选后检测/安装所有版本（含预发布），
             // 未勾选只走正式版清单（与旧版本行为一致）。切换后下次检查生效。
             .child(
                 div()
-                    .id("include_beta_updates")
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.0))
-                    .cursor(CursorStyle::PointingHand)
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.update_preferences.include_beta =
-                            !this.update_preferences.include_beta;
-                        this.save_update_preferences();
-                        cx.notify();
-                    }))
-                    .child(toggle_box(include_beta))
+                    .child(self.toggle_switch(
+                        "include_beta_updates",
+                        include_beta,
+                        false,
+                        |this, _next, _, _| {
+                            this.update_preferences.include_beta =
+                                !this.update_preferences.include_beta;
+                            this.save_update_preferences();
+                        },
+                        cx,
+                    ))
                     .child(
                         div()
+                            .id("include_beta_updates-label")
+                            .cursor(CursorStyle::PointingHand)
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
+                            .text_size(px(12.0))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.update_preferences.include_beta =
+                                    !this.update_preferences.include_beta;
+                                this.save_update_preferences();
+                                cx.notify();
+                            }))
                             .child(
                                 div()
                                     .text_color(rgb(ui_theme::FOREGROUND))
@@ -1050,7 +1053,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                    .child("勾选后同时检测并安装测试版；测试版可能不稳定"),
+                                    .child("开启后同时检测并安装测试版；测试版可能不稳定"),
                             ),
                     ),
             )
@@ -2037,7 +2040,7 @@ impl RepositoryView {
                                     div()
                                         .text_size(px(18.0))
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .font_family("Consolas, monospace")
+                                        .font_family("Consolas")
                                         .text_color(rgb(ui_theme::PRIMARY))
                                         .child(code),
                                 )

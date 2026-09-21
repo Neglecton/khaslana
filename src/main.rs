@@ -60,12 +60,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_channel::{Receiver, Sender};
 use git2::Repository;
 use gpui::{
-    App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, FocusHandle,
+    App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, FocusHandle,
     Focusable, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
     ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowOptions, actions, canvas, div, img, point, prelude::*, px, size,
-    uniform_list,
+    WindowBounds, WindowBackgroundAppearance, WindowOptions, actions, canvas, div, img, point,
+    prelude::*, px, size, uniform_list,
 };
 use khaslana::{
     AiProviderSettings, AiReviewRecord, AiReviewResult, AiReviewStep, BlameView, BranchKind,
@@ -108,8 +108,8 @@ use ui::{
     components::{
         AppToastKind, FeedbackMessage, InputFrameSize, ToastAction, app_shell_surface,
         bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
-        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, glass_menu, input_frame,
-        segmented_button, toggle_box, tooltip_text,
+        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, floating_panel,
+        glass_menu, input_frame, segmented_button, tooltip_text,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
@@ -118,11 +118,6 @@ use ui_helpers::*;
 use workflow_editor::{WorkflowEditorState, workflow_editor_field_or_fallback};
 use workflow_view::{
     WorkflowInputFieldState, WorkflowLogEntry, WorkflowTemplateItem, workflow_templates_dir,
-};
-use yororen_ui::{
-    component::{init as init_yororen_components, select, select_option},
-    i18n::{I18n, Locale},
-    theme::GlobalTheme,
 };
 
 actions!(
@@ -181,6 +176,19 @@ pub(crate) struct RunWorkflowShortcut {
     pub(crate) file: String,
     /// 「后台执行」勾选结果：true = 触发时不切换到工作流页。
     pub(crate) background: bool,
+}
+
+/// Kit 下拉菜单的有载荷动作：菜单项只负责派发选择，业务状态仍由 RepositoryView 持有。
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ui_action, no_json)]
+pub(crate) struct SelectRemoteBranchOperationRemote {
+    pub(crate) remote: String,
+}
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ui_action, no_json)]
+pub(crate) struct SelectTagPushRemote {
+    pub(crate) remote: String,
 }
 
 /// 可配置快捷键的功能枚举，用于持久化与设置中心 UI。
@@ -448,8 +456,10 @@ const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
 const ENCODING_MENU_WIDTH: f32 = 170.0;
 const MENU_VIEWPORT_MARGIN: f32 = 8.0;
-// Windows 原生窗口控制区（3×44px）固定占宽；壳层布局与本文件共用同一常量。
-pub(crate) const WINDOW_CONTROLS_WIDTH: f32 = 132.0;
+// 自绘窗口控制区（3 × 32px + 2 × 2px 间距）固定占宽；右边距由顶栏内边距给出。
+// 壳层布局与本文件共用同一常量。
+pub(crate) const WINDOW_CONTROLS_WIDTH: f32 =
+    ui_theme::WINDOW_CONTROL_SIZE * 3.0 + ui_theme::WINDOW_CONTROL_GAP * 2.0;
 // 仓库切换下拉尺寸：宽 320 容纳完整路径，高 480 内部滚动。
 const REPO_SWITCHER_MENU_WIDTH: f32 = 320.0;
 const REPO_SWITCHER_MENU_HEIGHT: f32 = 480.0;
@@ -3236,6 +3246,8 @@ pub(crate) struct RepositoryView {
     pub(crate) workflow_shortcut_bindings: khaslana::WorkflowShortcutBindings,
     /// 正在录制的快捷键目标（静态动作或工作流模板）；None 表示非录制态。
     pub(crate) recording_shortcut: Option<ShortcutRecordingTarget>,
+    /// 应用壳层的稳定焦点落点：关闭弹层后恢复到这里，再由 Tab 进入下一个控件。
+    shell_focus: FocusHandle,
     /// 设置中心面板的焦点句柄，录制态时夺取焦点使 keydown dispatch_path 进入 overlay。
     settings_center_focus: FocusHandle,
     /// 工作流快捷键绑定弹窗的焦点句柄，录制态夺取焦点使按键先到根捕获层。
@@ -3265,7 +3277,7 @@ pub(crate) struct RepositoryView {
     context_navigator_overlay_open: bool,
     /// Context Navigator 展开偏好（全局单值，跨模式/跨仓库共享，经布局偏好持久化）。
     context_navigator_preferences: ContextNavigatorPreferences,
-    // 壳层按钮均为纯鼠标交互，不再持有焦点句柄（键盘白名单见 AGENTS.md §8）。
+    // 普通壳层按钮的焦点由 Kit 基础按钮按元素 id 管理，无需在状态机单独持有句柄。
     /// 仓库切换下拉触发器按钮的窗口坐标矩形，paint 时记录，供菜单锚定与点击外部关闭。
     repo_switcher_anchor: Option<RepoSwitcherAnchor>,
     /// 仓库切换下拉展开时缓存的最近仓库列表（toggle 时同步加载，渲染时纯读）。
@@ -3335,6 +3347,8 @@ pub(crate) struct RepositoryView {
     proxy_http_url: TextFieldState,
     proxy_https_url: TextFieldState,
     proxy_socks5_url: TextFieldState,
+    /// 已迁移到 Kit 输入的字段宿主（`ui::fields`，按 `DEDICATED_FIELDS` 惰性创建）。
+    kit_fields: Vec<(FieldId, ui::fields::KitField)>,
     pub(crate) ai_settings: AiProviderSettings,
     pub(crate) external_merge_settings: ExternalMergeSettings,
     pub(crate) external_merge_enabled_form: bool,
@@ -3455,6 +3469,16 @@ impl Render for RepositoryView {
         // 工作流模板编辑器：渲染前确保当前展示的文本框已创建
         //（field_mut 无 cx 不能惰性建框，text_input 的 paint 路径依赖它已存在）。
         self.ensure_workflow_editor_fields_inited(window, cx);
+        // Kit 输入字段：渲染期只有 `&self`，宿主实体必须在这里先建好并对齐。
+        self.ensure_kit_fields(window, cx);
+        // 窗口圆角：外壳是「透明窗口 + 自绘圆角」的那张卡片，最大化时必须归零，
+        // 否则四角会露出桌面。所有铺满窗口的色块（根背景、顶栏、对话框遮罩）
+        // 都读这个值，保证圆角一致。
+        ui_theme::set_window_radius(if window.is_maximized() {
+            0.0
+        } else {
+            ui_theme::RADIUS_WINDOW
+        });
         let shell_policy = self.shell_layout_policy(window);
         let shell_content_height =
             chrome_view::shell_content_height(window.viewport_size().height.into());
@@ -3471,6 +3495,7 @@ impl Render for RepositoryView {
 
         app_shell_surface()
             .id("app-root")
+            .track_focus(&self.shell_focus)
             .relative()
             .flex()
             .flex_col()
@@ -3483,6 +3508,29 @@ impl Render for RepositoryView {
                 }
                 this.toggle_code_search_palette(window, cx);
                 cx.notify();
+            }))
+            .on_action(cx.listener(Self::text_submit))
+            .on_action(cx.listener(
+                |this, action: &SelectRemoteBranchOperationRemote, _window, cx| {
+                    this.select_remote_branch_operation_remote(action.remote.clone());
+                    cx.notify();
+                },
+            ))
+            .on_action(cx.listener(
+                |this, action: &SelectTagPushRemote, _window, cx| {
+                    this.tag_push_remote = Some(action.remote.clone());
+                    cx.notify();
+                },
+            ))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.as_str() == "escape"
+                    && this.recording_shortcut.is_none()
+                    && this.dismiss_topmost_cancellable_overlay()
+                {
+                    window.focus(&this.shell_focus, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
             }))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 this.encoding_menu_closed_by_capture = None;
@@ -3626,9 +3674,14 @@ impl Render for RepositoryView {
                     .min_w(px(0.0))
                     .min_h(px(0.0))
                     .relative()
-                    // 左侧列：Docked 展开完整导航器（标题 + 模式按钮 + 分组列表）；
+                    // 悬浮工作台：内容区四周留白，导航与页面各成一张抬起的面板。
+                    // 面板之间不设 gap——拖拽区自身就是那段间隙（默认无可见分割线，
+                    // 悬停/拖拽时才显示指示），收起窄条用右边距留出同样的间隙。
+                    .px(px(chrome_view::SHELL_PADDING))
+                    .pb(px(chrome_view::SHELL_PADDING))
+                    // 左侧列：Docked 展开完整导航器（模式按钮 + 分组列表）；
                     // 其余情况（收起偏好/窄窗/专用页面）一律渲染 48px 收起窄条
-                    // （展开箭头 + 模式图标），模式入口在任何页面都常驻。
+                    // （模式图标 + 展开箭头 + 设置），模式入口在任何页面都常驻。
                     .child(
                         if context_presentation == chrome_view::ContextNavigatorPresentation::Docked
                         {
@@ -3643,24 +3696,33 @@ impl Render for RepositoryView {
                         context_presentation == chrome_view::ContextNavigatorPresentation::Docked,
                         |this| this.child(self.render_column_splitter(ResizeTarget::Sidebar, cx)),
                     )
-                    .child(match self.main_mode {
-                        MainMode::Worktree => {
-                            self.render_worktree_view(window, cx).into_any_element()
-                        }
-                        MainMode::Conflict => self
-                            .render_conflict_workbench(window, cx)
-                            .into_any_element(),
-                        MainMode::History => self.render_history_view(cx).into_any_element(),
-                        MainMode::Workflow => {
-                            self.render_workflow_view(window, cx).into_any_element()
-                        }
-                        MainMode::Stash => self.render_stash_preview_view(cx).into_any_element(),
-                        MainMode::Browse => self.render_browse_view(cx).into_any_element(),
-                        MainMode::Blame => self.render_blame_view(cx).into_any_element(),
-                        MainMode::CommitGraph => {
-                            self.render_commit_graph_view(window, cx).into_any_element()
-                        }
-                    })
+                    .child(
+                        floating_panel()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .child(match self.main_mode {
+                                MainMode::Worktree => {
+                                    self.render_worktree_view(window, cx).into_any_element()
+                                }
+                                MainMode::Conflict => self
+                                    .render_conflict_workbench(window, cx)
+                                    .into_any_element(),
+                                MainMode::History => self.render_history_view(cx).into_any_element(),
+                                MainMode::Workflow => {
+                                    self.render_workflow_view(window, cx).into_any_element()
+                                }
+                                MainMode::Stash => {
+                                    self.render_stash_preview_view(cx).into_any_element()
+                                }
+                                MainMode::Browse => self.render_browse_view(cx).into_any_element(),
+                                MainMode::Blame => self.render_blame_view(cx).into_any_element(),
+                                MainMode::CommitGraph => {
+                                    self.render_commit_graph_view(window, cx).into_any_element()
+                                }
+                            }),
+                    )
                     // 窄窗 Navigator 覆盖层最后挂载（盖在主体内容之上）。
                     .when(
                         context_presentation == chrome_view::ContextNavigatorPresentation::Overlay,
@@ -3687,12 +3749,14 @@ impl Render for RepositoryView {
             .child(self.render_operation_blocker())
             .child(self.render_credentials(window, cx))
             .child(self.render_feedback_layer(cx))
+            // 窗口缩放带挂最外层：弹窗遮罩打开时窗口四边也仍然可缩放。
+            .child(self.render_window_resize_bands(window, cx))
     }
 }
 
 impl Focusable for RepositoryView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.clone_url.focus.clone()
+        self.shell_focus.clone()
     }
 }
 
@@ -4339,7 +4403,19 @@ fn register_all_key_bindings(
     workflow_bindings: &khaslana::WorkflowShortcutBindings,
     skip_shortcuts: bool,
 ) {
+    // Kit 在 init 时注册按钮、输入、菜单等组件键位。动态刷新应用快捷键时只清理
+    // Khaslana 自己的绑定，不能把 Kit 的 Tab/Enter/Space/方向键/Esc 一并抹掉。
+    let component_bindings = {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        keymap
+            .bindings()
+            .filter(|binding| !is_khaslana_keybinding_action(binding.action().name()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     cx.clear_key_bindings();
+    cx.bind_keys(component_bindings);
     // 基础键位：文本输入框和浏览内容区。
     cx.bind_keys([
         KeyBinding::new("backspace", TextBackspace, Some("TextInput")),
@@ -4364,6 +4440,9 @@ fn register_all_key_bindings(
         KeyBinding::new("ctrl-c", TextCopy, Some("TextInput")),
         KeyBinding::new("ctrl-v", TextPaste, Some("TextInput")),
         KeyBinding::new("ctrl-x", TextCut, Some("TextInput")),
+        // Kit Textarea 默认会在 secondary-enter 先插入换行再发 PressEnter；
+        // 这里以应用提交动作覆盖该键位，确保提交前不会污染业务真值。
+        KeyBinding::new("secondary-enter", TextSubmit, Some("Input")),
     ]);
     // 应用级快捷键：全局生效（无 context 谓词）。
     if !skip_shortcuts {
@@ -4420,6 +4499,10 @@ fn register_all_key_bindings(
             cx.bind_keys([binding]);
         }
     }
+}
+
+fn is_khaslana_keybinding_action(action_name: &str) -> bool {
+    action_name.starts_with("text_input::") || action_name.starts_with("app_action::")
 }
 
 /// 注册全局快捷键 action 监听器，通过 weak entity 在回调中安全更新 RepositoryView。
@@ -4604,7 +4687,8 @@ fn main() {
         .try_init()
         .ok();
 
-    Application::new()
+    // gpui-pre 由平台层提供入口函数，没有 `Application::new()`（gpui-ce 的写法）。
+    gpui_kit::application()
         .with_assets(assets::AppAssets::new())
         .run(|cx: &mut App| {
             // 启动最早期执行待处理的便携迁移（若用户上次已同意迁移）；
@@ -4618,11 +4702,14 @@ fn main() {
             if let Some(data_dir) = khaslana::storage::active_data_dir() {
                 khaslana::record_last_data_home(&data_dir);
             }
-            init_yororen_components(cx);
-            cx.set_global(GlobalTheme::new(cx.window_appearance()));
-            cx.set_global(I18n::with_embedded(
-                Locale::new("zh-CN").expect("zh-CN locale is valid"),
-            ));
+            // Kit 初始化（组件层 + 键位）。Kit 不注册 AssetSource，图标资源由
+            // `application().with_assets(...)` 提供；主题在窗口创建后按外观与
+            // 强调色偏好重建（`apply_theme_for_appearance`）。
+            gpui_kit::init(cx);
+            // 组件层文案语言：Kit 的内置 locale 停在 `en` fallback，迁移前
+            // Yororen `I18n` 提供的简体中文能力要在这一层继承（`zh-CN` 是
+            // 组件自带 ui.yml 支持的 locale key）。
+            gpui_kit::component::set_locale("zh-CN");
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
             // 注册全部键盘绑定：基础键位（TextInput）+ 工作流快捷键 + 应用级快捷键（从持久化加载）。
             let shortcut_bindings = khaslana::AppStorage::open_default()
@@ -4648,9 +4735,16 @@ fn main() {
                         appears_transparent: true,
                         ..Default::default()
                     }),
+                    // 窗口背景透明：外壳自己就是那张圆角卡片（画板把外围桌面装饰去掉，
+                    // 以圆角内容为边界）。系统边框由 `apply_window_chrome` 去掉，
+                    // 否则 DWM 会沿顶边画一条线、并从圆角外的透明区域透出来。
+                    window_background: WindowBackgroundAppearance::Transparent,
                     ..Default::default()
                 },
                 |window, cx| {
+                    // 去掉系统边框（创建后一次 + 下一帧一次，系统会在窗口显示后补回 caption）。
+                    chrome_view::apply_window_chrome(window);
+                    window.on_next_frame(|window, _cx| chrome_view::apply_window_chrome(window));
                     let view = cx.new(RepositoryView::new_with_session);
                     view.update(cx, |this, cx| {
                         this.attach_window_to_tray(window);
@@ -4674,8 +4768,23 @@ fn main() {
                     });
                     // 注册全局快捷键监听器：不依赖焦点路径，在 action 冒泡到顶层时触发。
                     register_shortcut_listeners(cx, view.downgrade());
-                    window.focus(&view.read(cx).focus_handle(cx));
-                    view
+                    // `view.read(cx)` 与 `focus(.., cx)` 会在同一表达式里借 cx 两次，
+                    // 先取出焦点句柄再调用。
+                    let root_focus = view.read(cx).focus_handle(cx);
+                    window.focus(&root_focus, cx);
+                    // Kit `Root` 作为窗口根视图（M2 遗留缺口）：它是 Kit 各种弹层
+                    //（Notification / Sheet / Dialog / Tooltip 宿主）的挂载点，同时提供
+                    // 标准 Tab / Shift+Tab 焦点遍历。业务视图仍是 `RepositoryView`，
+                    // Root 只包一层，不改业务状态。Linux 的 CSD 边框由 `bordered(false)` 关掉
+                    //（Windows 侧本身不绘制）。
+                    cx.new(|cx| {
+                        // `Root` 自己会铺一层 `theme.tokens.background`，那会把外壳圆角
+                        // 之外的那圈重新涂成实色（圆角随之消失）。这里显式覆盖成透明，
+                        // 让窗口只在圆角卡片内部有像素——Kit 组件的底色仍走主题映射。
+                        gpui_kit::component::Root::new(view, window, cx)
+                            .bordered(false)
+                            .bg(ui_theme::rgba(0x00000000))
+                    })
                 },
             )
             .unwrap();

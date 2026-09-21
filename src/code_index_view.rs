@@ -320,9 +320,8 @@ impl RepositoryView {
         let stats = self.code_index_stats.get(&entry.repo_key);
         let status = code_index_entry_status(running, enabled, stats.is_some());
 
-        // 开关：点击切换该仓库偏好；开启且无在途任务时立即全量建索引。
+        // 开关：切换该仓库偏好；开启且无在途任务时立即全量建索引。
         let toggle_repo = entry.repo_key.clone();
-        let toggle_enabled = enabled;
 
         // 全局单任务守卫：任一任务运行时，其它仓库（及本仓库非取消操作）禁用。
         let actions_free = self.code_index_task.is_none();
@@ -359,17 +358,15 @@ impl RepositoryView {
                 )
                 .child(code_index_status_pill(status))
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .id(format!("code-index-toggle-{}", entry.repo_key))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.set_code_index_enabled_for(&toggle_repo, !toggle_enabled, cx);
-                        }))
-                        .child(code_index_switch(enabled)),
-                ),
+                .child(self.toggle_switch(
+                    format!("code-index-toggle-{}", entry.repo_key),
+                    enabled,
+                    false,
+                    move |this, next, _, cx| {
+                        this.set_code_index_enabled_for(&toggle_repo, next, cx);
+                    },
+                    cx,
+                )),
         );
         // 路径行。
         card = card.child(
@@ -913,27 +910,6 @@ impl RepositoryView {
 // ----------------------------------------------------------------------
 // 渲染纯函数与小部件
 // ----------------------------------------------------------------------
-
-/// 滑动开关（设计稿样式）：34×19 圆角胶囊 + 15px 圆形滑块，开启时滑块
-/// 右置、胶囊主题色；区别于复选框样式的 `toggle_box`。
-fn code_index_switch(enabled: bool) -> impl IntoElement {
-    div()
-        .w(px(34.0))
-        .h(px(19.0))
-        .rounded_full()
-        .bg(rgb(if enabled {
-            ui_theme::PRIMARY
-        } else {
-            ui_theme::BORDER
-        }))
-        .px(px(2.0))
-        .py(px(2.0))
-        .flex()
-        .items_center()
-        .when(enabled, |this| this.justify_end())
-        .when(!enabled, |this| this.justify_start())
-        .child(div().size(px(15.0)).rounded_full().bg(rgb(ui_theme::CARD)))
-}
 
 /// 状态徽标 pill（圆点 + 文字）。
 fn code_index_status_pill(status: CodeIndexEntryStatus) -> gpui::AnyElement {

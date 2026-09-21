@@ -14,6 +14,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::tokens;
+use crate::verify::{VerifyCommand, VerifyView};
 
 /// 差异行的三种形态。
 #[derive(Clone, Copy, PartialEq)]
@@ -122,6 +123,9 @@ pub struct WorkbenchView {
     navigator_collapsed: bool,
     search: Entity<InputState>,
     commit_message: Entity<TextareaState>,
+    /// M1 验证台：占满内容区时隐藏工作区样板（视觉对照仍走 show_verify = false）。
+    verify: Entity<VerifyView>,
+    show_verify: bool,
 }
 
 impl WorkbenchView {
@@ -133,12 +137,28 @@ impl WorkbenchView {
                 .placeholder("简要描述这次修改…")
                 .default_value("优化工作区面板布局")
         });
+        let verify = cx.new(|cx| VerifyView::new(window, cx));
+        cx.subscribe_in(
+            &verify,
+            window,
+            |this, _src, cmd: &VerifyCommand, _window, cx| match cmd {
+                VerifyCommand::Back => {
+                    this.show_verify = false;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         Self {
             has_staged: true,
             committing: false,
             navigator_collapsed: false,
             search,
             commit_message,
+            verify,
+            // 采证时用 KHASLANA_SPIKE_VIEW=verify 直接进入验证台，
+            // 免去自动化点击定位；正常启动仍是视觉对照的工作区。
+            show_verify: std::env::var("KHASLANA_SPIKE_VIEW").as_deref() == Ok("verify"),
         }
     }
 
@@ -239,7 +259,27 @@ impl WorkbenchView {
                     .child(self.toolbar_command(cx, "refresh", IconName::RefreshCw, "刷新", compact))
                     .child(self.toolbar_command(cx, "fetch", IconName::RotateCw, "获取", compact))
                     .child(self.toolbar_command(cx, "pull", IconName::ArrowDown, "拉取", compact))
-                    .child(self.toolbar_command(cx, "push", IconName::ArrowUp, "推送", compact)),
+                    .child(self.toolbar_command(cx, "push", IconName::ArrowUp, "推送", compact))
+                    .child(
+                        // M1 验证台入口：与工具栏命令同规格。
+                        Button::new("open-verify")
+                            .secondary()
+                            .h(px(tokens::H_CONTROL))
+                            .border_1()
+                            .border_color(tokens::border_soft())
+                            .shadow(tokens::control_shadow())
+                            .icon(
+                                Icon::new(IconName::ListChecks)
+                                    .size(px(16.))
+                                    .text_color(tokens::text_nav()),
+                            )
+                            .tooltip("M1 验证台")
+                            .label(if compact { "验证" } else { "验证台" })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.show_verify = true;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(div().flex_1())
             .child(
@@ -1036,6 +1076,9 @@ impl WorkbenchView {
 
 impl Render for WorkbenchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.show_verify {
+            return self.verify.clone().into_any_element();
+        }
         // 窄窗断点：860×520 最小窗下命令必须仍可达（视觉规范 §5）。
         let compact = window.viewport_size().width < px(1120.);
         div()
@@ -1102,6 +1145,7 @@ impl Render for WorkbenchView {
             )
             .child(self.render_status_bar())
             .child(div().flex_none().h(px(24.)))
+            .into_any_element()
     }
 }
 

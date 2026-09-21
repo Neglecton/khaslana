@@ -25,94 +25,55 @@ impl RepositoryView {
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .w_full()
+            .gap(px(ui_theme::SPACE_4))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
+                crate::ui::components::settings_card("代理模式", Some(proxy_mode_help(self.proxy_mode)))
                     .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("代理模式"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .p_1()
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                        crate::ui::components::settings_segmented_group()
                             .child(self.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
                             .child(self.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
                             .child(self.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(proxy_mode_help(self.proxy_mode)),
                     ),
             )
             .when(custom_enabled, |this| {
                 this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .pt_3()
-                        .border_t_1()
-                        .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                .child("自定义地址"),
-                        )
-                        .child(self.input(FieldId::ProxyHttpUrl, false, window, cx))
-                        .child(self.input(FieldId::ProxyHttpsUrl, false, window, cx))
-                        .child(self.input(FieldId::ProxySocks5Url, false, window, cx))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child("代理认证第一版请写在 URL 中，例如 http://user:pass@127.0.0.1:7890。"),
-                        ),
+                    crate::ui::components::settings_card(
+                        "自定义地址",
+                        Some("代理认证第一版请写在 URL 中，例如 http://user:pass@127.0.0.1:7890。"),
+                    )
+                    .child(self.input(FieldId::ProxyHttpUrl, false, window, cx))
+                    .child(self.input(FieldId::ProxyHttpsUrl, false, window, cx))
+                    .child(self.input(FieldId::ProxySocks5Url, false, window, cx)),
                 )
             })
             .child(
-                div()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(remote_label),
-            )
-            .child(
-                dialog_actions()
-                    .child(self.button(
-                        "测试代理",
-                        !self.busy,
-                        |this, _, _| this.test_network_proxy_settings(),
-                        cx,
-                    ))
-                    .child(self.primary_button(
-                        "保存",
-                        !self.busy,
-                        |this, _, cx| {
-                            this.save_network_proxy_settings();
-                            this.notify_settings_save("代理设置已保存", cx);
-                        },
-                        cx,
-                    )),
+                crate::ui::components::settings_card("连接测试", Some("在保存前可以先测试一次代理连通性。"))
+                    .child(
+                        div()
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .line_height(px(18.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(remote_label),
+                    )
+                    .child(
+                        dialog_actions()
+                            .child(self.button(
+                                "测试代理",
+                                !self.busy,
+                                |this, _, _| this.test_network_proxy_settings(),
+                                cx,
+                            ))
+                            .child(self.primary_button(
+                                "保存",
+                                !self.busy,
+                                |this, _, cx| {
+                                    this.save_network_proxy_settings();
+                                    this.notify_settings_save("代理设置已保存", cx);
+                                },
+                                cx,
+                            )),
+                    ),
             )
     }
 

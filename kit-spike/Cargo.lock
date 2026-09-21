@@ -3562,6 +3562,7 @@ name = "kit-spike"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "gpui-pre",
  "raw-window-handle",
  "windows 0.62.2",
  "windows-sys 0.61.2",

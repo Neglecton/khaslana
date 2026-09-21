@@ -218,7 +218,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(12.0))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
@@ -375,7 +375,7 @@ impl RepositoryView {
                     div()
                         .flex_none()
                         .w(px(BLAME_GUTTER_HASH_WIDTH))
-                        .font_family("Consolas, monospace")
+                        .font_family("Consolas")
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::PRIMARY))
                         .truncate()

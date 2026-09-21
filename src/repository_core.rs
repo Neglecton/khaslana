@@ -128,6 +128,7 @@ impl RepositoryView {
             shortcut_bindings: Self::load_shortcut_bindings(&storage),
             workflow_shortcut_bindings: Self::load_workflow_shortcut_bindings(&storage),
             recording_shortcut: None,
+            shell_focus: cx.focus_handle(),
             settings_center_focus: cx.focus_handle(),
             workflow_shortcut_binding_focus: cx.focus_handle(),
             dialog_before_window_close: None,
@@ -270,6 +271,8 @@ impl RepositoryView {
                 .with_value(proxy_custom.https_proxy),
             proxy_socks5_url: TextFieldState::new(cx, "SOCKS5 代理 URL")
                 .with_value(proxy_custom.socks5_proxy),
+            // Kit 输入宿主按需创建（见 `ui::fields`）。
+            kit_fields: Vec::new(),
         }
     }
 
@@ -1852,37 +1855,22 @@ impl RepositoryView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            if field == FieldId::CommitMessage {
-                self.commit();
-                cx.notify();
-            } else if field == FieldId::ConflictEditor {
-                self.apply_selected_conflict_draft(false);
-                cx.notify();
-            } else if matches!(
-                field,
-                FieldId::ProxyHttpUrl | FieldId::ProxyHttpsUrl | FieldId::ProxySocks5Url
-            ) && self.settings_center == Some(SettingsCategory::Proxy)
-            {
-                self.save_network_proxy_settings();
-                cx.notify();
-            } else if matches!(
-                field,
-                FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel
-            ) && self.settings_center == Some(SettingsCategory::Ai)
-            {
-                self.save_ai_provider_settings_from_form();
-                cx.notify();
-            } else if field == FieldId::ExternalMergeIntellijPath
-                && self.settings_center == Some(SettingsCategory::ExternalMerge)
-            {
-                self.save_external_merge_settings_from_form();
-                cx.notify();
-            }
+        if let Some(field) = self
+            .focused_kit_field(window, cx)
+            .or_else(|| self.focused_text_field(window, cx))
+        {
+            self.submit_focused_field(field);
+            cx.notify();
         }
     }
 
-    fn focused_field(&self, window: &Window, _cx: &App) -> Option<FieldId> {
+    fn focused_field(&self, window: &Window, cx: &App) -> Option<FieldId> {
+        // 已迁移到 Kit 的字段由 Kit 输入独占键盘（含 IME）。若这里仍把它们
+        // 报给自绘 action 处理，同一个按键会被写两遍：Kit 改 InputState、
+        // 自绘 action 改表单真值，下一帧同步再把真值推回 Kit，输入直接坏掉。
+        if self.kit_field_focused(window, cx) {
+            return None;
+        }
         DEDICATED_FIELDS
             .iter()
             .find_map(|(id, access)| access(self).focus.is_focused(window).then_some(*id))
@@ -1973,14 +1961,14 @@ impl RepositoryView {
         });
     }
 
-    pub(crate) fn open_clone_dialog(&mut self, window: &mut Window) {
+    pub(crate) fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popups();
         self.clone_url.clear();
         self.clone_path.clear();
         self.clone_recursive_submodules = default_clone_recursive_submodules();
         self.active_dialog = Some(DialogState::CloneRepo);
         self.last_error = None;
-        window.focus(&self.clone_url.focus);
+        window.focus(&self.clone_url.focus, cx);
     }
 
     pub(crate) fn open_create_branch_dialog(&mut self) {
@@ -2027,6 +2015,70 @@ impl RepositoryView {
         self.close_repo_switcher();
         // 工作流编辑器的下拉（类型/守卫）在弹窗关闭时一并收起，防陈旧态。
         self.workflow_editor_close_menus();
+    }
+
+    /// Esc 只关闭最上层且可取消的浮层；返回 true 表示本次按键已消费。
+    pub(crate) fn dismiss_topmost_cancellable_overlay(&mut self) -> bool {
+        if self.remote_branch_operation.branch_dropdown_open {
+            self.remote_branch_operation.branch_dropdown_open = false;
+            self.remote_branch_search.clear();
+            return true;
+        }
+        if self.commit_graph.branch_menu_open {
+            self.commit_graph.branch_menu_open = false;
+            self.commit_graph_branch_search.clear();
+            return true;
+        }
+        if self.workflow_editor_menu_open() {
+            self.workflow_editor_close_menus();
+            return true;
+        }
+        if self.repo_switcher_menu.is_some() {
+            self.close_repo_switcher();
+            return true;
+        }
+        if self.branch_context_menu.is_some()
+            || self.remote_context_menu.is_some()
+            || self.change_context_menu.is_some()
+            || self.file_path_context_menu.is_some()
+            || self.credential_context_menu.is_some()
+            || self.tag_context_menu.is_some()
+            || self.stash_context_menu.is_some()
+            || self.commit_context_menu.is_some()
+            || self.workflow_template_context_menu.is_some()
+            || self.encoding_menu_target.is_some()
+            || self.context_navigator_overlay_open
+        {
+            self.branch_context_menu = None;
+            self.remote_context_menu = None;
+            self.change_context_menu = None;
+            self.file_path_context_menu = None;
+            self.credential_context_menu = None;
+            self.tag_context_menu = None;
+            self.stash_context_menu = None;
+            self.commit_context_menu = None;
+            self.workflow_template_context_menu = None;
+            self.encoding_menu_target = None;
+            self.context_navigator_overlay_open = false;
+            return true;
+        }
+        if self.code_search_palette.is_some() {
+            self.close_code_search();
+            return true;
+        }
+        if self.ai_review_history.is_some() {
+            self.ai_review_history = None;
+            return true;
+        }
+        if self.active_dialog.is_some() && !self.busy {
+            self.close_dialog();
+            return true;
+        }
+        if self.settings_center.is_some() && !self.busy {
+            self.close_settings_center();
+            return true;
+        }
+        false
     }
 
     /// 切换仓库切换下拉的展开/收起；展开时菜单固定在触发器按钮正下方（按记录的锚点定位）。
@@ -2346,13 +2398,6 @@ impl RepositoryView {
         if enabled {
             self.external_merge_enabled_form = true;
         }
-        self.last_error = None;
-    }
-
-    pub(crate) fn save_external_merge_settings_from_form(&mut self) {
-        self.external_merge_settings = self.external_merge_form_settings();
-        self.save_external_merge_settings();
-        self.status = "合并工具设置已保存".into();
         self.last_error = None;
     }
 

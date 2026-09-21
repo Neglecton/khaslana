@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::ui::theme::rgb;
+use crate::ui::theme::{rgb, rgba};
 use gpui::{
     ClickEvent, Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, Window, div,
     prelude::*, px, uniform_list,
@@ -352,10 +352,10 @@ impl RepositoryView {
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            // 纯鼠标区域：不再承载 R/B/T/S/M 字母快捷键与键盘焦点
-            //（键盘白名单见 AGENTS.md §8；分组折叠均由鼠标点击完成）。
+            // 容器本身不承载字母快捷键；可交互子控件各自管理焦点与激活。
             .overflow_hidden()
-            .bg(rgb(ui_theme::SURFACE_BASE))
+            // 底色交给外层的导航面板（半透明浅面 + 投影），这里保持透明。
+            .bg(rgba(0x00000000))
             .pt(px(8.0))
             .pb(px(12.0))
             .children(children)
@@ -528,7 +528,7 @@ impl RepositoryView {
             icon,
             open,
             self.repo_path.is_some(),
-            move |this, window, _| this.toggle_sidebar_branch_search(section, window),
+            move |this, window, cx| this.toggle_sidebar_branch_search(section, window, cx),
             cx,
         )
     }
@@ -582,7 +582,12 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    fn toggle_sidebar_branch_search(&mut self, section: SidebarSection, window: &mut Window) {
+    fn toggle_sidebar_branch_search(
+        &mut self,
+        section: SidebarSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_popups();
         match section {
             SidebarSection::LocalBranches => {
@@ -592,7 +597,7 @@ impl RepositoryView {
                     if !self.sidebar_sections.is_expanded(section) {
                         self.sidebar_sections.toggle(section);
                     }
-                    window.focus(&self.sidebar_local_branch_search.focus);
+                    window.focus(&self.sidebar_local_branch_search.focus, cx);
                 } else {
                     self.sidebar_local_branch_search.clear();
                 }
@@ -604,7 +609,7 @@ impl RepositoryView {
                     if !self.sidebar_sections.is_expanded(section) {
                         self.sidebar_sections.toggle(section);
                     }
-                    window.focus(&self.sidebar_remote_branch_search.focus);
+                    window.focus(&self.sidebar_remote_branch_search.focus, cx);
                 } else {
                     self.sidebar_remote_branch_search.clear();
                 }

@@ -77,6 +77,8 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
         .flex()
         .items_center()
         .justify_center()
+        // 与外壳圆角一致：遮罩铺满整窗，否则窗口圆角外会留下一圈灰。
+        .rounded(px(ui_theme::window_radius()))
         .bg(rgba(visual.scrim))
         .cursor(CursorStyle::Arrow)
         .occlude()

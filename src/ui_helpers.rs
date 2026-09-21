@@ -327,12 +327,12 @@ fn scrollbar_geometry(
     let scroll_offset = handle.offset();
     let margin = SCROLLBAR_MARGIN;
     let thickness = SCROLLBAR_THICKNESS;
-    let reserve_horizontal = f32::from(max_offset.width) > 1.0;
-    let reserve_vertical = f32::from(max_offset.height) > 1.0;
+    let reserve_horizontal = f32::from(max_offset.x) > 1.0;
+    let reserve_vertical = f32::from(max_offset.y) > 1.0;
 
     let (viewport_len, max_offset, current_offset, track) = match axis {
         ScrollbarAxis::Vertical => {
-            let max_offset: f32 = max_offset.height.into();
+            let max_offset: f32 = max_offset.y.into();
             if max_offset <= 1.0 {
                 return None;
             }
@@ -360,7 +360,7 @@ fn scrollbar_geometry(
             )
         }
         ScrollbarAxis::Horizontal => {
-            let max_offset: f32 = max_offset.width.into();
+            let max_offset: f32 = max_offset.x.into();
             if max_offset <= 1.0 {
                 return None;
             }

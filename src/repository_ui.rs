@@ -1,6 +1,8 @@
 //! RepositoryView 的通用输入、菜单、差异与状态渲染。
 
 use crate::*;
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Disableable, Sizable, Size, switch::Switch};
 
 impl RepositoryView {
     pub(crate) fn credential_scope_button(
@@ -36,6 +38,32 @@ impl RepositoryView {
             .child(label)
     }
 
+    /// 受控滑块开关（Kit Switch）：点击或键盘（Tab 聚焦 + Enter/Space）激活后
+    /// 经 `on_change` 回传**请求值**，由调用方写回状态。
+    ///
+    /// Kit 的 Switch 是受控组件：`on_change` 只携带请求值，不替调用方落状态；
+    /// 且它在启用时不拦截冒泡，所以不要在同一元素的外层容器再挂同一动作
+    /// （会双重触发）。需要「点文字也能切换」时给文字单独挂处理器。
+    pub(crate) fn toggle_switch(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        checked: bool,
+        disabled: bool,
+        on_change: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Switch::new(id)
+            .checked(checked)
+            .disabled(disabled)
+            .with_size(Size::Small)
+            .on_change(cx.listener(move |this, next: &bool, window, cx| {
+                on_change(this, *next, window, cx);
+                cx.notify();
+            }))
+    }
+
+    /// 「开关 + 文字」设置行：开关本体可交互，文字区独立可点，
+    /// 两者都走同一个动作（互不重叠，不会双重触发）。
     pub(crate) fn toggle_row(
         &self,
         id: &'static str,
@@ -44,21 +72,29 @@ impl RepositoryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let on_click = Rc::new(on_click);
+        let label_click = on_click.clone();
         div()
-            .id(id)
             .flex()
             .items_center()
             .gap_2()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                on_click(this, window, cx);
-                cx.notify();
-            }))
-            .child(toggle_box(checked))
+            .child(self.toggle_switch(
+                id,
+                checked,
+                false,
+                move |this, _next, window, cx| on_click(this, window, cx),
+                cx,
+            ))
             .child(
                 div()
+                    .id(format!("{id}-label"))
+                    .cursor_pointer()
                     .text_size(px(12.0))
                     .text_color(rgb(ui_theme::FOREGROUND))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        label_click(this, window, cx);
+                        cx.notify();
+                    }))
                     .child(label),
             )
     }
@@ -69,9 +105,17 @@ impl RepositoryView {
         compact: bool,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        // 冲突草稿是带按块接受、语法高亮与三栏联动的领域编辑器，按计划留到 M6。
         if id == FieldId::ConflictEditor {
             return self.conflict_editor_input(window, cx).into_any_element();
+        }
+        // 已迁到 Kit 的字段：宿主由 `ensure_kit_fields` 每帧建好（渲染期只有
+        // `&self`，建不了实体）。未迁移的字段没有宿主，继续走下面的自绘路径。
+        if let Some(field) = self.kit_field(id) {
+            let blocked = self.active_operation_blocker_message().is_some()
+                && !self.operation_blocker_allows_text_field(id);
+            return field.render(compact, blocked);
         }
         if Self::is_multiline_field(id) {
             return self.multi_line_input(id, window, cx).into_any_element();
@@ -143,7 +187,7 @@ impl RepositoryView {
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                window.focus(&this.field(id).focus);
+                window.focus(&this.field(id).focus, cx);
                 let position = this.field(id).index_for_mouse_position(event.position);
                 let field = this.field_mut(id);
                 field.is_selecting = true;
@@ -236,7 +280,7 @@ impl RepositoryView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.field(id).focus);
+                    window.focus(&this.field(id).focus, cx);
                     let position = this.field(id).index_for_mouse_position(event.position);
                     let field = this.field_mut(id);
                     field.is_selecting = true;
@@ -366,7 +410,7 @@ impl RepositoryView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.field(FieldId::ConflictEditor).focus);
+                    window.focus(&this.field(FieldId::ConflictEditor).focus, cx);
                     let position = this
                         .field(FieldId::ConflictEditor)
                         .index_for_mouse_position(event.position);
@@ -451,22 +495,26 @@ impl RepositoryView {
         } else {
             ui_theme::MUTED_FOREGROUND
         };
-        div()
-            .id("repo-switcher-trigger")
+        BaseButton::new("repo-switcher-trigger")
+            .disabled(!enabled)
+            .accessibility_label("切换仓库")
+            .focus_visible(|this| this.border_1().border_color(rgb(ui_theme::PRIMARY)))
             .relative()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .py(px(4.0))
-            .ml(px(12.0))
-            .rounded(px(ui_theme::RADIUS_XS))
-            // 纯鼠标触发器：不可聚焦、无键盘激活（键盘白名单见 AGENTS.md §8）。
+            .gap(px(10.0))
+            .h(px(ui_theme::CONTROL_HEIGHT_TOOLBAR))
+            .px(px(ui_theme::SPACE_3))
+            .ml(px(ui_theme::SPACE_4))
+            .rounded(px(ui_theme::RADIUS_MD))
+            // 画板：仅显示仓库名的白色薄实体（图标 + 名称 + 展开箭头）。
+            .bg(rgb(ui_theme::WB_PANEL))
+            .shadow(crate::ui::components::control_shadow())
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed())
             .when(enabled, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                this.hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.opacity(0.5))
@@ -484,13 +532,20 @@ impl RepositoryView {
                 }
                 cx.notify();
             }))
-            .child(repo_avatar(&name))
+            .child(toolbar_icon(
+                ToolbarIcon::Open,
+                if enabled {
+                    ui_theme::CONTENT_SECONDARY
+                } else {
+                    ui_theme::CONTENT_TERTIARY
+                },
+            ))
             .child(
                 div()
                     .id("repo-switcher-name")
-                    .text_size(px(12.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .max_w(px(120.0))
+                    .max_w(px(140.0))
                     .min_w(px(0.0))
                     .truncate()
                     .tooltip(move |_window, cx| tooltip_text(repo_tooltip.clone(), cx))
@@ -597,9 +652,9 @@ impl RepositoryView {
                 "repo-switcher-clone",
                 ToolbarIcon::Clone,
                 "克隆仓库…",
-                |this, window, _cx| {
+                |this, window, cx| {
                     this.close_repo_switcher();
-                    this.open_clone_dialog(window);
+                    this.open_clone_dialog(window, cx);
                 },
                 cx,
             ))
@@ -619,9 +674,9 @@ impl RepositoryView {
                     "repo-switcher-search-toggle",
                     ToolbarIcon::Search,
                     "搜索仓库",
-                    |this, window, _cx| {
+                    |this, window, cx| {
                         this.repo_switcher_search_open = true;
-                        window.focus(&this.repo_switcher_search.focus);
+                        window.focus(&this.repo_switcher_search.focus, cx);
                     },
                     cx,
                 ))
@@ -923,18 +978,17 @@ impl RepositoryView {
                     // 固定高度，弹窗大小不随分类内容多少变化；内容超出由右侧内容区滚动。
                     .h(px(640.0))
                     .min_w(px(0.0))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .rounded(px(ui_theme::RADIUS_PANEL))
+                    .bg(rgb(ui_theme::WB_PANEL))
                     .shadow_lg()
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
-                    // 顶栏
+                    // 顶栏：不画底边线，靠留白与分类导航的底色分区。
                     .child(
                         div()
                             .flex()
@@ -942,27 +996,25 @@ impl RepositoryView {
                             .justify_between()
                             .px_4()
                             .py_3()
-                            .border_b_1()
-                            .border_color(rgb(ui_theme::BORDER))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(px(ui_theme::TYPE_PAGE_TITLE))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child("设置中心"),
                             )
                             .child(
                                 div()
                                     .id("settings-center-close")
-                                    .size(px(24.0))
+                                    .size(px(28.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(ui_theme::RADIUS_XS))
+                                    .rounded(px(ui_theme::RADIUS_SM))
                                     .cursor_pointer()
                                     .text_size(px(14.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.close_settings_center();
                                         cx.notify();
@@ -976,15 +1028,14 @@ impl RepositoryView {
                             .flex()
                             .flex_1()
                             .min_h(px(0.0))
-                            // 左导航
+                            // 左导航：浅凹底分区（不画右边框）
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .flex_none()
-                                    .w(px(160.0))
-                                    .border_r_1()
-                                    .border_color(rgb(ui_theme::BORDER))
+                                    .w(px(168.0))
+                                    .bg(rgb(ui_theme::WB_INPUT_SURFACE))
                                     .py_2()
                                     .children(categories.iter().map(|(cat, icon, label)| {
                                         let is_active = *cat == category;
@@ -994,17 +1045,21 @@ impl RepositoryView {
                                             .flex()
                                             .items_center()
                                             .gap_2()
+                                            .mx_2()
                                             .px_3()
                                             .py_2()
-                                            .text_size(px(12.0))
+                                            .rounded(px(ui_theme::RADIUS_SM))
+                                            .text_size(px(ui_theme::TYPE_BODY))
                                             .cursor_pointer()
                                             .when(is_active, |this| {
-                                                this.bg(rgb(ui_theme::ACCENT))
+                                                this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
                                                     .text_color(rgb(ui_theme::PRIMARY))
                                             })
                                             .when(!is_active, |this| {
-                                                this.text_color(rgb(ui_theme::FOREGROUND))
-                                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                                this.text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                                    .hover(|this| {
+                                                        this.bg(rgb(ui_theme::WB_ROW_HOVER))
+                                                    })
                                             })
                                             .on_click(cx.listener(
                                                 move |this, _event, _window, cx| {
@@ -1017,7 +1072,7 @@ impl RepositoryView {
                                                 if is_active {
                                                     ui_theme::PRIMARY
                                                 } else {
-                                                    ui_theme::MUTED_FOREGROUND
+                                                    ui_theme::CONTENT_TERTIARY
                                                 },
                                             ))
                                             .child(*label)
@@ -1902,15 +1957,32 @@ impl RepositoryView {
             self.active_dialog.is_some(),
             self.any_popup_menu_open(),
         );
+        // 悬浮工作台：拖拽区默认就是面板之间的空隙，不画线；悬停才浮出指示条，
+        // 拖拽中常亮。侧栏那一列的面板间隙由拖拽区自身宽度提供（16px），
+        // 页面内部相邻面板仍用 8px。
+        let gap = if target == ResizeTarget::Sidebar {
+            crate::chrome_view::SHELL_PADDING
+        } else {
+            ui_theme::SPACE_2
+        };
+        let indicator_color = if active {
+            rgb(ui_theme::PRIMARY)
+        } else {
+            rgb(ui_theme::BORDER_STRONG)
+        };
 
         div()
+            .id(format!("column-splitter-{target:?}"))
+            .group("column-splitter")
             .flex_none()
             .relative()
+            .items_center()
+            .justify_center()
             .map(|this| {
                 if horizontal {
-                    this.h(px(8.0)).w_full()
+                    this.h(px(gap)).w_full()
                 } else {
-                    this.w(px(8.0)).h_full()
+                    this.w(px(gap)).h_full()
                 }
             })
             .when(interactive, |this| {
@@ -1919,12 +1991,6 @@ impl RepositoryView {
                 } else {
                     CursorStyle::ResizeColumn
                 })
-                .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
-            })
-            .bg(if active {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::CARD)
             })
             .on_mouse_up_out(
                 MouseButton::Left,
@@ -1941,25 +2007,27 @@ impl RepositoryView {
                     .left(px(0.0))
                     .right(px(0.0))
                     .top(px(3.0))
-                    .h(px(1.0))
-                    .bg(if active {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
+                    .h(px(2.0))
+                    .rounded_full()
+                    .when(!active, |this| this.opacity(0.0))
+                    .when(interactive && !active, |this| {
+                        this.group_hover("column-splitter", |this| this.opacity(1.0))
                     })
+                    .bg(indicator_color)
                     .into_any_element()
             } else {
                 div()
                     .absolute()
-                    .left(px(3.0))
+                    .left(px((gap - 2.0) / 2.0))
                     .top(px(0.0))
                     .bottom(px(0.0))
-                    .w(px(1.0))
-                    .bg(if active {
-                        rgb(ui_theme::PRIMARY)
-                    } else {
-                        rgb(ui_theme::BORDER)
+                    .w(px(2.0))
+                    .rounded_full()
+                    .when(!active, |this| this.opacity(0.0))
+                    .when(interactive && !active, |this| {
+                        this.group_hover("column-splitter", |this| this.opacity(1.0))
                     })
+                    .bg(indicator_color)
                     .into_any_element()
             })
             .child(
@@ -2103,7 +2171,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(12.0))
             .bg(rgb(ui_theme::CARD))
             .child(
@@ -2473,9 +2541,9 @@ impl RepositoryView {
             .gap(px(8.0))
             .h(px(chrome_view::STATUS_BAR_HEIGHT))
             .px(px(16.0))
-            .border_t_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            // 状态栏直接坐在外壳的环境底上：底色透明，让根元素的圆角背景透出来
+            //（自己铺色会糊掉窗口底部两角），也不画分隔线——面板投影已经分开了层次。
+            .bg(ui_theme::rgba(0x00000000))
             .text_size(px(10.0))
             .child(
                 div()

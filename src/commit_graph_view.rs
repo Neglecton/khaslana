@@ -295,7 +295,7 @@ fn render_commit_graph_cell(graph: CommitGraphRow, width: f32, dimmed: bool) -> 
                     .flex()
                     .items_center()
                     .text_size(px(10.0))
-                    .font_family("Consolas, monospace")
+                    .font_family("Consolas")
                     .text_color(rgb(ui_theme::MUTED_FOREGROUND))
                     .child("..."),
             )
@@ -580,7 +580,7 @@ impl RepositoryView {
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.toggle_commit_graph_branch_menu(window);
+                            this.toggle_commit_graph_branch_menu(window, cx);
                             cx.notify();
                         }),
                     )
@@ -1168,7 +1168,7 @@ impl RepositoryView {
             .text_color(rgb(ui_theme::MUTED_FOREGROUND))
             .child(
                 div()
-                    .font_family("Consolas, monospace")
+                    .font_family("Consolas")
                     .child(commit.oid.clone()),
             )
             .child(

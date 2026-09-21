@@ -160,7 +160,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(120.0))
                             .text_size(px(11.0))
-                            .font_family("Consolas, monospace")
+                            .font_family("Consolas")
                             .text_color(rgb(if is_recording {
                                 ui_theme::CONTENT_PRIMARY
                             } else {
@@ -214,7 +214,7 @@ impl RepositoryView {
                                             // 跳过快捷键绑定（使按键不匹配 action，keydown 能正常到达 capture_key_down）。
                                             this.recording_shortcut =
                                                 Some(ShortcutRecordingTarget::App(action_val));
-                                            window.focus(&this.settings_center_focus);
+                                            window.focus(&this.settings_center_focus, cx);
                                             crate::register_all_key_bindings(
                                                 &mut cx.deref_mut(),
                                                 &this.shortcut_bindings,
@@ -400,7 +400,7 @@ impl RepositoryView {
                                                     .flex_none()
                                                     .w(px(120.0))
                                                     .text_size(px(11.0))
-                                                    .font_family("Consolas, monospace")
+                                                    .font_family("Consolas")
                                                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                                     .text_align(gpui::TextAlign::Center)
                                                     .child(display),

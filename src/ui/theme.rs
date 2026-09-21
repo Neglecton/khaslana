@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gpui::{Rgba, WindowAppearance, rgb as gpui_rgb, rgba as gpui_rgba};
 use khaslana::ThemeMode;
@@ -15,13 +15,6 @@ pub(crate) enum ThemeVariant {
 }
 
 impl ThemeVariant {
-    pub(crate) const fn window_appearance(self) -> WindowAppearance {
-        match self {
-            Self::Light => WindowAppearance::Light,
-            Self::Dark => WindowAppearance::Dark,
-        }
-    }
-
     /// 是否深色变体；语法高亮等按深浅二选一的能力用它分流。
     pub(crate) const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
@@ -211,6 +204,24 @@ theme_tokens! {
     107: TITLEBAR_SURFACE => 0xFFFFFF, 0x181A20;
     108: SHADOW_ELEVATION_1 => 0x1820331F, 0x00000052;
     109: SHADOW_ELEVATION_2 => 0x18203333, 0x00000080;
+
+    // ── 悬浮工作台（M3 壳层视觉层）──────────────────────────
+    // 与上面的 Focus Workbench token 并存：壳层与本轮迁移的页面用这一组，
+    // 未迁移页面不受影响；M7 清理阶段再合并重复项（见重构计划 §4.2）。
+    //
+    // 这一组表面色**必须是不带 alpha 的 6 位值**：`rgb()` 会把 8 位值按
+    // (G, B, A) 解析（gpui `color.rs`：`[_, r, g, b] = hex.to_be_bytes()`），
+    // 带 alpha 的 token 只能经 `rgba()` 消费。画板里的半透明面板按
+    // 「面板色与下层环境底预合成后的实色」给出，单测守住这一点。
+    110: WB_ENV => 0xF1F5FD, 0x0E1117;
+    111: WB_TOOLBAR => 0xF9FBFF, 0x141922;
+    // 导航面板：画板为 75% 浅面叠在环境底上的合成结果。
+    112: WB_NAV => 0xF7FAFE, 0x151922;
+    113: WB_PANEL => 0xFFFFFF, 0x1A1F29;
+    115: WB_INPUT_SURFACE => 0xF5F8FD, 0x1B212B;
+    116: WB_ROW_HOVER => 0xEFF4FD, 0x252B36;
+    117: WB_SHADOW_PANEL => 0x3A5D9814, 0x00000052;
+    118: WB_SHADOW_CONTROL => 0x3151830F, 0x00000040;
 }
 
 // ── 主色族 token（受 accent 预设动态控制）─────────────────
@@ -473,13 +484,21 @@ pub(crate) const TYPE_META: f32 = 11.0;
 pub(crate) const TYPE_BODY: f32 = 12.0;
 pub(crate) const TYPE_TITLE: f32 = 14.0;
 pub(crate) const TYPE_PAGE_TITLE: f32 = 16.0;
+/// 顶栏品牌字（最新 Pencil 稿的 "Khaslana" 字号）。
+pub(crate) const TYPE_BRAND: f32 = 21.0;
 
 #[allow(dead_code)]
 pub(crate) const CONTROL_HEIGHT_COMPACT: f32 = 28.0;
 pub(crate) const CONTROL_HEIGHT_REGULAR: f32 = 32.0;
+/// 顶栏命令与输入控件的统一高度（最新 Pencil 稿 60px 顶栏内的 36px 控件）。
+pub(crate) const CONTROL_HEIGHT_TOOLBAR: f32 = 36.0;
 pub(crate) const ROW_HEIGHT_COMPACT: f32 = 28.0;
 pub(crate) const ROW_HEIGHT_REGULAR: f32 = 36.0;
-pub(crate) const TITLEBAR_HEIGHT: f32 = 44.0;
+pub(crate) const TITLEBAR_HEIGHT: f32 = 60.0;
+/// 自绘窗口控制按钮：32 × 32、间距 2px、距右缘 12px（最新 Pencil 稿第五版）。
+pub(crate) const WINDOW_CONTROL_SIZE: f32 = 32.0;
+pub(crate) const WINDOW_CONTROL_GAP: f32 = 2.0;
+pub(crate) const WINDOW_CONTROLS_RIGHT_INSET: f32 = 12.0;
 /// Context Navigator 收起态窄条宽度（只剩展开箭头 + 模式图标）。
 pub(crate) const NAVIGATOR_COLLAPSED_WIDTH: f32 = 48.0;
 
@@ -487,7 +506,29 @@ pub(crate) const RADIUS_XS: f32 = 6.0;
 pub(crate) const RADIUS_SM: f32 = 8.0;
 #[allow(dead_code)]
 pub(crate) const RADIUS_MD: f32 = 10.0;
+/// 工作面板圆角（文件列表、差异外壳、提交区）。
+pub(crate) const RADIUS_PANEL: f32 = 16.0;
+/// 导航外壳圆角（画板比工作面板大一档）。
+pub(crate) const RADIUS_NAV: f32 = 18.0;
+/// 窗口圆角：外壳本身就是那张圆角卡片（画板把外围桌面装饰去掉，以圆角内容为边界）。
+pub(crate) const RADIUS_WINDOW: f32 = 24.0;
 pub(crate) const RADIUS_PILL: f32 = 999.0;
+
+/// 当前窗口圆角（逻辑像素）。
+///
+/// 「透明窗口 + 根元素圆角」方案里，gpui 的 `overflow_hidden` 只裁**矩形**，
+/// 圆角必须由每一层真正铺到底的色块自己画（根背景、顶栏、全屏遮罩）。窗口最大化时
+/// 圆角要归零，否则四角会露出桌面；这个值由 `RepositoryView::render` 按窗口状态写入，
+/// 供上面那些铺色层读取。
+static WINDOW_RADIUS: AtomicU32 = AtomicU32::new(RADIUS_WINDOW as u32);
+
+pub(crate) fn set_window_radius(radius: f32) {
+    WINDOW_RADIUS.store(radius.max(0.0).round() as u32, Ordering::Relaxed);
+}
+
+pub(crate) fn window_radius() -> f32 {
+    WINDOW_RADIUS.load(Ordering::Relaxed) as f32
+}
 
 /// 动效只用于 hover / active 的瞬态反馈；不引入会干扰桌面操作的装饰性动画。
 #[allow(dead_code)]
@@ -498,6 +539,16 @@ pub(crate) const MOTION_STANDARD_MS: u32 = 180;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// 强调色是进程级全局状态：改动它的测试必须串行，否则并行执行时
+    /// 一个测试的 `set_active_accent` 会让另一个测试读到别的预设（实测偶发失败）。
+    fn accent_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn theme_tokens_resolve_to_distinct_light_and_dark_colors() {
@@ -555,6 +606,7 @@ mod tests {
 
     #[test]
     fn accent_switching_changes_primary_resolution() {
+        let _guard = accent_lock();
         // 重置为默认，避免其他测试干扰
         set_active_accent(0);
         assert_eq!(
@@ -595,6 +647,7 @@ mod tests {
 
     #[test]
     fn accent_out_of_range_falls_back_to_default() {
+        let _guard = accent_lock();
         set_active_accent(999);
         assert_eq!(
             resolve_color_for_variant(PRIMARY, ThemeVariant::Light),
@@ -605,6 +658,7 @@ mod tests {
 
     #[test]
     fn non_accent_tokens_unaffected_by_accent_switch() {
+        let _guard = accent_lock();
         set_active_accent(0);
         let bg_light = resolve_color_for_variant(BACKGROUND, ThemeVariant::Light);
         let selection_light = resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Light);
@@ -623,6 +677,7 @@ mod tests {
 
     #[test]
     fn focus_ring_follows_accent_without_changing_static_state_tokens() {
+        let _guard = accent_lock();
         set_active_accent(0);
         let indigo_ring_light = resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Light);
         let indigo_ring_dark = resolve_color_for_variant(STATE_FOCUS_RING, ThemeVariant::Dark);
@@ -662,8 +717,16 @@ mod tests {
     fn focus_workbench_tokens_keep_density_and_theme_layers() {
         assert_eq!(SPACE_1, 4.0);
         assert_eq!(SPACE_6, 24.0);
-        assert_eq!(TITLEBAR_HEIGHT, 44.0);
+        // 最新 Pencil 稿：顶栏 60px，窗口按钮 32 × 32、间距 2、距右 12。
+        assert_eq!(TITLEBAR_HEIGHT, 60.0);
+        assert_eq!(WINDOW_CONTROL_SIZE, 32.0);
+        assert_eq!(WINDOW_CONTROL_GAP, 2.0);
+        assert_eq!(WINDOW_CONTROLS_RIGHT_INSET, 12.0);
+        assert!(CONTROL_HEIGHT_TOOLBAR < TITLEBAR_HEIGHT);
         assert_eq!(NAVIGATOR_COLLAPSED_WIDTH, 48.0);
+        // 外壳就是那张圆角卡片：圆角比工作面板大一档。
+        assert_eq!(RADIUS_WINDOW, 24.0);
+        assert!(RADIUS_WINDOW > RADIUS_PANEL);
         assert!(CONTROL_HEIGHT_COMPACT < CONTROL_HEIGHT_REGULAR);
         assert!(ROW_HEIGHT_COMPACT < ROW_HEIGHT_REGULAR);
         assert_ne!(
@@ -674,5 +737,66 @@ mod tests {
             resolve_color_for_variant(STATE_HOVER, ThemeVariant::Light),
             resolve_color_for_variant(STATE_SELECTION, ThemeVariant::Light)
         );
+    }
+
+    /// 悬浮工作台 token：深浅两套必须不同（避免写成固定色），
+    /// 且环境底与面板底要能拉开层次。
+    #[test]
+    fn workbench_tokens_separate_env_from_panel_in_both_variants() {
+        for variant in [ThemeVariant::Light, ThemeVariant::Dark] {
+            assert_ne!(
+                resolve_color_for_variant(WB_ENV, variant),
+                resolve_color_for_variant(WB_PANEL, variant)
+            );
+            assert_ne!(
+                resolve_color_for_variant(WB_TOOLBAR, variant),
+                resolve_color_for_variant(WB_PANEL, variant)
+            );
+            assert_ne!(
+                resolve_color_for_variant(WB_ROW_HOVER, variant),
+                resolve_color_for_variant(WB_PANEL, variant)
+            );
+        }
+    }
+
+    /// 悬浮工作台的表面色必须是无 alpha 的 6 位色：它们都经 `rgb()` 消费，
+    /// 而 `rgb()` 会把 8 位值当成 (G, B, A) 解析——8 位白 `0xFFFFFFF7`
+    /// 会渲染成奶油色 `#FFFFF7`（实测踩过），透明也只能用 `rgba(0x00000000)`。
+    /// 阴影色是例外：它们只经 `rgba()` 消费，必须保留 alpha。
+    #[test]
+    fn workbench_surface_tokens_stay_opaque_for_rgb_consumption() {
+        let surfaces = [
+            WB_ENV,
+            WB_TOOLBAR,
+            WB_NAV,
+            WB_PANEL,
+            WB_INPUT_SURFACE,
+            WB_ROW_HOVER,
+        ];
+        for token in surfaces {
+            for variant in [ThemeVariant::Light, ThemeVariant::Dark] {
+                assert!(
+                    resolve_color_for_variant(token, variant) <= 0xFFFFFF,
+                    "悬浮工作台表面 token 不能带 alpha：{token:#x}"
+                );
+            }
+        }
+        for token in [WB_SHADOW_PANEL, WB_SHADOW_CONTROL] {
+            assert!(
+                resolve_color_for_variant(token, ThemeVariant::Light) > 0xFFFFFF,
+                "阴影 token 必须带 alpha：{token:#x}"
+            );
+        }
+    }
+
+    /// 窗口圆角：默认取设计值，最大化时归零（否则四角露出桌面），负数夹到 0。
+    /// 只有渲染路径会写它，所以这个测试独占该全局状态是安全的。
+    #[test]
+    fn window_radius_defaults_to_design_value_and_clamps_negative() {
+        assert_eq!(window_radius(), RADIUS_WINDOW);
+        set_window_radius(-4.0);
+        assert_eq!(window_radius(), 0.0);
+        set_window_radius(RADIUS_WINDOW);
+        assert_eq!(window_radius(), RADIUS_WINDOW);
     }
 }

@@ -6,7 +6,26 @@
 
 mod theme;
 mod tokens;
+mod verify;
 mod workbench;
+
+/// 采证日志：`KHASLANA_SPIKE_LOG` 存在时把验证台的观测按行追加到 exe 工作目录。
+///
+/// 断言与事件序列写文件而不是只画在界面上，是因为采样环境可能不提供可读的
+/// 屏幕输出（RDP 会话下 DWM 不合成时截图全白），此时文件是唯一可靠证据。
+pub fn logline(line: &str) {
+    if std::env::var("KHASLANA_SPIKE_LOG").is_err() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("kit-spike-verify.log")
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 use gpui_kit::component::Root;
 use gpui_kit::*;
@@ -114,4 +133,26 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// M2 前置验证：别名 `gpui` 与 `gpui-kit` 必须指向**同一个** gpui-pre 实例。
+///
+/// 两边类型若来自不同实例，下面的赋值无法编译——那意味着主工程现有的
+/// 39 个 `use gpui::...` 文件必须逐个改写而不能靠 Cargo 别名过渡。
+#[allow(dead_code)]
+fn assert_aliases_are_same_crate(window: &mut gpui::Window, app: &mut gpui::App) {
+    let _: &mut gpui_kit::Window = window;
+    let _: &mut gpui_kit::App = app;
+}
+
+/// 同一验证的宏侧：主工程用 `gpui::actions!` 定义动作，别名路径必须也能解析。
+#[allow(dead_code)]
+mod alias_macro_probe {
+    use gpui::Action;
+
+    #[derive(Clone, PartialEq, Default, Debug, Action)]
+    #[action(namespace = alias_probe)]
+    pub struct ProbeAction;
+
+    gpui::actions!(alias_probe_two, [ProbeTwo]);
 }

@@ -338,7 +338,7 @@ fn render_block(block: &MdBlock) -> gpui::AnyElement {
                 .py_1()
                 .rounded_sm()
                 .bg(rgb(ui_theme::TILE))
-                .font_family("Consolas, monospace")
+                .font_family("Consolas")
                 .text_size(px(11.0))
                 .line_height(px(16.0))
                 .children(

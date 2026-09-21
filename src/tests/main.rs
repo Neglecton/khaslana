@@ -1418,9 +1418,6 @@ fn repo_switcher_filter_ranks_name_matches_before_path_matches() {
     assert_eq!(filtered.open[2].path_key, "khaslana");
 }
 
-// 仓库切换下拉的键盘导航（↑↓ 高亮 / Enter 确认 / Esc 关闭）已按键盘白名单
-// 整体移除：下拉仅支持鼠标点击与搜索框文本过滤。
-
 #[test]
 fn stage_operations_refresh_worktree_diff() {
     // 整文件（含行内 +/- 按钮路径）与按块/按行部分暂存的消息都触发差异面板跟随刷新
@@ -1841,4 +1838,16 @@ fn dedicated_fields_cover_all_field_ids() {
             "FieldId {id:?} 未注册到 DEDICATED_FIELDS（渲染即 panic / 输入静默丢失）"
         );
     }
+}
+
+#[test]
+fn shortcut_refresh_preserves_kit_component_bindings() {
+    assert!(is_khaslana_keybinding_action(gpui::Action::name(
+        &TextSubmit
+    )));
+    assert!(is_khaslana_keybinding_action(gpui::Action::name(
+        &ShortcutRefresh
+    )));
+    assert!(!is_khaslana_keybinding_action("input::Enter"));
+    assert!(!is_khaslana_keybinding_action("menu::SelectNext"));
 }
