@@ -28,8 +28,8 @@ use crate::{
     sidebar_view::sidebar_branch_matches_normalized_query,
     ui::{
         components::{
-            PlaceholderAlign, command_group, glass_menu, list_row_surface, page_header,
-            panel_empty_row, segmented_button, tooltip_text,
+            PlaceholderAlign, command_group, floating_panel, glass_menu, list_row_surface,
+            page_header, panel_empty_row, segmented_button, tooltip_text,
         },
         theme::{self as ui_theme, rgb},
     },
@@ -442,7 +442,7 @@ impl RepositoryView {
         // 搜索或文件过滤激活时隐藏泳道列（过滤后中间提交缺失，泳道线会断裂）。
         let graph_visible = !search_active && self.history_file_filter.is_none();
 
-        div()
+        floating_panel()
             .relative()
             .id("commit-graph-page")
             .flex()
@@ -450,7 +450,6 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(page_header("提交图谱", Some("分支拓扑与动向追踪")).child(
                 command_group().child(self.button(
                     "关闭",

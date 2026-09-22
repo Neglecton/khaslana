@@ -26,7 +26,7 @@ fn minimum_window_size_keeps_native_controls_reachable() {
     assert!(MIN_WINDOW_HEIGHT >= theme::TITLEBAR_HEIGHT + STATUS_BAR_HEIGHT);
     assert_eq!(
         shell_content_height(MIN_WINDOW_HEIGHT),
-        MIN_WINDOW_HEIGHT - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT
+        MIN_WINDOW_HEIGHT - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * SHELL_PADDING
     );
     assert_eq!(shell_content_height(40.0), 0.0);
 }

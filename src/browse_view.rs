@@ -37,8 +37,8 @@ use crate::{
     diff_encoding_label, encoding_info_label,
     ui::{
         components::{
-            command_group, empty_state, list_row_surface, page_header, panel_section_header,
-            segmented_button,
+            command_group, empty_state, floating_panel, list_row_surface, page_header,
+            panel_section_header, segmented_button,
         },
         theme as ui_theme,
     },
@@ -132,12 +132,11 @@ fn cached_widest_browse_line_index(
 
 impl RepositoryView {
     pub(crate) fn render_browse_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        floating_panel()
             .flex()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(match self.browse.list_mode {
                 BrowseListMode::Tree => self.render_browse_file_tree(cx).into_any_element(),
                 BrowseListMode::Compare => self.render_browse_compare_files(cx).into_any_element(),

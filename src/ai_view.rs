@@ -20,6 +20,7 @@ use crate::{
         components::{
             PlaceholderAlign, dialog_actions, dialog_overlay, inline_error_bubble, panel_empty_row,
         },
+        icons::ToolbarIcon,
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, scrollable_frame_when},
@@ -441,7 +442,10 @@ impl RepositoryView {
         self.ai_settings.is_usable() && !self.ai_commit_loading && !self.busy
     }
 
-    /// 渲染 commit message 输入框下方的 AI 生成按钮。
+    /// 渲染 commit message 标题行右侧的 AI 生成按钮。
+    ///
+    /// 按设计稿是「左侧图标 + 右侧文字」的轻量入口：无边框、无底色，
+    /// 与提交信息标题行并列，不是带轮廓的实体按钮。
     pub(crate) fn render_ai_commit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let enabled = self.ai_commit_button_enabled();
         let label = if self.ai_commit_loading {
@@ -449,9 +453,12 @@ impl RepositoryView {
         } else {
             "AI 生成"
         };
-        div().flex().items_center().child(self.button(
+        div().flex().items_center().child(self.ghost_button(
             label,
+            ToolbarIcon::Ai,
             enabled,
+            // 未配置供应商是禁用主因：tooltip 直接给出去设置中心的指引。
+            Some("请先在 AI 设置中配置并启用供应商"),
             |this, _, _| this.generate_ai_commit_message(),
             cx,
         ))

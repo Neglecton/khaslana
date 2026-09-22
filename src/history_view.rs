@@ -12,7 +12,8 @@ use crate::{
     scrollable_uniform_frame,
     ui::{
         components::{
-            EmptyState, list_row_surface, metric_badge, panel_section_header, tooltip_text,
+            EmptyState, floating_panel, list_row_surface, metric_badge, panel_section_header,
+            tooltip_text,
         },
         theme as ui_theme,
     },
@@ -60,7 +61,7 @@ impl RepositoryView {
         // 「没有仓库」是页面级空态：与工作区共用同一套文案与入口，
         // 避免无仓库时渲染空导航列 + 「请先打开一个仓库」的孤立占位行。
         if self.repo_path.is_none() {
-            return div()
+            return floating_panel()
                 .flex()
                 .flex_1()
                 .min_w(px(0.0))
@@ -105,17 +106,20 @@ impl RepositoryView {
 
         // Focus Workbench 的 History Inspector：提交导航全高固定在左，右侧检查器
         // 将提交概览与文件/差异拆成稳定的两层，避免原先上下三区互相挤压。
+        // 提交记录与检查器各是一张悬浮面板，中间只隔拖拽区的空隙。
         div()
             .flex()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            // 页面已坐在壳层的 floating_panel 内，这里不再自铺底色，
-            // 让检查器各列的分组底色直接落在面板上。
             .child(self.render_commit_history(layout.navigator_width, cx))
             .child(self.render_column_splitter(ResizeTarget::HistoryFiles, cx))
             .child(
-                div()
+                self.render_column_splitter(ResizeTarget::HistoryFiles, cx)
+            )
+            .child(
+                // 检查器（提交概览 + 文件/差异）是右侧独立悬浮面板。
+                floating_panel()
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -245,7 +249,8 @@ impl RepositoryView {
             )
             .into_any_element();
 
-        div()
+        // 提交记录列是独立悬浮面板：与右侧检查器之间只隔拖拽区的空隙。
+        floating_panel()
             .relative()
             .flex()
             .flex_col()
@@ -256,6 +261,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .child(
                 panel_section_header(format!("提交记录（{}）", self.history_scope.label()))
+                    .top_rounded()
                     .action(
                         div()
                             .flex()
@@ -388,7 +394,7 @@ impl RepositoryView {
                 .flex_none()
                 .h(px(details_height))
                 .min_h(px(HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT))
-                .child(panel_section_header("提交详情").build())
+                .child(panel_section_header("提交详情").top_rounded().build())
                 .child(
                     div()
                         .flex()
@@ -410,6 +416,7 @@ impl RepositoryView {
             "提交详情".to_string()
         };
         let header = panel_section_header(header_title)
+            .top_rounded()
             .action(
                 history_scope_button(
                     toggle_label,

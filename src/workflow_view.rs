@@ -28,7 +28,9 @@ use crate::{
     system::open_directory,
     tasks::TaskKind,
     ui::{
-        components::{command_group, list_row_surface, page_header, panel_section_header},
+        components::{
+            command_group, floating_panel, list_row_surface, page_header, panel_section_header,
+        },
         theme as ui_theme,
     },
 };
@@ -808,12 +810,12 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 模板列表与 Runbook Studio 各是一张悬浮面板，页面根不铺底色。
         div()
             .flex()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_workflow_template_column(cx))
             .child(self.render_column_splitter(ResizeTarget::WorkflowTemplates, cx))
             .child(self.render_workflow_detail(window, cx))
@@ -871,13 +873,14 @@ impl RepositoryView {
             ui_theme::CONTENT_SECONDARY
         };
 
-        div()
+        // Runbook Studio 是右侧独立悬浮面板：输入、步骤预览与运行日志
+        // 都在同一张卡内分层，卡与模板列表之间只隔拖拽区的空隙。
+        floating_panel()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 page_header("Runbook Studio", None).child(
                     command_group()
@@ -993,18 +996,18 @@ impl RepositoryView {
         let list_handle = scroll_handle.clone();
         let model_for_rows = Arc::clone(&model);
 
-        div()
+        // 模板导航列是独立悬浮面板（白底 + 圆角 + 投影），与右侧内容面板
+        // 之间只隔拖拽区的空隙；右侧分隔线由列分割条统一绘制。
+        floating_panel()
             .flex()
             .flex_col()
             .flex_none()
             .w(px(width))
             .min_w(px(crate::MIN_WORKFLOW_TEMPLATES_WIDTH))
             .min_h(px(0.0))
-            // 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
-            // 面板不自画右边框，避免出现两条平行框线。
-            .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
                 panel_section_header("模板导航")
+                    .top_rounded()
                     .action(
                         self.button(
                             "新建",

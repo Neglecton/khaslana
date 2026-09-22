@@ -88,8 +88,9 @@ impl RepositoryView {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .border_b_1()
-                .border_color(rgb(ui_theme::BORDER_MUTED))
+                .mb(px(ui_theme::SPACE_2))
+                // 与合并状态条一致：圆角实体 + 留白分隔，不画贯穿底边线。
+                .rounded(px(ui_theme::RADIUS_MD))
                 .bg(rgb(ui_theme::COLOR_WARNING))
                 .child(
                     div()

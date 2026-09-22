@@ -23,7 +23,8 @@ use crate::{
 /// 原生控制区固定在标题栏最右侧，窗口不能缩到把它们挤出视口。
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 520.0;
-pub(crate) const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// 底部状态栏高度：Kit StatusBar 单行小字，压到 10px 给中间内容区让路。
+pub(crate) const STATUS_BAR_HEIGHT: f32 = 10.0;
 pub(crate) const NARROW_LAYOUT_WIDTH: f32 = 1120.0;
 pub(crate) const COMFORTABLE_LAYOUT_WIDTH: f32 = 1440.0;
 /// 悬浮工作台的内容区留白：四周与面板间隙同值（画板 16px）。
@@ -158,8 +159,11 @@ pub(crate) fn start_window_resize(edge: WindowResizeEdge, window: &Window) {
 pub(crate) fn start_window_resize(_edge: WindowResizeEdge, _window: &Window) {}
 
 /// 根壳中间区使用确定高度，避免页面最小高度把状态栏和导航器底部推出视口。
+///
+/// 中间区自身带 SHELL_PADDING 的四周留白（顶栏与主界面之间也要有空隙），
+/// 所以这里先把上下两段留白扣掉，再交给页面容器。
 pub(crate) fn shell_content_height(viewport_height: f32) -> f32 {
-    (viewport_height - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0)
+    (viewport_height - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * SHELL_PADDING).max(0.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,7 +187,7 @@ pub(crate) enum ContextNavigatorPresentation {
 }
 
 /// 宽度策略只描述信息优先级：窄窗口覆盖 Context Navigator，
-/// 绝不挤压 titlebar 的原生命中区域；「贮藏」「子模块」常驻内联，不再收纳进 overflow。
+/// 绝不挤压 titlebar 的原生命中区域；窄档下顶栏命令统一收成纯图标。
 pub(crate) const fn shell_layout_policy(width: f32) -> ShellLayoutPolicy {
     if width < NARROW_LAYOUT_WIDTH {
         ShellLayoutPolicy {
@@ -380,14 +384,14 @@ impl RepositoryView {
                         },
                         cx,
                     ))
-                    // 「贮藏」「子模块」常驻内联：壳层不做响应式收纳，任何窗口宽度都可直达。
-                    // 两者在画板里没有位置，用图标按钮 + tooltip 保持顶栏宽度可控。
+                    // 「贮藏」「子模块」与刷新/获取/拉取/推送同一策略：宽窗显示
+                    // 图标 + 文字，窄档（< 1120）自动收成纯图标，顶栏宽度可控。
                     .child(self.chrome_command_button(
                         "贮藏",
                         ToolbarIcon::Stash,
                         None,
                         repo_open && !self.busy && !merge_in_progress,
-                        true,
+                        compact,
                         |this, _window, _cx| this.open_stash_dialog(),
                         cx,
                     ))
@@ -396,7 +400,7 @@ impl RepositoryView {
                         ToolbarIcon::Submodule,
                         None,
                         repo_open && !self.busy,
-                        true,
+                        compact,
                         |this, _window, _cx| this.open_submodule_manager(),
                         cx,
                     )),
@@ -539,6 +543,9 @@ impl RepositoryView {
 
     /// 展开态模式按钮：图标与文字是**同一个**按钮--悬停、按下、选中反馈整行同步。
     /// 左内边距让图标中心落在 x=24，与收起窄条图标位置一致（两态切换图标零位移）。
+    ///
+    /// `justify_start` 必须显式声明：Kit `Button` 自带 `justify_center`，整行按钮若
+    /// 不覆盖它，图标 + 文字会缩在行中部，与「左对齐的功能区」设计不符。
     fn navigator_expanded_mode_button(
         &self,
         id: &'static str,
@@ -559,6 +566,7 @@ impl RepositoryView {
             .mb(px(theme::SPACE_1))
             .flex()
             .items_center()
+            .justify_start()
             // 图标槽 16px：pl(16) + 槽中心 8 -> 图标中心 x=24（与收起窄条一致）
             .pl(px(16.0))
             .gap(px(theme::SPACE_2))

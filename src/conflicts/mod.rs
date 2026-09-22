@@ -14,7 +14,7 @@ use khaslana::{
 use crate::{
     MainMode, RepositoryView,
     ui::{
-        components::{PanelHeaderSurface, app_panel, panel_section_header},
+        components::{PanelHeaderSurface, app_panel, floating_panel, panel_section_header},
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, scrollable_uniform_frame},
@@ -538,10 +538,9 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let surfaces = conflict_workbench_surfaces();
-        app_panel()
+        // 冲突工作台整页是一张悬浮面板（内部 rail / 详情列再分层）。
+        floating_panel()
             .flex()
-            .bg(rgb(surfaces.canvas))
             .flex_col()
             .flex_1()
             .min_w(px(0.0))

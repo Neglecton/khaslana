@@ -2,7 +2,7 @@
 
 use crate::*;
 use gpui_kit::base::{Button as BaseButton, FocusTrapElement};
-use gpui_kit::component::{Disableable, Sizable, Size, switch::Switch};
+use gpui_kit::component::{Disableable, Sizable, Size, status_bar::StatusBar, switch::Switch};
 
 impl RepositoryView {
     pub(crate) fn credential_scope_button(
@@ -1881,39 +1881,45 @@ impl RepositoryView {
             .unwrap_or("未打开仓库");
         let staged_count = self.change_indexes.staged.len();
         let unstaged_count = self.change_indexes.unstaged.len();
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(8.0))
+        // 状态栏用 Kit StatusBar 的三区结构（left 固定左、center 伸缩、right 固定右）。
+        // Kit 默认带底色与顶边线，这里覆盖掉：状态栏坐在外壳的环境底上，
+        // 自己铺色会糊掉窗口底部两角，面板投影已经足够分层。
+        // 10px 的极矮条：垂直内边距归零、9px 小字，状态点与间距同步缩小。
+        StatusBar::new()
             .h(px(chrome_view::STATUS_BAR_HEIGHT))
-            .px(px(16.0))
-            // 状态栏直接坐在外壳的环境底上：底色透明，让根元素的圆角背景透出来
-            //（自己铺色会糊掉窗口底部两角），也不画分隔线——面板投影已经分开了层次。
+            .py(px(0.0))
+            .px(px(ui_theme::SPACE_4))
             .bg(ui_theme::rgba(0x00000000))
-            .text_size(px(10.0))
-            .child(
+            .border_color(ui_theme::rgba(0x00000000))
+            .text_size(px(9.0))
+            .left(
                 div()
-                    .flex_none()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(rgb(if self.busy {
-                        ui_theme::PRIMARY
-                    } else {
-                        ui_theme::GIT_ADDED
-                    })),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(status_label),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(branch.to_string()),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(5.0))
+                            .rounded_full()
+                            .bg(rgb(if self.busy {
+                                ui_theme::PRIMARY
+                            } else {
+                                ui_theme::GIT_ADDED
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(status_label),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(branch.to_string()),
+                    ),
             )
             .child(
                 div()
@@ -1940,13 +1946,13 @@ impl RepositoryView {
                         .child(format!("错误：{error}")),
                 )
             })
-            .child(
+            .right(
                 div()
                     .flex_none()
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("{unstaged_count} 未暂存 · {staged_count} 已暂存")),
             )
-            .child(
+            .right(
                 div()
                     .flex_none()
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))

@@ -14,7 +14,8 @@ use crate::{
     tasks::TaskKind,
     ui::{
         components::{
-            PanelBadge, command_group, list_row_surface, page_header, panel_section_header,
+            PanelBadge, command_group, floating_panel, list_row_surface, page_header,
+            panel_section_header,
         },
         theme as ui_theme,
     },
@@ -319,13 +320,12 @@ impl RepositoryView {
     }
 
     pub(crate) fn render_stash_preview_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        floating_panel()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_stash_preview_header(cx))
             .child(
                 div()

@@ -132,8 +132,10 @@ impl RepositoryView {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .border_b_1()
-                .border_color(rgb(ui_theme::BORDER_MUTED))
+                .mb(px(ui_theme::SPACE_2))
+                // 页面容器透明后，状态条是浮在环境底色上的独立实体：
+                // 用圆角 + 留白与下方分栏分隔，不再画贯穿的底边线。
+                .rounded(px(ui_theme::RADIUS_MD))
                 .bg(rgb(ui_theme::COLOR_WARNING))
                 .child(
                     div()

@@ -240,7 +240,10 @@ impl RepositoryView {
             .font_family("Consolas")
             .text_size(px(12.0))
             // 代码内容保持平整底色（WB_DIFF_SURFACE），不跟随面板悬浮感加投影/圆角，
-            // 否则每行都会像卡片。
+            // 否则每行都会像卡片。但它是差异面板的**最后一行**：gpui 的
+            // overflow_hidden 裁不住圆角，方角的代码底色会盖住面板底部两角，
+            // 因此底部两角必须显式带上与面板一致的圆角。
+            .rounded_b(px(ui_theme::RADIUS_PANEL))
             .bg(rgb(ui_theme::WB_DIFF_SURFACE))
             .child(
                 uniform_list(
@@ -506,11 +509,15 @@ impl RepositoryView {
                 },
             );
 
-        panel_section_header(title)
+        // 工作区差异是独立悬浮面板的第一行：标题行带顶部圆角，避免方角
+        // 分组底色盖住面板圆角；其他入口的差异列在面板内部，不加。
+        let mut header = panel_section_header(title)
             .accent_title()
-            .padding_x(ui_theme::SPACE_4)
-            .action(tools.into_any_element())
-            .build()
+            .padding_x(ui_theme::SPACE_4);
+        if target == EncodingMenuTarget::Worktree {
+            header = header.top_rounded();
+        }
+        header.action(tools.into_any_element()).build()
     }
 
     fn encoding_button(

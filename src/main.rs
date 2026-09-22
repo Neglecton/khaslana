@@ -104,8 +104,8 @@ use ui::{
     components::{
         AppToastKind, FeedbackMessage, ToastAction, app_shell_surface, bottom_progress_bar,
         danger_callout, dialog_actions, dialog_overlay, dialog_panel as ui_dialog_panel,
-        dialog_panel_size, feedback_bubble, feedback_stack, floating_panel, glass_menu,
-        segmented_button, tooltip_text,
+        dialog_panel_size, feedback_bubble, feedback_stack, glass_menu, segmented_button,
+        tooltip_text,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
@@ -3838,7 +3838,9 @@ impl Render for RepositoryView {
                     // 悬浮工作台：内容区四周留白，导航与页面各成一张抬起的面板。
                     // 面板之间不设 gap——拖拽区自身就是那段间隙（默认无可见分割线，
                     // 悬停/拖拽时才显示指示），收起窄条用右边距留出同样的间隙。
+                    // 顶栏与主界面之间同样留出 SHELL_PADDING，避免顶栏贴住页面。
                     .px(px(chrome_view::SHELL_PADDING))
+                    .pt(px(chrome_view::SHELL_PADDING))
                     .pb(px(chrome_view::SHELL_PADDING))
                     // 左侧列：Docked 展开完整导航器（模式按钮 + 分组列表）；
                     // 其余情况（收起偏好/窄窗/专用页面）一律渲染 48px 收起窄条
@@ -3857,8 +3859,11 @@ impl Render for RepositoryView {
                         context_presentation == chrome_view::ContextNavigatorPresentation::Docked,
                         |this| this.child(self.render_column_splitter(ResizeTarget::Sidebar, cx)),
                     )
+                    // 页面容器本身不铺底色：各页面自行把分栏组合成独立的悬浮面板
+                    // （floating_panel），面板之间的空隙直接露出环境底色，分割
+                    // 靠面板自身的圆角与投影表达，而不是一整张卡被线条切开。
                     .child(
-                        floating_panel()
+                        div()
                             .flex()
                             .flex_1()
                             .min_w(px(0.0))

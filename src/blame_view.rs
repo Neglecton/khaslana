@@ -14,7 +14,7 @@ use khaslana::BlameView;
 use crate::{
     EncodingMenuTarget, RepositoryView,
     ui::{
-        components::{command_group, page_header, tooltip_text},
+        components::{command_group, floating_panel, page_header, tooltip_text},
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
@@ -92,14 +92,13 @@ fn cached_widest_blame_line_index(
 
 impl RepositoryView {
     pub(crate) fn render_blame_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        floating_panel()
             .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_blame_header(cx))
             .child(self.render_blame_body(cx))
             // 编码选择下拉菜单（复用 diff 编码选择）
@@ -192,6 +191,9 @@ impl RepositoryView {
             .p_2()
             .font_family("Consolas")
             .text_size(px(12.0))
+            // 追溯页是整页单卡：代码区是面板最后一行，gpui 的 overflow_hidden
+            // 裁不住圆角，方角底色会盖住面板底部两角，这里显式补上。
+            .rounded_b(px(ui_theme::RADIUS_PANEL))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(

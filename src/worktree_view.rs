@@ -10,7 +10,7 @@ use crate::{
     placeholder_row, scrollable_frame_when, scrollable_uniform_frame,
     ui::{
         components::{
-            EmptyState, PanelBadge, PanelHeaderSurface, PlaceholderAlign, app_panel,
+            EmptyState, PanelBadge, PanelHeaderSurface, PlaceholderAlign, floating_panel,
             list_row_surface, panel_empty_row, panel_empty_row_aligned, panel_section_header,
         },
         icons::ToolbarIcon,
@@ -136,7 +136,7 @@ impl RepositoryView {
         // 「没有仓库」是页面级空态：不渲染空列表与禁用的提交条，
         // 给出可执行入口（视觉规范 §2：无仓库与干净工作区分别设计）。
         if self.repo_path.is_none() {
-            return app_panel()
+            return floating_panel()
                 .flex()
                 .flex_1()
                 .min_w(px(0.0))
@@ -179,7 +179,8 @@ impl RepositoryView {
             .as_ref()
             .map_or(0, |snapshot| snapshot.conflicts.len());
 
-        app_panel()
+        // 页面根不铺底色：左列变更列表、右列差异与提交条各自是独立的悬浮面板。
+        div()
             .flex()
             .flex_col()
             .flex_1()
@@ -227,8 +228,8 @@ impl RepositoryView {
             .flex_none()
             .px(px(ui_theme::SPACE_4))
             .py(px(ui_theme::SPACE_2))
-            .border_b_1()
-            .border_color(rgb(ui_theme::FEEDBACK_WARNING_BORDER))
+            .mb(px(ui_theme::SPACE_2))
+            .rounded(px(ui_theme::RADIUS_MD))
             .bg(rgb(ui_theme::FEEDBACK_WARNING_BG))
             .text_size(px(ui_theme::TYPE_BODY))
             .text_color(rgb(ui_theme::FEEDBACK_WARNING_TEXT))
@@ -242,6 +243,11 @@ impl RepositoryView {
         let unstaged_count = self.change_indexes.unstaged.len();
         let has_staged = staged_count > 0;
         let has_unstaged = unstaged_count > 0;
+        // 冲突区（若存在）占据左列顶部，其余分区不再是面板第一行。
+        let has_conflicts = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.conflicts.is_empty());
         let layout = change_sections_layout(
             staged_count,
             self.loading.staged(),
@@ -249,7 +255,9 @@ impl RepositoryView {
             self.loading.unstaged(),
         );
 
-        app_panel()
+        // 左列变更列表是独立悬浮面板：与差异面板之间只隔拖拽区的空隙，
+        // 圆角与投影表达「两块分开的实体」，不再共用一张大卡。
+        floating_panel()
             .flex()
             .flex_none()
             .flex_col()
@@ -287,6 +295,8 @@ impl RepositoryView {
                                 .into_any_element(),
                             ],
                             layout.staged,
+                            // 无冲突区时，已暂存分区是面板第一行：标题行带顶部圆角。
+                            !has_conflicts,
                             cx,
                         ))
                     })
@@ -316,6 +326,8 @@ impl RepositoryView {
                             .into_any_element(),
                         ],
                         layout.unstaged,
+                        // 无冲突区且无已暂存分区时，未暂存分区才是面板第一行。
+                        !has_conflicts && !layout.show_staged,
                         cx,
                     )),
             )
@@ -334,6 +346,8 @@ impl RepositoryView {
         peer_has_content: bool,
         actions: Vec<gpui::AnyElement>,
         height: ChangeSectionHeight,
+        // 该分区是否是左列面板的第一行（决定标题行是否带顶部圆角）。
+        top: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_staged = scope == DiffScope::Staged;
@@ -348,6 +362,9 @@ impl RepositoryView {
             }
         });
         let mut header = panel_section_header(title).padding_x(ui_theme::SPACE_4);
+        if top {
+            header = header.top_rounded();
+        }
         if let Some(badge) = badge {
             header = header.badge(badge);
         }
@@ -652,7 +669,9 @@ impl RepositoryView {
             })
             .unwrap_or_else(|| "差异".to_string());
 
-        div()
+        // 差异区是与变更列表并列的独立悬浮面板；提交条浮在它下方，
+        // 三段各自带圆角与投影，中间以留白分隔。
+        floating_panel()
             .flex()
             .flex_col()
             .flex_1()
@@ -712,6 +731,12 @@ impl RepositoryView {
                     .and_then(|snapshot| snapshot.head.as_deref()),
             )
         };
+        // 主动作文案同样预计算：修补模式下变为「修补提交并推送」。
+        let primary_label: &'static str = if self.amend_mode {
+            "修补提交并推送"
+        } else {
+            "提交并推送"
+        };
 
         let commit_actions = div()
             .flex()
@@ -735,8 +760,9 @@ impl RepositoryView {
                 ))
             })
             .when(!merge_in_progress, |this| {
-                this.child(self.secondary_button(
+                this.child(self.secondary_button_with_icon(
                     secondary_label.into(),
+                    ToolbarIcon::Check,
                     can_primary_commit,
                     |this, _, _| {
                         if this.amend_mode {
@@ -747,13 +773,9 @@ impl RepositoryView {
                     },
                     cx,
                 ))
-                .child(self.primary_button(
-                    // 修补模式下主动作变为「修补提交并推送」。
-                    if self.amend_mode {
-                        "修补提交并推送"
-                    } else {
-                        "提交并推送"
-                    },
+                .child(self.primary_button_with_icon(
+                    primary_label,
+                    ToolbarIcon::ArrowUp,
                     can_commit_and_push,
                     |this, _, _| {
                         if this.amend_mode {
@@ -771,7 +793,9 @@ impl RepositoryView {
             .flex_col()
             .flex_none()
             .gap_2()
-            .m(px(ui_theme::SPACE_2))
+            // 提交条与差异面板等宽同列：只留与上方差异区的间距，不设左右外边距
+            // （设计稿：提交信息框与差异框左右对齐、宽度一致）。
+            .mt(px(ui_theme::SPACE_2))
             .p(px(ui_theme::SPACE_3))
             .rounded(px(ui_theme::RADIUS_MD))
             // 提交区是独立抬起的一条工作条：用底色 + 圆角 + 内边距与上方内容分层，
@@ -794,14 +818,15 @@ impl RepositoryView {
                     // 极窄列下动作组整体换行，而不是与开关互相挤压或把主操作
                     // 挤出提交条（验收矩阵：长分支名不覆盖主操作）。
                     .flex_wrap()
-                    // 修补上次提交开关：位于提交信息下方左侧；
+                    // 修补上次提交复选框：位于提交信息下方左侧；
                     // 合并进行中不提供（合并提交用“完成合并”路径）。
+                    // 设计稿是复选框（方框 + 勾）而不是开关。
                     .when(!merge_in_progress && self.repo_path.is_some(), |this| {
-                        this.child(self.toggle_row(
+                        this.child(self.checkbox_row(
                             "commit-amend-toggle",
                             "修补上次提交",
                             self.amend_mode,
-                            |this, _window, _cx| {
+                            |this, _cx| {
                                 this.amend_mode = !this.amend_mode;
                                 if this.amend_mode {
                                     // 开启时输入框为空则预填 HEAD 的完整提交信息，
@@ -810,7 +835,7 @@ impl RepositoryView {
                                         this.prefill_amend_message();
                                     }
                                 } else if let Some(prefill) = this.amend_prefill.take() {
-                                    // 关闭时清除由开关预填且未被用户修改的内容；
+                                    // 关闭时清除由复选框预填且未被用户修改的内容；
                                     // 用户已编辑则保留，避免误删输入。
                                     if this.commit_message.value == prefill {
                                         this.commit_message.clear();

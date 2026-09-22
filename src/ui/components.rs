@@ -2,6 +2,7 @@
 // 其中部分控件为预留的公共 API，可能暂未被业务 view 调用，属于有意保留。
 #![allow(dead_code)]
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::ui::theme::{rgb, rgba};
@@ -13,7 +14,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Pixels,
     Render, SharedString, Stateful, Window, div, prelude::*, px,
 };
-use gpui_kit::base::Button as BaseButton;
+use gpui_kit::base::{Button as BaseButton, Checkbox, CheckboxState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppToastKind {
@@ -399,6 +400,9 @@ pub(crate) fn flat_panel() -> Div {
 }
 
 /// 页面标题行：标题、说明和命令组保持同一条基线，适合壳层和后续独立页面复用。
+///
+/// 只用于页面/悬浮面板顶部：底色带上与面板一致的顶部圆角，避免方角盖住
+/// 面板圆角（gpui 的 overflow_hidden 裁不住圆角）。
 pub(crate) fn page_header(title: &'static str, description: Option<&'static str>) -> Div {
     div()
         .flex()
@@ -408,6 +412,7 @@ pub(crate) fn page_header(title: &'static str, description: Option<&'static str>
         .gap(px(theme::SPACE_3))
         .min_h(px(40.0))
         .px(px(theme::SPACE_4))
+        .rounded_t(px(theme::RADIUS_PANEL))
         .border_b_1()
         .border_color(rgb(theme::BORDER_MUTED))
         .bg(rgb(theme::SURFACE_BASE))
@@ -1013,6 +1018,7 @@ pub(crate) struct PanelSectionHeader {
     tone: PanelTitleTone,
     surface: PanelHeaderSurface,
     padding_x: f32,
+    top_rounded: bool,
     actions: Vec<AnyElement>,
 }
 
@@ -1029,6 +1035,7 @@ impl PanelSectionHeader {
             tone: PanelTitleTone::Neutral,
             surface: PanelHeaderSurface::Grouped,
             padding_x: theme::SPACE_3,
+            top_rounded: false,
             actions: Vec::new(),
         }
     }
@@ -1050,6 +1057,14 @@ impl PanelSectionHeader {
 
     pub(crate) fn padding_x(mut self, padding_x: f32) -> Self {
         self.padding_x = padding_x;
+        self
+    }
+
+    /// 标记该标题行是所在悬浮面板的**第一行**：分组底色要带上与面板一致的
+    /// 顶部圆角。gpui 的 `overflow_hidden` 只裁矩形、裁不住圆角，方角的标题
+    /// 底色会盖住面板圆角，让面板外角看起来是直角。
+    pub(crate) fn top_rounded(mut self) -> Self {
+        self.top_rounded = true;
         self
     }
 
@@ -1076,6 +1091,9 @@ impl PanelSectionHeader {
             .py(px(theme::SPACE_2))
             .when(self.surface == PanelHeaderSurface::Grouped, |this| {
                 this.bg(rgb(theme::WB_SECTION_HEADER))
+            })
+            .when(self.top_rounded, |this| {
+                this.rounded_t(px(theme::RADIUS_PANEL))
             })
             .child(
                 div()
@@ -1519,6 +1537,63 @@ impl RepositoryView {
         )
     }
 
+    /// 轻量文字按钮：左侧图标 + 右侧文字，无边框、无底色，hover 才出浅底。
+    ///
+    /// 用于「AI 生成」这类行内文字入口——设计稿中它不是带轮廓的实体按钮，
+    /// 与旁边的输入框并列时不能抢焦点。禁用态用 tooltip 说明原因。
+    pub(crate) fn ghost_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
+        &self,
+        label: &'static str,
+        icon: ToolbarIcon,
+        enabled: bool,
+        disabled_hint: Option<&'static str>,
+        on_click: T,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<T> {
+        let hint = if enabled {
+            None
+        } else {
+            Some(disabled_hint.unwrap_or("当前状态不可用"))
+        };
+        // 图标与文字同色：AI 入口用主色强调，禁用时统一转为弱化灰。
+        let fg = if enabled {
+            theme::PRIMARY
+        } else {
+            theme::CONTENT_TERTIARY
+        };
+        BaseButton::new(label)
+            .disabled(!enabled)
+            .accessibility_label(label)
+            .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
+            .flex_none()
+            .flex()
+            .items_center()
+            // 图标与文字贴近（设计稿：AI 生成是图标 + 紧凑文字）。
+            .gap(px(6.0))
+            .h(px(theme::CONTROL_HEIGHT_TOOLBAR))
+            .px(px(theme::SPACE_2))
+            .rounded(px(theme::RADIUS_SM))
+            .text_color(rgb(fg))
+            .text_size(px(theme::TYPE_BODY))
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(rgb(theme::WB_ROW_HOVER)))
+                    .active(|this| this.opacity(0.8))
+            })
+            .when(!enabled, |this| this.cursor_not_allowed())
+            .when_some(hint, |this, text| {
+                this.tooltip(move |_window, cx| tooltip_text(text, cx))
+            })
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if enabled {
+                    on_click(this, window, cx);
+                    cx.notify();
+                }
+            }))
+            .child(toolbar_icon(icon, fg))
+            .child(label)
+    }
+
     pub(crate) fn toolbar_button(
         &self,
         label: &'static str,
@@ -1752,6 +1827,122 @@ impl RepositoryView {
             on_click,
             cx,
         )
+    }
+
+    /// 次级动作按钮（前置图标版）：「提交到 &lt;分支&gt;」按设计稿在文字前
+    /// 加勾图标，主次关系与无图标版完全一致。
+    pub(crate) fn secondary_button_with_icon<
+        T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    >(
+        &self,
+        label: SharedString,
+        icon: ToolbarIcon,
+        enabled: bool,
+        on_click: T,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<T> {
+        self.app_button(
+            label,
+            Some(icon),
+            None,
+            ButtonTone::Secondary,
+            enabled,
+            on_click,
+            cx,
+        )
+    }
+
+    /// 主动作按钮（前置图标版）：「提交并推送」按设计稿在文字前加上箭头。
+    pub(crate) fn primary_button_with_icon<
+        T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    >(
+        &self,
+        label: &'static str,
+        icon: ToolbarIcon,
+        enabled: bool,
+        on_click: T,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<T> {
+        self.app_button(
+            label.into(),
+            Some(icon),
+            None,
+            ButtonTone::Primary,
+            enabled,
+            on_click,
+            cx,
+        )
+    }
+
+    /// 「复选框 + 文字」行：Kit Checkbox（方框 + 勾），文字区独立可点，
+    /// 两者走同一动作（互不重叠，不会双重触发）。
+    ///
+    /// 设计稿的「修补上一次提交」是复选框而不是开关；方框与勾由调用方自绘，
+    /// 选中态用主色填充，未选中是弱轮廓空心框。Kit `Checkbox.on_change` 的
+    /// 签名比 Switch 多一个 `ClickEvent` 且按值传状态，`cx.listener` 适配不了，
+    /// 这里经 `cx.entity()` 回写宿主；动作因此不携带 `Window`。
+    pub(crate) fn checkbox_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        checked: bool,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        let on_click = Rc::new(on_click);
+        let box_click = on_click.clone();
+        let label_click = on_click.clone();
+        let box_border = if checked {
+            theme::PRIMARY
+        } else {
+            theme::BORDER_STRONG
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(theme::SPACE_2))
+            .child(
+                Checkbox::new(id)
+                    .checked(checked)
+                    .accessibility_label(label)
+                    .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
+                    .flex_none()
+                    .size(px(16.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(box_border))
+                    .bg(rgb(if checked {
+                        theme::PRIMARY
+                    } else {
+                        theme::WB_PANEL
+                    }))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_change(move |_state: CheckboxState, _event: &ClickEvent, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            box_click(this, cx);
+                            cx.notify();
+                        });
+                    })
+                    .when(checked, |this| {
+                        this.child(toolbar_icon(ToolbarIcon::Check, theme::PRIMARY_FOREGROUND))
+                    }),
+            )
+            .child(
+                div()
+                    .id(format!("{id}-label"))
+                    .cursor_pointer()
+                    .text_size(px(theme::TYPE_BODY))
+                    .text_color(rgb(theme::CONTENT_PRIMARY))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        label_click(this, cx);
+                        cx.notify();
+                    }))
+                    .child(label),
+            )
     }
 
     fn app_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
