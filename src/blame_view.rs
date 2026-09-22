@@ -167,35 +167,7 @@ impl RepositoryView {
                         )
                         .child(format!("编码：{encoding_label}")),
                 )
-                .child(
-                    div()
-                        .id("blame-close")
-                        .flex_none()
-                        .min_h(px(ui_theme::CONTROL_HEIGHT_COMPACT))
-                        .px(px(ui_theme::SPACE_2))
-                        .rounded(px(ui_theme::RADIUS_XS))
-                        .border_1()
-                        .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .bg(rgb(ui_theme::SURFACE_RAISED))
-                        .text_size(px(ui_theme::TYPE_BODY))
-                        .text_color(rgb(if self.busy {
-                            ui_theme::CONTENT_TERTIARY
-                        } else {
-                            ui_theme::CONTENT_PRIMARY
-                        }))
-                        .when(!self.busy, |this| {
-                            this.cursor_pointer()
-                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
-                        })
-                        .when(self.busy, |this| this.cursor_not_allowed().opacity(0.6))
-                        .on_click(cx.listener(|this, _event, _window, cx| {
-                            if !this.busy {
-                                this.close_blame();
-                                cx.notify();
-                            }
-                        }))
-                        .child("关闭"),
-                ),
+                .child(self.button("关闭", !self.busy, |this, _, _| this.close_blame(), cx)),
         )
     }
 
@@ -371,23 +343,27 @@ impl RepositoryView {
                 this.tooltip(move |_window, cx| tooltip_text(tooltip.clone(), cx))
             })
             .when_some(commit, |this, commit| {
+                // uniform_list 行内文本一律 overflow_hidden + whitespace_nowrap
+                // 硬裁剪：truncate() 的省略号会被 MinContent 测量坍缩固化。
                 this.child(
                     div()
                         .flex_none()
                         .w(px(BLAME_GUTTER_HASH_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .font_family("Consolas")
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::PRIMARY))
-                        .truncate()
                         .child(commit.short_oid.clone()),
                 )
                 .child(
                     div()
                         .flex_none()
                         .w(px(BLAME_GUTTER_AUTHOR_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .truncate()
                         .child(commit.author.clone()),
                 )
                 .child(
@@ -402,9 +378,10 @@ impl RepositoryView {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .truncate()
                         .child(commit.summary.clone()),
                 )
             })

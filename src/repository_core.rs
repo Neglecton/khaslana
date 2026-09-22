@@ -131,6 +131,14 @@ impl RepositoryView {
             shell_focus: cx.focus_handle(),
             settings_center_focus: cx.focus_handle(),
             workflow_shortcut_binding_focus: cx.focus_handle(),
+            dialog_focus: cx.focus_handle(),
+            ai_thinking_focus: cx.focus_handle(),
+            credential_prompt_focus: cx.focus_handle(),
+            code_palette_focus: cx.focus_handle(),
+            review_history_focus: cx.focus_handle(),
+            context_menu_focus: cx.focus_handle().tab_stop(true),
+            overlay_focus_return: OverlayFocusReturn::default(),
+            context_menu_keyboard: RefCell::new(ContextMenuKeyboard::default()),
             dialog_before_window_close: None,
             exit_requested: false,
             #[cfg(windows)]
@@ -229,6 +237,8 @@ impl RepositoryView {
             conflict_pane_scroll_sync: Rc::new(RefCell::new(None)),
             ai_conflict_loading: false,
             ai_thinking_overlay: None,
+            ai_thinking_task: None,
+            next_ai_thinking_task_id: 1,
             ai_thinking_follow_state: std::rc::Rc::new(AiThinkingFollowState {
                 last_key: std::cell::Cell::new((usize::MAX, usize::MAX)),
             }),
@@ -1214,7 +1224,6 @@ impl RepositoryView {
         );
 
         if conflict_paths.is_empty() {
-            self.conflict_editor.clear();
             return;
         }
         self.ensure_conflict_views_loaded();
@@ -1255,7 +1264,6 @@ impl RepositoryView {
 
     pub(crate) fn sync_conflict_editor_from_state(&mut self) {
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
-            self.conflict_editor.clear();
             return;
         };
         let Some((kind, draft)) = self
@@ -1264,25 +1272,14 @@ impl RepositoryView {
             .get(&path)
             .map(|view| (view.kind, view.draft.clone()))
         else {
-            self.conflict_editor.clear();
             return;
         };
         if kind != ConflictFileKind::Text {
-            self.conflict_editor.clear();
             return;
         }
-        if !conflict_editor_should_store_draft(kind) {
-            self.conflict_editor.clear();
-            self.scroll_conflict_panes_to_selected_block(
-                &draft,
-                self.selected_conflict_block_start(),
-            );
-            return;
-        }
-        if self.conflict_editor.value != draft {
-            self.conflict_editor.set_value(draft);
-        }
-        self.highlight_selected_conflict_block();
+        // 结果区是只读文档视图（M6 起固定），编辑器不承载草稿；
+        // 选中块变化时仍需把三栏滚动到该块。
+        self.scroll_conflict_panes_to_selected_block(&draft, self.selected_conflict_block_start());
     }
 
     fn selected_conflict_block_start(&self) -> usize {
@@ -1304,32 +1301,6 @@ impl RepositoryView {
             .unwrap_or(0)
     }
 
-    fn highlight_selected_conflict_block(&mut self) {
-        let Some(path) = self.conflict_workbench.selected_path.clone() else {
-            return;
-        };
-        let Some(view) = self.conflict_workbench.files.get(&path) else {
-            return;
-        };
-        let Some(block) = view
-            .blocks
-            .get(
-                self.conflict_workbench
-                    .selected_block
-                    .min(view.blocks.len().saturating_sub(1)),
-            )
-            .cloned()
-        else {
-            return;
-        };
-        let draft = view.draft.clone();
-        if conflict_editor_should_store_draft(view.kind) {
-            self.conflict_editor.move_caret_to(block.start, false);
-            self.conflict_editor.move_caret_to(block.end, true);
-        }
-        self.scroll_conflict_panes_to_selected_block(&draft, block.start);
-    }
-
     fn scroll_conflict_panes_to_selected_block(&self, text: &str, offset: usize) {
         let line_index = line_index_for_byte_offset(text, offset);
         for handle_id in conflict_workbench_scroll_handle_ids() {
@@ -1338,27 +1309,7 @@ impl RepositoryView {
         }
     }
 
-    pub(crate) fn sync_conflict_editor_into_state(&mut self) {
-        if !conflict_result_pane_uses_editor() {
-            return;
-        }
-        let Some(path) = self.conflict_workbench.selected_path.clone() else {
-            return;
-        };
-        let new_value = self.conflict_editor.value.clone();
-        let Some(view) = self.conflict_workbench.files.get_mut(&path) else {
-            return;
-        };
-        if view.kind == ConflictFileKind::Text && view.draft != new_value {
-            let max_index = view.blocks.len().saturating_sub(1);
-            view.set_draft(new_value);
-            self.conflict_workbench.selected_block =
-                self.conflict_workbench.selected_block.min(max_index);
-        }
-    }
-
     pub(crate) fn select_conflict_file(&mut self, path: String) {
-        self.sync_conflict_editor_into_state();
         self.conflict_workbench.selected_path = Some(path.clone());
         self.conflict_workbench.selected_block = 0;
         self.conflict_workbench.show_base = false;
@@ -1380,7 +1331,6 @@ impl RepositoryView {
     }
 
     fn select_conflict_block(&mut self, index: usize) {
-        self.sync_conflict_editor_into_state();
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             return;
         };
@@ -1415,7 +1365,6 @@ impl RepositoryView {
         &mut self,
         resolution: ConflictBlockResolution,
     ) {
-        self.sync_conflict_editor_into_state();
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             return;
         };
@@ -1429,7 +1378,6 @@ impl RepositoryView {
     }
 
     pub(crate) fn ignore_selected_conflict_block(&mut self) {
-        self.sync_conflict_editor_into_state();
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             return;
         };
@@ -1442,7 +1390,6 @@ impl RepositoryView {
     }
 
     pub(crate) fn apply_selected_conflict_draft(&mut self, resolve: bool) {
-        self.sync_conflict_editor_into_state();
         let Some(path) = self.conflict_workbench.selected_path.clone() else {
             self.last_error = Some("请先选择一个冲突文件".into());
             return;
@@ -1466,7 +1413,6 @@ impl RepositoryView {
     }
 
     pub(crate) fn confirm_pending_conflict_resolve(&mut self) {
-        self.sync_conflict_editor_into_state();
         let Some(pending) = self.conflict_workbench.pending_resolve.clone() else {
             self.active_dialog = None;
             return;
@@ -1552,8 +1498,6 @@ impl RepositoryView {
     pub(crate) fn submit_focused_field(&mut self, field: FieldId) {
         if matches!(field, FieldId::CommitMessage) {
             self.commit();
-        } else if matches!(field, FieldId::ConflictEditor) {
-            self.apply_selected_conflict_draft(false);
         } else if matches!(field, FieldId::CloneUrl | FieldId::ClonePath) {
             if self.active_dialog == Some(DialogState::CloneRepo) {
                 self.clone_repo();
@@ -1658,203 +1602,20 @@ impl RepositoryView {
             )
     }
 
-    pub(crate) fn text_backspace(
-        &mut self,
-        _: &TextBackspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).delete_backward();
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_delete(
-        &mut self,
-        _: &TextDelete,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).delete_forward();
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_left(&mut self, _: &TextLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).move_left(false);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_right(
-        &mut self,
-        _: &TextRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).move_right(false);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_up(&mut self, _: &TextUp, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            if Self::is_multiline_field(field) {
-                self.field_mut(field).move_vertical(-1, false);
-                cx.notify();
-            }
-        }
-    }
-
-    pub(crate) fn text_down(&mut self, _: &TextDown, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            if Self::is_multiline_field(field) {
-                self.field_mut(field).move_vertical(1, false);
-                cx.notify();
-            }
-        }
-    }
-
-    pub(crate) fn text_select_left(
-        &mut self,
-        _: &TextSelectLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).move_left(true);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_select_right(
-        &mut self,
-        _: &TextSelectRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).move_right(true);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_select_up(
-        &mut self,
-        _: &TextSelectUp,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx)
-            && Self::is_multiline_field(field)
-        {
-            self.field_mut(field).move_vertical(-1, true);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_select_down(
-        &mut self,
-        _: &TextSelectDown,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx)
-            && Self::is_multiline_field(field)
-        {
-            self.field_mut(field).move_vertical(1, true);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_select_all(
-        &mut self,
-        _: &TextSelectAll,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).select_all();
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_home(&mut self, _: &TextHome, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            if Self::is_multiline_field(field) {
-                self.field_mut(field).move_to_line_start(false);
-            } else {
-                self.field_mut(field).move_caret_to(0, false);
-            }
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_end(&mut self, _: &TextEnd, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            if Self::is_multiline_field(field) {
-                self.field_mut(field).move_to_line_end(false);
-            } else {
-                let end = self.field(field).value.len();
-                self.field_mut(field).move_caret_to(end, false);
-            }
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_paste(
-        &mut self,
-        _: &TextPaste,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(field) = self.focused_text_field(window, cx) else {
-            return;
-        };
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.field_mut(field).replace_text_in_utf16_range_with_mode(
-                None,
-                &text,
-                Self::is_multiline_field(field),
-            );
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn text_copy(&mut self, _: &TextCopy, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(field) = self.focused_text_field(window, cx) else {
-            return;
-        };
-        if let Some(text) = self.field(field).copyable_selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
-    }
-
-    pub(crate) fn text_cut(&mut self, _: &TextCut, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(field) = self.focused_text_field(window, cx) else {
-            return;
-        };
-        if let Some(text) = self.field(field).copyable_selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.field_mut(field).delete_selection();
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
     pub(crate) fn text_submit(
         &mut self,
         _: &TextSubmit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 顶层模态归属校验：焦点不在最上层模态浮层内时忽略提交——遮罩下
+        // 的输入框（被 AI 思考窗盖住的工作流编辑器、被确认框盖住的提交框）
+        // 不应响应 Enter / Ctrl+Enter 触发用户看不见的操作。
+        if let Some(handle) = self.top_modal_focus_handle() {
+            if !handle.contains_focused(window, cx) {
+                return;
+            }
+        }
         if let Some(field) = self
             .focused_kit_field(window, cx)
             .or_else(|| self.focused_text_field(window, cx))
@@ -1892,6 +1653,42 @@ impl RepositoryView {
                 .iter()
                 .find_map(|(field_id, access)| (*field_id == id).then(|| access(self)))
                 .expect("FieldId 未注册到 DEDICATED_FIELDS"),
+        }
+    }
+
+    /// 字段的严格只读寻址：目标不存在时返回 `None`，不做任何兜底。
+    ///
+    /// 与 [`Self::field`] 的区别在于动态字段：`field()` 对越界/未初始化的
+    /// 工作流字段回落到 `branch_name` 满足借用契约（渲染路径不能 panic），
+    /// 而 Kit 宿主的事件回调必须区分「字段还在」与「字段已消失」——后者要
+    /// 静默丢弃事件，落兜底会把孤儿输入写进无关表单。静态字段永远存在，
+    /// 两个方法行为一致。
+    pub(crate) fn try_field(&self, id: FieldId) -> Option<&TextFieldState> {
+        match id {
+            FieldId::WorkflowInput(index) => self
+                .workflow_state
+                .inputs
+                .get(index)
+                .map(|input| &input.field),
+            FieldId::WorkflowEditor(editor_id) => self.workflow_editor_field_ref(editor_id),
+            _ => DEDICATED_FIELDS
+                .iter()
+                .find_map(|(field_id, access)| (*field_id == id).then(|| access(self))),
+        }
+    }
+
+    /// 字段的严格可变寻址：目标不存在时返回 `None`，不做任何兜底。
+    /// 语义与 [`Self::try_field`] 对称，供 Kit 宿主的 Change 回调写回真值。
+    pub(crate) fn try_field_mut(&mut self, id: FieldId) -> Option<&mut TextFieldState> {
+        match id {
+            FieldId::WorkflowInput(index) => match self.workflow_state.inputs.get_mut(index) {
+                Some(_) => Some(&mut self.workflow_state.inputs[index].field),
+                None => None,
+            },
+            FieldId::WorkflowEditor(editor_id) => self.workflow_editor_field_ref_mut(editor_id),
+            // 静态字段经 field_mut 的穷举 match（未注册的变体会在编译期
+            // 暴露）；返回 Option 只是为了与动态字段的签名统一。
+            _ => Some(self.field_mut(id)),
         }
     }
 
@@ -1961,14 +1758,14 @@ impl RepositoryView {
         });
     }
 
-    pub(crate) fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_clone_dialog(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         self.close_popups();
         self.clone_url.clear();
         self.clone_path.clear();
         self.clone_recursive_submodules = default_clone_recursive_submodules();
         self.active_dialog = Some(DialogState::CloneRepo);
         self.last_error = None;
-        window.focus(&self.clone_url.focus, cx);
+        // 初始输入焦点由浮层挂载后的统一回调设置。
     }
 
     pub(crate) fn open_create_branch_dialog(&mut self) {
@@ -2019,6 +1816,12 @@ impl RepositoryView {
 
     /// Esc 只关闭最上层且可取消的浮层；返回 true 表示本次按键已消费。
     pub(crate) fn dismiss_topmost_cancellable_overlay(&mut self) -> bool {
+        // 关闭顺序自顶到底，与 `render` 尾部的挂载顺序（后者画在上层）一致。
+        // 「需要凭据」面板挂最顶：Esc 等价于它的「取消」按钮，中止当前 git 操作。
+        if self.pending_credential.is_some() {
+            self.cancel_credential_request();
+            return true;
+        }
         if self.remote_branch_operation.branch_dropdown_open {
             self.remote_branch_operation.branch_dropdown_open = false;
             self.remote_branch_search.clear();
@@ -2062,6 +1865,12 @@ impl RepositoryView {
             self.context_navigator_overlay_open = false;
             return true;
         }
+        // AI 思考窗不可取消（任务在后台继续），Esc 复用「后台运行」语义：
+        // 只收起弹窗，绝不穿透关闭被它遮住的父层（如工作流编辑器）。
+        if self.ai_thinking_overlay.is_some() {
+            self.close_ai_thinking_overlay();
+            return true;
+        }
         if self.code_search_palette.is_some() {
             self.close_code_search();
             return true;
@@ -2079,6 +1888,142 @@ impl RepositoryView {
             return true;
         }
         false
+    }
+
+    // ── 顶层浮层焦点圈与焦点恢复（R1 / R7） ──────────────────────────
+
+    /// 当前最上层浮层，以实际挂载顺序为准。
+    pub(crate) fn top_overlay_kind(&self) -> TopOverlayKind {
+        self.overlay_focus_layers().last().map(|layer| layer.0).unwrap_or_else(|| {
+            if self.any_popup_menu_open() { TopOverlayKind::PopupMenu } else { TopOverlayKind::None }
+        })
+    }
+
+    /// 模态和受键盘模型管理的菜单都有焦点圈；其余下拉保留自身输入焦点。
+    fn modal_focus_handle(&self, kind: TopOverlayKind) -> Option<FocusHandle> {
+        match kind {
+            TopOverlayKind::CredentialPrompt => Some(self.credential_prompt_focus.clone()),
+            TopOverlayKind::AiThinking => Some(self.ai_thinking_focus.clone()),
+            TopOverlayKind::CodePalette => Some(self.code_palette_focus.clone()),
+            TopOverlayKind::ReviewHistory => Some(self.review_history_focus.clone()),
+            TopOverlayKind::Dialog => Some(self.dialog_focus.clone()),
+            TopOverlayKind::Settings => Some(self.settings_center_focus.clone()),
+            // 只有受键盘模型支持的右键菜单才把焦点收进容器：仓库切换下拉、
+            // 编码菜单等没有挂焦点圈的容器，抢焦点会把它们的输入框焦点
+            // 落到没有元素跟踪的死句柄上。
+            TopOverlayKind::PopupMenu => self
+                .tracked_context_menu_open()
+                .then(|| self.context_menu_focus.clone()),
+            TopOverlayKind::None => None,
+        }
+    }
+
+    /// 当前最上层模态浮层的焦点圈句柄（无模态时为 None）。
+    pub(crate) fn top_modal_focus_handle(&self) -> Option<FocusHandle> {
+        let kind = self.top_overlay_kind();
+        if kind.is_modal() || self.tracked_context_menu_open() {
+            self.modal_focus_handle(kind)
+        } else {
+            None
+        }
+    }
+
+    /// 标记浮层已关闭：下一帧渲染时把焦点还给进入浮层前的触发器
+    /// （目标已销毁则回退父层焦点圈，最后回退应用根）。鼠标关闭与键盘
+    /// 关闭共用这一路径；由 `maintain_overlay_focus` 在 render 顶部执行。
+    pub(crate) fn request_overlay_focus_restore(&mut self) {
+        self.overlay_focus_return.restore_pending = true;
+    }
+
+    /// 按实际挂载顺序列出需要管理焦点的浮层。无遮罩菜单是否接管焦点
+    /// 由其键盘模型决定，与 is_modal 分开；父层即使被覆盖也保留返回记录。
+    fn overlay_focus_layers(&self) -> Vec<OverlayFocusKey> {
+        let mut layers = Vec::new();
+        let mut push = |kind, visible| {
+            if visible {
+                layers.push((kind, None));
+            }
+        };
+        push(TopOverlayKind::ReviewHistory, self.ai_review_history.is_some());
+        push(TopOverlayKind::PopupMenu,
+            self.tracked_context_menu_open() && self.credential_context_menu.is_none());
+        push(TopOverlayKind::Settings, self.settings_center.is_some());
+        if let Some(dialog) = self.dialog_before_window_close.as_ref() {
+            layers.push((TopOverlayKind::Dialog, Some(dialog.clone())));
+        }
+        if let Some(dialog) = self.active_dialog.as_ref() {
+            layers.push((TopOverlayKind::Dialog, Some(dialog.clone())));
+        }
+        for (kind, visible) in [
+            (TopOverlayKind::CodePalette, self.code_search_palette.is_some()),
+            (TopOverlayKind::AiThinking, self.ai_thinking_overlay.is_some()),
+            (TopOverlayKind::PopupMenu, self.credential_context_menu.is_some()),
+            (TopOverlayKind::CredentialPrompt, self.pending_credential.is_some()),
+        ] {
+            if visible {
+                layers.push((kind, None));
+            }
+        }
+        layers
+    }
+
+    /// 渲染前只记录进入/退出关系；新树完成后再验证目标是否仍挂载。
+    /// 同帧替换继承原触发器，关闭父子多层时恢复最外层的返回目标。
+    pub(crate) fn maintain_overlay_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu_keyboard.borrow_mut().actions.clear();
+        let restore_pending = std::mem::take(&mut self.overlay_focus_return.restore_pending);
+        let layers = self.overlay_focus_layers();
+        let current = window.focused(cx).map(|handle| handle.downgrade());
+        let change = self.overlay_focus_return.stack.reconcile(&layers, current.clone())
+            .or_else(|| restore_pending.then_some(OverlayFocusChange {
+                entering: false,
+                return_to: current,
+            }));
+        let Some(change) = change else {
+            return;
+        };
+        self.overlay_focus_return.generation = self.overlay_focus_return.generation.wrapping_add(1);
+        let generation = self.overlay_focus_return.generation;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                // 快速开关/替换后，旧帧的回调不得抢走新浮层焦点。
+                if this.overlay_focus_return.generation != generation
+                    || this.overlay_focus_layers() != layers
+                {
+                    return;
+                }
+                let kind = layers.last().map(|layer| layer.0).unwrap_or_default();
+                let container = this.modal_focus_handle(kind);
+                let allowed = |handle: &FocusHandle| {
+                    this.shell_focus.contains(handle, window)
+                        && container.as_ref().is_none_or(|parent| parent.contains(handle, window))
+                };
+                if !change.entering {
+                    if let Some(handle) = change.return_to.and_then(|weak| weak.upgrade()) {
+                        if allowed(&handle) {
+                            window.focus(&handle, cx);
+                            return;
+                        }
+                    }
+                } else if window.focused(cx).as_ref().is_some_and(&allowed) {
+                    // 开窗入口显式设置的初始控件焦点已经有效时保留它。
+                    return;
+                }
+                let preferred = match kind {
+                    TopOverlayKind::CodePalette => Some(this.code_palette_search.focus.clone()),
+                    TopOverlayKind::Dialog if this.active_dialog == Some(DialogState::CloneRepo) => {
+                        Some(this.clone_url.focus.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(handle) = preferred.filter(|handle| allowed(handle)) {
+                    window.focus(&handle, cx);
+                } else {
+                    window.focus(&container.unwrap_or_else(|| this.shell_focus.clone()), cx);
+                }
+            });
+        });
     }
 
     /// 切换仓库切换下拉的展开/收起；展开时菜单固定在触发器按钮正下方（按记录的锚点定位）。
@@ -2134,6 +2079,155 @@ impl RepositoryView {
             || self.workflow_editor_menu_open()
     }
 
+    // ── 右键菜单键盘模型（R6） ────────────────────────────────────────
+
+    /// 是否有支持键盘模型的右键菜单打开（九类上下文菜单）。
+    ///
+    /// 仓库切换下拉、编码菜单、图谱分支下拉、编辑器步骤下拉与窄窗导航
+    /// 覆盖层有自己的输入/键盘语义，不进这套模型。
+    pub(crate) fn tracked_context_menu_open(&self) -> bool {
+        self.branch_context_menu.is_some()
+            || self.remote_context_menu.is_some()
+            || self.change_context_menu.is_some()
+            || self.file_path_context_menu.is_some()
+            || self.credential_context_menu.is_some()
+            || self.tag_context_menu.is_some()
+            || self.stash_context_menu.is_some()
+            || self.commit_context_menu.is_some()
+            || self.workflow_template_context_menu.is_some()
+    }
+
+    /// 关闭全部受跟踪的右键菜单（互斥，同时只开一个）并归还焦点。
+    fn close_tracked_context_menus(&mut self) {
+        self.branch_context_menu = None;
+        self.remote_context_menu = None;
+        self.change_context_menu = None;
+        self.file_path_context_menu = None;
+        self.credential_context_menu = None;
+        self.tag_context_menu = None;
+        self.stash_context_menu = None;
+        self.commit_context_menu = None;
+        self.workflow_template_context_menu = None;
+        self.request_overlay_focus_restore();
+    }
+
+    /// 右键菜单键盘模型：↑/↓ 循环选择（跳过禁用项）、Enter 执行选中项。
+    /// 返回 true 表示按键已消费。Esc 不走这里——根层统一关闭路由
+    /// （`dismiss_topmost_cancellable_overlay`）负责。
+    pub(crate) fn handle_context_menu_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !self.tracked_context_menu_open() || self.top_overlay_kind() != TopOverlayKind::PopupMenu {
+            return false;
+        }
+        match key {
+            "up" => {
+                self.move_context_menu_selection(-1);
+                true
+            }
+            "down" => {
+                self.move_context_menu_selection(1);
+                true
+            }
+            "enter" => self.activate_context_menu_selection(cx),
+            _ => false,
+        }
+    }
+
+    /// 登记一个右键菜单条目的键盘动作（渲染时与视觉条目同序调用），
+    /// 返回该条目当前是否被键盘选中（供高亮）。菜单身份变化时重置
+    /// 动作表与选中；首个可用条目自动选中（Enter 直接执行它）。
+    pub(crate) fn register_context_menu_action(
+        &self,
+        menu_id: &str,
+        id: &str,
+        enabled: bool,
+        action: Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>,
+    ) -> bool {
+        let mut keyboard = self.context_menu_keyboard.borrow_mut();
+        if keyboard.menu_id.as_deref() != Some(menu_id) {
+            keyboard.menu_id = Some(menu_id.to_string());
+            keyboard.actions.clear();
+            keyboard.selected = None;
+        }
+        let index = keyboard.actions.len();
+        keyboard.actions.push(ContextMenuKeyAction {
+            id: id.to_string(),
+            enabled,
+            action,
+        });
+        match keyboard.selected {
+            Some(selected) => selected == index,
+            None if enabled => {
+                keyboard.selected = Some(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 选中失效（未选 / 指向禁用项）时吸附到首个可用条目。
+    fn snap_context_menu_selection(&self) {
+        let mut keyboard = self.context_menu_keyboard.borrow_mut();
+        let valid = keyboard
+            .selected
+            .and_then(|selected| keyboard.actions.get(selected))
+            .is_some_and(|action| action.enabled);
+        if !valid {
+            keyboard.selected = keyboard.actions.iter().position(|action| action.enabled);
+        }
+    }
+
+    /// ↑/↓ 移动键盘选中：只在可用条目间循环（分隔线不登记、禁用项跳过）。
+    fn move_context_menu_selection(&mut self, delta: i32) {
+        self.snap_context_menu_selection();
+        let mut keyboard = self.context_menu_keyboard.borrow_mut();
+        let selectable: Vec<usize> = keyboard
+            .actions
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| action.enabled)
+            .map(|(index, _)| index)
+            .collect();
+        let count = selectable.len();
+        if count == 0 {
+            return;
+        }
+        let current = keyboard
+            .selected
+            .and_then(|selected| selectable.iter().position(|index| *index == selected));
+        let next = match current {
+            Some(position) => (position as i32 + delta).rem_euclid(count as i32) as usize,
+            // 尚未选中：↓ 取首个、↑ 取末个。
+            None if delta >= 0 => 0,
+            None => count - 1,
+        };
+        keyboard.selected = Some(selectable[next]);
+    }
+
+    /// Enter 执行键盘选中的条目：先关菜单再执行（执行可能开对话框），
+    /// 与鼠标点击后各动作自关菜单等效。禁用项/无选中不执行。
+    fn activate_context_menu_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        self.snap_context_menu_selection();
+        let (action, executed_id) = {
+            let keyboard = self.context_menu_keyboard.borrow();
+            match keyboard
+                .selected
+                .and_then(|selected| keyboard.actions.get(selected))
+                .filter(|action| action.enabled)
+            {
+                Some(action) => (Some(action.action.clone()), action.id.clone()),
+                None => (None, String::new()),
+            }
+        };
+        let Some(action) = action else {
+            return false;
+        };
+        self.close_tracked_context_menus();
+        tracing::debug!(target: "khaslana::ui", "右键菜单键盘执行条目：{executed_id}");
+        action(self, cx);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn toggle_sidebar_section(&mut self, section: SidebarSection) {
         self.close_popups();
         self.sidebar_sections.toggle(section);
@@ -2149,6 +2243,13 @@ impl RepositoryView {
             self.close_settings_center();
             return;
         }
+        // 工作流编辑器有独立的状态清理（草稿、挂起编辑、动态字段宿主）：
+        // 只置空 active_dialog 会残留 workflow_editor，让动态宿主继续存活、
+        // 后台 AI 结果回填到已隐藏的编辑器。Esc 与关闭按钮走同一清理。
+        if matches!(self.active_dialog, Some(DialogState::WorkflowEditor)) {
+            self.close_workflow_editor();
+            return;
+        }
         let closing_submodule_manager = self.active_dialog == Some(DialogState::SubmoduleManager);
         self.active_dialog = None;
         self.remote_branch_operation.branch_dropdown_open = false;
@@ -2158,6 +2259,7 @@ impl RepositoryView {
             self.submodule_dialog.invalidate();
         }
         self.last_error = None;
+        self.request_overlay_focus_restore();
     }
 
     fn request_window_close(&mut self) {
@@ -2175,6 +2277,8 @@ impl RepositoryView {
     pub(crate) fn cancel_window_close(&mut self) {
         self.active_dialog = self.dialog_before_window_close.take();
         self.last_error = None;
+        // 关闭确认收回后焦点停在已消失的确认按钮上，移回对话框焦点圈。
+        self.request_overlay_focus_restore();
     }
 
     pub(crate) fn should_close_window(&mut self) -> bool {
@@ -2301,6 +2405,9 @@ impl RepositoryView {
 
     /// 关闭设置中心。
     pub(crate) fn close_settings_center(&mut self) {
+        if self.settings_center.is_some() {
+            self.request_overlay_focus_restore();
+        }
         self.settings_center = None;
         // 关闭设置中心时清掉可能残留的「保存并继续」待处理冲突路径，
         // 等价于原外部合并「取消」按钮的清理职责。

@@ -11,7 +11,6 @@ impl RepositoryView {
                 let feedbacks_before = self.feedbacks.len();
                 self.feedbacks.retain(|feedback| !feedback.is_expired(now));
                 let feedbacks_expired = self.feedbacks.len() != feedbacks_before;
-                self.sync_conflict_editor_into_state();
                 self.handle_tray_action(cx);
                 // 周期静默更新检查（12 小时一次）：到期才触发；fire 时读取
                 // auto_check 开关（会话中切换设置即时生效）；重排下次时刻
@@ -1302,13 +1301,24 @@ impl RepositoryView {
                     self.last_error = None;
                 }
             }
-            UiEvent::AiWorkflowTemplateGenerated { content } => {
-                self.handle_ai_workflow_template_generated(content, cx);
+            UiEvent::AiWorkflowTemplateGenerated { task_id, content } => {
+                let Some(kind @ crate::AiThinkingTaskKind::WorkflowTemplate { .. }) = self.ai_thinking_task_kind(task_id) else {
+                    return;
+                };
+                let target_alive = kind.owns_workflow_session(self.workflow_editor_session_id());
+                self.finish_ai_thinking_task(task_id);
+                if target_alive {
+                    self.handle_ai_workflow_template_generated(content, cx);
+                } else {
+                    self.notify_warning("AI 生成已结束，原编辑会话已关闭或更换，未覆盖当前模板", cx);
+                }
             }
-            UiEvent::AiCommitMessageGenerated { message } => {
+            UiEvent::AiCommitMessageGenerated { task_id, message } => {
+                if self.ai_thinking_task.as_ref().map(|task| task.id) != Some(task_id) {
+                    return;
+                }
+                self.finish_ai_thinking_task(task_id);
                 self.ai_commit_loading = false;
-                // 思考弹窗随完成自动关闭。
-                self.ai_thinking_overlay = None;
                 // 兜底守卫：空结果不覆盖输入框（避免清掉用户草稿）并显式提示。
                 // 正常路径已在生成任务里按空正文报错，这里防御未来回归。
                 if message.trim().is_empty() {
@@ -1434,17 +1444,26 @@ impl RepositoryView {
                 segment,
                 total,
             } => {
-                // 分段模式下的进度提示：仅当前选中的冲突文件更新状态栏，
-                // 避免生成期间切换文件后被旧任务的进度占据。整文件模式
-                // 只有一段，不发送该事件。
-                if self.conflict_workbench.selected_path.as_deref() == Some(path.as_str()) {
+                // 分段模式下的进度提示：进度归属当前运行的合并任务（按任务
+                // 身份 + 路径寻址）且仍是选中文件时才更新状态栏，避免生成
+                // 期间切换文件后被旧任务的进度占据。整文件模式只有一段，
+                // 不发送该事件。
+                if self.ai_thinking_owns_conflict_path(&path)
+                    && self.conflict_workbench.selected_path.as_deref() == Some(path.as_str())
+                {
                     self.status = format!("正在生成 AI 合并建议（第 {segment}/{total} 段）");
                 }
             }
-            UiEvent::AiConflictMergeGenerated { path, draft } => {
+            UiEvent::AiConflictMergeGenerated {
+                task_id,
+                path,
+                draft,
+            } => {
+                if self.ai_thinking_task.as_ref().map(|task| task.id) != Some(task_id) {
+                    return;
+                }
+                self.finish_ai_thinking_task(task_id);
                 self.ai_conflict_loading = false;
-                // 思考弹窗随完成自动关闭。
-                self.ai_thinking_overlay = None;
                 match self.conflict_workbench.files.get_mut(&path) {
                     Some(view) if view.kind == ConflictFileKind::Text => {
                         // Merged 写入：被覆盖块标记「已合并」（绿色），不再
@@ -1464,14 +1483,27 @@ impl RepositoryView {
                     }
                 }
             }
-            UiEvent::AiRequestFailed { error } => {
-                self.ai_commit_loading = false;
-                self.ai_conflict_loading = false;
-                // 思考弹窗随失败自动关闭（无论哪路业务失败）。
-                self.ai_thinking_overlay = None;
+            UiEvent::AiRequestFailed { task_id, error } => {
+                // 共用失败事件按任务身份路由：只复位所属业务的 loading 与
+                // 回填目标，迟到/无关任务的失败不碰其他业务（审查 R8）。
+                let Some(kind) = self.ai_thinking_task_kind(task_id) else {
+                    return;
+                };
+                match &kind {
+                    crate::AiThinkingTaskKind::CommitMessage => self.ai_commit_loading = false,
+                    crate::AiThinkingTaskKind::ConflictMerge { .. } => {
+                        self.ai_conflict_loading = false
+                    }
+                    // 工作流模板的 loading 复位与错误条回写由
+                    // handle_ai_workflow_template_failed 负责（字段私有）。
+                    crate::AiThinkingTaskKind::WorkflowTemplate { .. } => {}
+                }
+                self.finish_ai_thinking_task(task_id);
                 // 工作流模板编辑器的 AI 生成失败：错误写进编辑器内错误条
-                // （弹窗仍开着，用户可直接改需求重试），并复位其 loading。
-                self.handle_ai_workflow_template_failed(&error);
+                // （弹窗仍开着，用户可直接改需求重试）。仅当失败归属它。
+                if kind.owns_workflow_session(self.workflow_editor_session_id()) {
+                    self.handle_ai_workflow_template_failed(&error);
+                }
                 // 评审失败走带代际的 AiReviewFailed（旧任务的失败不能
                 // 误复位当前附着任务的状态）。
                 // 测试连接失败时也要解锁借用的 busy，否则按钮永久禁用。
@@ -1482,10 +1514,16 @@ impl RepositoryView {
                 self.notify_error(format!("AI 请求失败：{error}"), cx);
             }
             UiEvent::AiThinkingDelta {
+                task_id,
                 content_delta,
                 reasoning_delta,
             } => {
-                // 思考弹窗已关闭（后台运行）时丢弃增量。
+                // 只接受当前运行任务的增量；身份不匹配（迟到/其他任务）丢弃。
+                if self.ai_thinking_task.as_ref().map(|task| task.id) != Some(task_id) {
+                    return;
+                }
+                // 思考弹窗已关闭（后台运行）时丢弃增量：任务继续跑，结果
+                // 仍由完成事件回传（toast / 输入框回填）。
                 let Some(overlay) = self.ai_thinking_overlay.as_mut() else {
                     return;
                 };
@@ -1502,6 +1540,14 @@ impl RepositoryView {
                 self.status = message.clone();
                 self.last_error = None;
                 self.notify_completion(&message, cx);
+            }
+            UiEvent::AiConnectionTestFailed { error } => {
+                // 连接测试失败（不属于一次性生成任务）：只解锁借用的 busy
+                // 并提示，不碰任何思考弹窗/加载标志。
+                self.end_global_test_busy();
+                self.status = "AI 请求失败".into();
+                self.last_error = Some(error.clone());
+                self.notify_error(format!("AI 请求失败：{error}"), cx);
             }
             // ── 更新事件 ──
             UiEvent::UpdateCheckFinished {
@@ -1599,7 +1645,11 @@ impl RepositoryView {
                 // 「已有操作正在运行」）。
                 self.ai_commit_loading = false;
                 self.ai_conflict_loading = false;
-                self.ai_thinking_overlay = None;
+                // 运行态与可见态都清掉：任务体的第二层 catch_unwind 通常已
+                // 发过带身份的 AiRequestFailed（迟到事件被身份守卫丢弃），
+                // 这里保守释放互斥槽，否则永久挡掉后续一次性 AI 生成。
+                self.ai_thinking_task = None;
+                self.close_ai_thinking_overlay();
                 self.global_busy_tab = None;
                 self.update_downloading = false;
                 // 代码索引任务无法区分是否 panic 来源：置空全局单任务守卫，

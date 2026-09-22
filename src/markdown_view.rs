@@ -25,7 +25,7 @@ pub(crate) struct MdInlineSpan {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
-    /// 行内代码：TILE 底 + PRIMARY 字（chip 观感）。
+    /// 行内代码：SURFACE_SUNKEN 底 + PRIMARY 字（chip 观感）。
     pub code: bool,
     /// 弱化文字（列表符号等辅助标记）。
     pub muted: bool,
@@ -316,7 +316,7 @@ fn render_block(block: &MdBlock) -> gpui::AnyElement {
                 .mt_1()
                 .text_size(px(size))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(ui_theme::FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                 .child(md_styled_text(spans))
                 .into_any_element()
         }
@@ -337,7 +337,7 @@ fn render_block(block: &MdBlock) -> gpui::AnyElement {
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(ui_theme::TILE))
+                .bg(rgb(ui_theme::SURFACE_SUNKEN))
                 .font_family("Consolas")
                 .text_size(px(11.0))
                 .line_height(px(16.0))
@@ -355,15 +355,15 @@ fn render_block(block: &MdBlock) -> gpui::AnyElement {
             .pl_2()
             .py_1()
             .border_l_2()
-            .border_color(rgb(ui_theme::BORDER))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
             .children(blocks.iter().map(render_block))
             .into_any_element(),
         MdBlock::Rule => div()
             .flex_none()
             .my_1()
             .h(px(1.0))
-            .bg(rgb(ui_theme::BORDER))
+            .bg(rgb(ui_theme::BORDER_MUTED))
             .into_any_element(),
     }
 }
@@ -411,10 +411,10 @@ fn span_highlight(span: &MdInlineSpan) -> HighlightStyle {
         style.strikethrough = Some(StrikethroughStyle::default());
     }
     if span.code {
-        style.background_color = Some(rgb(ui_theme::TILE).into());
+        style.background_color = Some(rgb(ui_theme::SURFACE_SUNKEN).into());
         style.color = Some(rgb(ui_theme::PRIMARY).into());
     } else if span.muted {
-        style.color = Some(rgb(ui_theme::MUTED_FOREGROUND).into());
+        style.color = Some(rgb(ui_theme::CONTENT_SECONDARY).into());
     }
     style
 }

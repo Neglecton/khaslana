@@ -28,8 +28,8 @@ use crate::{
     sidebar_view::sidebar_branch_matches_normalized_query,
     ui::{
         components::{
-            command_group, glass_menu, list_row_surface, page_header, segmented_button,
-            tooltip_text,
+            PlaceholderAlign, command_group, glass_menu, list_row_surface, page_header,
+            panel_empty_row, segmented_button, tooltip_text,
         },
         theme::{self as ui_theme, rgb},
     },
@@ -294,9 +294,9 @@ fn render_commit_graph_cell(graph: CommitGraphRow, width: f32, dimmed: bool) -> 
                     .bottom(px(0.0))
                     .flex()
                     .items_center()
-                    .text_size(px(10.0))
+                    .text_size(px(ui_theme::TYPE_META))
                     .font_family("Consolas")
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("..."),
             )
         })
@@ -321,7 +321,7 @@ fn paint_graph_line(
 fn paint_graph_dot(window: &mut gpui::Window, x: gpui::Pixels, y: gpui::Pixels, color: gpui::Rgba) {
     let outer = px(5.0);
     let inner = px(4.0);
-    paint_graph_circle(window, x, y, outer, rgb(ui_theme::CARD));
+    paint_graph_circle(window, x, y, outer, rgb(ui_theme::SURFACE_BASE));
     paint_graph_circle(window, x, y, inner, color);
 }
 
@@ -382,8 +382,8 @@ fn commit_graph_branch_group_label(label: &'static str) -> gpui::AnyElement {
         .px_3()
         .pt(px(6.0))
         .pb(px(2.0))
-        .text_size(px(10.0))
-        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .text_size(px(ui_theme::TYPE_META))
+        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
         .child(label)
         .into_any_element()
 }
@@ -404,7 +404,7 @@ fn scope_segment_option(
         .items_center()
         .min_h(px(28.0))
         .px_3()
-        .text_size(px(12.0))
+        .text_size(px(ui_theme::TYPE_BODY))
         .font_weight(if selected {
             gpui::FontWeight::BOLD
         } else {
@@ -413,12 +413,12 @@ fn scope_segment_option(
         .text_color(rgb(if selected {
             ui_theme::PRIMARY
         } else {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         }))
         .bg(rgb(if selected {
-            ui_theme::ACCENT
+            ui_theme::WB_SECTION_HEADER
         } else {
-            ui_theme::CARD
+            ui_theme::SURFACE_BASE
         }))
         .cursor_pointer()
         .when(!selected, |this| {
@@ -450,7 +450,7 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(page_header("提交图谱", Some("分支拓扑与动向追踪")).child(
                 command_group().child(self.button(
                     "关闭",
@@ -517,9 +517,9 @@ impl RepositoryView {
                     .h(px(28.0))
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .overflow_hidden()
-                    .bg(rgb(ui_theme::CARD))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
                     // 真分段控件：共享外框与圆角，内部选项无独立边框、
                     // 以 1px 分隔线区隔，选中项主色底——同一时刻只有一个
                     // 选中态（history_scope 单值），互斥且是一个视觉整体。
@@ -535,7 +535,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(1.0))
                             .h_full()
-                            .bg(rgb(ui_theme::BORDER)),
+                            .bg(rgb(ui_theme::BORDER_MUTED)),
                     )
                     .child(scope_segment_option(
                         "commit-graph-scope-all",
@@ -557,25 +557,25 @@ impl RepositoryView {
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
                     .border_color(rgb(if highlight_active {
-                        ui_theme::ACCENT
+                        ui_theme::WB_SECTION_HEADER
                     } else {
-                        ui_theme::BORDER
+                        ui_theme::BORDER_MUTED
                     }))
                     .bg(rgb(if highlight_active {
-                        ui_theme::ACCENT
+                        ui_theme::WB_SECTION_HEADER
                     } else {
-                        ui_theme::CARD
+                        ui_theme::SURFACE_BASE
                     }))
-                    .text_size(px(12.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
                     .text_color(rgb(if highlight_active {
                         ui_theme::PRIMARY
                     } else {
-                        ui_theme::MUTED_FOREGROUND
+                        ui_theme::CONTENT_SECONDARY
                     }))
                     .max_w(px(220.0))
                     .min_w(px(0.0))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -627,8 +627,8 @@ impl RepositoryView {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(hint),
                 )
             })
@@ -636,8 +636,8 @@ impl RepositoryView {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("谱系计算中..."),
                 )
             })
@@ -789,7 +789,7 @@ impl RepositoryView {
                                         .px_3()
                                         .py_1()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child("远端分支加载中...")
                                         .into_any_element(),
                                     _ => div()
@@ -797,7 +797,7 @@ impl RepositoryView {
                                         .px_3()
                                         .py_1()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child("没有匹配的分支")
                                         .into_any_element(),
                                 };
@@ -855,19 +855,19 @@ impl RepositoryView {
             .id(id)
             .px_3()
             .py_1()
-            .text_size(px(12.0))
+            .text_size(px(ui_theme::TYPE_BODY))
             // 远端分支名（origin/…）用次要色与本地分支区分（选中仍以主色突出）。
             .text_color(rgb(if selected {
                 ui_theme::PRIMARY
             } else if remote {
                 ui_theme::CONTENT_SECONDARY
             } else {
-                ui_theme::FOREGROUND
+                ui_theme::CONTENT_PRIMARY
             }))
             .bg(rgb(if selected {
                 ui_theme::PRIMARY_SUBTLE
             } else {
-                ui_theme::CARD
+                ui_theme::SURFACE_BASE
             }))
             .cursor_pointer()
             .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
@@ -909,7 +909,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     COMMIT_GRAPH_LIST_SCROLL_ID,
@@ -1098,16 +1098,11 @@ impl RepositoryView {
                 .flex_none()
                 .h(px(COMMIT_GRAPH_DETAILS_HEIGHT))
                 .child(section_header_action("提交详情", None))
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .child("点击泳道行选中提交，查看完整信息"),
-                )
+                .child(panel_empty_row(
+                    "点击泳道行选中提交，查看完整信息",
+                    COMMIT_GRAPH_DETAILS_HEIGHT - 36.0,
+                    PlaceholderAlign::Center,
+                ))
                 .into_any_element();
         };
 
@@ -1165,12 +1160,10 @@ impl RepositoryView {
             .gap_x_3()
             .gap_y_1()
             .text_size(px(11.0))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-            .child(
-                div()
-                    .font_family("Consolas")
-                    .child(commit.oid.clone()),
-            )
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+            .child(div().font_family("Consolas").child(commit.oid.clone()))
+            // 复制类小按钮保留自绘：回调需要 `cx.listener` 的 FnMut 语义
+            // （项目级 button 的回调是 Fn，收不下可变的 cx）。
             .child(
                 div()
                     .id("commit-graph-copy-sha")
@@ -1179,9 +1172,9 @@ impl RepositoryView {
                     .py(px(1.0))
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .child("复制 SHA")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.copy_commit_sha(oid_for_copy.clone(), cx);
@@ -1195,9 +1188,9 @@ impl RepositoryView {
                     .py(px(1.0))
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .child("复制信息")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1238,9 +1231,9 @@ impl RepositoryView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
+                            .text_size(px(ui_theme::TYPE_BODY))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(commit.summary.clone()),
                     )
                     // 详情卡全量展示引用标签（不受行内 3 个上限约束）。
@@ -1253,8 +1246,8 @@ impl RepositoryView {
                         this.child(
                             div()
                                 .flex_none()
-                                .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_size(px(ui_theme::TYPE_META))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child("无引用标签"),
                         )
                     }),
@@ -1263,7 +1256,7 @@ impl RepositoryView {
                 div()
                     .min_w(px(0.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(text)
             }))
             .child(meta_row);
@@ -1332,7 +1325,7 @@ impl RepositoryView {
                     .bg(if active {
                         rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::BORDER)
+                        rgb(ui_theme::BORDER_MUTED)
                     }),
             )
     }

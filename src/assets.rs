@@ -1,8 +1,8 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use gpui::{AssetSource, SharedString};
-use rust_embed::Embed;
 use gpui_kit::assets::AllAssets;
+use rust_embed::Embed;
 
 #[derive(Embed)]
 #[folder = "assets/"]

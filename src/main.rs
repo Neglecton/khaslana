@@ -48,7 +48,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
-use std::ops::{Deref, DerefMut, Range};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -60,12 +60,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_channel::{Receiver, Sender};
 use git2::Repository;
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, FocusHandle,
-    Focusable, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, ListSizingBehavior,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle,
-    ScrollStrategy, TitlebarOptions, UTF16Selection, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowBackgroundAppearance, WindowOptions, actions, canvas, div, img, point,
-    prelude::*, px, size, uniform_list,
+    App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, FocusHandle, Focusable,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollHandle, ScrollStrategy, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, div, img, point,
+    prelude::*, px, size,
 };
 use khaslana::{
     AiProviderSettings, AiReviewRecord, AiReviewResult, AiReviewStep, BlameView, BranchKind,
@@ -99,17 +98,14 @@ use submodule_view::{
     submodule_request_matches,
 };
 use tasks::{TaskExecutor, TaskKind};
-use text_input::{
-    MULTILINE_LINE_HEIGHT, MULTILINE_MIN_LINES, MultiLineInputElement, SingleLineInputElement,
-    TextFieldState,
-};
+use text_input::TextFieldState;
 use ui::theme::rgb;
 use ui::{
     components::{
-        AppToastKind, FeedbackMessage, InputFrameSize, ToastAction, app_shell_surface,
-        bottom_progress_bar, danger_callout, dialog_actions, dialog_overlay,
-        dialog_panel as ui_dialog_panel, feedback_bubble, feedback_stack, floating_panel,
-        glass_menu, input_frame, segmented_button, tooltip_text,
+        AppToastKind, FeedbackMessage, ToastAction, app_shell_surface, bottom_progress_bar,
+        danger_callout, dialog_actions, dialog_overlay, dialog_panel as ui_dialog_panel,
+        dialog_panel_size, feedback_bubble, feedback_stack, floating_panel, glass_menu,
+        segmented_button, tooltip_text,
     },
     icons::{OauthBrand, ToolbarIcon, toolbar_icon},
     theme as ui_theme,
@@ -120,28 +116,11 @@ use workflow_view::{
     WorkflowInputFieldState, WorkflowLogEntry, WorkflowTemplateItem, workflow_templates_dir,
 };
 
-actions!(
-    text_input,
-    [
-        TextBackspace,
-        TextDelete,
-        TextLeft,
-        TextRight,
-        TextUp,
-        TextDown,
-        TextSelectLeft,
-        TextSelectRight,
-        TextSelectUp,
-        TextSelectDown,
-        TextSelectAll,
-        TextHome,
-        TextEnd,
-        TextPaste,
-        TextCopy,
-        TextCut,
-        TextSubmit,
-    ]
-);
+// Kit 输入（`Input` / `Textarea`）自管编辑、选区、IME 与剪贴板键位；
+// 自绘输入的 16 个 text_* action 随 M7 清理删除。这里只保留 TextSubmit：
+// 多行框的 Ctrl/Cmd+Enter 提交由它在 Kit 写入换行前截获（key context
+// "Input" 由 Kit 输入组件内部声明）。
+actions!(text_input, [TextSubmit]);
 
 // 应用级快捷键动作：每个对应一个可配置快捷键的功能入口。
 // bind_keys 把按键映射到这些 action，on_action 在根元素上监听并分发到 RepositoryView 方法。
@@ -1001,6 +980,36 @@ impl ChangeListIndexes {
     }
 }
 
+/// 右键菜单的键盘动作表：渲染时按条目顺序登记（与视觉清单同源），
+/// ↑/↓ 循环选择（跳过分隔线与禁用项）、Enter 执行选中项——键盘确认
+/// 与鼠标点击走同一条执行路径（审查 R6）。
+pub(crate) struct ContextMenuKeyboard {
+    /// 当前登记的菜单身份（切换到别的菜单时重置选中与动作表）。
+    menu_id: Option<String>,
+    /// 键盘选中的条目索引；None = 尚未选择，吸附首个可用项。
+    selected: Option<usize>,
+    /// 按渲染顺序登记的条目（分隔线不登记）。
+    actions: Vec<ContextMenuKeyAction>,
+}
+
+impl Default for ContextMenuKeyboard {
+    fn default() -> Self {
+        Self {
+            menu_id: None,
+            selected: None,
+            actions: Vec::new(),
+        }
+    }
+}
+
+/// 右键菜单单个条目的键盘动作：稳定业务 id（不用中文 label 寻址）+
+/// 可用性 + 打开菜单时构造的执行闭包。
+pub(crate) struct ContextMenuKeyAction {
+    pub(crate) id: String,
+    pub(crate) enabled: bool,
+    pub(crate) action: Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>,
+}
+
 #[derive(Clone, Debug)]
 struct ChangeContextMenu {
     path: String,
@@ -1193,14 +1202,6 @@ fn conflict_workbench_scroll_handle_ids() -> [&'static str; 3] {
     ]
 }
 
-fn conflict_result_pane_uses_editor() -> bool {
-    false
-}
-
-fn conflict_editor_should_store_draft(kind: ConflictFileKind) -> bool {
-    kind == ConflictFileKind::Text && conflict_result_pane_uses_editor()
-}
-
 fn default_clone_recursive_submodules() -> bool {
     true
 }
@@ -1274,24 +1275,6 @@ fn column_splitter_should_clear_resize(overlay_open: bool, resizing: bool) -> bo
 #[cfg(test)]
 fn dialog_parent_should_stop_mouse_event(event_name: &str) -> bool {
     event_name == "mouse_down"
-}
-
-fn multiline_input_should_scroll(id: FieldId, value: &str) -> bool {
-    id == FieldId::ConflictEditor || visual_line_count(value) > MULTILINE_MIN_LINES
-}
-
-/// 多行输入字段的滚动容器句柄 id（提交信息框与冲突编辑器各一个）。
-pub(crate) fn multiline_scroll_handle_id(id: FieldId) -> &'static str {
-    if id == FieldId::ConflictEditor {
-        CONFLICT_RESULT_SCROLL_HANDLE_ID
-    } else {
-        "commit-message-input-scroll"
-    }
-}
-
-#[cfg(test)]
-fn multiline_input_uses_input_frame(id: FieldId) -> bool {
-    id != FieldId::ConflictEditor
 }
 
 #[cfg(test)]
@@ -1587,6 +1570,126 @@ pub(crate) struct AiThinkingOverlayState {
 /// 复位以强制首帧钉底。
 pub(crate) struct AiThinkingFollowState {
     pub last_key: std::cell::Cell<(usize, usize)>,
+}
+
+/// 一次性 AI 生成任务（commit message / 冲突合并建议 / 工作流模板）的
+/// 运行态。与弹窗可见态分离：「后台运行」只收起弹窗，任务继续跑，
+/// 三业务互斥到任务真正完成/失败才释放（审查 R8）。
+pub(crate) struct AiThinkingTask {
+    /// 任务身份：增量/完成/失败事件按它寻址，迟到事件不影响其他任务。
+    id: u64,
+    /// 归属业务：共用失败事件只复位本业务的 loading 与回填目标。
+    kind: AiThinkingTaskKind,
+}
+
+fn take_matching_ai_task(task: &mut Option<AiThinkingTask>, task_id: u64) -> Option<AiThinkingTask> {
+    if task.as_ref()?.id != task_id {
+        return None;
+    }
+    task.take()
+}
+
+/// 一次性 AI 生成任务归属的业务。
+#[derive(Clone, Debug)]
+pub(crate) enum AiThinkingTaskKind {
+    CommitMessage,
+    ConflictMerge { path: String },
+    WorkflowTemplate { session_id: u64 },
+}
+
+impl AiThinkingTaskKind {
+    fn owns_workflow_session(&self, current: Option<u64>) -> bool {
+        matches!(self, Self::WorkflowTemplate { session_id } if Some(*session_id) == current)
+    }
+}
+
+/// 浮层种类。实际层级由 overlay_focus_layers 按挂载顺序构建：普通
+/// 右键菜单在设置之下，凭据菜单在对话框之上，不能只按枚举排序。
+///
+/// 渲染挂载顺序（`RepositoryView::render` 尾部）自底向上为：设置中心 →
+/// 对话框 → 代码面板 → AI 思考窗 → 凭据菜单 → 操作遮罩 → 待输入凭据
+/// 面板，因此这里的排序与之对应。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TopOverlayKind {
+    /// 「需要凭据」提示面板（git 凭据回调期间挂在最顶层）。
+    CredentialPrompt,
+    /// 无遮罩弹层：各类右键菜单、编码菜单、仓库切换下拉、图谱分支下拉、
+    /// 编辑器步骤下拉与窄窗导航覆盖层。
+    PopupMenu,
+    /// AI 思考弹窗（Esc = 后台运行语义，不终止任务）。
+    AiThinking,
+    /// 全局符号搜索面板（Ctrl+P）。
+    CodePalette,
+    /// AI 评审历史弹窗。
+    ReviewHistory,
+    /// 普通对话框（含工作流编辑器、凭据子窗等）。
+    Dialog,
+    /// 设置中心。
+    Settings,
+    #[default]
+    None,
+}
+
+impl TopOverlayKind {
+    /// 是否为带焦点圈的模态浮层（打开时焦点移入其中，Tab 在圈内循环）。
+    fn is_modal(self) -> bool {
+        matches!(
+            self,
+            Self::CredentialPrompt
+                | Self::AiThinking
+                | Self::CodePalette
+                | Self::ReviewHistory
+                | Self::Dialog
+                | Self::Settings
+        )
+    }
+}
+
+/// 每一层保留自己的返回目标。同层替换继承旧层的返回目标，不能记录
+/// 即将销毁的旧弹窗控件；同时关闭多层时返回最外一层的触发器。
+struct OverlayFocusStack<K, H> {
+    entries: Vec<(K, Option<H>)>,
+}
+
+impl<K, H> Default for OverlayFocusStack<K, H> {
+    fn default() -> Self {
+        Self { entries: Vec::new() }
+    }
+}
+
+struct OverlayFocusChange<H> {
+    entering: bool,
+    return_to: Option<H>,
+}
+
+impl<K: PartialEq + Clone, H: Clone> OverlayFocusStack<K, H> {
+    fn reconcile(&mut self, layers: &[K], current: Option<H>) -> Option<OverlayFocusChange<H>> {
+        let common = self.entries.iter().zip(layers)
+            .take_while(|((old, _), new)| old == *new).count();
+        if common == self.entries.len() && common == layers.len() {
+            return None;
+        }
+        let return_to = if common < self.entries.len() {
+            self.entries[common].1.clone()
+        } else {
+            current
+        };
+        self.entries.truncate(common);
+        let entering = layers.len() > common;
+        for (index, layer) in layers.iter().enumerate().skip(common) {
+            self.entries.push((layer.clone(), if index == common { return_to.clone() } else { None }));
+        }
+        Some(OverlayFocusChange { entering, return_to })
+    }
+}
+
+type OverlayFocusKey = (TopOverlayKind, Option<DialogState>);
+
+#[derive(Default)]
+pub(crate) struct OverlayFocusReturn {
+    stack: OverlayFocusStack<OverlayFocusKey, gpui::WeakFocusHandle>,
+    generation: u64,
+    restore_pending: bool,
 }
 
 /// 分支浏览模式的 per-repository 状态。
@@ -2421,10 +2524,14 @@ pub(crate) enum UiEvent {
         path: Option<PathBuf>,
     },
     AiCommitMessageGenerated {
+        /// 任务身份：与 `ai_thinking_task` 匹配才应用；不匹配说明是已收尾
+        /// 任务的迟到事件，静默丢弃（审查 R8）。
+        task_id: u64,
         message: String,
     },
     /// 工作流模板 AI 生成/编辑完成（JSON5 文本，经编辑器解析回填表单）。
     AiWorkflowTemplateGenerated {
+        task_id: u64,
         content: String,
     },
     AiReviewGenerated {
@@ -2474,16 +2581,24 @@ pub(crate) enum UiEvent {
         total: usize,
     },
     AiConflictMergeGenerated {
+        task_id: u64,
         path: String,
         draft: String,
     },
     /// AI 思考弹窗的流式增量（思维链/正文），由公共执行器转发；
-    /// `content_delta` 为 None 表示本片是思维链。
+    /// `content_delta` 为 None 表示本片是思维链。携带任务身份：只进
+    /// 所属任务且弹窗仍可见时增量，后台运行/迟到增量不写进别的窗口。
     AiThinkingDelta {
+        task_id: u64,
         content_delta: Option<String>,
         reasoning_delta: String,
     },
     AiRequestFailed {
+        task_id: u64,
+        error: String,
+    },
+    /// AI 供应商连接测试失败（不属于一次性生成任务，无任务身份）。
+    AiConnectionTestFailed {
         error: String,
     },
     AiConnectionTested {
@@ -3252,6 +3367,22 @@ pub(crate) struct RepositoryView {
     settings_center_focus: FocusHandle,
     /// 工作流快捷键绑定弹窗的焦点句柄，录制态夺取焦点使按键先到根捕获层。
     pub(crate) workflow_shortcut_binding_focus: FocusHandle,
+    /// 普通对话框的焦点圈句柄：dialog_overlay 经 `focus_trap` 挂载，
+    /// 打开时焦点移入其中，Tab/Shift+Tab 在圈内循环不漏到遮罩下层。
+    dialog_focus: FocusHandle,
+    /// AI 思考弹窗的焦点圈句柄（同 dialog_focus 用途）。
+    ai_thinking_focus: FocusHandle,
+    /// 「需要凭据」提示面板的焦点圈句柄（同 dialog_focus 用途）。
+    credential_prompt_focus: FocusHandle,
+    /// 全局符号搜索面板的焦点圈句柄（同 dialog_focus 用途）。
+    code_palette_focus: FocusHandle,
+    review_history_focus: FocusHandle,
+    /// 右键菜单容器的共享焦点圈句柄：菜单打开时焦点移入其中
+    /// （maintain_overlay_focus），↑/↓/Enter 经根层 on_key_down 分发。
+    context_menu_focus: FocusHandle,
+    /// 顶层浮层焦点恢复记录（进入前焦点、待恢复标志），见
+    /// [`OverlayFocusReturn`] 与 `maintain_overlay_focus`。
+    overlay_focus_return: OverlayFocusReturn,
     dialog_before_window_close: Option<DialogState>,
     exit_requested: bool,
     #[cfg(windows)]
@@ -3267,6 +3398,9 @@ pub(crate) struct RepositoryView {
     pub(crate) stash_context_menu: Option<StashContextMenu>,
     pub(crate) workflow_template_context_menu: Option<WorkflowTemplateContextMenu>,
     pub(crate) commit_context_menu: Option<CommitContextMenu>,
+    /// 右键菜单键盘动作表（渲染时登记、↑/↓/Enter 按索引执行），见
+    /// [`ContextMenuKeyboard`]（审查 R6）。
+    pub(crate) context_menu_keyboard: RefCell<ContextMenuKeyboard>,
     pub(crate) encoding_menu_target: Option<EncodingMenuTarget>,
     encoding_menu_closed_by_capture: Option<EncodingMenuTarget>,
     /// 图谱页分支高亮下拉菜单：根层捕获点击关闭后的「同次点击不再打开」标记
@@ -3397,7 +3531,16 @@ pub(crate) struct RepositoryView {
     /// AI 思考弹窗状态（None = 关闭）：公共执行器发起的一次性 AI 请求
     /// （commit message / 冲突合并建议 / 工作流模板生成）期间展示思维链
     /// 流式输出，任务完成或失败后自动关闭弹窗。
+    ///
+    /// 这只是**可见态**：「后台运行」只把它置 None，任务继续跑；三业务
+    /// 互斥由 [`RepositoryView::ai_thinking_task`]（运行态）持有，任务
+    /// 真正完成/失败才释放（审查 R8）。
     pub(crate) ai_thinking_overlay: Option<AiThinkingOverlayState>,
+    /// 一次性 AI 生成任务的运行态（None = 无任务）：打开即占位，完成/失败
+    /// 才清空。增量/成功/失败事件携带任务 id 按它寻址。
+    pub(crate) ai_thinking_task: Option<AiThinkingTask>,
+    /// 下一个 AI 思考任务 id（进程内自增，只用于身份区分）。
+    next_ai_thinking_task_id: u64,
     /// 思考弹窗钉底跟随的跨帧状态（内容长度键），见 `AiThinkingFollowState`。
     pub(crate) ai_thinking_follow_state: std::rc::Rc<AiThinkingFollowState>,
     // ── 代码索引 ──
@@ -3466,6 +3609,8 @@ impl DerefMut for RepositoryView {
 impl Render for RepositoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_events(cx);
+        // 先记录进入/退出的焦点关系，新元素树挂载后再应用初始焦点或返回目标。
+        self.maintain_overlay_focus(window, cx);
         // 工作流模板编辑器：渲染前确保当前展示的文本框已创建
         //（field_mut 无 cx 不能惰性建框，text_input 的 paint 路径依赖它已存在）。
         self.ensure_workflow_editor_fields_inited(window, cx);
@@ -3499,7 +3644,7 @@ impl Render for RepositoryView {
             .relative()
             .flex()
             .flex_col()
-            .text_color(rgb(ui_theme::FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
             // 全局符号搜索面板的入口监听：元素级（区别于其他快捷键的
             // App::on_action），回调带 Window 以便聚焦面板输入框。
             .on_action(cx.listener(|this, _: &ShortcutOpenCodeSearch, window, cx| {
@@ -3522,12 +3667,25 @@ impl Render for RepositoryView {
                     cx.notify();
                 },
             ))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key.as_str() == "escape"
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                if key == "escape"
                     && this.recording_shortcut.is_none()
                     && this.dismiss_topmost_cancellable_overlay()
                 {
-                    window.focus(&this.shell_focus, cx);
+                    // 焦点归还进入浮层前的触发器（已销毁则父层/根），
+                    // 由下一帧 maintain_overlay_focus 执行。
+                    this.request_overlay_focus_restore();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                // 右键菜单键盘模型（R6）：↑/↓ 循环选择（跳禁用项）、
+                // Enter 执行选中项。仅最上层是受跟踪的右键菜单时响应；
+                // 仓库切换下拉、编码菜单等有自己的输入/键盘语义。
+                if matches!(key, "up" | "down" | "enter")
+                    && this.handle_context_menu_key(key, cx)
+                {
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -3568,6 +3726,9 @@ impl Render for RepositoryView {
                     this.commit_graph_branch_search.clear();
                     this.commit_graph_branch_menu_closed_by_capture = closed_branch_menu;
                     this.close_repo_switcher();
+                    // 鼠标点外部关闭菜单与 Esc 关闭同一策略：焦点还给打开
+                    // 菜单前的元素（下一帧 maintain_overlay_focus 执行）。
+                    this.request_overlay_focus_restore();
                     cx.notify();
                 }
             }))
@@ -3744,7 +3905,7 @@ impl Render for RepositoryView {
             // AI 思考弹窗：一次性生成类请求的思维链流式展示，层级在
             // 普通对话框之上（工作流编辑器弹窗内触发时覆盖其上）。
             .child(self.render_code_search_palette(window, cx))
-            .child(self.render_ai_thinking_overlay(cx))
+            .child(self.render_ai_thinking_overlay(window, cx))
             .child(self.render_credential_context_menu(cx))
             .child(self.render_operation_blocker())
             .child(self.render_credentials(window, cx))
@@ -3757,117 +3918,6 @@ impl Render for RepositoryView {
 impl Focusable for RepositoryView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.shell_focus.clone()
-    }
-}
-
-impl gpui::EntityInputHandler for RepositoryView {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        adjusted_range: &mut Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let field = self.focused_text_field(window, cx)?;
-        let field_state = self.field(field);
-        let range = field_state.range_from_utf16(&range_utf16);
-        adjusted_range.replace(field_state.range_to_utf16(&range));
-        Some(field_state.text_for_utf16_range(&range_utf16))
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let field = self.focused_text_field(window, cx)?;
-        let field_state = self.field(field);
-        Some(UTF16Selection {
-            range: field_state.range_to_utf16(&field_state.input_range()),
-            reversed: field_state.selection_reversed(),
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        let field = self.focused_text_field(window, cx)?;
-        let field_state = self.field(field);
-        field_state
-            .marked_range
-            .as_ref()
-            .map(|range| field_state.range_to_utf16(range))
-    }
-
-    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).marked_range = None;
-        }
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field).replace_text_in_utf16_range_with_mode(
-                range_utf16,
-                text,
-                field == FieldId::CommitMessage,
-            );
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(field) = self.focused_text_field(window, cx) {
-            self.field_mut(field)
-                .replace_and_mark_text_in_utf16_range_with_mode(
-                    range_utf16,
-                    new_text,
-                    new_selected_range_utf16,
-                    field == FieldId::CommitMessage,
-                );
-            self.notify_text_field_changed(field);
-            cx.notify();
-        }
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let field = self.focused_text_field(window, cx)?;
-        let field_state = self.field(field);
-        field_state.bounds_for_utf16_range(&range_utf16, bounds)
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        position: gpui::Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        let field = self.focused_text_field(window, cx)?;
-        let field_state = self.field(field);
-        Some(field_state.offset_to_utf16(field_state.index_for_mouse_position(position)))
     }
 }
 
@@ -3996,10 +4046,6 @@ fn timestamp_label(seconds: i64) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "-".to_string())
-}
-
-fn visual_line_count(value: &str) -> usize {
-    value.chars().filter(|ch| *ch == '\n').count() + 1
 }
 
 pub(crate) fn clamped_menu_position(
@@ -4416,34 +4462,15 @@ fn register_all_key_bindings(
     };
     cx.clear_key_bindings();
     cx.bind_keys(component_bindings);
-    // 基础键位：文本输入框和浏览内容区。
-    cx.bind_keys([
-        KeyBinding::new("backspace", TextBackspace, Some("TextInput")),
-        KeyBinding::new("delete", TextDelete, Some("TextInput")),
-        KeyBinding::new("left", TextLeft, Some("TextInput")),
-        KeyBinding::new("right", TextRight, Some("TextInput")),
-        KeyBinding::new("up", TextUp, Some("TextInput")),
-        KeyBinding::new("down", TextDown, Some("TextInput")),
-        KeyBinding::new("shift-left", TextSelectLeft, Some("TextInput")),
-        KeyBinding::new("shift-right", TextSelectRight, Some("TextInput")),
-        KeyBinding::new("shift-up", TextSelectUp, Some("TextInput")),
-        KeyBinding::new("shift-down", TextSelectDown, Some("TextInput")),
-        KeyBinding::new("home", TextHome, Some("TextInput")),
-        KeyBinding::new("end", TextEnd, Some("TextInput")),
-        KeyBinding::new("cmd-enter", TextSubmit, Some("TextInput")),
-        KeyBinding::new("ctrl-enter", TextSubmit, Some("TextInput")),
-        KeyBinding::new("cmd-a", TextSelectAll, Some("TextInput")),
-        KeyBinding::new("cmd-c", TextCopy, Some("TextInput")),
-        KeyBinding::new("cmd-v", TextPaste, Some("TextInput")),
-        KeyBinding::new("cmd-x", TextCut, Some("TextInput")),
-        KeyBinding::new("ctrl-a", TextSelectAll, Some("TextInput")),
-        KeyBinding::new("ctrl-c", TextCopy, Some("TextInput")),
-        KeyBinding::new("ctrl-v", TextPaste, Some("TextInput")),
-        KeyBinding::new("ctrl-x", TextCut, Some("TextInput")),
-        // Kit Textarea 默认会在 secondary-enter 先插入换行再发 PressEnter；
-        // 这里以应用提交动作覆盖该键位，确保提交前不会污染业务真值。
-        KeyBinding::new("secondary-enter", TextSubmit, Some("Input")),
-    ]);
+    // Kit Textarea 默认会在 secondary-enter 先插入换行再发 PressEnter；
+    // 这里以应用提交动作覆盖该键位，确保提交前不会污染业务真值。
+    //（key context "Input" 由 Kit 输入组件内部声明；自绘输入的
+    // "TextInput" context 键位随自绘输入一并删除。）
+    cx.bind_keys([KeyBinding::new(
+        "secondary-enter",
+        TextSubmit,
+        Some("Input"),
+    )]);
     // 应用级快捷键：全局生效（无 context 谓词）。
     if !skip_shortcuts {
         // 工作流绑定先于静态快捷键注册：同键位意外撞车时后注册的静态键胜出

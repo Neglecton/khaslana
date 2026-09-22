@@ -130,7 +130,9 @@ impl WindowResizeEdge {
 pub(crate) fn start_window_resize(edge: WindowResizeEdge, window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, SendMessageW, WM_NCLBUTTONDOWN};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, SendMessageW, WM_NCLBUTTONDOWN,
+    };
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -202,7 +204,8 @@ pub(crate) const fn shell_layout_policy(width: f32) -> ShellLayoutPolicy {
 }
 
 /// 模式的中文名（收起窄条的图标按钮用 tooltip 表达；展开态按钮直接显示文字）。
-fn navigator_mode_label(mode: MainMode) -> &'static str {    match mode {
+fn navigator_mode_label(mode: MainMode) -> &'static str {
+    match mode {
         MainMode::Worktree => "工作区",
         MainMode::Conflict => "冲突处理",
         MainMode::History => "提交记录",
@@ -524,15 +527,14 @@ impl RepositoryView {
             .child(self.render_context_navigator_toggle(overlay, toggle_enabled, cx))
             // 箭头与模式图标之间留出间隔，避免两排图标贴在一起
             .child(div().h(px(theme::SPACE_2)));
-        self.navigator_mode_entries().into_iter().fold(
-            strip,
-            |strip, (id, icon, _label, active, mode)| {
+        self.navigator_mode_entries()
+            .into_iter()
+            .fold(strip, |strip, (id, icon, _label, active, mode)| {
                 strip.child(self.navigator_mode_button(id, icon, active, mode, cx))
-            },
-        )
-        // 底部：设置入口常驻（展开/收起两态都在同一位置）。
-        .child(div().flex_1())
-        .child(self.navigator_settings_button("navigator-settings-strip", cx))
+            })
+            // 底部：设置入口常驻（展开/收起两态都在同一位置）。
+            .child(div().flex_1())
+            .child(self.navigator_settings_button("navigator-settings-strip", cx))
     }
 
     /// 展开态模式按钮：图标与文字是**同一个**按钮--悬停、按下、选中反馈整行同步。
@@ -787,7 +789,12 @@ impl RepositoryView {
             ))
             .child(self.window_resize_band(
                 WindowResizeEdge::Bottom,
-                move |this| this.left(px(0.0)).right(px(0.0)).bottom(px(0.0)).h(px(band)),
+                move |this| {
+                    this.left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px(0.0))
+                        .h(px(band))
+                },
                 cx,
             ))
             // 两个下角后挂：命中优先于相邻的直边（后绘制者在上层）。
@@ -831,10 +838,13 @@ impl RepositoryView {
                 })
                 .absolute()
                 .cursor(edge.cursor())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _event, window, cx| {
-                    start_window_resize(edge, window);
-                    cx.stop_propagation();
-                })),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this, _event, window, cx| {
+                        start_window_resize(edge, window);
+                        cx.stop_propagation();
+                    }),
+                ),
         )
     }
 

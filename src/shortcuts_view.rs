@@ -388,9 +388,9 @@ impl RepositoryView {
                                                                 .px(px(6.0))
                                                                 .py(px(1.0))
                                                                 .rounded(px(ui_theme::RADIUS_PILL))
-                                                                .bg(rgb(ui_theme::SECONDARY))
+                                                                .bg(rgb(ui_theme::WB_ROW_HOVER))
                                                                 .text_size(px(10.0))
-                                                                .text_color(rgb(ui_theme::SECONDARY_FOREGROUND))
+                                                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                                                 .child("后台"),
                                                         )
                                                     }),

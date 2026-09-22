@@ -6,9 +6,10 @@
 // 拦截——先于输入框的 TextUp/TextDown/提交处理，保持检索面板的列表导航语义。
 
 use gpui::{Context, IntoElement, KeyDownEvent, MouseButton, Window, div, prelude::*, px};
+use gpui_kit::base::FocusTrapElement;
 
 use crate::tasks::TaskKind;
-use crate::ui::components::dialog_overlay;
+use crate::ui::components::{dialog_overlay, dialog_panel_size};
 use crate::ui::theme::{self as ui_theme, rgb};
 use crate::{FieldId, RepositoryView, UiEvent, send_ui_event};
 use khaslana::code_index::{DetailOutcome, SymbolDetail, TraceHop, search_symbols, symbol_detail};
@@ -26,16 +27,18 @@ impl RepositoryView {
         }
     }
 
-    pub(crate) fn open_code_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_code_search(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.close_popups();
         self.code_search_palette = Some(crate::CodeSearchPaletteState::default());
-        // 面板打开即聚焦输入框（重开续用上次关键词，立即按现有输入查询）。
-        window.focus(&self.code_palette_search.focus, cx);
+        // 挂载后由 maintain_overlay_focus 聚焦搜索框；进入前保留触发器焦点。
         self.on_code_palette_input_changed();
         cx.notify();
     }
 
     pub(crate) fn close_code_search(&mut self) {
+        if self.code_search_palette.is_some() {
+            self.request_overlay_focus_restore();
+        }
         self.code_search_palette = None;
     }
 
@@ -216,9 +219,9 @@ impl RepositoryView {
                 let is_selected = index == selected;
                 div()
                     .id(format!("code-palette-row-{index}"))
-                    .when(is_selected, |this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .when(is_selected, |this| this.bg(rgb(ui_theme::STATE_SELECTION)))
                     .when(!is_selected, |this| {
-                        this.hover(|style| style.bg(rgb(ui_theme::SECONDARY)))
+                        this.hover(|style| style.bg(rgb(ui_theme::WB_ROW_HOVER)))
                     })
                     .flex()
                     .items_center()
@@ -261,7 +264,7 @@ impl RepositoryView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(format!("{}:{}", hit.file_path, hit.start_line)),
                     )
                     .into_any_element()
@@ -305,7 +308,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(format!(
                                 "{} · 第 {}-{} 行",
                                 detail.file_path, detail.start_line, detail.end_line
@@ -325,7 +328,7 @@ impl RepositoryView {
                             this.child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("索引中没有该符号的调用关系边"),
                             )
                         },
@@ -338,7 +341,7 @@ impl RepositoryView {
                 .items_center()
                 .justify_center()
                 .text_size(px(12.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child(if palette.detail_loading {
                     "详情加载中…".to_string()
                 } else if searching {
@@ -419,11 +422,17 @@ impl RepositoryView {
                     .flex_1()
                     .text_right()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("↑↓ 切换 · Enter 追溯 · Esc 关闭"),
             );
 
+        // 焦点圈：面板打开即聚焦搜索框（open_code_search），Tab 在面板内
+        // 循环，不会漏到遮罩下层的主界面。
+        // 尺寸按视口钳制（审查 R3）：760×520 在最小窗/高 DPI 下越界。
+        let (panel_width, panel_height) = dialog_panel_size(window, 760.0, 520.0);
         dialog_overlay()
+            .id("code-palette-overlay")
+            .focus_trap("code-palette-overlay-trap", &self.code_palette_focus)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -435,13 +444,13 @@ impl RepositoryView {
             .child(
                 div()
                     .id("code-search-palette")
-                    .w(px(760.0))
-                    .h(px(520.0))
+                    .w(panel_width)
+                    .h(panel_height)
                     .p_4()
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::WB_PANEL))
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -477,7 +486,7 @@ impl RepositoryView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child("符号搜索"),
                     )
                     .child(self.input(FieldId::CodePaletteSearch, false, window, cx))
@@ -503,7 +512,7 @@ impl RepositoryView {
                                             div()
                                                 .pt_2()
                                                 .text_size(px(12.0))
-                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                                 .child(if has_repo {
                                                     "无匹配符号。改用更短的词（如 push 代替 pushBranch）"
                                                 } else {
@@ -553,7 +562,7 @@ fn render_palette_hop(hop: &TraceHop) -> gpui::AnyElement {
                 .rounded(px(ui_theme::RADIUS_XS))
                 .bg(rgb(ui_theme::SURFACE_SUNKEN))
                 .text_size(px(10.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child(format!("H{} {}", hop.hop, hop.risk)),
         )
         .child(
@@ -573,7 +582,7 @@ fn render_palette_hop(hop: &TraceHop) -> gpui::AnyElement {
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_size(px(11.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child(hop.file_path.clone()),
         )
         .into_any_element()

@@ -222,6 +222,12 @@ theme_tokens! {
     116: WB_ROW_HOVER => 0xEFF4FD, 0x252B36;
     117: WB_SHADOW_PANEL => 0x3A5D9814, 0x00000052;
     118: WB_SHADOW_CONTROL => 0x3151830F, 0x00000040;
+    // 分区标题行：面板内比面板底略沉一档的浅凹陷色（不是分割线，是分组底色）。
+    119: WB_SECTION_HEADER => 0xF7F9FD, 0x1D222C;
+    // 代码内容区（diff 正文）：保持平整底色，不随面板悬浮感加投影。
+    120: WB_DIFF_SURFACE => 0xFFFFFF, 0x16191F;
+    // 提交区：面板内独立抬起的一条工作条（与上方变更/差异区拉开层次）。
+    121: WB_COMMIT_BAR => 0xFFFFFF, 0x1D222C;
 }
 
 // ── 主色族 token（受 accent 预设动态控制）─────────────────
@@ -493,7 +499,6 @@ pub(crate) const CONTROL_HEIGHT_REGULAR: f32 = 32.0;
 /// 顶栏命令与输入控件的统一高度（最新 Pencil 稿 60px 顶栏内的 36px 控件）。
 pub(crate) const CONTROL_HEIGHT_TOOLBAR: f32 = 36.0;
 pub(crate) const ROW_HEIGHT_COMPACT: f32 = 28.0;
-pub(crate) const ROW_HEIGHT_REGULAR: f32 = 36.0;
 pub(crate) const TITLEBAR_HEIGHT: f32 = 60.0;
 /// 自绘窗口控制按钮：32 × 32、间距 2px、距右缘 12px（最新 Pencil 稿第五版）。
 pub(crate) const WINDOW_CONTROL_SIZE: f32 = 32.0;
@@ -728,7 +733,7 @@ mod tests {
         assert_eq!(RADIUS_WINDOW, 24.0);
         assert!(RADIUS_WINDOW > RADIUS_PANEL);
         assert!(CONTROL_HEIGHT_COMPACT < CONTROL_HEIGHT_REGULAR);
-        assert!(ROW_HEIGHT_COMPACT < ROW_HEIGHT_REGULAR);
+        assert_eq!(ROW_HEIGHT_COMPACT, 28.0);
         assert_ne!(
             resolve_color_for_variant(SURFACE_CANVAS, ThemeVariant::Light),
             resolve_color_for_variant(SURFACE_CANVAS, ThemeVariant::Dark)
@@ -772,6 +777,9 @@ mod tests {
             WB_PANEL,
             WB_INPUT_SURFACE,
             WB_ROW_HOVER,
+            WB_SECTION_HEADER,
+            WB_DIFF_SURFACE,
+            WB_COMMIT_BAR,
         ];
         for token in surfaces {
             for variant in [ThemeVariant::Light, ThemeVariant::Dark] {

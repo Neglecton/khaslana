@@ -64,7 +64,7 @@ fn author_label_includes_email_when_present() {
 #[test]
 fn history_commit_rows_fit_two_line_metadata_and_badges() {
     assert_eq!(HISTORY_COMMIT_ROW_HEIGHT, 48.0);
-    assert!(HISTORY_COMMIT_ROW_HEIGHT > ui_theme::ROW_HEIGHT_REGULAR);
+    assert!(HISTORY_COMMIT_ROW_HEIGHT > ui_theme::ROW_HEIGHT_COMPACT);
 }
 
 // 主历史页导航列较窄：行内引用标签上限收紧到 1（HEAD/首个本地分支优先），

@@ -240,8 +240,8 @@ impl RepositoryView {
             .p_3()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::WB_PANEL))
             .child(
                 div()
                     .flex()
@@ -256,13 +256,13 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child("本机 SSH 身份"),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("检测 ~/.ssh 私钥、SSH config 的 IdentityFile 和 Agent 已加载身份"),
                             ),
                     )
@@ -294,13 +294,13 @@ impl RepositoryView {
                         .px_2()
                         .py_2()
                         .rounded_sm()
-                        .bg(rgb(ui_theme::ACCENT))
+                        .bg(rgb(ui_theme::STATE_HOVER))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                 .child(format!("SSH Agent · 已加载 {count} 个身份")),
                         )
                         .child(self.button(
@@ -328,7 +328,7 @@ impl RepositoryView {
                         .py_2()
                         .rounded_sm()
                         .border_1()
-                        .border_color(rgb(ui_theme::BORDER))
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .child(
                             div()
                                 .flex_1()
@@ -338,14 +338,14 @@ impl RepositoryView {
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(ui_theme::FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                         .child(format!("{} · {source}", key.label)),
                                 )
                                 .child(
                                     div()
                                         .truncate()
                                         .text_size(px(10.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child(path.display().to_string()),
                                 ),
                         )
@@ -362,7 +362,7 @@ impl RepositoryView {
                 panel = panel.child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("未发现可用身份，可使用下方“选择私钥文件”手动指定。"),
                 );
             }

@@ -28,7 +28,7 @@ use crate::{
     system::open_directory,
     tasks::TaskKind,
     ui::{
-        components::{command_group, list_row_surface, page_header},
+        components::{command_group, list_row_surface, page_header, panel_section_header},
         theme as ui_theme,
     },
 };
@@ -39,7 +39,8 @@ pub(crate) struct WorkflowInputFieldState {
     label: String,
     description: Option<String>,
     required: bool,
-    field: TextFieldState,
+    /// 持业务真值的文本框（Kit 输入宿主经 `try_field` 读写这里）。
+    pub(crate) field: TextFieldState,
 }
 
 /// 一条工作流日志：标题行 + 可选的明细行（如逐个删除/命中的分支）。
@@ -1003,58 +1004,48 @@ impl RepositoryView {
             // 面板不自画右边框，避免出现两条平行框线。
             .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(ui_theme::SPACE_2))
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("模板导航"),
+                panel_section_header("模板导航")
+                    .action(
+                        self.button(
+                            "新建",
+                            !self.busy,
+                            |this, _, cx| this.open_workflow_editor(cx),
+                            cx,
+                        )
+                        .into_any_element(),
                     )
-                    .child(
-                        command_group()
-                            .child(self.button(
-                                "新建",
-                                !self.busy,
-                                |this, _, cx| this.open_workflow_editor(cx),
-                                cx,
-                            ))
-                            .child(self.button(
-                                "刷新",
-                                !self.busy,
-                                |this, _, cx| {
-                                    this.refresh_workflow_templates();
-                                    cx.notify();
-                                },
-                                cx,
-                            ))
-                            .child(self.button(
-                                "目录",
-                                !self.busy,
-                                |this, _, _| this.open_workflow_template_dir(),
-                                cx,
-                            )),
-                    ),
+                    .action(
+                        self.button(
+                            "刷新",
+                            !self.busy,
+                            |this, _, cx| {
+                                this.refresh_workflow_templates();
+                                cx.notify();
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
+                    )
+                    .action(
+                        self.button(
+                            "目录",
+                            !self.busy,
+                            |this, _, _| this.open_workflow_template_dir(),
+                            cx,
+                        )
+                        .into_any_element(),
+                    )
+                    .build(),
             )
             .child(
                 div()
                     .flex_none()
                     .px(px(ui_theme::SPACE_3))
                     .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .text_size(px(10.0))
+                    .text_size(px(ui_theme::TYPE_META))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .truncate()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(dir_label),
             )
             .child({
@@ -1273,9 +1264,9 @@ impl RepositoryView {
                                 .px(px(5.0))
                                 .py(px(1.0))
                                 .rounded(px(ui_theme::RADIUS_PILL))
-                                .bg(rgb(ui_theme::SECONDARY))
+                                .bg(rgb(ui_theme::WB_ROW_HOVER))
                                 .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::SECONDARY_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                 .child("后台"),
                         )
                     }),

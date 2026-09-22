@@ -28,7 +28,7 @@ use khaslana::{
 
 use crate::{
     FieldId, RepositoryView, TextFieldState,
-    ui::components::{dialog_actions, glass_menu, section_title},
+    ui::components::{dialog_actions, dialog_panel_size, glass_menu, section_title},
     ui::theme::{self as ui_theme, rgb},
     ui_helpers::{ScrollbarMode, menu_separator, placeholder_row, scrollable_frame_when},
     workflow_view::workflow_templates_dir,
@@ -1148,10 +1148,11 @@ pub(crate) struct PendingWorkflowEdit {
 }
 
 /// 单个步骤的 UI 状态：文本框 + 回写数据的引用槽。
-struct WorkflowEditorStepState {
+pub(crate) struct WorkflowEditorStepState {
     /// 该步骤各槽的文本框，按 `WorkflowStepSlot` 寻址。
     /// 惰性创建：首次渲染某槽时才建框，未建框的槽值以纯数据层为准。
-    fields: std::collections::HashMap<WorkflowStepSlot, TextFieldState>,
+    /// Kit 输入宿主经 `workflow_editor_live_fields` 枚举活跃槽位。
+    pub(crate) fields: std::collections::HashMap<WorkflowStepSlot, TextFieldState>,
 }
 
 /// 编辑器整体 UI 状态：包住纯数据层并持有全部文本框。
@@ -1160,11 +1161,12 @@ pub(crate) struct WorkflowEditorState {
     name_field: TextFieldState,
     file_name_field: TextFieldState,
     /// 步骤文本框，与 `data.steps` 按下标一一对应。
-    step_fields: Vec<WorkflowEditorStepState>,
+    /// Kit 输入宿主经 `workflow_editor_live_fields` 枚举活跃字段。
+    pub(crate) step_fields: Vec<WorkflowEditorStepState>,
     /// 输入变量文本框，与 `data.inputs` 按下标一一对应。
-    input_fields: Vec<WorkflowEditorInputRowState>,
+    pub(crate) input_fields: Vec<WorkflowEditorInputRowState>,
     /// 自定义变量文本框，与 `data.vars` 按下标一一对应。
-    var_fields: Vec<WorkflowEditorVarRowState>,
+    pub(crate) var_fields: Vec<WorkflowEditorVarRowState>,
     /// 当前展开「步骤类型」下拉菜单的步骤下标（None = 全部收起）。
     kind_menu_open: Option<usize>,
     /// 当前展开的守卫策略下拉：(步骤下标, 是否 on_exists)，None = 全部收起。
@@ -1182,16 +1184,16 @@ pub(crate) struct WorkflowEditorState {
     picker_search_field: TextFieldState,
 }
 
-struct WorkflowEditorInputRowState {
-    key_field: Option<TextFieldState>,
-    label_field: Option<TextFieldState>,
-    description_field: Option<TextFieldState>,
-    default_field: Option<TextFieldState>,
+pub(crate) struct WorkflowEditorInputRowState {
+    pub(crate) key_field: Option<TextFieldState>,
+    pub(crate) label_field: Option<TextFieldState>,
+    pub(crate) description_field: Option<TextFieldState>,
+    pub(crate) default_field: Option<TextFieldState>,
 }
 
-struct WorkflowEditorVarRowState {
-    key_field: Option<TextFieldState>,
-    value_field: Option<TextFieldState>,
+pub(crate) struct WorkflowEditorVarRowState {
+    pub(crate) key_field: Option<TextFieldState>,
+    pub(crate) value_field: Option<TextFieldState>,
 }
 
 impl WorkflowEditorState {
@@ -1404,6 +1406,9 @@ impl RepositoryView {
         self.workflow_editor = None;
         self.active_dialog = None;
         self.pending_workflow_edit = None;
+        // 与点击「关闭」按钮、Esc 关闭共用焦点归还：焦点回到打开编辑器
+        // 前的触发器（模板行菜单项等），不停留在已消失的弹窗控件上。
+        self.request_overlay_focus_restore();
     }
 
     /// 应用预设模板（仅编辑器步骤为空时生效，防止误覆盖已编辑内容）。
@@ -1921,9 +1926,20 @@ impl RepositoryView {
     /// 后台任务 panic 后的兜底复位（由 BackgroundTaskPanicked 调用）：
     /// ai_loading 是私有字段且失败路径还需要写错误条，统一走编辑器模块。
     pub(crate) fn reset_ai_loading_after_panic(&mut self) {
+        self.clear_workflow_editor_ai_loading();
+    }
+
+    /// 复位编辑器 AI 生成 loading（任务被互斥拒绝/收尾时调用）。
+    /// `ai_loading` 是私有字段，跨模块复位统一走这个方法。
+    pub(crate) fn clear_workflow_editor_ai_loading(&mut self) {
         if let Some(state) = self.workflow_editor.as_mut() {
             state.ai_loading = false;
         }
+    }
+
+    /// 名称字段的 uid 随整份编辑器重建而变化，作为本次编辑会话的身份。
+    pub(crate) fn workflow_editor_session_id(&self) -> Option<u64> {
+        self.workflow_editor.as_ref().map(|state| state.name_field.uid)
     }
 
     /// AI 生成完成事件处理：解析回填编辑器表单。
@@ -1934,8 +1950,8 @@ impl RepositoryView {
         content: String,
         cx: &mut Context<Self>,
     ) {
-        // 思考弹窗随完成自动关闭（编辑器弹窗仍开着，结果直接回填表单）。
-        self.ai_thinking_overlay = None;
+        // 思考弹窗已由事件处理器按任务身份收尾（finish_ai_thinking_task），
+        // 这里只负责把结果回填编辑器表单。
         let Some(state) = self.workflow_editor.as_mut() else {
             return;
         };
@@ -1996,6 +2012,7 @@ impl RepositoryView {
             .and_then(|definition| json5::to_string(&definition).ok());
 
         state.ai_loading = true;
+        let session_id = state.name_field.uid;
         // 清掉上一次的错误提示（新一轮生成开始）。
         state.data.error = None;
 
@@ -2003,7 +2020,8 @@ impl RepositoryView {
         // 自动关闭并把 JSON5 回填编辑器表单。
         self.start_ai_thinking_task(
             "AI 正在生成工作流模板",
-            |content| crate::UiEvent::AiWorkflowTemplateGenerated { content },
+            crate::AiThinkingTaskKind::WorkflowTemplate { session_id },
+            |task_id, content| crate::UiEvent::AiWorkflowTemplateGenerated { task_id, content },
             move |client, _proxy_url, _tx, on_delta| {
                 let (system, user) =
                     khaslana::workflow_template_prompts(&request, current_json5.as_deref());
@@ -2202,13 +2220,13 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(format!("模板 {file_label} 中包含手工写的注释。")),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("可视化编辑器保存时会重新生成文件，原文件中的注释与排版将无法保留（内容本身不受影响）。"),
             )
             .child(
@@ -2237,7 +2255,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(format!("确认删除模板「{display_name}」？")),
             )
             .child(
@@ -2309,12 +2327,12 @@ impl RepositoryView {
                         .border_color(rgb(if menu_open {
                             ui_theme::PRIMARY
                         } else {
-                            ui_theme::BORDER
+                            ui_theme::BORDER_MUTED
                         }))
                         .rounded(px(ui_theme::RADIUS_XS))
-                        .bg(rgb(ui_theme::CARD))
+                        .bg(rgb(ui_theme::WB_PANEL))
                         .cursor_pointer()
-                        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                        .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                         // 同类型触发器：阻断 mouse_down 冒泡保住 toggle 语义。
                         .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
                             cx.stop_propagation();
@@ -2326,13 +2344,13 @@ impl RepositoryView {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                 .child(current_label),
                         )
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child("▾"),
                         ),
                 ),
@@ -2380,12 +2398,12 @@ impl RepositoryView {
                                 .text_color(rgb(if selected {
                                     ui_theme::PRIMARY
                                 } else {
-                                    ui_theme::FOREGROUND
+                                    ui_theme::CONTENT_PRIMARY
                                 }))
                                 .bg(rgb(if selected {
                                     ui_theme::PRIMARY_SUBTLE
                                 } else {
-                                    ui_theme::CARD
+                                    ui_theme::WB_PANEL
                                 }))
                                 .cursor_pointer()
                                 .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
@@ -2433,6 +2451,9 @@ impl RepositoryView {
         };
         let step = editor.wizard_step;
         let scroll_handle = self.scroll_handle("workflow-editor-scroll");
+        // 面板尺寸按视口钳制（审查 R3）：最小窗/高 DPI 下 880×640 会被
+        // 根圆角裁掉顶栏与底部导航。
+        let (panel_width, panel_max_height) = dialog_panel_size(window, 880.0, 640.0);
 
         let content = match step {
             0 => self.render_wizard_step_basic(window, cx),
@@ -2443,12 +2464,12 @@ impl RepositoryView {
 
         div()
             .id("workflow-editor-panel")
-            .w(px(880.0))
-            .max_h(px(640.0))
+            .w(panel_width)
+            .max_h(panel_max_height)
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::WB_PANEL))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -2486,7 +2507,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(16.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child(if editor.data.editing_path.is_some() {
                                         "编辑工作流模板"
                                     } else {
@@ -2496,7 +2517,7 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("按引导分步完成，变量随步骤绑定，不会遗漏"),
                             ),
                     )
@@ -2514,7 +2535,7 @@ impl RepositoryView {
                     .flex_none()
                     .w_full()
                     .h(px(1.0))
-                    .bg(rgb(ui_theme::BORDER)),
+                    .bg(rgb(ui_theme::BORDER_MUTED)),
             )
             // 内容区（滚动）
             .child(scrollable_frame_when(
@@ -2582,7 +2603,7 @@ impl RepositoryView {
                             .bg(rgb(if active {
                                 ui_theme::PRIMARY
                             } else {
-                                ui_theme::TILE
+                                ui_theme::SURFACE_SUNKEN
                             }))
                             .child(
                                 div()
@@ -2594,14 +2615,14 @@ impl RepositoryView {
                                     .bg(rgb(if active {
                                         ui_theme::PRIMARY_FOREGROUND
                                     } else {
-                                        ui_theme::SECONDARY
+                                        ui_theme::WB_ROW_HOVER
                                     }))
                                     .text_size(px(10.0))
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(rgb(if active {
                                         ui_theme::PRIMARY
                                     } else {
-                                        ui_theme::MUTED_FOREGROUND
+                                        ui_theme::CONTENT_SECONDARY
                                     }))
                                     .child(format!("{}", index + 1)),
                             )
@@ -2611,7 +2632,7 @@ impl RepositoryView {
                                     .text_color(rgb(if active {
                                         ui_theme::PRIMARY_FOREGROUND
                                     } else {
-                                        ui_theme::MUTED_FOREGROUND
+                                        ui_theme::CONTENT_SECONDARY
                                     }))
                                     .child((*label).to_string()),
                             )
@@ -2664,13 +2685,13 @@ impl RepositoryView {
             .px_4()
             .py_3()
             .border_t_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .child(left)
             .child(center)
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!(
                         "第 {} 步 / 共 {} 步",
                         step + 1,
@@ -2717,7 +2738,7 @@ impl RepositoryView {
                             .gap_2()
                             .p_3()
                             .border_1()
-                            .border_color(rgb(ui_theme::BORDER))
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
                             .rounded(px(ui_theme::RADIUS_MD))
                             .child(
                                 div()
@@ -2741,7 +2762,7 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child(match editor.data.editing_path.is_some() {
                                         true => "描述修改需求，AI 会基于当前模板内容调整步骤与变量。",
                                         false => "用一句话描述你想要的工作流，AI 生成步骤与变量并自动填入后续各步，你只需检查和微调。",
@@ -2840,12 +2861,12 @@ impl RepositoryView {
                 .w_full()
                 .h(px(32.0))
                 .border_1()
-                .border_color(rgb(ui_theme::BORDER))
+                .border_color(rgb(ui_theme::BORDER_MUTED))
                 .rounded(px(ui_theme::RADIUS_XS))
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .text_color(rgb(ui_theme::PRIMARY))
-                .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.workflow_editor_open_step_picker();
                     cx.notify();
@@ -2890,13 +2911,13 @@ impl RepositoryView {
                             div()
                                 .text_size(px(14.0))
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(ui_theme::FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                 .child("添加操作步骤"),
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child("选择要加入工作流的 Git 操作，参数稍后在卡片里填写"),
                         ),
                 )
@@ -2933,7 +2954,7 @@ impl RepositoryView {
                     div()
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(label.to_string()),
                 );
                 for pair in group_kinds.chunks(2) {
@@ -2951,7 +2972,7 @@ impl RepositoryView {
         panel = panel.child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child("点击某个操作即可添加为工作流步骤，并回到步骤列表"),
         );
 
@@ -2981,12 +3002,12 @@ impl RepositoryView {
             .gap_1()
             .p(px(10.0))
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .rounded(px(ui_theme::RADIUS_MD))
             .cursor_pointer()
             .hover(|this| {
                 this.border_color(rgb(ui_theme::PRIMARY))
-                    .bg(rgb(ui_theme::TILE))
+                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
@@ -3015,20 +3036,20 @@ impl RepositoryView {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(kind.display_name().to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(kind.op_name().to_string()),
                     ),
             )
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(kind.description().to_string()),
             )
             .into_any_element()
@@ -3061,7 +3082,7 @@ impl RepositoryView {
                 .h(px(24.0))
                 .rounded(px(ui_theme::RADIUS_XS))
                 .cursor_pointer()
-                .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                 // 阻断 mouse_down 冒泡：否则弹窗壳层的「收起菜单」先执行，
                 // 随后的 toggle 又把菜单打开，触发器永远关不掉菜单。
                 .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
@@ -3074,13 +3095,13 @@ impl RepositoryView {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                         .child(kind.display_name().to_string()),
                 )
                 .child(
                     div()
                         .text_size(px(9.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("▾"),
                 ),
         );
@@ -3134,9 +3155,9 @@ impl RepositoryView {
             .gap_2()
             .p_3()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .rounded(px(ui_theme::RADIUS_MD))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::WB_PANEL))
             // 卡头：序号 + 类型下拉 + 排序/删除
             .child(
                 div()
@@ -3291,7 +3312,7 @@ impl RepositoryView {
                 card = card.child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("该步骤无需参数：运行到此步时检查工作区，有未提交改动则停止。"),
                 );
             }
@@ -3323,7 +3344,7 @@ impl RepositoryView {
         } else if !binding.used.is_empty() {
             (ui_theme::PRIMARY_SUBTLE, ui_theme::PRIMARY)
         } else {
-            (ui_theme::TILE, ui_theme::MUTED_FOREGROUND)
+            (ui_theme::SURFACE_SUNKEN, ui_theme::CONTENT_SECONDARY)
         };
         card = card.child(
             div()
@@ -3395,10 +3416,10 @@ impl RepositoryView {
                                 .flex_1()
                                 .p_3()
                                 .border_1()
-                                .border_color(rgb(ui_theme::BORDER))
+                                .border_color(rgb(ui_theme::BORDER_MUTED))
                                 .rounded_sm()
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.apply_workflow_editor_preset(preset, cx);
                                     cx.notify();
@@ -3413,7 +3434,7 @@ impl RepositoryView {
                                 .child(
                                     div()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child(preset.description()),
                                 )
                                 .into_any_element()
@@ -3424,7 +3445,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("也可以跳过预设，点下方「+ 添加步骤」从零开始。"),
             )
             .into_any_element()
@@ -3446,13 +3467,13 @@ impl RepositoryView {
                 div()
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child("运行前用户填写的变量（inputs）"),
             )
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("运行工作流前在页面填写"),
             );
         if data.inputs.is_empty() {
@@ -3478,13 +3499,13 @@ impl RepositoryView {
                 div()
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child("自定义变量（vars）"),
             )
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("工作流内部使用的固定值，可写 ${...} 表达式"),
             );
         if data.vars.is_empty() {
@@ -3552,7 +3573,7 @@ impl RepositoryView {
             .gap_1p5()
             .p_2p5()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .rounded(px(ui_theme::RADIUS_MD))
             // 卡头：键徽标 + 引用标签 + 删除
             .child(
@@ -3580,7 +3601,7 @@ impl RepositoryView {
                         this.child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child(format!(
                                     "→ 被步骤 {} 引用",
                                     referenced
@@ -3701,7 +3722,7 @@ impl RepositoryView {
             .gap_1p5()
             .p_2p5()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .rounded(px(ui_theme::RADIUS_MD))
             .child(
                 div()
@@ -3728,7 +3749,7 @@ impl RepositoryView {
                         this.child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child(format!(
                                     "→ 被步骤 {} 引用",
                                     referenced
@@ -3878,13 +3899,13 @@ impl RepositoryView {
                             .gap_2()
                             .p_3()
                             .border_1()
-                            .border_color(rgb(ui_theme::BORDER))
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
                             .rounded(px(ui_theme::RADIUS_MD))
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child("模板摘要"),
                             )
                             .children(summary_rows.into_iter().map(|(label, value)| {
@@ -3896,7 +3917,7 @@ impl RepositoryView {
                                             .w(px(76.0))
                                             .flex_none()
                                             .text_size(px(11.0))
-                                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                             .child(label.to_string()),
                                     )
                                     .child(
@@ -3904,7 +3925,7 @@ impl RepositoryView {
                                             .flex_1()
                                             .min_w_0()
                                             .text_size(px(11.0))
-                                            .text_color(rgb(ui_theme::FOREGROUND))
+                                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                             .child(value),
                                     )
                             })),
@@ -3916,7 +3937,7 @@ impl RepositoryView {
                             .gap_2()
                             .p_2()
                             .rounded(px(ui_theme::RADIUS_XS))
-                            .bg(rgb(ui_theme::TILE))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
                             .child(
                                 div()
                                     .size(px(18.0))
@@ -3935,7 +3956,7 @@ impl RepositoryView {
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child(format!("将保存到工作流模板目录：{save_label}")),
                             ),
                     ),
@@ -3951,25 +3972,25 @@ impl RepositoryView {
                         div()
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child("生成的工作流（JSON5 预览）"),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("确认无误后点「保存模板」，文件写入模板目录并出现在左侧列表"),
                     )
                     .child(
                         div()
                             .p_3()
                             .border_1()
-                            .border_color(rgb(ui_theme::BORDER))
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
                             .rounded(px(ui_theme::RADIUS_MD))
-                            .bg(rgb(ui_theme::TILE))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
                             .font_family("Consolas")
                             .text_size(px(10.5))
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(preview),
                     ),
             )
@@ -3998,7 +4019,7 @@ fn workflow_guide_card(title: &'static str, body: &'static str) -> gpui::AnyElem
         .child(
             div()
                 .text_size(px(11.5))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child(body),
         )
         .into_any_element()
@@ -4036,7 +4057,7 @@ fn workflow_editor_card_remove_button(
         .justify_center()
         .rounded(px(ui_theme::RADIUS_XS))
         .text_size(px(11.0))
-        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
         .cursor_pointer()
         .hover(|this| {
             this.bg(rgb(ui_theme::COLOR_WARNING))
@@ -4072,7 +4093,7 @@ fn workflow_editor_field_label(label: &str, required: bool) -> impl IntoElement 
         .items_center()
         .gap_1()
         .text_size(px(12.0))
-        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
         .child(label.to_string())
         .when(required, |this| {
             this.child(div().text_color(rgb(ui_theme::DESTRUCTIVE)).child("*"))
@@ -4114,9 +4135,9 @@ fn workflow_editor_step_action_button(
         .justify_center()
         .rounded(px(ui_theme::RADIUS_XS))
         .text_size(px(11.0))
-        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             match action {
                 0 => this.workflow_editor_move_step(index, true),
@@ -4149,7 +4170,7 @@ fn render_workflow_kind_menu_items(
                 .pt_2()
                 .pb_1()
                 .text_size(px(10.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .child(group_label.to_string())
                 .into_any_element(),
         );
@@ -4169,12 +4190,12 @@ fn render_workflow_kind_menu_items(
                     .text_color(rgb(if selected {
                         ui_theme::PRIMARY
                     } else {
-                        ui_theme::FOREGROUND
+                        ui_theme::CONTENT_PRIMARY
                     }))
                     .bg(rgb(if selected {
                         ui_theme::PRIMARY_SUBTLE
                     } else {
-                        ui_theme::CARD
+                        ui_theme::WB_PANEL
                     }))
                     .cursor_pointer()
                     .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
@@ -4218,12 +4239,12 @@ fn workflow_editor_add_button(
         .min_h(px(28.0))
         .px_3()
         .border_1()
-        .border_color(rgb(ui_theme::BORDER))
+        .border_color(rgb(ui_theme::BORDER_MUTED))
         .rounded(px(ui_theme::RADIUS_XS))
         .cursor_pointer()
         .text_size(px(12.0))
         .text_color(rgb(ui_theme::PRIMARY))
-        .hover(|this| this.bg(rgb(ui_theme::ACCENT)))
+        .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             on_click(this);
             cx.notify();

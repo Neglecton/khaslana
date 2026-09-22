@@ -13,7 +13,9 @@ use crate::{
     menu_separator, perf_log, placeholder_row, scrollable_uniform_frame, send_ui_event,
     tasks::TaskKind,
     ui::{
-        components::{command_group, list_row_surface, page_header},
+        components::{
+            PanelBadge, command_group, list_row_surface, page_header, panel_section_header,
+        },
         theme as ui_theme,
     },
 };
@@ -421,6 +423,14 @@ impl RepositoryView {
             )
             .into_any_element();
 
+        let files_header = panel_section_header("贮藏文件")
+            .badge(PanelBadge::new(
+                self.stash_preview.files.len(),
+                ui_theme::SURFACE_SUNKEN,
+                ui_theme::CONTENT_SECONDARY,
+            ))
+            .build();
+
         div()
             .flex()
             .flex_col()
@@ -430,28 +440,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .h_full()
             .bg(rgb(ui_theme::SURFACE_BASE))
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .min_h(px(ui_theme::ROW_HEIGHT_REGULAR))
-                    .px(px(ui_theme::SPACE_3))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("贮藏文件")
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_META))
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(rgb(ui_theme::CONTENT_TERTIARY))
-                            .child(self.stash_preview.files.len().to_string()),
-                    ),
-            )
+            .child(files_header)
             .child(scrollable_uniform_frame(
                 "stash-file-list",
                 ScrollbarMode::Vertical,
@@ -659,18 +648,27 @@ impl RepositoryView {
         let can_apply = !self.busy && !self.merge_in_progress();
         div()
             .child(crate::context_menu_item(
+                self,
+                "stash-menu",
+                "view-stash",
                 "查看贮藏",
                 !self.busy,
                 move |this| this.view_stash(index),
                 cx,
             ))
             .child(crate::context_menu_item(
+                self,
+                "stash-menu",
+                "apply-stash",
                 "应用贮藏",
                 can_apply,
                 move |this| this.apply_stash(index),
                 cx,
             ))
             .child(crate::context_menu_item(
+                self,
+                "stash-menu",
+                "pop-stash",
                 "弹出贮藏",
                 can_apply,
                 move |this| this.open_pop_stash_confirm_dialog(index),
@@ -678,6 +676,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(crate::context_menu_item(
+                self,
+                "stash-menu",
+                "delete-stash",
                 "删除贮藏...",
                 !self.busy,
                 move |this| this.open_drop_stash_confirm_dialog(index),

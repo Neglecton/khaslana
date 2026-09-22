@@ -1153,34 +1153,6 @@ fn conflict_workbench_uses_distinct_scroll_handles_per_pane() {
     assert_eq!(unique.len(), 3);
 }
 
-#[test]
-fn conflict_result_pane_uses_document_view_instead_of_editor() {
-    assert!(!conflict_result_pane_uses_editor());
-}
-
-#[test]
-fn conflict_editor_does_not_store_text_conflict_draft_when_result_is_document() {
-    assert!(!conflict_editor_should_store_draft(ConflictFileKind::Text));
-}
-
-#[test]
-fn conflict_editor_always_uses_scrollable_multiline_viewport() {
-    assert!(multiline_input_should_scroll(
-        FieldId::ConflictEditor,
-        "short"
-    ));
-    assert!(!multiline_input_should_scroll(
-        FieldId::CommitMessage,
-        "short"
-    ));
-}
-
-#[test]
-fn conflict_editor_multiline_frame_expands_to_allow_scroll_viewport() {
-    assert!(!multiline_input_uses_input_frame(FieldId::ConflictEditor));
-    assert!(multiline_input_uses_input_frame(FieldId::CommitMessage));
-}
-
 fn test_diff(lines: Vec<khaslana::DiffLine>, is_binary: bool) -> FileDiff {
     FileDiff {
         path: "file.txt".to_string(),
@@ -1850,4 +1822,87 @@ fn shortcut_refresh_preserves_kit_component_bindings() {
     )));
     assert!(!is_khaslana_keybinding_action("input::Enter"));
     assert!(!is_khaslana_keybinding_action("menu::SelectNext"));
+}
+
+// ── 顶层浮层焦点圈与焦点恢复（R1 / R7） ────────────────────────────
+
+/// 菜单另走键盘接管；评审历史与普通模态必须归入同一隔离策略。
+#[test]
+fn top_overlay_kind_modal_classification() {
+    use crate::TopOverlayKind::*;
+    for kind in [CredentialPrompt, AiThinking, CodePalette, ReviewHistory, Dialog, Settings] {
+        assert!(kind.is_modal());
+    }
+    assert!(!PopupMenu.is_modal());
+}
+
+#[test]
+fn overlay_focus_stack_restores_each_nested_trigger() {
+    let mut stack = crate::OverlayFocusStack::<&str, u32>::default();
+    assert!(stack.reconcile(&["settings"], Some(10)).unwrap().entering);
+    assert!(stack.reconcile(&["settings", "dialog"], Some(20)).unwrap().entering);
+    assert!(stack.reconcile(&["settings", "dialog", "ai"], Some(30)).unwrap().entering);
+    let change = stack.reconcile(&["settings", "dialog"], Some(40)).unwrap();
+    assert!(!change.entering);
+    assert_eq!(change.return_to, Some(30));
+    assert_eq!(stack.reconcile(&["settings"], None).unwrap().return_to, Some(20));
+    assert_eq!(stack.reconcile(&[], None).unwrap().return_to, Some(10));
+}
+
+#[test]
+fn overlay_focus_stack_menu_replacement_preserves_original_trigger() {
+    let mut stack = crate::OverlayFocusStack::<&str, u32>::default();
+    assert!(stack.reconcile(&["menu"], Some(10)).unwrap().entering);
+    // 从菜单打开对话框，不能把已销毁的菜单焦点 20 记成返回目标。
+    assert!(stack.reconcile(&["dialog"], Some(20)).unwrap().entering);
+    assert!(stack.reconcile(&["dialog"], Some(30)).is_none());
+    assert_eq!(stack.reconcile(&[], Some(30)).unwrap().return_to, Some(10));
+}
+
+#[test]
+fn overlay_focus_stack_multiple_closes_return_to_outer_trigger() {
+    let mut stack = crate::OverlayFocusStack::<&str, u32>::default();
+    stack.reconcile(&["settings"], Some(10));
+    stack.reconcile(&["settings", "dialog"], Some(20));
+    assert_eq!(stack.reconcile(&[], Some(30)).unwrap().return_to, Some(10));
+    assert!(stack.reconcile(&[], Some(40)).is_none());
+}
+
+#[test]
+fn overlay_focus_stack_same_layer_replace_and_window_close_cancel() {
+    let mut stack = crate::OverlayFocusStack::<&str, u32>::default();
+    stack.reconcile(&["dialog-a"], Some(10));
+    stack.reconcile(&["dialog-b"], Some(20));
+    stack.reconcile(&["dialog-b", "window-close"], Some(30));
+    assert_eq!(stack.reconcile(&["dialog-b"], None).unwrap().return_to, Some(30));
+    assert_eq!(stack.reconcile(&[], None).unwrap().return_to, Some(10));
+}
+
+#[test]
+fn workflow_ai_target_survives_background_but_not_editor_replacement() {
+    let task = crate::AiThinkingTaskKind::WorkflowTemplate { session_id: 10 };
+    // 收起思考窗不改变编辑会话；关闭/重开或套用预设则使旧结果失去目标。
+    assert!(task.owns_workflow_session(Some(10)));
+    assert!(!task.owns_workflow_session(None));
+    assert!(!task.owns_workflow_session(Some(11)));
+    assert!(!crate::AiThinkingTaskKind::CommitMessage.owns_workflow_session(Some(10)));
+    assert!(!crate::AiThinkingTaskKind::ConflictMerge { path: "a.txt".into() }
+        .owns_workflow_session(Some(10)));
+}
+
+#[test]
+fn workflow_ai_completion_releases_task_even_when_target_is_gone() {
+    // 成功与失败都经过同一个完成路径；旧编辑会话失效不能卡住公共互斥。
+    for current_session in [None, Some(11)] {
+        let mut running = Some(crate::AiThinkingTask {
+            id: 5,
+            kind: crate::AiThinkingTaskKind::WorkflowTemplate { session_id: 10 },
+        });
+        assert!(crate::take_matching_ai_task(&mut running, 4).is_none());
+        assert_eq!(running.as_ref().unwrap().id, 5);
+        let completed = crate::take_matching_ai_task(&mut running, 5).unwrap();
+        assert!(!completed.kind.owns_workflow_session(current_session));
+        assert!(running.is_none());
+        assert!(crate::take_matching_ai_task(&mut running, 5).is_none());
+    }
 }

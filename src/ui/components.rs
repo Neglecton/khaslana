@@ -10,8 +10,8 @@ use crate::{
     ui::{icons::ToolbarIcon, icons::toolbar_icon, theme},
 };
 use gpui::{
-    App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Render, Stateful, Window,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, CursorStyle, Div, IntoElement, MouseButton, Pixels,
+    Render, SharedString, Stateful, Window, div, prelude::*, px,
 };
 use gpui_kit::base::Button as BaseButton;
 
@@ -43,8 +43,14 @@ pub(crate) struct FeedbackMessage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonTone {
+    /// 普通命令：浅灰薄实体 + 常规轮廓（顶栏、对话框、列表操作）。
     Neutral,
+    /// 次级动作：白/近白薄实体 + 弱轮廓，与蓝色主按钮并列时表达主次
+    /// （最新 Pencil 稿的「提交到 &lt;分支&gt;」）。
+    Secondary,
+    /// 主动作：蓝色实面 + 柔和投影（「提交并推送」）。
     Primary,
+    /// 危险动作：危险色实面，独立语义，不参与主次排序。
     Danger,
 }
 
@@ -54,6 +60,9 @@ struct ButtonPalette {
     hover_bg: u32,
     fg: u32,
     border: u32,
+    /// 是否带接触阴影（视觉规范 §3.1：按钮用细腻接触阴影体现厚度）。
+    /// 主/次动作是「抬起的实体」，普通命令与危险色保持平整。
+    contact_shadow: bool,
 }
 
 struct TextTooltip {
@@ -160,31 +169,43 @@ pub(crate) fn tooltip_text(text: impl Into<gpui::SharedString>, cx: &mut App) ->
 fn app_button_palette(tone: ButtonTone, enabled: bool) -> ButtonPalette {
     if !enabled {
         return ButtonPalette {
-            bg: theme::ACCENT,
-            hover_bg: theme::ACCENT,
-            fg: theme::MUTED_FOREGROUND,
-            border: theme::BORDER,
+            bg: theme::STATE_HOVER,
+            hover_bg: theme::STATE_HOVER,
+            fg: theme::CONTENT_SECONDARY,
+            border: theme::BORDER_MUTED,
+            // 禁用态保持平整：阴影会削弱「此时不可点」的信号。
+            contact_shadow: false,
         };
     }
 
     match tone {
         ButtonTone::Neutral => ButtonPalette {
-            bg: theme::ACCENT,
-            hover_bg: theme::SECONDARY,
-            fg: theme::FOREGROUND,
-            border: theme::BORDER,
+            bg: theme::STATE_HOVER,
+            hover_bg: theme::WB_ROW_HOVER,
+            fg: theme::CONTENT_PRIMARY,
+            border: theme::BORDER_MUTED,
+            contact_shadow: false,
+        },
+        ButtonTone::Secondary => ButtonPalette {
+            bg: theme::WB_PANEL,
+            hover_bg: theme::WB_ROW_HOVER,
+            fg: theme::CONTENT_PRIMARY,
+            border: theme::BORDER_MUTED,
+            contact_shadow: true,
         },
         ButtonTone::Primary => ButtonPalette {
             bg: theme::PRIMARY,
             hover_bg: theme::PRIMARY,
             fg: theme::PRIMARY_FOREGROUND,
             border: theme::PRIMARY,
+            contact_shadow: true,
         },
         ButtonTone::Danger => ButtonPalette {
             bg: theme::DESTRUCTIVE,
             hover_bg: theme::DESTRUCTIVE,
             fg: theme::DESTRUCTIVE_FOREGROUND,
             border: theme::DESTRUCTIVE,
+            contact_shadow: false,
         },
     }
 }
@@ -197,7 +218,7 @@ pub(crate) fn section_label(title: &'static str) -> impl IntoElement {
         .py(px(8.0))
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(theme::SIDEBAR_FOREGROUND))
+        .text_color(rgb(theme::CONTENT_SECONDARY))
         .child(title)
 }
 
@@ -245,11 +266,11 @@ pub(crate) fn section_title(title: &'static str) -> impl IntoElement {
         .px_2()
         .py_2()
         .border_b_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::CARD))
+        .border_color(rgb(theme::BORDER_MUTED))
+        .bg(rgb(theme::WB_PANEL))
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(theme::MUTED_FOREGROUND))
+        .text_color(rgb(theme::CONTENT_SECONDARY))
         .child(title)
 }
 
@@ -288,6 +309,15 @@ pub(crate) fn control_shadow() -> Vec<gpui::BoxShadow> {
     vec![
         gpui::BoxShadow::new(px(0.0), px(2.0), rgba(theme::WB_SHADOW_CONTROL).into())
             .blur_radius(px(5.0)),
+    ]
+}
+
+/// 按下时的接触阴影：比默认更短，表达「压下」（视觉规范 §4）。
+/// 阴影收短不改变布局尺寸，因此按压不会引起命中区跳动。
+pub(crate) fn pressed_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow::new(px(0.0), px(1.0), rgba(theme::WB_SHADOW_CONTROL).into())
+            .blur_radius(px(2.0)),
     ]
 }
 
@@ -417,30 +447,94 @@ pub(crate) fn command_group() -> Div {
 }
 
 /// 空状态：使用克制的图文层级而不是卡片堆叠。
+///
+/// 区块级空态（无仓库、无差异内容）通过 builder 构建，可带一行可执行
+/// 命令（视觉规范 §2：「无仓库」「干净工作区」等状态要有明确入口，
+/// 不能只有文字）；`EmptyState::fill` 让空态在剩余空间里居中呈现。
+/// 列表内占位（正在加载/暂无数据）继续走 `panel_empty_row`，
+/// 保持行高节奏不破坏虚拟列表测量。
 pub(crate) fn empty_state(title: &'static str, detail: &'static str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(theme::SPACE_2))
-        .p(px(theme::SPACE_6))
-        .text_align(gpui::TextAlign::Center)
-        .child(
-            div()
-                .text_size(px(theme::TYPE_TITLE))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(theme::CONTENT_PRIMARY))
-                .child(title),
-        )
-        .child(
-            div()
-                .max_w(px(360.0))
-                .text_size(px(theme::TYPE_BODY))
-                .line_height(px(18.0))
-                .text_color(rgb(theme::CONTENT_SECONDARY))
-                .child(detail),
-        )
+    EmptyState::new(title).detail(detail).build()
+}
+
+/// 带动作行的空状态 builder：`empty_state(..)` 是无动作的快捷入口。
+pub(crate) struct EmptyState {
+    title: &'static str,
+    detail: Option<&'static str>,
+    actions: Vec<AnyElement>,
+    fill: bool,
+}
+
+impl EmptyState {
+    pub(crate) fn new(title: &'static str) -> Self {
+        Self {
+            title,
+            detail: None,
+            actions: Vec::new(),
+            fill: false,
+        }
+    }
+
+    /// 说明文字（title 下方的一句补充）。
+    pub(crate) fn detail(mut self, detail: &'static str) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    /// 追加一个命令槽元素（通常是一枚按钮）。
+    pub(crate) fn action(mut self, action: AnyElement) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    /// 占满剩余空间并垂直居中：用于页面级/区块级空态（无仓库、未选中文件）。
+    /// 不开启时按内容自适应高度，兼容列表内的局部占位。
+    pub(crate) fn fill(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
+    pub(crate) fn build(self) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(theme::SPACE_2))
+            .p(px(theme::SPACE_6))
+            .when(self.fill, |this| this.flex_1().min_h(px(0.0)))
+            .text_align(gpui::TextAlign::Center)
+            .child(
+                div()
+                    .text_size(px(theme::TYPE_TITLE))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::CONTENT_PRIMARY))
+                    .child(self.title),
+            )
+            .when_some(self.detail, |this, detail| {
+                this.child(
+                    div()
+                        .max_w(px(360.0))
+                        .text_size(px(theme::TYPE_BODY))
+                        .line_height(px(18.0))
+                        .text_color(rgb(theme::CONTENT_SECONDARY))
+                        .child(detail),
+                )
+            })
+            .when(!self.actions.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(theme::SPACE_2))
+                        // 顶部留半档间距：动作行与说明文字之间保持呼吸感，
+                        // 不会在无说明时凭空多出一段。
+                        .mt(px(theme::SPACE_1))
+                        .children(self.actions),
+                )
+            })
+    }
 }
 
 /// 通用图标按钮视觉底座。调用方追加 `on_click`；禁用态自动保留原因提示。
@@ -554,8 +648,8 @@ pub(crate) fn glass_panel() -> Div {
     div()
         .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::CARD))
+        .border_color(rgb(theme::BORDER_MUTED))
+        .bg(rgb(theme::WB_PANEL))
         .shadow_lg()
 }
 
@@ -578,7 +672,7 @@ pub(crate) fn metric_badge(label: impl Into<gpui::SharedString>, tone: u32) -> D
         .rounded_full()
         .border_1()
         .border_color(rgb(tone))
-        .bg(rgb(theme::ACCENT))
+        .bg(rgb(theme::STATE_HOVER))
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(rgb(tone))
@@ -603,6 +697,54 @@ pub(crate) fn dialog_overlay() -> Div {
         .occlude()
 }
 
+/// 弹窗面板与窗口边缘之间的可见间距（审查 R3 的安全边距）。
+const DIALOG_PANEL_VIEWPORT_MARGIN: f32 = 24.0;
+/// 面板尺寸下限：极端小窗（高 DPI 下逻辑视口更小）也不缩到这个尺寸以下，
+/// 保证标题、关闭与底部操作行始终可用。
+const DIALOG_PANEL_MIN_WIDTH: f32 = 480.0;
+const DIALOG_PANEL_MIN_HEIGHT: f32 = 320.0;
+
+/// 弹窗面板尺寸按视口钳制：`min(设计尺寸, 可用空间)`。
+///
+/// 最小窗 860×520（125% DPI 下逻辑视口只有 688×416）里，大于视口的固定
+/// 尺寸会被根圆角裁掉——标题/关闭与底部内容点不到，内部滚动也修不了
+/// 整个面板越界（审查 R3）。
+pub(crate) fn dialog_panel_size(
+    window: &Window,
+    design_width: f32,
+    design_height: f32,
+) -> (Pixels, Pixels) {
+    let viewport = window.viewport_size();
+    let available_width = f32::from(viewport.width) - DIALOG_PANEL_VIEWPORT_MARGIN * 2.0;
+    let available_height = f32::from(viewport.height) - DIALOG_PANEL_VIEWPORT_MARGIN * 2.0;
+    let (width, height) = clamp_dialog_panel_size(
+        design_width,
+        design_height,
+        available_width,
+        available_height,
+    );
+    (px(width), px(height))
+}
+
+/// 钳制计算（纯函数，供 [`dialog_panel_size`] 与单测共用）：
+/// 取 min(设计尺寸, 可用空间)，并保留下限——极端小窗也不缩到下限以下，
+/// 否则标题与操作行会挤没。
+fn clamp_dialog_panel_size(
+    design_width: f32,
+    design_height: f32,
+    available_width: f32,
+    available_height: f32,
+) -> (f32, f32) {
+    (
+        design_width
+            .min(available_width)
+            .max(DIALOG_PANEL_MIN_WIDTH),
+        design_height
+            .min(available_height)
+            .max(DIALOG_PANEL_MIN_HEIGHT),
+    )
+}
+
 /// 对话框面板
 pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div> {
     let title: gpui::SharedString = title.into();
@@ -613,8 +755,8 @@ pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div
         .p_4()
         .rounded(px(theme::RADIUS_XS))
         .border_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::CARD))
+        .border_color(rgb(theme::BORDER_MUTED))
+        .bg(rgb(theme::WB_PANEL))
         .shadow_lg()
         .flex()
         .flex_col()
@@ -632,13 +774,13 @@ pub(crate) fn dialog_panel(title: impl Into<gpui::SharedString>) -> Stateful<Div
                 .gap_3()
                 .pb_1()
                 .border_b_1()
-                .border_color(rgb(theme::BORDER))
+                .border_color(rgb(theme::BORDER_MUTED))
                 .child(
                     div()
                         .min_w(px(0.0))
                         .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(theme::FOREGROUND))
+                        .text_color(rgb(theme::CONTENT_PRIMARY))
                         .truncate()
                         .child(title),
                 ),
@@ -654,7 +796,7 @@ pub(crate) fn dialog_actions() -> Div {
         .gap_2()
         .pt_2()
         .border_t_1()
-        .border_color(rgb(theme::BORDER))
+        .border_color(rgb(theme::BORDER_MUTED))
 }
 
 /// 危险操作提示框
@@ -700,7 +842,7 @@ pub(crate) fn input_frame(id: String, focused: bool, size: InputFrameSize) -> St
         .line_height(px(18.0))
         .cursor(CursorStyle::IBeam)
         .when(!focused, |this| {
-            this.hover(|this| this.bg(rgb(theme::ACCENT)))
+            this.hover(|this| this.bg(rgb(theme::STATE_HOVER)))
         })
         .when(focused, |this| {
             this.shadow_sm()
@@ -723,20 +865,20 @@ pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Bas
         .border_color(if selected {
             rgb(theme::PRIMARY)
         } else {
-            rgb(theme::BORDER)
+            rgb(theme::BORDER_MUTED)
         })
         .bg(if selected {
-            rgb(theme::ACCENT)
+            rgb(theme::STATE_SELECTION)
         } else {
-            rgb(theme::CARD)
+            rgb(theme::WB_PANEL)
         })
         .text_size(px(12.0))
         .text_color(if selected {
             rgb(theme::PRIMARY)
         } else if enabled {
-            rgb(theme::MUTED_FOREGROUND)
+            rgb(theme::CONTENT_SECONDARY)
         } else {
-            rgb(theme::BORDER)
+            rgb(theme::BORDER_MUTED)
         })
         .font_weight(if selected {
             gpui::FontWeight::BOLD
@@ -747,7 +889,7 @@ pub(crate) fn segmented_button(id: String, selected: bool, enabled: bool) -> Bas
         .when(enabled, |this| this.cursor_pointer())
         .when(!enabled, |this| this.cursor_not_allowed().opacity(0.68))
         .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(theme::SECONDARY)))
+            this.hover(|this| this.bg(rgb(theme::WB_ROW_HOVER)))
         })
 }
 
@@ -798,6 +940,220 @@ pub(crate) fn list_row_surface(id: String, selected: bool) -> Stateful<Div> {
         })
 }
 
+/// 区块计数徽标的完整定义：数量 + 一对语义配色。
+///
+/// 同一语义必须用同一配色（如「已暂存」走主色、「未暂存」走次级色），
+/// 因此配色随徽标一起传递，调用方不再各自拼 `bg`/`fg`。
+/// 调用方负责只在 `count > 0` 时构造徽标（0 没有展示价值）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PanelBadge {
+    pub(crate) count: usize,
+    pub(crate) bg: u32,
+    pub(crate) fg: u32,
+}
+
+impl PanelBadge {
+    pub(crate) const fn new(count: usize, bg: u32, fg: u32) -> Self {
+        Self { count, bg, fg }
+    }
+
+    /// 渲染为浅色小药丸标签（10px 半粗，与各列表计数徽标规格一致）。
+    pub(crate) fn render(self) -> impl IntoElement {
+        div()
+            .flex_none()
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded(px(theme::RADIUS_PILL))
+            .bg(rgb(self.bg))
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(self.fg))
+            .child(self.count.to_string())
+    }
+}
+
+/// 区块标题行的底色语义。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PanelHeaderSurface {
+    /// 分组带：`WB_SECTION_HEADER` 底色，用于列表/分区上方，替代贯穿分割线。
+    #[default]
+    Grouped,
+    /// 随父面板：不自铺底色，用于已经抬起的卡片内部（如提交条里的「提交信息」）。
+    Parent,
+}
+
+/// 区块标题的语义色：普通区块用正文色，正在查看的对象（如当前差异文件）用强调色。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PanelTitleTone {
+    #[default]
+    Neutral,
+    Accent,
+}
+
+impl PanelTitleTone {
+    const fn color(self) -> u32 {
+        match self {
+            PanelTitleTone::Neutral => theme::CONTENT_PRIMARY,
+            PanelTitleTone::Accent => theme::PRIMARY,
+        }
+    }
+}
+
+/// 面板区块标题行 —— 工作区变更分区、提交导航/详情/文件、差异区共用同一条。
+///
+/// 设计约定（悬浮工作台视觉规范 §4）：**分组底色（`WB_SECTION_HEADER`）替代贯穿分割线**，
+/// 留白与底色表达分组；左侧是标题与可选计数徽标，右侧是命令槽。列表内容区回到
+/// 面板底色，标题因此成为列表上方那条可辨认的分组带。
+///
+/// `padding_x` 与该列行内容的左内边距对齐（变更/差异列 16px、历史列 12px），
+/// 标题才能和下方行文本落在同一条基线上。
+pub(crate) struct PanelSectionHeader {
+    title: SharedString,
+    badge: Option<PanelBadge>,
+    tone: PanelTitleTone,
+    surface: PanelHeaderSurface,
+    padding_x: f32,
+    actions: Vec<AnyElement>,
+}
+
+/// 区块标题行的入口：`panel_section_header("标题").badge(..).build()`。
+pub(crate) fn panel_section_header(title: impl Into<SharedString>) -> PanelSectionHeader {
+    PanelSectionHeader::new(title)
+}
+
+impl PanelSectionHeader {
+    pub(crate) fn new(title: impl Into<SharedString>) -> Self {
+        Self {
+            title: title.into(),
+            badge: None,
+            tone: PanelTitleTone::Neutral,
+            surface: PanelHeaderSurface::Grouped,
+            padding_x: theme::SPACE_3,
+            actions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn badge(mut self, badge: PanelBadge) -> Self {
+        self.badge = Some(badge);
+        self
+    }
+
+    pub(crate) fn accent_title(mut self) -> Self {
+        self.tone = PanelTitleTone::Accent;
+        self
+    }
+
+    pub(crate) fn surface(mut self, surface: PanelHeaderSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub(crate) fn padding_x(mut self, padding_x: f32) -> Self {
+        self.padding_x = padding_x;
+        self
+    }
+
+    /// 追加一个命令槽元素（按添加顺序从左到右排列）。
+    pub(crate) fn action(mut self, action: AnyElement) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    /// 批量追加命令槽元素；`Option` 也接受（`None` 表示没有命令）。
+    pub(crate) fn actions(mut self, actions: impl IntoIterator<Item = AnyElement>) -> Self {
+        self.actions.extend(actions);
+        self
+    }
+
+    pub(crate) fn build(self) -> Div {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(theme::SPACE_2))
+            .px(px(self.padding_x))
+            .py(px(theme::SPACE_2))
+            .when(self.surface == PanelHeaderSurface::Grouped, |this| {
+                this.bg(rgb(theme::WB_SECTION_HEADER))
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(theme::TYPE_BODY))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(self.tone.color()))
+                            .child(self.title),
+                    )
+                    .when_some(self.badge, |this, badge| this.child(badge.render())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme::SPACE_1))
+                    .children(self.actions),
+            )
+    }
+}
+
+/// 空状态/加载提示行的对齐语义。
+///
+/// 区块级空态居中（提示整块区域没有内容），列表级提示左对齐
+/// （与列表行文字同一起点，读起来仍是一个列表项）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceholderAlign {
+    Start,
+    Center,
+}
+
+/// 区块内与列表内的空状态/加载提示行：无卡片框、无边框、弱化文字，
+/// 与所在面板底色连成一片（视觉规范 §4：状态不靠逐行卡片表达）。
+///
+/// `row_height` 由调用方给出，用于保持该区域原本的行高节奏
+/// （列表占位 `ROW_HEIGHT_COMPACT`、变更分区 `CHANGE_ROW_HEIGHT`）。
+/// `padding_x` 默认 `SPACE_3`；与 `PanelSectionHeader::padding_x` 同理，
+/// 需要与所在列表行文本对齐时由调用方覆盖（变更列表行是 16px）。
+pub(crate) fn panel_empty_row(
+    text: impl Into<SharedString>,
+    row_height: f32,
+    align: PlaceholderAlign,
+) -> Div {
+    panel_empty_row_aligned(text, row_height, align, theme::SPACE_3)
+}
+
+/// `panel_empty_row` 的显式左内边距变体：空态提示与列表行文本同基线。
+pub(crate) fn panel_empty_row_aligned(
+    text: impl Into<SharedString>,
+    row_height: f32,
+    align: PlaceholderAlign,
+    padding_x: f32,
+) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .min_h(px(row_height))
+        .flex()
+        .items_center()
+        .px(px(padding_x))
+        .py(px(theme::SPACE_2))
+        .text_size(px(theme::TYPE_BODY))
+        .line_height(px(18.0))
+        .text_color(rgb(theme::CONTENT_SECONDARY))
+        .map(|this| match align {
+            PlaceholderAlign::Start => this.justify_start(),
+            PlaceholderAlign::Center => this.justify_center(),
+        })
+        .child(text.into())
+}
+
 /// 状态药丸
 pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement {
     div()
@@ -810,17 +1166,17 @@ pub(crate) fn status_pill(label: &'static str, active: bool) -> impl IntoElement
         .border_color(if active {
             rgb(theme::PRIMARY)
         } else {
-            rgb(theme::BORDER)
+            rgb(theme::BORDER_MUTED)
         })
         .bg(if active {
-            rgb(theme::ACCENT)
+            rgb(theme::STATE_SELECTION)
         } else {
-            rgb(theme::CARD)
+            rgb(theme::WB_PANEL)
         })
         .text_color(if active {
             rgb(theme::PRIMARY)
         } else {
-            rgb(theme::MUTED_FOREGROUND)
+            rgb(theme::CONTENT_SECONDARY)
         })
         .font_weight(gpui::FontWeight::BOLD)
         .child(label)
@@ -886,12 +1242,12 @@ pub(crate) fn feedback_bubble(
         .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(rgb(border))
-        .bg(rgb(theme::CARD))
+        .bg(rgb(theme::WB_PANEL))
         .shadow_lg()
         .when_some(feedback.action, |this, action| {
             // 可点击气泡：点击气泡体直达对应页面；点 ✕ 只关闭不触发。
             this.cursor_pointer()
-                .hover(|this| this.border_color(rgb(theme::ACCENT)))
+                .hover(|this| this.border_color(rgb(theme::STATE_HOVER)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     match action {
                         ToastAction::OpenUpdateSettings => this.open_update_settings_center(),
@@ -923,7 +1279,7 @@ pub(crate) fn feedback_bubble(
                     div()
                         .text_size(px(12.0))
                         .line_height(px(18.0))
-                        .text_color(rgb(theme::FOREGROUND))
+                        .text_color(rgb(theme::CONTENT_PRIMARY))
                         .child(feedback.message.clone()),
                 ),
         )
@@ -937,8 +1293,8 @@ pub(crate) fn feedback_bubble(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .text_color(rgb(theme::MUTED_FOREGROUND))
-                .hover(|this| this.bg(rgb(theme::ACCENT)))
+                .text_color(rgb(theme::CONTENT_SECONDARY))
+                .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     cx.stop_propagation();
                     this.feedbacks.retain(|feedback| feedback.id != feedback_id);
@@ -946,7 +1302,7 @@ pub(crate) fn feedback_bubble(
                 }))
                 // 关闭按钮图标走项目自绘 toolbar_icon（svg 直连、与侧边栏 ✕ 同款）。
                 // 此前用的 yororen Icon 包装在该气泡内未渲染出图形（仅剩 22px 空槽）。
-                .child(toolbar_icon(ToolbarIcon::Close, theme::MUTED_FOREGROUND)),
+                .child(toolbar_icon(ToolbarIcon::Close, theme::CONTENT_SECONDARY)),
         )
 }
 
@@ -960,7 +1316,7 @@ pub(crate) fn inline_error_bubble(message: impl Into<gpui::SharedString>) -> imp
         .rounded_full()
         .border_1()
         .border_color(rgb(theme::FEEDBACK_ERROR_BORDER))
-        .bg(rgb(theme::CARD))
+        .bg(rgb(theme::WB_PANEL))
         .text_color(rgb(theme::FEEDBACK_ERROR_TEXT))
         .truncate()
         .child(message.into())
@@ -1001,7 +1357,7 @@ pub(crate) fn operation_loading_bar(message: impl Into<gpui::SharedString>) -> i
         .rounded(px(theme::RADIUS_XS))
         .border_1()
         .border_color(rgb(theme::FEEDBACK_INFO_BORDER))
-        .bg(rgb(theme::CARD))
+        .bg(rgb(theme::WB_PANEL))
         .shadow_lg()
         .flex()
         .items_center()
@@ -1143,6 +1499,8 @@ impl RepositoryView {
             || message.contains("工作流")
     }
 
+    /// 普通命令按钮。文案是静态字面量：按钮的 ElementId 与无障碍标签都由它派生，
+    /// 多行列表里请改用带显式 ID 的行内按钮 helper。
     pub(crate) fn button(
         &self,
         label: &'static str,
@@ -1151,7 +1509,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.app_button(
-            label,
+            label.into(),
             None,
             None,
             ButtonTone::Neutral,
@@ -1170,7 +1528,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.app_button(
-            label,
+            label.into(),
             Some(icon),
             None,
             ButtonTone::Neutral,
@@ -1190,7 +1548,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.app_button(
-            label,
+            label.into(),
             Some(icon),
             badge,
             ButtonTone::Neutral,
@@ -1209,7 +1567,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.app_button_with_click_event(
-            label,
+            label.into(),
             Some(icon),
             None,
             ButtonTone::Neutral,
@@ -1220,7 +1578,7 @@ impl RepositoryView {
     }
 
     /// 变更区域图标按钮 — 设计图：22×22 圆角方块，纯图标，无边框
-    /// hover 显示 ACCENT 背景，icon 14px MUTED_FOREGROUND 色
+    /// hover 显示 STATE_HOVER 背景，icon 14px CONTENT_SECONDARY 色
     pub(crate) fn change_icon_button(
         &self,
         label: &'static str,
@@ -1230,9 +1588,9 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let icon_color = if enabled {
-            theme::MUTED_FOREGROUND
+            theme::CONTENT_SECONDARY
         } else {
-            theme::MUTED_FOREGROUND
+            theme::CONTENT_SECONDARY
         };
         BaseButton::new(label)
             .disabled(!enabled)
@@ -1246,7 +1604,7 @@ impl RepositoryView {
             .justify_center()
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
@@ -1280,7 +1638,7 @@ impl RepositoryView {
             .justify_center()
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
@@ -1294,9 +1652,14 @@ impl RepositoryView {
     }
 
     /// 变更行内图标按钮 — 设计图：20×20 圆角方块，纯图标 12px，无边框
-    /// hover 显示 ACCENT 背景
+    /// hover 显示 STATE_HOVER 背景
+    ///
+    /// `id` 必须由调用方给出「页面 + 条目键 + 动作」（例：`change-row-action-unstaged-src/a.rs`）：
+    /// 该按钮在每个变更行里都出现，拿中文 label 当 ElementId 会让所有行共用同一份
+    /// 键控状态（焦点与 tooltip 宿主互相串）。
     pub(crate) fn change_row_icon_button(
         &self,
+        id: impl Into<gpui::ElementId>,
         label: &'static str,
         icon: ToolbarIcon,
         icon_color: u32,
@@ -1304,7 +1667,7 @@ impl RepositoryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        BaseButton::new(label)
+        BaseButton::new(id)
             .disabled(!enabled)
             .accessibility_label(label)
             .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
@@ -1316,7 +1679,7 @@ impl RepositoryView {
             .justify_center()
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(theme::ACCENT)))
+                    .hover(|this| this.bg(rgb(theme::STATE_HOVER)))
                     .active(|this| this.opacity(0.82))
             })
             .when(!enabled, |this| this.opacity(0.4).cursor_not_allowed())
@@ -1329,6 +1692,32 @@ impl RepositoryView {
             .child(toolbar_icon(icon, icon_color))
     }
 
+    /// 次级动作按钮：白/近白薄实体 + 弱轮廓 + 接触阴影。与蓝色主按钮并列时表达
+    /// 「先做这个、再做那个」的主次（最新 Pencil 稿的「提交到 &lt;分支&gt;」）。
+    /// 启用条件与业务守卫语义与 `primary_button` 完全一致，只换视觉权重。
+    ///
+    /// 文案允许是运行时字符串（如「提交到 &lt;当前分支&gt;」），因此这里收 `SharedString`
+    /// 而不是 `&'static str`；调用方传 `"提交到 x".into()`。按钮的 ElementId 由文案派生，
+    /// 所以同一页面上的按钮文案必须唯一——提交条满足这一点（分支名即条目键）；
+    /// 多行列表按钮请改用带显式 ID 的行内按钮 helper。
+    pub(crate) fn secondary_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
+        &self,
+        label: SharedString,
+        enabled: bool,
+        on_click: T,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<T> {
+        self.app_button(
+            label,
+            None,
+            None,
+            ButtonTone::Secondary,
+            enabled,
+            on_click,
+            cx,
+        )
+    }
+
     pub(crate) fn primary_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
         &self,
         label: &'static str,
@@ -1337,7 +1726,7 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<T> {
         self.app_button(
-            label,
+            label.into(),
             None,
             None,
             ButtonTone::Primary,
@@ -1354,12 +1743,20 @@ impl RepositoryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        self.app_button(label, None, None, ButtonTone::Danger, enabled, on_click, cx)
+        self.app_button(
+            label.into(),
+            None,
+            None,
+            ButtonTone::Danger,
+            enabled,
+            on_click,
+            cx,
+        )
     }
 
     fn app_button<T: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static>(
         &self,
-        label: &'static str,
+        label: SharedString,
         icon: Option<ToolbarIcon>,
         badge: Option<usize>,
         tone: ButtonTone,
@@ -1382,7 +1779,7 @@ impl RepositoryView {
         T: Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
     >(
         &self,
-        label: &'static str,
+        label: SharedString,
         icon: Option<ToolbarIcon>,
         badge: Option<usize>,
         tone: ButtonTone,
@@ -1392,15 +1789,20 @@ impl RepositoryView {
     ) -> impl IntoElement + use<T> {
         let palette = app_button_palette(tone, enabled);
         let disabled_reason = self.disabled_reason(enabled, "当前状态不可用");
-        let bg_color = if enabled { palette.bg } else { theme::ACCENT };
+        let bg_color = if enabled {
+            palette.bg
+        } else {
+            theme::STATE_HOVER
+        };
         let text_color = if enabled {
             palette.fg
         } else {
-            theme::MUTED_FOREGROUND
+            theme::CONTENT_SECONDARY
         };
+        let accessibility_label = label.clone();
         BaseButton::new(label)
             .disabled(!enabled)
-            .accessibility_label(label)
+            .accessibility_label(accessibility_label.clone())
             .focus_visible(|this| this.border_color(rgb(theme::PRIMARY)))
             .relative()
             .flex()
@@ -1421,11 +1823,15 @@ impl RepositoryView {
             } else {
                 gpui::FontWeight::NORMAL
             })
+            .when(enabled && palette.contact_shadow, |this| {
+                this.shadow(control_shadow())
+            })
             .when(enabled, |this| this.cursor_pointer())
             .when(!enabled, |this| this.cursor_not_allowed().opacity(0.78))
             .when(enabled, |this| {
                 this.hover(move |this| this.bg(rgb(palette.hover_bg)))
-                    .active(|this| this.opacity(0.82))
+                    // 按下：阴影收短 + 轻微压暗，表达「压下」而不改变尺寸。
+                    .active(|this| this.opacity(0.9).shadow(pressed_shadow()))
             })
             .when_some(disabled_reason, |this, tooltip| {
                 this.tooltip(move |_window, cx| tooltip_text(tooltip, cx))
@@ -1459,7 +1865,7 @@ impl RepositoryView {
                     .when_some(icon, |this, icon| {
                         this.child(toolbar_icon(icon, text_color))
                     })
-                    .child(label)
+                    .child(accessibility_label)
                     .when_some(badge.filter(|count| *count > 0), |this, count| {
                         this.child(button_badge(count))
                     }),

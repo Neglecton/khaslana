@@ -238,14 +238,14 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("当前本地分支"),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
                                     .child(local_branch_label),
                             ),
@@ -260,7 +260,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(kind.help()),
             )
             .child(self.remote_selector(remotes, selected_remote.clone(), cx))
@@ -272,7 +272,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("远程分支"),
                     )
                     .child(self.remote_branch_editable_selector(
@@ -312,7 +312,7 @@ impl RepositoryView {
                                 .id("pull-use-rebase-label")
                                 .cursor_pointer()
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.remote_branch_operation.use_rebase =
                                         !this.remote_branch_operation.use_rebase;
@@ -359,7 +359,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("远端"),
             )
             .child(
@@ -391,7 +391,7 @@ impl RepositoryView {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .truncate()
                         .child(url),
                 )
@@ -432,12 +432,12 @@ impl RepositoryView {
                     .items_center()
                     .justify_center()
                     .border_l_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .bg(rgb(ui_theme::INPUT_BG))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .when(!disabled, |this| {
                         this.cursor_pointer()
-                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                            .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                     })
                     .when(disabled, |this| this.opacity(0.55).cursor_not_allowed())
                     .on_mouse_down(
@@ -458,13 +458,11 @@ impl RepositoryView {
                             cx.notify();
                         }),
                     )
-                    .child(
-                        toolbar_icon_rotated(
-                            ToolbarIcon::ChevronRight,
-                            ui_theme::MUTED_FOREGROUND,
-                            90.0,
-                        ),
-                    ),
+                    .child(toolbar_icon_rotated(
+                        ToolbarIcon::ChevronRight,
+                        ui_theme::CONTENT_SECONDARY,
+                        90.0,
+                    )),
             )
             .when(dropdown_open, |this| {
                 let menu = self.remote_branch_dropdown_menu(selected_remote, branches, window, cx);
@@ -519,7 +517,7 @@ impl RepositoryView {
                         .px_3()
                         .py_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("暂无远端分支，请点击刷新获取"),
                 )
             })
@@ -592,7 +590,7 @@ impl RepositoryView {
                     .px_2()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(self.input(FieldId::RemoteBranchSearch, false, window, cx)),
             )
             .child(

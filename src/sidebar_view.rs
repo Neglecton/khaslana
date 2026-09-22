@@ -5,6 +5,7 @@ use gpui::{
     ClickEvent, Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, Window, div,
     prelude::*, px, uniform_list,
 };
+use gpui_kit::base::FocusTrapElement;
 use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
@@ -495,7 +496,7 @@ impl RepositoryView {
             .px_2()
             .py_1()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
             .bg(rgb(ui_theme::SURFACE_BASE))
             // 复用统一输入框，确保侧边栏搜索也支持现有 IME、选区和光标逻辑。
             .child(self.input(field, true, window, cx))
@@ -545,7 +546,7 @@ impl RepositoryView {
         // 设计图：20×20 圆角方块，$--radius-xs，无描边
         // icon 14px，$--sidebar-foreground 色
         let icon_color = if !enabled {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         } else if active {
             ui_theme::PRIMARY
         } else {
@@ -786,7 +787,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(10.0))
                                     .font_weight(gpui::FontWeight::NORMAL)
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child(tag_count.to_string()),
                             )
                         })
@@ -800,7 +801,7 @@ impl RepositoryView {
                         .flex_none()
                         .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::NORMAL)
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(count.to_string())
                         .into_any_element()
                 })
@@ -901,11 +902,16 @@ impl RepositoryView {
         };
 
         glass_menu()
+            .id("remote-menu")
+            .focus_trap("remote-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
             .w(px(REMOTE_MENU_WIDTH))
             .child(context_menu_item(
+                self,
+                "remote-menu",
+                "refresh",
                 "刷新",
                 !self.busy,
                 {
@@ -1065,7 +1071,7 @@ impl RepositoryView {
         } else if is_local {
             ui_theme::CONTENT_PRIMARY
         } else {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         };
         let name_weight = if is_current {
             gpui::FontWeight::SEMIBOLD
@@ -1181,6 +1187,8 @@ impl RepositoryView {
             });
 
         glass_menu()
+            .id("branch-menu")
+            .focus_trap("branch-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1188,6 +1196,9 @@ impl RepositoryView {
             .when(!is_local, |this| {
                 let branch = menu.branch.clone();
                 this.child(context_menu_item_with_context(
+                    self,
+                    "branch-menu",
+                    "copy-name",
                     "复制名称",
                     !self.busy,
                     {
@@ -1197,6 +1208,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item_with_context(
+                    self,
+                    "branch-menu",
+                    "copy-checkout-command",
                     "复制 checkout 命令",
                     !self.busy,
                     {
@@ -1208,6 +1222,9 @@ impl RepositoryView {
                 .child(menu_separator())
             })
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "checkout",
                 "切换到此分支",
                 is_local && !menu.is_head && !self.busy && !merge_in_progress,
                 {
@@ -1217,6 +1234,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "pull",
                 "拉取此分支更新",
                 can_pull_local && !self.busy && !merge_in_progress,
                 {
@@ -1226,6 +1246,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "merge",
                 "合并到当前分支",
                 !menu.is_head && !self.busy && !merge_in_progress,
                 {
@@ -1235,6 +1258,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "rebase",
                 "变基到当前分支",
                 !menu.is_head && !self.busy && !merge_in_progress,
                 {
@@ -1244,6 +1270,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "fetch-checkout",
                 "拉取到本地并切换",
                 !is_local && !self.busy && !merge_in_progress,
                 {
@@ -1254,6 +1283,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "set-upstream",
                 "设置/修改 upstream...",
                 is_local && !self.busy,
                 {
@@ -1263,6 +1295,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "rename",
                 "重命名...",
                 is_local && !self.busy,
                 {
@@ -1272,6 +1307,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "delete-branch",
                 "删除分支",
                 is_local && !menu.is_head && !self.busy,
                 {
@@ -1281,6 +1319,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "delete-remote-branch",
                 "删除远端分支",
                 !is_local && !self.busy,
                 {
@@ -1290,6 +1331,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "browse-branch",
                 "浏览此分支",
                 !self.busy,
                 {
@@ -1300,6 +1344,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "branch-menu",
+                "compare-with-current",
                 "与当前分支比较",
                 !menu.is_head && !self.busy,
                 {

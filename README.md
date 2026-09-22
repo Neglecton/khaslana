@@ -5,7 +5,7 @@
 <h1 align="center">Khaslana</h1>
 
 <p align="center">
-  一个使用 Rust、gpui-ce 和 libgit2 构建的轻量桌面 Git 客户端。
+  一个使用 Rust、gpui-pre 和 libgit2 构建的轻量桌面 Git 客户端。
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ## 简介
 
-Khaslana 是一个面向日常开发工作流的桌面 Git 客户端。它使用 `gpui-ce` 和 `yororen_ui` 构建原生界面，使用 `git2` / libgit2 执行 Git 操作，并通过系统 Keyring 保存凭据密文。
+Khaslana 是一个面向日常开发工作流的桌面 Git 客户端。它使用 `gpui-pre`（Cargo 别名 `gpui`）与 `gpui-kit` 构建原生界面，使用 `git2` / libgit2 执行 Git 操作，并通过系统 Keyring 保存凭据密文。
 
 项目目标不是替代所有 Git CLI 能力，而是把仓库打开、分支切换、暂存提交、远端同步、历史查看、凭据管理、代理设置、子模块更新和常用自动化工作流整合到一个轻量客户端里。
 
@@ -75,7 +75,7 @@ Khaslana 是一个面向日常开发工作流的桌面 Git 客户端。它使用
 环境要求：
 
 - Rust 1.85+，项目使用 Rust 2024 edition。
-- Windows 10 / 11 推荐；其他平台需确认 `gpui-ce`、系统 Keyring 和 libgit2 后端可用性。
+- Windows 10 / 11 推荐；其他平台需确认 `gpui-pre`、系统 Keyring 和 libgit2 后端可用性。
 - 可访问目标 Git 远端所需的网络和凭据环境。
 
 本地运行：

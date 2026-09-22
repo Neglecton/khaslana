@@ -36,7 +36,10 @@ use crate::{
     BrowseViewMode, CHANGE_ROW_HEIGHT, EncodingMenuTarget, RepositoryView, ResizeTarget,
     diff_encoding_label, encoding_info_label,
     ui::{
-        components::{command_group, empty_state, list_row_surface, page_header, segmented_button},
+        components::{
+            command_group, empty_state, list_row_surface, page_header, panel_section_header,
+            segmented_button,
+        },
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
@@ -245,8 +248,6 @@ impl RepositoryView {
                     .gap(px(ui_theme::SPACE_2))
                     .px(px(ui_theme::SPACE_4))
                     .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
                             .flex()
@@ -278,14 +279,9 @@ impl RepositoryView {
                     ))),
             )
             .child(
-                div()
-                    .flex_none()
-                    .px(px(ui_theme::SPACE_4))
-                    .py(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("文件树"),
+                panel_section_header("文件树")
+                    .padding_x(ui_theme::SPACE_4)
+                    .build(),
             )
             .child(scrollable_uniform_frame(
                 "browse-tree-scroll",

@@ -89,7 +89,7 @@ impl RepositoryView {
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_color(rgb(ui_theme::BORDER))
+                .border_color(rgb(ui_theme::BORDER_MUTED))
                 .bg(rgb(ui_theme::COLOR_WARNING))
                 .child(
                     div()

@@ -7,15 +7,19 @@ use std::sync::Arc;
 
 use async_channel::Sender;
 use gpui::{Context, IntoElement, Window, canvas, div, point, prelude::*, px};
+use gpui_kit::base::FocusTrapElement;
 use khaslana::{
     AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
 };
 
 use crate::ui::theme::rgb;
 use crate::{
-    AiThinkingOverlayState, FieldId, RepositoryView, UiEvent,
+    AiThinkingOverlayState, AiThinkingTask, AiThinkingTaskKind, FieldId, RepositoryView, UiEvent,
+    dialog_panel_size,
     ui::{
-        components::{dialog_actions, dialog_overlay},
+        components::{
+            PlaceholderAlign, dialog_actions, dialog_overlay, inline_error_bubble, panel_empty_row,
+        },
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, scrollable_frame_when},
@@ -28,11 +32,20 @@ impl RepositoryView {
     /// `(client, proxy_url, tx, on_delta)`——预建好的 ChatClient、当前
     /// 代理 URL（业务需按段重建客户端时用）、UI 事件发送端（自定义进度
     /// 事件）、以及 StreamDelta 转发回调（思维链/正文增量实时进弹窗）。
-    /// 成功结果经调用方提供的 `emit_result` 组装事件回传，失败统一发
-    /// 共用 `AiRequestFailed`。任务完成或失败后事件处理器自动关闭思考
-    /// 弹窗。空正文校验等业务逻辑留在 `task` 内。
-    pub(crate) fn start_ai_thinking_task<R, F, E>(&mut self, title: &str, emit_result: E, task: F)
-    where
+    /// 成功结果经调用方提供的 `emit_result` 组装事件回传（携带任务
+    /// 身份），失败统一发共用 `AiRequestFailed`。任务完成或失败后事件
+    /// 处理器自动关闭思考弹窗。空正文校验等业务逻辑留在 `task` 内。
+    ///
+    /// **互斥按运行态而非可见态**（审查 R8）：`kind` 标记任务归属业务，
+    /// 「后台运行」只收起弹窗，`ai_thinking_task` 仍占位——第二个业务
+    /// 会被明确拒绝，不会与后台任务共用弹窗与 loading 标志。
+    pub(crate) fn start_ai_thinking_task<R, F, E>(
+        &mut self,
+        title: &str,
+        kind: AiThinkingTaskKind,
+        emit_result: E,
+        task: F,
+    ) where
         R: Send + 'static,
         F: FnOnce(
                 ChatClient,
@@ -42,17 +55,32 @@ impl RepositoryView {
             ) -> khaslana::Result<R>
             + Send
             + 'static,
-        E: FnOnce(R) -> UiEvent + Send + 'static,
+        E: FnOnce(u64, R) -> UiEvent + Send + 'static,
     {
         // 互斥：三个业务（commit message / 冲突合并建议 / 工作流模板）共用
-        // 这一个弹窗与一组 loading 标志。并发开跑会输出交错、先完成者关掉
+        // 一组 loading 标志与思考弹窗。并发开跑会输出交错、先完成者关掉
         // 弹窗（后续增量被丢弃）、共用的 AiRequestFailed 处理器互相复位
-        // 对方的标志——直接拒绝第二个任务。
-        if self.ai_thinking_overlay.is_some() {
-            self.status = "已有 AI 生成任务进行中，请等待完成或点击后台运行".to_string();
+        // 对方的标志——直接拒绝第二个任务。注意这里按**任务运行态**判定：
+        // 「后台运行」后弹窗已收起但任务仍在跑，互斥继续有效。
+        if self.ai_thinking_task.is_some() {
+            // 调用方在进入本函数前已置起自己的 loading，按归属业务复位，
+            // 否则被拒绝的任务会把按钮永久卡在禁用态。
+            match &kind {
+                AiThinkingTaskKind::CommitMessage => self.ai_commit_loading = false,
+                AiThinkingTaskKind::ConflictMerge { .. } => self.ai_conflict_loading = false,
+                AiThinkingTaskKind::WorkflowTemplate { session_id } => {
+                    if self.workflow_editor_session_id() == Some(*session_id) {
+                        self.clear_workflow_editor_ai_loading();
+                    }
+                }
+            }
+            self.status = "已有 AI 生成任务进行中，请等待完成后重试".to_string();
             self.last_error = Some("已有 AI 生成任务进行中".to_string());
             return;
         }
+        let task_id = self.next_ai_thinking_task_id;
+        self.next_ai_thinking_task_id = self.next_ai_thinking_task_id.wrapping_add(1);
+        self.ai_thinking_task = Some(AiThinkingTask { id: task_id, kind });
         self.ai_thinking_overlay = Some(AiThinkingOverlayState {
             title: title.to_string(),
             reasoning: String::new(),
@@ -75,7 +103,7 @@ impl RepositoryView {
             // panic 兜底（第二层）：TaskExecutor 的 catch_unwind 只发全局
             // BackgroundTaskPanicked（无法区分任务种类，不复位本业务的
             // loading 标志与弹窗）；这里补发共用失败事件精确复位（与 AI
-            // 评审任务同一模式）。
+            // 评审任务同一模式）。失败事件携带任务 id，只影响所属任务。
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let client = ChatClient::new(settings, proxy_url.clone());
                 let mut forward = |delta: StreamDelta| {
@@ -86,6 +114,7 @@ impl RepositoryView {
                     crate::send_ui_event(
                         &task_tx,
                         UiEvent::AiThinkingDelta {
+                            task_id,
                             content_delta,
                             reasoning_delta,
                         },
@@ -105,13 +134,14 @@ impl RepositoryView {
             };
             match outcome {
                 Ok(result) => {
-                    crate::send_ui_event(&tx, emit_result(result));
+                    crate::send_ui_event(&tx, emit_result(task_id, result));
                 }
                 Err(err) => {
                     tracing::warn!(target: "khaslana::ai", "AI 思考任务失败：{err}");
                     crate::send_ui_event(
                         &tx,
                         UiEvent::AiRequestFailed {
+                            task_id,
                             error: err.to_string(),
                         },
                     );
@@ -120,9 +150,50 @@ impl RepositoryView {
         });
     }
 
+    /// 任务终结（完成/失败）：身份匹配才释放互斥槽并收起可见弹窗。
+    /// 迟到事件（身份不匹配，如任务已被全局 panic 复位路径收尾）静默
+    /// 忽略，不复位其他任务的状态。
+    pub(crate) fn finish_ai_thinking_task(&mut self, task_id: u64) -> bool {
+        if crate::take_matching_ai_task(&mut self.ai_thinking_task, task_id).is_none() {
+            return false;
+        }
+        self.close_ai_thinking_overlay();
+        true
+    }
+
+    /// 当前运行任务的归属业务（身份不匹配时为 None）。
+    pub(crate) fn ai_thinking_task_kind(&self, task_id: u64) -> Option<AiThinkingTaskKind> {
+        let task = self.ai_thinking_task.as_ref()?;
+        (task.id == task_id).then(|| task.kind.clone())
+    }
+
+    /// 当前运行任务是否正是指定路径的冲突合并任务。进度事件不携带任务
+    /// 身份，按「任务归属 + 路径」双重寻址：切换文件后旧任务的进度
+    /// 不再占据状态栏。
+    pub(crate) fn ai_thinking_owns_conflict_path(&self, path: &str) -> bool {
+        self.ai_thinking_task.as_ref().is_some_and(|task| {
+            matches!(
+                &task.kind,
+                AiThinkingTaskKind::ConflictMerge { path: owned } if owned == path
+            )
+        })
+    }
+
+    /// 关闭 AI 思考弹窗（任务完成/失败/后台运行/Esc 共用）：只收起弹窗，
+    /// 不终止后台任务（结果仍经事件回传）；焦点归还打开弹窗前的触发器。
+    pub(crate) fn close_ai_thinking_overlay(&mut self) {
+        if self.ai_thinking_overlay.take().is_some() {
+            self.request_overlay_focus_restore();
+        }
+    }
+
     /// 渲染 AI 思考弹窗：一次性生成类请求进行中的全屏遮罩 + 居中面板，
     /// 实时流式展示思维链。任务完成或失败后由事件处理关闭弹窗。
-    pub(crate) fn render_ai_thinking_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_ai_thinking_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(overlay) = &self.ai_thinking_overlay else {
             return div().into_any_element();
         };
@@ -145,9 +216,9 @@ impl RepositoryView {
             .w_full()
             .overflow_y_scroll()
             .track_scroll(&handle)
-            .text_size(px(11.0))
+            .text_size(px(ui_theme::TYPE_META))
             .line_height(px(16.0))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
             // 思维链在前（reasoning 模型的主要反馈），正文增量在后
             // （非 reasoning 模型的唯一反馈）。GPUI 文本默认 Normal 换行，
             // 长行与 \n 都能正确折行。
@@ -160,7 +231,7 @@ impl RepositoryView {
                         .mt_2()
                         .pt_2()
                         .border_t_1()
-                        .border_color(rgb(ui_theme::BORDER))
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(content_text),
                 )
@@ -191,19 +262,25 @@ impl RepositoryView {
                 .size(px(1.0)),
             );
 
+        // 焦点圈：思考窗打开时焦点移入其中（maintain_overlay_focus），
+        // Tab 在「后台运行」等弹窗控件内循环，不漏到被遮住的父层。
+        // 尺寸按视口钳制（审查 R3）：高 DPI 下逻辑视口可能小于 560×420。
+        let (panel_width, panel_height) = dialog_panel_size(window, 560.0, 420.0);
         dialog_overlay()
+            .id("ai-thinking-overlay")
+            .focus_trap("ai-thinking-overlay-trap", &self.ai_thinking_focus)
             .child(
                 div()
-                    .w(px(560.0))
+                    .w(panel_width)
                     // 固定高度（而非 max_h）：内容流式增长时居中弹窗的上下
                     // 边缘都会移动，头部「后台运行」按钮跟着漂移难以命中；
                     // 固定高度让按钮从第一帧起位置恒定。
-                    .h(px(420.0))
+                    .h(panel_height)
                     .p_4()
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -229,7 +306,7 @@ impl RepositoryView {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .text_size(px(12.0))
+                                    .text_size(px(ui_theme::TYPE_BODY))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
@@ -241,7 +318,7 @@ impl RepositoryView {
                                 |this, _, _| {
                                     // 仅收起弹窗不终止任务：结果仍会经事件回传
                                     // （toast / 输入框回填），弹窗不再出现。
-                                    this.ai_thinking_overlay = None;
+                                    this.close_ai_thinking_overlay();
                                 },
                                 cx,
                             )),
@@ -292,14 +369,14 @@ impl RepositoryView {
                     .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(ui_theme::TYPE_BODY))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child("连接配置"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(ui_theme::TYPE_BODY))
                             .line_height(px(18.0))
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(format!("接口类型：{}", AiApiType::ChatCompletions.label())),
@@ -310,7 +387,7 @@ impl RepositoryView {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
                     .line_height(px(18.0))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。"),
@@ -322,7 +399,7 @@ impl RepositoryView {
                         .pt_3()
                         .border_t_1()
                         .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .text_size(px(12.0))
+                        .text_size(px(ui_theme::TYPE_BODY))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(self.status.clone()),
                 )
@@ -333,7 +410,7 @@ impl RepositoryView {
                         .pt_3()
                         .border_t_1()
                         .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .text_size(px(12.0))
+                        .text_size(px(ui_theme::TYPE_BODY))
                         .text_color(rgb(ui_theme::DESTRUCTIVE))
                         .truncate()
                         .child(self.last_error.clone().unwrap_or_default()),
@@ -410,7 +487,8 @@ impl RepositoryView {
         let staged_paths = staged_paths;
         self.start_ai_thinking_task(
             "正在生成提交信息",
-            |message| crate::UiEvent::AiCommitMessageGenerated { message },
+            crate::AiThinkingTaskKind::CommitMessage,
+            |task_id, message| crate::UiEvent::AiCommitMessageGenerated { task_id, message },
             move |client, _proxy_url, _tx, on_delta| {
                 let repo = git2::Repository::open(&repo_path)?;
                 // 收集所有 staged 文件的 diff 文本。体积预算对齐评审 agent
@@ -536,7 +614,12 @@ impl RepositoryView {
         let task_path = path.clone();
         self.start_ai_thinking_task(
             "正在生成 AI 合并建议",
-            |draft| crate::UiEvent::AiConflictMergeGenerated { path, draft },
+            crate::AiThinkingTaskKind::ConflictMerge { path: path.clone() },
+            |task_id, draft| crate::UiEvent::AiConflictMergeGenerated {
+                task_id,
+                path,
+                draft,
+            },
             move |_client, proxy_url, tx, on_delta| {
                 let path = task_path;
                 let repo = git2::Repository::open(&repo_path)?;
@@ -672,7 +755,7 @@ impl RepositoryView {
                 Err(err) => {
                     crate::send_ui_event(
                         &tx,
-                        crate::UiEvent::AiRequestFailed {
+                        crate::UiEvent::AiConnectionTestFailed {
                             error: err.to_string(),
                         },
                     );
@@ -927,8 +1010,8 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 div()
                     .flex()
@@ -937,7 +1020,7 @@ impl RepositoryView {
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(ui_theme::TYPE_BODY))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(ui_theme::PRIMARY))
                             .child("AI 评审"),
@@ -945,8 +1028,8 @@ impl RepositoryView {
                     .when(!status_text.is_empty(), |this| {
                         this.child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_size(px(ui_theme::TYPE_META))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .truncate()
                                 .child(status_text),
                         )
@@ -1034,9 +1117,9 @@ impl RepositoryView {
             .track_scroll(&handle)
             .px_3()
             .py_2()
-            .text_size(px(12.0))
+            .text_size(px(ui_theme::TYPE_BODY))
             .line_height(px(18.0))
-            .text_color(rgb(ui_theme::FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
             .child(self.render_review_timeline(cx))
             .when_some(review, |this, review| {
                 this.child(
@@ -1044,7 +1127,7 @@ impl RepositoryView {
                         .mt_2()
                         .pt_2()
                         .border_t_1()
-                        .border_color(rgb(ui_theme::BORDER))
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .child(crate::markdown_view::render_markdown(&review.content)),
                 )
             })
@@ -1056,7 +1139,7 @@ impl RepositoryView {
                         .mt_2()
                         .pt_2()
                         .border_t_1()
-                        .border_color(rgb(ui_theme::BORDER))
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
                         .child(crate::markdown_view::render_markdown(&live_content)),
                 )
             })
@@ -1065,8 +1148,8 @@ impl RepositoryView {
                 this.child(
                     div()
                         .mt_2()
-                        .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(if has_steps {
                             "工具执行中…"
                         } else {
@@ -1080,7 +1163,7 @@ impl RepositoryView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(header)
             .child(scrollable_frame_when(
                 "ai-review-scroll",
@@ -1123,11 +1206,11 @@ impl RepositoryView {
             .h(px(32.0))
             .flex_none()
             .border_t_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(ui_theme::TYPE_META))
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(ui_theme::PRIMARY))
                     .flex_none()
@@ -1137,8 +1220,8 @@ impl RepositoryView {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .truncate()
                     .child(preview),
             )
@@ -1209,26 +1292,21 @@ impl RepositoryView {
         let handle = self.scroll_handle("ai-review-history-scroll");
 
         let body = if state.loading {
-            div()
-                .py_6()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                .child("正在加载评审记录…")
-                .into_any_element()
+            panel_empty_row(
+                "正在加载评审记录…",
+                ui_theme::ROW_HEIGHT_COMPACT * 2.0,
+                PlaceholderAlign::Start,
+            )
+            .into_any_element()
         } else if let Some(error) = &state.error {
-            div()
-                .py_6()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::DESTRUCTIVE))
-                .child(format!("加载失败：{error}"))
-                .into_any_element()
+            inline_error_bubble(format!("加载失败：{error}")).into_any_element()
         } else if state.records.is_empty() {
-            div()
-                .py_6()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                .child("暂无评审记录")
-                .into_any_element()
+            panel_empty_row(
+                "暂无评审记录",
+                ui_theme::ROW_HEIGHT_COMPACT * 2.0,
+                PlaceholderAlign::Start,
+            )
+            .into_any_element()
         } else {
             // 滚动结构照仓库切换下拉同构：外层有界 + scrollable_frame_when
             // 直接子元素 + 内容 div 只挂 id/overflow/track_scroll。
@@ -1252,8 +1330,8 @@ impl RepositoryView {
                         .gap_3()
                         .px_2()
                         .py_1()
-                        .text_size(px(11.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(div().w(px(92.0)).flex_none().child("完成时间"))
                         .child(div().flex_1().min_w(px(0.0)).child("目标分支"))
                         .child(div().w(px(110.0)).flex_none().child("模型"))
@@ -1272,6 +1350,8 @@ impl RepositoryView {
         };
 
         dialog_overlay()
+            .id("ai-review-history-overlay")
+            .focus_trap("ai-review-history-trap", &self.review_history_focus)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
@@ -1288,8 +1368,8 @@ impl RepositoryView {
                     .flex_col()
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
-                    .bg(rgb(ui_theme::CARD))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
                     .shadow_lg()
                     .occlude()
                     .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
@@ -1307,7 +1387,7 @@ impl RepositoryView {
                             .px_3()
                             .py_2()
                             .border_b_1()
-                            .border_color(rgb(ui_theme::BORDER))
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
                             .child(
                                 div()
                                     .text_size(px(13.0))
@@ -1315,18 +1395,18 @@ impl RepositoryView {
                                     .child("评审历史"),
                             )
                             .child(
-                                div()
-                                    .id("ai-review-history-close")
+                                gpui_kit::base::Button::new("ai-review-history-close")
+                                    .focus_visible(|this| this.border_1().border_color(rgb(ui_theme::PRIMARY)))
                                     .flex_none()
                                     .size(px(20.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .rounded(px(ui_theme::RADIUS_XS))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.close_ai_review_history();
                                         cx.notify();
@@ -1366,7 +1446,7 @@ impl RepositoryView {
             .py(px(5.0))
             .rounded(px(ui_theme::RADIUS_XS))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_ai_review_record(record.clone());
                 cx.notify();
@@ -1375,16 +1455,16 @@ impl RepositoryView {
                 div()
                     .w(px(92.0))
                     .flex_none()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(date),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_BODY))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .truncate()
                     .child(target_display_name),
             )
@@ -1392,8 +1472,8 @@ impl RepositoryView {
                 div()
                     .w(px(110.0))
                     .flex_none()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .truncate()
                     .child(model),
             )
@@ -1401,8 +1481,8 @@ impl RepositoryView {
                 div()
                     .w(px(64.0))
                     .flex_none()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .text_right()
                     .child(format!("{step_count} 步")),
             )
@@ -1410,7 +1490,7 @@ impl RepositoryView {
     }
 
     /// 步骤时间线（Codex/ZCode 式）：左侧竖轨 + 节点圆点，行默认折叠只显
-    /// 一行摘要，点击展开 TILE 底等宽详情块；思维链与工具调用错开颜色，
+    /// 一行摘要，点击展开 SURFACE_SUNKEN 底等宽详情块；思维链与工具调用错开颜色，
     /// 错误步骤用警告色。
     fn render_review_timeline(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let has_steps = !self.ai_review_steps.is_empty();
@@ -1437,7 +1517,7 @@ impl RepositoryView {
                     .top(px(4.0))
                     .bottom(px(4.0))
                     .w(px(1.0))
-                    .bg(rgb(ui_theme::BORDER)),
+                    .bg(rgb(ui_theme::BORDER_MUTED)),
             )
             .children(rows)
             // live 思考行：流式期间的瞬时「思考中…」，思维链全文灰色
@@ -1471,22 +1551,22 @@ impl RepositoryView {
                                             div()
                                                 .flex_none()
                                                 .text_size(px(10.0))
-                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                                 .child("✻"),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
-                                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                                .text_size(px(ui_theme::TYPE_META))
+                                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                                 .child("思考中…"),
                                         ),
                                 )
                                 .child(
                                     div()
                                         .mt_1()
-                                        .text_size(px(11.0))
+                                        .text_size(px(ui_theme::TYPE_META))
                                         .line_height(px(16.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child(live_reasoning),
                                 ),
                         ),
@@ -1528,16 +1608,16 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(10.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("❝"),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .text_size(px(11.0))
+                                    .text_size(px(ui_theme::TYPE_META))
                                     .line_height(px(17.0))
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .child(text.clone()),
                             ),
                     ),
@@ -1553,9 +1633,9 @@ impl RepositoryView {
         let summary_color = if is_error {
             ui_theme::DESTRUCTIVE
         } else if is_reasoning {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         } else {
-            ui_theme::FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         };
         let marker = if is_reasoning {
             "✻"
@@ -1579,7 +1659,7 @@ impl RepositoryView {
                     .bg(rgb(if is_error {
                         ui_theme::DESTRUCTIVE
                     } else if is_reasoning {
-                        ui_theme::MUTED_FOREGROUND
+                        ui_theme::CONTENT_SECONDARY
                     } else {
                         ui_theme::PRIMARY
                     })),
@@ -1596,7 +1676,7 @@ impl RepositoryView {
                             .items_center()
                             .gap_1()
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                            .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                             .rounded(px(ui_theme::RADIUS_XS))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 if this.ai_review_step_expanded.contains(&index) {
@@ -1610,14 +1690,14 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(10.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child(marker),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .text_size(px(11.0))
+                                    .text_size(px(ui_theme::TYPE_META))
                                     .text_color(rgb(summary_color))
                                     .truncate()
                                     .child(summary),
@@ -1630,14 +1710,14 @@ impl RepositoryView {
                                 .mb_2()
                                 .p_2()
                                 .rounded(px(ui_theme::RADIUS_XS))
-                                .bg(rgb(ui_theme::TILE))
-                                .text_size(px(11.0))
+                                .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                                .text_size(px(ui_theme::TYPE_META))
                                 .line_height(px(16.0))
                                 .font_family("Consolas")
                                 .text_color(rgb(if is_error {
                                     ui_theme::DESTRUCTIVE
                                 } else {
-                                    ui_theme::MUTED_FOREGROUND
+                                    ui_theme::CONTENT_SECONDARY
                                 }))
                                 .child(detail),
                         )

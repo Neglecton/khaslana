@@ -1,7 +1,7 @@
 //! RepositoryView 的通用输入、菜单、差异与状态渲染。
 
 use crate::*;
-use gpui_kit::base::Button as BaseButton;
+use gpui_kit::base::{Button as BaseButton, FocusTrapElement};
 use gpui_kit::component::{Disableable, Sizable, Size, switch::Switch};
 
 impl RepositoryView {
@@ -90,7 +90,7 @@ impl RepositoryView {
                     .id(format!("{id}-label"))
                     .cursor_pointer()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         label_click(this, window, cx);
                         cx.notify();
@@ -99,384 +99,37 @@ impl RepositoryView {
             )
     }
 
+    /// 渲染字段输入框。M7 起全部字段（静态 + 工作流动态）均迁至 Kit，
+    /// 宿主由 `ensure_kit_fields` 每帧建好（渲染期只有 `&self`，建不了实体）；
+    /// 自绘回退路径已随旧控件一并删除——无宿主即编程错误，渲染空占位
+    /// 而不是静默回退到第二套输入实现。
     pub(crate) fn input(
         &self,
         id: FieldId,
         compact: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
+        _window: &Window,
+        _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // 冲突草稿是带按块接受、语法高亮与三栏联动的领域编辑器，按计划留到 M6。
-        if id == FieldId::ConflictEditor {
-            return self.conflict_editor_input(window, cx).into_any_element();
-        }
-        // 已迁到 Kit 的字段：宿主由 `ensure_kit_fields` 每帧建好（渲染期只有
-        // `&self`，建不了实体）。未迁移的字段没有宿主，继续走下面的自绘路径。
-        if let Some(field) = self.kit_field(id) {
-            let blocked = self.active_operation_blocker_message().is_some()
-                && !self.operation_blocker_allows_text_field(id);
-            return field.render(compact, blocked);
-        }
-        if Self::is_multiline_field(id) {
-            return self.multi_line_input(id, window, cx).into_any_element();
-        }
-        self.single_line_input(id, compact, window, cx)
-            .into_any_element()
+        let Some(field) = self.kit_field(id) else {
+            debug_assert!(
+                false,
+                "FieldId {id:?} 没有 Kit 输入宿主（ensure_kit_fields 未覆盖）"
+            );
+            return div().into_any_element();
+        };
+        let blocked = self.active_operation_blocker_message().is_some()
+            && !self.operation_blocker_allows_text_field(id);
+        field.render(compact, blocked)
     }
 
     pub(crate) fn is_multiline_field(id: FieldId) -> bool {
         matches!(
             id,
             FieldId::CommitMessage
-                | FieldId::ConflictEditor
                 | FieldId::TagMessage
                 // 工作流模板 AI 功能需求描述（编辑器弹窗内多行输入）。
                 | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::AiDescription)
         )
-    }
-
-    fn single_line_input(
-        &self,
-        id: FieldId,
-        compact: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let field = self.field(id);
-        let focused = field.focus.is_focused(window);
-        input_frame(
-            format!("field-{id:?}"),
-            focused,
-            if compact {
-                InputFrameSize::Compact
-            } else {
-                InputFrameSize::Regular
-            },
-        )
-        .track_focus(&field.focus)
-        .key_context("TextInput")
-        .on_action(cx.listener(Self::text_backspace))
-        .on_action(cx.listener(Self::text_delete))
-        .on_action(cx.listener(Self::text_left))
-        .on_action(cx.listener(Self::text_right))
-        .on_action(cx.listener(Self::text_up))
-        .on_action(cx.listener(Self::text_down))
-        .on_action(cx.listener(Self::text_select_left))
-        .on_action(cx.listener(Self::text_select_right))
-        .on_action(cx.listener(Self::text_select_up))
-        .on_action(cx.listener(Self::text_select_down))
-        .on_action(cx.listener(Self::text_select_all))
-        .on_action(cx.listener(Self::text_home))
-        .on_action(cx.listener(Self::text_end))
-        .on_action(cx.listener(Self::text_paste))
-        .on_action(cx.listener(Self::text_copy))
-        .on_action(cx.listener(Self::text_cut))
-        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-            if this.active_operation_blocker_message().is_some()
-                && !this.operation_blocker_allows_text_field(id)
-            {
-                cx.stop_propagation();
-                return;
-            }
-            // 单行框 Enter 提交所在表单（用户确认保留的文本框内行为）。
-            if event.keystroke.key.as_str() == "enter" {
-                this.submit_focused_field(id);
-                cx.stop_propagation();
-            }
-        }))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                window.focus(&this.field(id).focus, cx);
-                let position = this.field(id).index_for_mouse_position(event.position);
-                let field = this.field_mut(id);
-                field.is_selecting = true;
-                if event.modifiers.shift {
-                    field.select_to(position);
-                } else {
-                    field.move_to(position);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }),
-        )
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.field_mut(id).is_selecting = false;
-                cx.notify();
-            }),
-        )
-        .on_mouse_up_out(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.field_mut(id).is_selecting = false;
-                cx.notify();
-            }),
-        )
-        .on_mouse_move(
-            cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                if !this.field(id).is_selecting {
-                    return;
-                }
-                let position = this.field(id).index_for_mouse_position(event.position);
-                this.field_mut(id).select_to(position);
-                cx.notify();
-            }),
-        )
-        .px_2()
-        .py_1()
-        .flex()
-        .items_center()
-        .child(SingleLineInputElement {
-            field_id: id,
-            entity: cx.entity(),
-        })
-    }
-
-    fn multi_line_input(
-        &self,
-        id: FieldId,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let field = self.field(id);
-        let focused = field.focus.is_focused(window);
-        // 溢出判定综合逻辑行数与上帧自动换行行数（长行换行后同样超高）。
-        let multiline_overflows = multiline_input_should_scroll(id, &field.value)
-            || field.last_wrapped_line_count > MULTILINE_MIN_LINES;
-        input_frame(format!("field-{id:?}"), focused, InputFrameSize::Multiline)
-            .track_focus(&field.focus)
-            .key_context("TextInput")
-            .on_action(cx.listener(Self::text_backspace))
-            .on_action(cx.listener(Self::text_delete))
-            .on_action(cx.listener(Self::text_left))
-            .on_action(cx.listener(Self::text_right))
-            .on_action(cx.listener(Self::text_select_left))
-            .on_action(cx.listener(Self::text_select_right))
-            .on_action(cx.listener(Self::text_select_all))
-            .on_action(cx.listener(Self::text_home))
-            .on_action(cx.listener(Self::text_end))
-            .on_action(cx.listener(Self::text_paste))
-            .on_action(cx.listener(Self::text_copy))
-            .on_action(cx.listener(Self::text_cut))
-            .on_action(cx.listener(Self::text_submit))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                if this.active_operation_blocker_message().is_some()
-                    && !this.operation_blocker_allows_text_field(id)
-                {
-                    cx.stop_propagation();
-                    return;
-                }
-                if event.keystroke.key.as_str() == "enter"
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.platform
-                {
-                    this.field_mut(id).insert_text("\n", true);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.field(id).focus, cx);
-                    let position = this.field(id).index_for_mouse_position(event.position);
-                    let field = this.field_mut(id);
-                    field.is_selecting = true;
-                    if event.modifiers.shift {
-                        field.select_to(position);
-                    } else {
-                        field.move_to(position);
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.field_mut(id).is_selecting = false;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.field_mut(id).is_selecting = false;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(
-                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                    if !this.field(id).is_selecting {
-                        return;
-                    }
-                    let position = this.field(id).index_for_mouse_position(event.position);
-                    this.field_mut(id).select_to(position);
-                    cx.notify();
-                }),
-            )
-            .px_2()
-            .py_2()
-            .overflow_hidden()
-            .child({
-                let handle = self.scroll_handle(multiline_scroll_handle_id(id));
-                let scroll_id = if id == FieldId::ConflictEditor {
-                    "conflict-editor-scroll"
-                } else {
-                    "commit-message-input-scroll"
-                };
-                let content = div()
-                    .id(scroll_id)
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&handle)
-                    .child(MultiLineInputElement {
-                        field_id: id,
-                        entity: cx.entity(),
-                    })
-                    .into_any_element();
-                let frame = scrollable_frame_when(
-                    scroll_id,
-                    ScrollbarMode::Vertical,
-                    content,
-                    handle,
-                    multiline_overflows,
-                    cx,
-                );
-                if id == FieldId::ConflictEditor {
-                    // 冲突编辑器随冲突面板高度伸缩。
-                    frame.into_any_element()
-                } else {
-                    // 提交信息框固定可视高度（约 MULTILINE_MIN_LINES 行），
-                    // 内容超出后滚动，不再随内容无限撑高。
-                    div()
-                        .flex()
-                        .flex_col()
-                        .h(px(MULTILINE_LINE_HEIGHT * MULTILINE_MIN_LINES as f32))
-                        .child(frame)
-                        .into_any_element()
-                }
-            })
-    }
-
-    fn conflict_editor_input(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let field = self.field(FieldId::ConflictEditor);
-        let multiline_overflows =
-            multiline_input_should_scroll(FieldId::ConflictEditor, &field.value);
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .min_h(px(0.0))
-            .track_focus(&field.focus)
-            .key_context("TextInput")
-            .on_action(cx.listener(Self::text_backspace))
-            .on_action(cx.listener(Self::text_delete))
-            .on_action(cx.listener(Self::text_left))
-            .on_action(cx.listener(Self::text_right))
-            .on_action(cx.listener(Self::text_select_left))
-            .on_action(cx.listener(Self::text_select_right))
-            .on_action(cx.listener(Self::text_select_all))
-            .on_action(cx.listener(Self::text_home))
-            .on_action(cx.listener(Self::text_end))
-            .on_action(cx.listener(Self::text_paste))
-            .on_action(cx.listener(Self::text_copy))
-            .on_action(cx.listener(Self::text_cut))
-            .on_action(cx.listener(Self::text_submit))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                if this.active_operation_blocker_message().is_some()
-                    && !this.operation_blocker_allows_text_field(FieldId::ConflictEditor)
-                {
-                    cx.stop_propagation();
-                    return;
-                }
-                if event.keystroke.key.as_str() == "enter"
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.platform
-                {
-                    this.field_mut(FieldId::ConflictEditor)
-                        .insert_text("\n", true);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.field(FieldId::ConflictEditor).focus, cx);
-                    let position = this
-                        .field(FieldId::ConflictEditor)
-                        .index_for_mouse_position(event.position);
-                    let field = this.field_mut(FieldId::ConflictEditor);
-                    field.is_selecting = true;
-                    if event.modifiers.shift {
-                        field.select_to(position);
-                    } else {
-                        field.move_to(position);
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.field_mut(FieldId::ConflictEditor).is_selecting = false;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.field_mut(FieldId::ConflictEditor).is_selecting = false;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(
-                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                    if !this.field(FieldId::ConflictEditor).is_selecting {
-                        return;
-                    }
-                    let position = this
-                        .field(FieldId::ConflictEditor)
-                        .index_for_mouse_position(event.position);
-                    this.field_mut(FieldId::ConflictEditor).select_to(position);
-                    cx.notify();
-                }),
-            )
-            .p_2()
-            .child({
-                let handle = self.scroll_handle(CONFLICT_RESULT_SCROLL_HANDLE_ID);
-                let content = div()
-                    .id("conflict-editor-scroll")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&handle)
-                    .child(MultiLineInputElement {
-                        field_id: FieldId::ConflictEditor,
-                        entity: cx.entity(),
-                    })
-                    .into_any_element();
-                scrollable_frame_when(
-                    "conflict-editor-scroll",
-                    ScrollbarMode::Vertical,
-                    content,
-                    handle,
-                    multiline_overflows,
-                    cx,
-                )
-            })
     }
 
     /// 仓库切换下拉触发器按钮：显示当前仓库头像 + 名称 + ▾。
@@ -491,9 +144,9 @@ impl RepositoryView {
             .unwrap_or_else(|| name.clone());
         let enabled = !self.busy;
         let text_color = if enabled {
-            ui_theme::FOREGROUND
+            ui_theme::CONTENT_PRIMARY
         } else {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         };
         BaseButton::new("repo-switcher-trigger")
             .disabled(!enabled)
@@ -554,7 +207,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(10.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("▾"),
             )
             // paint 时记录按钮的窗口坐标矩形，供下拉菜单锚定与“点击外部关闭”命中判定。
@@ -706,9 +359,9 @@ impl RepositoryView {
                                 .justify_center()
                                 .rounded(px(ui_theme::RADIUS_XS))
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                                .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     // 收起输入框，恢复「搜索仓库」按钮并取消过滤
                                     this.repo_switcher_search_open = false;
@@ -744,7 +397,7 @@ impl RepositoryView {
                             .px_3()
                             .py_4()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("没有匹配的仓库"),
                     )
                 },
@@ -790,14 +443,14 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .text_size(px(12.0))
-            .text_color(rgb(ui_theme::FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
             .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+            .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 on_click(this, window, cx);
                 cx.notify();
             }))
-            .child(toolbar_icon(icon, ui_theme::MUTED_FOREGROUND))
+            .child(toolbar_icon(icon, ui_theme::CONTENT_SECONDARY))
             .child(label)
     }
 
@@ -808,7 +461,7 @@ impl RepositoryView {
             .pt_2()
             .pb_1()
             .text_size(px(11.0))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
             .child(label)
     }
 
@@ -833,9 +486,9 @@ impl RepositoryView {
             .px_3()
             .py_2()
             .cursor_pointer()
-            .when(is_active, |this| this.bg(rgb(ui_theme::ACCENT)))
+            .when(is_active, |this| this.bg(rgb(ui_theme::STATE_HOVER)))
             .when(!is_active, |this| {
-                this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                this.hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
             })
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.close_repo_switcher();
@@ -863,7 +516,7 @@ impl RepositoryView {
                                 div()
                                     .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
                                     .child(repo.name),
                             )
@@ -879,7 +532,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .truncate()
                             .child(repo.full_path),
                     ),
@@ -894,7 +547,7 @@ impl RepositoryView {
                         .justify_center()
                         .rounded(px(ui_theme::RADIUS_XS))
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .cursor_pointer()
                         .hover(|this| this.bg(rgb(ui_theme::DESTRUCTIVE)))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -965,18 +618,25 @@ impl RepositoryView {
         };
         // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
         let settings_content_handle = self.scroll_handle("settings-center-content");
+        // 面板尺寸按视口钳制：最小窗（860×520，高 DPI 下逻辑视口更小）里
+        // 900×640 的固定尺寸会被根圆角裁掉，标题/关闭与底部内容点不到
+        // （审查 R3）。
+        let (panel_width, panel_height) = dialog_panel_size(window, 900.0, 640.0);
 
         // 遮罩不承载关闭：点击遮罩背景、遮罩上方的通知气泡（含其关闭按钮）
         // 都不关闭设置中心——唯一关闭入口是弹窗右上角的「✕」（Ctrl+, 快捷键
         // 保留 toggle 语义）。遮罩自身 occlude() 挡住下层 UI 的点击。
+        // 焦点圈挂在遮罩上：Tab/Shift+Tab 在设置中心内循环，不会漏到下层。
         dialog_overlay()
+            .id("settings-center-overlay")
+            .focus_trap("settings-center-overlay-trap", &self.settings_center_focus)
             .child(
                 div()
                     .id("settings-center-panel")
-                    .track_focus(&self.settings_center_focus)
-                    .w(px(900.0))
-                    // 固定高度，弹窗大小不随分类内容多少变化；内容超出由右侧内容区滚动。
-                    .h(px(640.0))
+                    .w(panel_width)
+                    // 高度按视口钳制，弹窗大小不随分类内容多少变化；
+                    // 内容超出由右侧内容区滚动。
+                    .h(panel_height)
                     .min_w(px(0.0))
                     .rounded(px(ui_theme::RADIUS_PANEL))
                     .bg(rgb(ui_theme::WB_PANEL))
@@ -1004,14 +664,21 @@ impl RepositoryView {
                                     .child("设置中心"),
                             )
                             .child(
-                                div()
-                                    .id("settings-center-close")
-                                    .size(px(28.0))
+                                // 关闭按钮用 Kit 基础按钮：可 Tab 聚焦、
+                                // Enter/Space 激活，与其它壳层按钮同一套
+                                // 键盘语义（审查 R6）。
+                                BaseButton::new("settings-center-close")
+                                    .focus_visible(|this| {
+                                        this.border_1().border_color(rgb(ui_theme::PRIMARY))
+                                    })
+                                    .flex_none()
+                                    .w(px(28.0))
+                                    .h(px(28.0))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .rounded(px(ui_theme::RADIUS_SM))
-                                    .cursor_pointer()
+                                    .bg(gpui::rgba(0x00000000))
                                     .text_size(px(14.0))
                                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
@@ -1040,17 +707,23 @@ impl RepositoryView {
                                     .children(categories.iter().map(|(cat, icon, label)| {
                                         let is_active = *cat == category;
                                         let cat = *cat;
-                                        div()
-                                            .id(format!("settings-nav-{label}"))
+                                        // 分类行用 Kit 基础按钮：九类设置均可
+                                        // Tab 遍历、Enter/Space 进入（审查 R6）。
+                                        BaseButton::new(format!("settings-nav-{label}"))
+                                            .selected(is_active)
+                                            .focus_visible(|this| {
+                                                this.border_1().border_color(rgb(ui_theme::PRIMARY))
+                                            })
                                             .flex()
                                             .items_center()
                                             .gap_2()
                                             .mx_2()
                                             .px_3()
                                             .py_2()
+                                            .w_full()
                                             .rounded(px(ui_theme::RADIUS_SM))
                                             .text_size(px(ui_theme::TYPE_BODY))
-                                            .cursor_pointer()
+                                            .bg(gpui::rgba(0x00000000))
                                             .when(is_active, |this| {
                                                 this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
                                                     .text_color(rgb(ui_theme::PRIMARY))
@@ -1115,11 +788,16 @@ impl RepositoryView {
             .is_some_and(|snapshot| !snapshot.remotes.is_empty());
 
         glass_menu()
+            .id("tag-menu")
+            .focus_trap("tag-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
             .w(px(TAG_MENU_WIDTH))
             .child(context_menu_item(
+                self,
+                "tag-menu",
+                "checkout-tag",
                 "检出标签",
                 !self.busy && !self.merge_in_progress(),
                 {
@@ -1129,6 +807,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "tag-menu",
+                "browse-tag",
                 "浏览此标签",
                 !self.busy,
                 {
@@ -1139,6 +820,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item(
+                self,
+                "tag-menu",
+                "push-tag",
                 "推送到远端...",
                 !self.busy && has_remotes,
                 {
@@ -1148,6 +832,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "tag-menu",
+                "delete-tag",
                 "删除标签",
                 !self.busy,
                 {
@@ -1157,6 +844,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "tag-menu",
+                "delete-remote-tag",
                 "删除远端标签...",
                 !self.busy && has_remotes,
                 {
@@ -1175,6 +865,8 @@ impl RepositoryView {
         };
 
         glass_menu()
+            .id("stash-menu")
+            .focus_trap("stash-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1203,11 +895,19 @@ impl RepositoryView {
             .unwrap_or_else(|| "该模板".to_string());
 
         glass_menu()
+            .id("workflow-template-menu")
+            .focus_trap(
+                "workflow-template-menu-focus-trap",
+                &self.context_menu_focus,
+            )
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
             .w(px(WORKFLOW_TEMPLATE_MENU_WIDTH))
             .child(context_menu_item_with_context(
+                self,
+                "workflow-template-menu",
+                "edit-template",
                 "编辑此模板",
                 !self.busy,
                 move |this, cx| {
@@ -1218,6 +918,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item_with_context(
+                self,
+                "workflow-template-menu",
+                "duplicate-template",
                 "复制为副本",
                 !self.busy,
                 move |this, cx| {
@@ -1228,6 +931,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item_with_context(
+                self,
+                "workflow-template-menu",
+                "bind-shortcut",
                 "绑定快捷键...",
                 !self.busy,
                 move |this, _cx| {
@@ -1239,6 +945,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item_with_context(
+                self,
+                "workflow-template-menu",
+                "delete-template",
                 "删除模板...",
                 !self.busy,
                 move |this, _cx| {
@@ -1345,6 +1054,8 @@ impl RepositoryView {
         let can_discard = !self.busy && !self.merge_in_progress();
 
         let mut menu_el = glass_menu()
+            .id("change-menu")
+            .focus_trap("change-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1366,6 +1077,9 @@ impl RepositoryView {
         menu_el = match menu.scope {
             DiffScope::Staged => menu_el
                 .child(context_menu_item_with_context(
+                    self,
+                    "change-menu",
+                    "copy-absolute-path",
                     "复制绝对路径",
                     true,
                     {
@@ -1375,6 +1089,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item_with_context(
+                    self,
+                    "change-menu",
+                    "open-parent-directory",
                     "打开文件所在目录",
                     true,
                     {
@@ -1384,6 +1101,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "view-file-history",
                     "查看文件历史",
                     true,
                     {
@@ -1393,6 +1113,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "blame-file",
                     "追溯此文件",
                     true,
                     {
@@ -1403,12 +1126,18 @@ impl RepositoryView {
                 ))
                 .child(menu_separator())
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "unstage-selected",
                     "取消暂存选定文件",
                     selected_count > 0 && !self.busy,
                     |this| this.unstage_selected(),
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "unstage-all",
                     "取消暂存所有文件",
                     all_count > 0 && !self.busy,
                     |this| this.unstage_all(),
@@ -1416,6 +1145,9 @@ impl RepositoryView {
                 ))
                 .child(menu_separator())
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-single",
                     "回滚更改...",
                     can_discard,
                     {
@@ -1432,6 +1164,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-selected",
                     "回滚指定更改...",
                     selected_count > 0 && can_discard,
                     {
@@ -1448,6 +1183,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-all",
                     "回滚全部更改...",
                     all_count > 0 && can_discard,
                     {
@@ -1465,6 +1203,9 @@ impl RepositoryView {
                 )),
             DiffScope::Unstaged => menu_el
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "view-file-history",
                     "查看文件历史",
                     true,
                     {
@@ -1474,6 +1215,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "blame-file",
                     "追溯此文件",
                     true,
                     {
@@ -1484,12 +1228,18 @@ impl RepositoryView {
                 ))
                 .child(menu_separator())
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "stage-selected",
                     "暂存选定文件",
                     selected_count > 0 && !self.busy,
                     |this| this.stage_selected(),
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "stage-all",
                     "暂存所有文件",
                     all_count > 0 && !self.busy,
                     |this| this.stage_all(),
@@ -1497,6 +1247,9 @@ impl RepositoryView {
                 ))
                 .child(menu_separator())
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-single",
                     "回滚更改...",
                     can_discard,
                     {
@@ -1513,6 +1266,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-selected",
                     "回滚指定更改...",
                     selected_count > 0 && can_discard,
                     {
@@ -1529,6 +1285,9 @@ impl RepositoryView {
                     cx,
                 ))
                 .child(context_menu_item(
+                    self,
+                    "change-menu",
+                    "discard-all",
                     "回滚全部更改...",
                     all_count > 0 && can_discard,
                     {
@@ -1555,6 +1314,8 @@ impl RepositoryView {
         };
 
         glass_menu()
+            .id("file-path-menu")
+            .focus_trap("file-path-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1566,6 +1327,9 @@ impl RepositoryView {
                 cx.stop_propagation();
             })
             .child(context_menu_item_with_context(
+                self,
+                "file-path-menu",
+                "copy-absolute-path",
                 "复制绝对路径",
                 true,
                 {
@@ -1575,6 +1339,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item_with_context(
+                self,
+                "file-path-menu",
+                "open-parent-directory",
                 "打开文件所在目录",
                 true,
                 {
@@ -1585,6 +1352,9 @@ impl RepositoryView {
             ))
             // 「追溯此文件」对 HEAD 版本追溯（v1 不支持对任意提交 blame）
             .child(context_menu_item(
+                self,
+                "file-path-menu",
+                "view-file-history",
                 "查看文件历史",
                 true,
                 {
@@ -1594,6 +1364,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "file-path-menu",
+                "blame-file",
                 "追溯此文件",
                 true,
                 {
@@ -1618,6 +1391,8 @@ impl RepositoryView {
         let can_change_repository = !self.busy && !self.merge_in_progress();
 
         glass_menu()
+            .id("commit-menu")
+            .focus_trap("commit-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1640,7 +1415,7 @@ impl RepositoryView {
                     .px_3()
                     .py_1()
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("提交 {}", menu.short_oid)),
             )
             .child(menu_separator())
@@ -1652,6 +1427,9 @@ impl RepositoryView {
                     "还原到暂存区（仅支持最新提交）"
                 };
                 this.child(context_menu_item(
+                    self,
+                    "commit-menu",
+                    "uncommit-to-staged",
                     label,
                     can_uncommit,
                     {
@@ -1669,6 +1447,9 @@ impl RepositoryView {
                 .child(menu_separator())
             })
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "reset-soft",
                 "软重置分支到此次提交",
                 can_change_repository,
                 {
@@ -1685,6 +1466,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "reset-mixed",
                 "混合重置分支到此次提交",
                 can_change_repository,
                 {
@@ -1701,6 +1485,9 @@ impl RepositoryView {
                 cx,
             ))
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "reset-hard",
                 "强制重置分支到此次提交",
                 can_change_repository,
                 {
@@ -1718,6 +1505,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "revert",
                 revert_label,
                 can_change_repository,
                 {
@@ -1735,6 +1525,9 @@ impl RepositoryView {
             ))
             // 拣选提交：合并提交暂不支持（需要 -m mainline 语义，后续迭代）。
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "cherry-pick",
                 if is_merge_commit {
                     "拣选提交（暂不支持合并提交）"
                 } else {
@@ -1749,6 +1542,9 @@ impl RepositoryView {
             ))
             .child(menu_separator())
             .child(context_menu_item(
+                self,
+                "commit-menu",
+                "create-tag",
                 "在此提交上创建标签...",
                 can_change_repository,
                 {
@@ -1784,6 +1580,8 @@ impl RepositoryView {
         let key_path = record.key_path.clone();
 
         glass_menu()
+            .id("credential-menu")
+            .focus_trap("credential-menu-focus-trap", &self.context_menu_focus)
             .absolute()
             .left(px(menu.x))
             .top(px(menu.y))
@@ -1794,10 +1592,33 @@ impl RepositoryView {
             .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
                 cx.stop_propagation();
             })
-            .child(self.credential_copy_menu_item("复制名称", name, "凭据名称", cx))
-            .child(self.credential_copy_menu_item("复制站点/远端", target, "站点/远端", cx))
-            .child(self.credential_copy_menu_item("复制用户名", username, "用户名", cx))
             .child(self.credential_copy_menu_item(
+                "credential-menu",
+                "copy-name",
+                "复制名称",
+                name,
+                "凭据名称",
+                cx,
+            ))
+            .child(self.credential_copy_menu_item(
+                "credential-menu",
+                "copy-target",
+                "复制站点/远端",
+                target,
+                "站点/远端",
+                cx,
+            ))
+            .child(self.credential_copy_menu_item(
+                "credential-menu",
+                "copy-username",
+                "复制用户名",
+                username,
+                "用户名",
+                cx,
+            ))
+            .child(self.credential_copy_menu_item(
+                "credential-menu",
+                "copy-key-path",
                 "复制 SSH Key 路径",
                 key_path,
                 "SSH Key 路径",
@@ -1806,8 +1627,12 @@ impl RepositoryView {
             .into_any_element()
     }
 
+    /// 凭据菜单的复制条目：与通用 `context_menu_item` 同一套键盘模型
+    /// （登记动作 + 选中高亮），仅复制目标与成功提示不同。
     fn credential_copy_menu_item(
         &self,
+        menu_id: &str,
+        id: &str,
         label: &'static str,
         text: Option<String>,
         status_label: &'static str,
@@ -1816,39 +1641,38 @@ impl RepositoryView {
         let enabled = text
             .as_ref()
             .is_some_and(|text| !text.is_empty() && text != "-");
-        div()
-            .id(format!("credential-context-menu-{label}"))
-            .px_3()
-            .py_1()
-            .text_color(if enabled {
-                rgb(ui_theme::FOREGROUND)
-            } else {
-                rgb(ui_theme::MUTED_FOREGROUND)
-            })
-            .bg(rgb(ui_theme::CARD))
-            .when(enabled, |this| {
-                this.cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-            })
-            .on_click(cx.listener(move |this, _event, _window, cx| {
+        let on_click = {
+            let text = text.clone();
+            Rc::new(
+                move |this: &mut RepositoryView, cx: &mut Context<RepositoryView>| {
+                    this.copy_credential_text(text.clone(), status_label, cx);
+                },
+            ) as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
+        };
+        let selected = self.register_context_menu_action(menu_id, id, enabled, on_click);
+        context_menu_row(id, label, enabled, selected).on_click(cx.listener(
+            move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 if enabled {
                     this.copy_credential_text(text.clone(), status_label, cx);
                     cx.notify();
                 }
-            }))
-            .child(label)
+            },
+        ))
     }
 
+    /// 提交菜单的「复制 SHA」条目：同通用键盘模型（登记 + 选中高亮）。
     fn commit_copy_sha_menu_item(&self, oid: String, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("context-menu-copy-commit-sha")
-            .px_3()
-            .py_1()
-            .text_color(rgb(ui_theme::FOREGROUND))
-            .bg(rgb(ui_theme::CARD))
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        let on_click = {
+            let oid = oid.clone();
+            Rc::new(
+                move |this: &mut RepositoryView, cx: &mut Context<RepositoryView>| {
+                    this.copy_commit_sha(oid.clone(), cx);
+                },
+            ) as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
+        };
+        let selected = self.register_context_menu_action("commit-menu", "copy-sha", true, on_click);
+        context_menu_row("copy-sha", "复制 SHA 到剪贴板", true, selected)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 this.copy_commit_sha(oid.clone(), cx);
@@ -1860,87 +1684,6 @@ impl RepositoryView {
             .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
                 cx.stop_propagation();
             })
-            .child("复制 SHA 到剪贴板")
-    }
-
-    pub(crate) fn render_encoding_dropdown(
-        &self,
-        target: EncodingMenuTarget,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        if self.encoding_menu_target != Some(target) {
-            return div().into_any_element();
-        }
-        let current = self.current_diff_encoding_choice();
-        let title = match target {
-            EncodingMenuTarget::Worktree => "工作区差异编码",
-            EncodingMenuTarget::History => "提交差异编码",
-            EncodingMenuTarget::Stash => "贮藏差异编码",
-            EncodingMenuTarget::Browse => "浏览编码",
-            EncodingMenuTarget::Blame => "追溯编码",
-        };
-
-        glass_menu()
-            .absolute()
-            .top(px(38.0))
-            .right(px(12.0))
-            .w(px(ENCODING_MENU_WIDTH))
-            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                cx.stop_propagation();
-            })
-            .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
-                cx.stop_propagation();
-            })
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                    .child(title),
-            )
-            .child(menu_separator())
-            .child(self.encoding_menu_item(DiffEncodingChoice::Auto, current, cx))
-            .child(self.encoding_menu_item(DiffEncodingChoice::Utf8, current, cx))
-            .child(self.encoding_menu_item(DiffEncodingChoice::Gb18030, current, cx))
-            .child(self.encoding_menu_item(DiffEncodingChoice::Big5, current, cx))
-            .into_any_element()
-    }
-
-    fn encoding_menu_item(
-        &self,
-        choice: DiffEncodingChoice,
-        current: DiffEncodingChoice,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selected = choice == current;
-        let label = if selected {
-            format!("✓ {}", choice.label())
-        } else {
-            format!("  {}", choice.label())
-        };
-        div()
-            .id(format!("context-menu-encoding-{}", choice.label()))
-            .px_3()
-            .py_1()
-            .text_color(if selected {
-                rgb(ui_theme::PRIMARY)
-            } else {
-                rgb(ui_theme::FOREGROUND)
-            })
-            .bg(if selected {
-                rgb(ui_theme::PRIMARY_SUBTLE)
-            } else {
-                rgb(ui_theme::CARD)
-            })
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                cx.stop_propagation();
-                this.choose_diff_encoding(choice);
-                cx.notify();
-            }))
-            .child(label)
     }
 
     pub(crate) fn render_column_splitter(
@@ -2129,402 +1872,6 @@ impl RepositoryView {
             )
     }
 
-    pub(crate) fn render_virtual_diff(
-        &self,
-        scroll_id: &'static str,
-        diff: Option<Arc<FileDiff>>,
-        headers_expanded: bool,
-        header_target: DiffHeaderTarget,
-        empty_message: String,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        // 二进制文件不渲染逐行 diff（也不显示「Binary files ... differ」原始行），
-        // 直接显示信息占位卡片，含文件大小/新增删除信息。例外：Office 文档
-        // （docx/xlsx/pptx）提取出的文本差异行——is_binary 保持 true（沿用
-        // 全部二进制门控）但携带 lines，按普通行渲染文本化预览。
-        if let Some(diff) = diff
-            .as_deref()
-            .filter(|diff| diff.is_binary && diff.lines.is_empty())
-        {
-            return binary_diff_placeholder(diff).into_any_element();
-        }
-        let model = diff_render_model_for(diff.as_deref(), headers_expanded);
-        let row_count = model.row_count;
-        let content_present = diff.is_some() && row_count > 0;
-        // 以内容最宽的文本行作为列表水平宽度的测量基准，保证长行也能左右滚动。
-        // 结果按 diff 身份缓存：大 diff（上限 2 万行）每帧重算是 O(总字符) 扫描。
-        let width_measure_index = cached_widest_diff_row_index(
-            diff.as_ref(),
-            headers_expanded,
-            &model,
-            &self.widest_diff_row_cache,
-        )
-        .or_else(|| row_count.checked_sub(1));
-        let handle = self.uniform_scroll_handle(scroll_id);
-        let list_handle = handle.clone();
-        let model_for_list = model.clone();
-        let content = div()
-            .id(scroll_id)
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .min_h(px(0.0))
-            .p_2()
-            .font_family("Consolas")
-            .text_size(px(12.0))
-            .bg(rgb(ui_theme::CARD))
-            .child(
-                uniform_list(
-                    scroll_id,
-                    row_count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                        let diff = diff.as_deref();
-                        range
-                            .map(|index| {
-                                this.render_diff_row(
-                                    diff,
-                                    model_for_list.row_at(index),
-                                    headers_expanded,
-                                    header_target,
-                                    &empty_message,
-                                    cx,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&list_handle)
-                .with_width_from_item(width_measure_index)
-                .with_sizing_behavior(ListSizingBehavior::Auto)
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0)),
-            )
-            .into_any_element();
-
-        scrollable_uniform_frame(
-            scroll_id,
-            ScrollbarMode::Both,
-            content,
-            handle,
-            content_present,
-            cx,
-        )
-        .into_any_element()
-    }
-
-    /// 按差异视图上下文取对应槽位的语法高亮结果（带主题变体守卫）。
-    fn syntax_spans_for_diff(&self, target: DiffHeaderTarget) -> Option<&SharedSyntaxSpans> {
-        let spans = match target {
-            DiffHeaderTarget::Worktree => &self.diff_syntax,
-            DiffHeaderTarget::History => &self.history_diff_syntax,
-            DiffHeaderTarget::Stash => &self.stash_preview.diff_syntax,
-            DiffHeaderTarget::Browse => &self.browse.diff_syntax,
-        };
-        spans
-            .as_deref()
-            .filter(|spans| spans.dark == ui::theme::active_variant().is_dark())
-    }
-
-    fn render_diff_row(
-        &self,
-        diff: Option<&FileDiff>,
-        row: DiffRenderRow,
-        headers_expanded: bool,
-        header_target: DiffHeaderTarget,
-        empty_message: &str,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        // 仅工作区差异视图提供部分暂存交互（历史/贮藏/浏览只读）；Office
-        // 文档的文本化差异是提取合成的，不能按块/按行回写（部分暂存守卫在
-        // 服务层同样拒绝），这里直接不显示按钮。
-        let partial_stage_enabled =
-            header_target == DiffHeaderTarget::Worktree && !diff.is_some_and(|d| d.is_binary);
-        match row {
-            DiffRenderRow::HeaderToggle => {
-                let summary = if headers_expanded {
-                    "Diff 元信息（点击折叠）"
-                } else {
-                    "Diff 元信息（点击展开）"
-                };
-                diff_header_toggle(summary, header_target, cx).into_any_element()
-            }
-            DiffRenderRow::DiffLine(index) => {
-                let Some(line) = diff.and_then(|diff| diff.lines.get(index)) else {
-                    return diff_line(DiffLineKind::Context, None, None, String::new(), None)
-                        .into_any_element();
-                };
-                // 按差异上下文取对应槽位的语法高亮（仅全文模式计算过）。
-                let syntax_spans = self
-                    .syntax_spans_for_diff(header_target)
-                    .and_then(|spans| spans.lines.get(index).map(Vec::as_slice));
-                if line.kind == DiffLineKind::Header {
-                    let is_hunk_header = line.content.starts_with("@@");
-                    let row_element =
-                        diff_line(line.kind.clone(), None, None, line.content.clone(), None);
-                    if partial_stage_enabled && is_hunk_header {
-                        // hunk 分隔行右侧提供整块暂存/取消暂存按钮。
-                        let is_stage = diff
-                            .map(|diff| diff.scope == DiffScope::Unstaged)
-                            .unwrap_or(true);
-                        let label: &'static str = if is_stage {
-                            "暂存此块"
-                        } else {
-                            "取消暂存此块"
-                        };
-                        let hunk_index = line.hunk_index;
-                        return div()
-                            .relative()
-                            .child(row_element)
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .right_1()
-                                    .flex()
-                                    .items_center()
-                                    .child(diff_hunk_action_button(
-                                        hunk_index,
-                                        label,
-                                        move |this| {
-                                            this.apply_hunk_partial_stage(hunk_index);
-                                        },
-                                        cx,
-                                    )),
-                            )
-                            .into_any_element();
-                    }
-                    return row_element.into_any_element();
-                }
-                let row_element = diff_line(
-                    display_diff_line_kind(line.kind.clone(), diff.is_some_and(|d| d.untracked)),
-                    line.old_lineno,
-                    line.new_lineno,
-                    line.content.clone(),
-                    syntax_spans,
-                );
-                if !partial_stage_enabled {
-                    return row_element.into_any_element();
-                }
-                let selectable = matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed);
-                if !selectable {
-                    return row_element.into_any_element();
-                }
-                // +/- 行：点击选择（Ctrl/Cmd 多选、Shift 范围）。
-                // 高亮层必须放在 row_element 之后：GPUI 按子元素顺序绘制，
-                // 放在前面会被行自身的不透明背景完全盖住，视觉上不可见。
-                let selected = self.diff_line_selection.contains(&index);
-                div()
-                    .relative()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            let multi = event.modifiers.control || event.modifiers.platform;
-                            let shift = event.modifiers.shift;
-                            this.toggle_diff_line_selection(index, multi, shift);
-                            cx.notify();
-                        }),
-                    )
-                    .child(row_element)
-                    .when(selected, |this| {
-                        this.child(
-                            // 整行半透明主题色打底：复用输入选区 token（自带 alpha，跟随主题色），
-                            // 叠加在 +/- 行背景色之上仍能清晰辨认选中范围。
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .right_0()
-                                .bg(ui_theme::rgba(ui_theme::INPUT_SELECTION)),
-                        )
-                        .child(
-                            // 左缘 2px 主题色实线条作为第二重视觉信号。
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .w(px(2.0))
-                                .bg(rgb(ui_theme::PRIMARY)),
-                        )
-                    })
-                    .into_any_element()
-            }
-            DiffRenderRow::Empty => {
-                let message = diff
-                    .map(|diff| {
-                        if diff.is_binary {
-                            "二进制文件仅显示元信息"
-                        } else {
-                            "没有可显示的文本差异"
-                        }
-                    })
-                    .unwrap_or(empty_message);
-                diff_line(DiffLineKind::Context, None, None, message.to_string(), None)
-                    .into_any_element()
-            }
-        }
-    }
-
-    pub(crate) fn diff_section_header(
-        &self,
-        title: String,
-        target: EncodingMenuTarget,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let diff = match target {
-            EncodingMenuTarget::Worktree => self.diff.as_deref(),
-            EncodingMenuTarget::History => self.history_diff.as_deref(),
-            EncodingMenuTarget::Stash => self.stash_preview.diff.as_deref(),
-            EncodingMenuTarget::Browse => self.browse.diff.as_deref(),
-            // 追溯视图没有 FileDiff；该 target 不经此头部渲染
-            EncodingMenuTarget::Blame => None,
-        };
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::PRIMARY))
-                    .truncate()
-                    .child(title),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    // 二进制文件没有全文/编码差异可言，隐藏这两个工具按钮
-                    .when(!diff.is_some_and(|diff| diff.is_binary), |this| {
-                        this.child(self.full_file_toggle_button(target, cx))
-                            .child(self.encoding_button(diff, target, cx))
-                    })
-                    // 按行选择非空时的部分暂存入口（仅工作区差异视图）。
-                    .when(
-                        target == EncodingMenuTarget::Worktree
-                            && !self.diff_line_selection.is_empty(),
-                        |this| {
-                            let count = self.diff_line_selection.len();
-                            let is_stage = self
-                                .diff
-                                .as_ref()
-                                .map(|diff| diff.scope == DiffScope::Unstaged)
-                                .unwrap_or(true);
-                            let label = if is_stage {
-                                format!("暂存选中行({count})")
-                            } else {
-                                format!("取消暂存选中行({count})")
-                            };
-                            this.child(
-                                // 尺寸规格与「全文/编码」工具按钮一致（px 8 / py 2 /
-                                // RADIUS_XS / 11px），避免撑高差异区标题栏。
-                                div()
-                                    .id("stage-selected-diff-lines-button")
-                                    .flex_none()
-                                    .px(px(8.0))
-                                    .py(px(2.0))
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::ACCENT))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::PRIMARY))
-                                    .cursor_pointer()
-                                    .hover(|hover| hover.bg(rgb(ui_theme::SECONDARY)))
-                                    .child(label)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.apply_selected_partial_stage();
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    )
-                    // 工作区差异的「追溯」入口：打开该文件的追溯视图
-                    //（规格严格复用「全文/编码」工具按钮；二进制文件不提供）。
-                    .when(
-                        target == EncodingMenuTarget::Worktree
-                            && self.diff.as_ref().is_some_and(|diff| !diff.is_binary),
-                        |this| {
-                            let path = self
-                                .diff
-                                .as_ref()
-                                .map(|diff| diff.path.clone())
-                                .unwrap_or_default();
-                            this.child(
-                                div()
-                                    .id("worktree-diff-blame-button")
-                                    .flex_none()
-                                    .px(px(8.0))
-                                    .py(px(2.0))
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::ACCENT))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::PRIMARY))
-                                    .cursor_pointer()
-                                    .hover(|hover| hover.bg(rgb(ui_theme::SECONDARY)))
-                                    .child("追溯")
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.open_blame_file(path.clone());
-                                        cx.notify();
-                                    })),
-                            )
-                        },
-                    ),
-            )
-    }
-
-    fn encoding_button(
-        &self,
-        diff: Option<&FileDiff>,
-        target: EncodingMenuTarget,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let requested = self.current_diff_encoding_choice();
-        let label = diff
-            .map(diff_encoding_label)
-            .unwrap_or_else(|| format!("编码：{}", requested.label()));
-        div()
-            .id(match target {
-                EncodingMenuTarget::Worktree => "worktree-diff-encoding",
-                EncodingMenuTarget::History => "history-diff-encoding",
-                EncodingMenuTarget::Stash => "stash-diff-encoding",
-                EncodingMenuTarget::Browse => "browse-encoding",
-                EncodingMenuTarget::Blame => "blame-encoding",
-            })
-            .relative()
-            .flex_none()
-            .px(px(8.0))
-            .py(px(2.0))
-            .rounded(px(ui_theme::RADIUS_XS))
-            .bg(rgb(ui_theme::ACCENT))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-            .text_size(px(11.0))
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_encoding_menu(target);
-                    cx.notify();
-                }),
-            )
-            .child(label)
-    }
-
     pub(crate) fn render_status(&self) -> impl IntoElement {
         let status_label = if self.busy { "运行中" } else { "就绪" };
         let branch = self
@@ -2559,13 +1906,13 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(status_label),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(branch.to_string()),
             )
             .child(
@@ -2576,7 +1923,7 @@ impl RepositoryView {
                     .text_color(if self.busy {
                         rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::MUTED_FOREGROUND)
+                        rgb(ui_theme::CONTENT_SECONDARY)
                     })
                     .child(if self.busy {
                         format!("{}...", self.status)
@@ -2596,13 +1943,13 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("{unstaged_count} 未暂存 · {staged_count} 已暂存")),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
     }
@@ -2643,7 +1990,11 @@ impl RepositoryView {
             return div().into_any_element();
         };
 
+        // 焦点圈：凭据回调期间焦点移入提示面板，Tab 在面板内循环，
+        // 不会漏到被它遮住的下层交互。
         div()
+            .id("credential-prompt")
+            .focus_trap("credential-prompt-trap", &self.credential_prompt_focus)
             .absolute()
             .top(px(70.0))
             .right(px(18.0))
@@ -2651,8 +2002,8 @@ impl RepositoryView {
             .p_3()
             .rounded_sm()
             .border_1()
-            .border_color(rgb(ui_theme::BORDER))
-            .bg(rgb(ui_theme::CARD))
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::WB_PANEL))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -2663,13 +2014,13 @@ impl RepositoryView {
                 div()
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child("需要凭据"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!("远端：{}", pending.request.url)),
             )
             .child(self.input(FieldId::CredentialUsername, true, window, cx))
@@ -2717,7 +2068,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("复用范围"),
                     )
                     .child(self.credential_scope_button(

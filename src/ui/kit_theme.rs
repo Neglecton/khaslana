@@ -7,18 +7,30 @@
 
 use gpui::{App, Hsla, px, rgb};
 use gpui_kit::component::Theme;
+use gpui_kit::component::ThemeMode;
 use gpui_kit::component::scroll::ScrollbarMode;
 
 use super::theme::{self as ui_theme, AccentPalette, ThemeVariant};
+
+/// Khaslana 主题变体 → Kit `ThemeMode`。
+///
+/// 纯函数，供 [`apply`] 与单测共用：`Theme::from(&ThemeColor)` 恒把 mode
+/// 写成默认的 Light，桥接必须显式映射，否则深色主题下 Kit 组件仍走浅色
+/// 分支（审查 R2）。
+pub(crate) fn kit_theme_mode(variant: ThemeVariant) -> ThemeMode {
+    match variant {
+        ThemeVariant::Light => ThemeMode::Light,
+        ThemeVariant::Dark => ThemeMode::Dark,
+    }
+}
 
 /// 按当前变体与强调色重建 Kit 全局主题。
 ///
 /// 调用点应与 `ui_theme::set_active_variant` / `set_active_accent` 同步，
 /// 保证自绘视图与 Kit 组件看到同一套颜色。
 pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette) {
-    let color = |token: u32| -> Hsla {
-        rgb(ui_theme::resolve_color_for_variant(token, variant)).into()
-    };
+    let color =
+        |token: u32| -> Hsla { rgb(ui_theme::resolve_color_for_variant(token, variant)).into() };
     let accent_color = |pair: (u32, u32)| -> Hsla {
         match variant {
             ThemeVariant::Light => rgb(pair.0).into(),
@@ -101,10 +113,15 @@ pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette)
 
     // 开关（Kit Switch）：未选中轨道取描边档、滑块固定白（深浅主题通用，
     // 与自绘开关的历史配色一致）；选中态轨道由 Kit 用 `primary` 表达。
-    colors.switch = color(ui_theme::BORDER);
+    colors.switch = color(ui_theme::BORDER_STRONG);
     colors.switch_thumb = color(ui_theme::WHITE);
 
     let mut theme = Theme::from(&colors);
+    // `Theme::from(&ThemeColor)` 恒把 mode 写成默认的 Light——只换颜色不换
+    // mode 的话，深色主题下 `Theme::is_dark()` 仍为 false，Kit 输入组的
+    // 背景/禁用态/错误环透明度会走浅色分支（审查 R2）。这里按当前变体
+    // 显式写入，与语义色板同步。
+    theme.mode = kit_theme_mode(variant);
     theme.radius = px(ui_theme::RADIUS_SM);
     theme.radius_lg = px(ui_theme::RADIUS_MD);
     theme.shadow = true;
@@ -114,3 +131,7 @@ pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette)
     theme.scrollbar_mode = ScrollbarMode::Hover;
     *Theme::global_mut(cx) = theme;
 }
+
+#[cfg(test)]
+#[path = "../tests/ui/kit_theme.rs"]
+mod tests;

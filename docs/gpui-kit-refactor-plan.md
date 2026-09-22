@@ -1,6 +1,6 @@
 # Khaslana 前端 GPUI Kit 重构计划
 
-状态：M1 已收口并给出 Go 结论；IME 与键盘交互已在第二轮可交互会话补验通过（Esc/焦点恢复待补），M2 依赖切换已完成，M3 壳层与首个设置页主体已落地（本轮）。更新日期：2026-09-21。
+状态：M1 已收口并给出 Go 结论；IME 与键盘交互已在第二轮可交互会话补验通过（Esc/焦点恢复待补），M2 依赖切换已完成，M3 壳层与首个设置页主体已落地，M4 普通输入/菜单/设置迁移已完成，M5 工作区与历史已收口（含页头/空状态统一与窄窗排布修正），M6 专业视图与工作流/AI 迁移已完成代码工作（五个批次），M7 清理与工程检查批次已完成（自绘输入通路整体删除、旧引用扫描零残留、工程检查四项全过、文档同步；真实前台键盘矩阵、旧 token 换色、性能与视觉实机验收、发布评估留待交互会话）。更新日期：2026-09-22。
 
 基线：`dev_gpuikit` / `b4ec8914139ba768f7a6596e3f870173869eabfb`。组件调研与实拍证据见 [gpui-kit-research.md](gpui-kit-research.md)。
 
@@ -222,7 +222,7 @@ GitService、类型、后台 TaskExecutor、UiEvent、仓库快照、AI 任务�
 | `stash_view.rs` / `submodule_view.rs` | 列表、状态、表单与弹窗 | pop/drop 确认、子模块同步策略、凭据/代理复用 |
 | `blame_view.rs` | 归属栏、代码区和控制条 | 未提交行、行号/归属对齐、编码、长行滚动 |
 | `commit_graph_view.rs` | 工具栏、选择菜单和详情 | 泳道拓扑、高亮/淡化、过滤、48px 行、往返状态 |
-| `conflicts/mod.rs` | 操作区、三栏容器、草稿输入 | ours/theirs/draft、连接线、同步滚动、按块接受、完成/中止、AI 草稿 |
+| `conflicts/mod.rs` | 操作区、三栏容器、只读结果区（M6 决策：草稿编辑不再作为产品路径） | ours/theirs、连接线、同步滚动、按块接受、完成/中止、AI 合并建议回填 |
 | `workflow_view.rs` / `workflow_editor.rs` | 模板导航、向导、步骤卡、动态字段、控制台 | JSON5 注释确认、变量校验、字段保值、运行顺序、后台日志 |
 | `ai_view.rs` / `markdown_view.rs` | 思考弹窗、时间线、Markdown、历史 | 固定 420px 思考窗、滚动跟随、取消/后台分离、并发上限、记录落盘 |
 
@@ -250,7 +250,7 @@ Markdown 替换必须验证流式半截输入、复制最终原文、历史重�
 | 分支、远端、标签、stash、reset/revert/cherry-pick | 完整操作可达，危险确认仍有效 |
 | fetch/pull/push、merge/rebase | 任务不阻塞 UI；冲突后的继续、完成、跳过/中止按已有能力工作 |
 | diff / browse / history / blame / graph | 编码、二进制/Office、大文件、行号、分页、过滤、横向滚动正确 |
-| 冲突工作台 | 三栏滚动/连接线/草稿编辑一致，AI 不用截断结果覆盖草稿 |
+| 冲突工作台 | 三栏滚动/连接线一致，结果区只读 + 按块接受/AI 回填（M6 决策），AI 不用截断结果覆盖草稿 |
 | 工作流 | 编辑/变量/校验/执行/取消/后台日志与原版等价 |
 | AI | 流式、后台分离、取消、代际、并发限制、历史持久化不受换 UI 影响 |
 | 设置/索引/MCP | 九类设置保存语义正确；索引开关/任务正确；MCP stdout 保持协议输出 |
@@ -364,7 +364,7 @@ Kit 主题的单向映射；窗口初始化改用 `gpui_kit::application()` + `g
    - 未完成：Esc 关闭浮层与关闭后焦点恢复仍缺真实前台会话的补验（本轮采证会话无前台键盘通路，
      与 M1 的 §5.2 限制相同）；表格/瀑布式重排不在本轮（工作区的 Diff 下方提交区与单双列表
      切换仍属 M5）。
-4. **M4 代码迁移已完成，后续按 M5 → M6 → M7 推进**。
+4. **M4 代码迁移已完成**，随后按 M5 → M6 → M7 推进（M5 第一批量见上条）。
    - `src/ui/fields.rs` 保留 `TextFieldState` 业务真值，并以 Kit `InputState` / `TextareaState`
      承担渲染与编辑；`ensure_kit_fields` 自动覆盖 `DEDICATED_FIELDS` 中除冲突草稿外的全部
      静态字段。工作流动态字段与冲突草稿按计划留到 M6。
@@ -377,6 +377,255 @@ Kit 主题的单向映射；窗口初始化改用 `gpui_kit::application()` + `g
      关闭、滚动与触发器焦点恢复；根层补充自绘可取消浮层的 Esc 关闭和稳定焦点恢复。
    - 单测覆盖静态字段迁移边界、多行 PressEnter 不提交，以及动态刷新快捷键不误删 Kit action。
      真实前台的完整键盘/焦点矩阵仍在 M7 验收；注入 WM_KEYDOWN 时使用 `PostMessage`。
+5. **M5 已开工（本轮，第一批）**：工作区与历史接入悬浮工作台外壳，并把共享 diff 渲染归位。
+   - **单双列表切换（计划 §5 的行为要求，原实现一直是恒双列表）**：`change_sections_layout`
+     新增 `show_staged`，无暂存内容时不渲染「已暂存变更」分区，未暂存列表独占左列剩余高度；
+     暂存区加载期间仍先渲染占位避免布局跳动，加载完仍为空则整段收起。新增 3 个单测
+     （`staged_section_is_hidden_when_index_is_clean`、
+     `staged_section_appears_while_loading_then_hides_when_still_empty`、
+     `clean_worktree_keeps_both_sections_compact`）守住这条策略。
+   - **视觉分层**：变更分区标题行与差异区标题行从「`CARD` 底 + `border_b_1` 贯穿分割线」
+     改为分组底色 `WB_SECTION_HEADER`（新增 token），分割线换成留白；提交区从
+     `border_t_1 + CARD` 改为独立抬起的提交条（`WB_COMMIT_BAR` + `RADIUS_MD` + 外边距 +
+     `control_shadow()`）；diff 正文区改用 `WB_DIFF_SURFACE`，保持平整底色、不随面板悬浮感
+     加投影/圆角；历史页的提交导航列与提交文件列改用分组底色，容器不再自铺 `CARD`。
+     三个新 token 都进 `workbench_surface_tokens_stay_opaque_for_rgb_consumption` 单测
+     （表面色不得带 alpha——`rgb()` 会把 8 位值按 (G,B,A) 解析）。
+   - **共享 diff 渲染归位**：`render_encoding_dropdown` / `render_virtual_diff` /
+     `syntax_spans_for_diff` / `render_diff_row` / `diff_section_header` / `encoding_button`
+     从 `repository_ui.rs` 搬到 `diff_view.rs`（475 行，**逐字节原样移动**，已用
+     `Compare-Object` 核对两侧行集合完全一致，除模块文档/导入与两处有意改样式的行外零差异）。
+     `render_column_splitter` 属通用分栏而非差异渲染，已留在 `repository_ui.rs`。
+     数据模型、虚拟列表、宽度测量、语法高亮槽位、部分暂存交互全部未改。
+   - 验证：`cargo check --all-targets` 零错误零警告；841 个测试（lib 526 + bin 315）全部通过。
+   - **未完成（M5 剩余）**：~~`worktree_view.rs` / `history_view.rs` 的页头与空状态统一、
+     提交区主次按钮在窄窗下的排布复验、长 diff 性能与视觉实机对照截图~~ → **已由
+     M5 收口批次完成**（见下条第 6 项）。
+6. **M5 收口批次（本轮）**：页头/空状态统一、窄窗排布修正、守卫语义纯函数化。
+   - **「没有仓库」页面级空态**：工作区与历史页在 `repo_path.is_none()` 时不再渲染
+     空变更列表 + 禁用提交条（或孤立占位行），改为整页 `EmptyState`：说明文字 +
+     「打开仓库… / 克隆仓库…」两个动作按钮（复用 `browse_open` / `open_clone_dialog`
+     既有入口，不新增业务路径）。视觉规范 §2「无仓库与干净工作区分别设计文字与
+     可执行入口」由此落实。
+   - **干净工作区专属文案**：新增纯函数 `unstaged_empty_text(loading, peer_has_content)`，
+     三态区分——加载中 / 未暂存空但暂存区有货（「未暂存变更已全部暂存」，流程没结束）
+     / 两边都空（「工作区干净，没有待提交的改动」）。此前只有一句「暂无未暂存变更」。
+   - **历史页列表基线对齐**：两个列表 wrapper 的 `p_2()` 改为 `py_2()`（水平留白交给
+     列表行自己），提交文件行从 `px_2()` 改为 `pl(SPACE_3) + pr_2`，使行文本左缘与
+     `panel_section_header` 默认 `padding_x(SPACE_3)` 落在同一条基线（此前提交行错位
+     8px、文件行错位 4px）；「加载更多」行补 `pl(SPACE_3)` 保持同一基线。工作区变更
+     列表的空态占位新增 `panel_empty_row_aligned` 变体，占位文字与行内 `px(16)`
+     及标题 `padding_x(SPACE_4)` 三者对齐。
+   - **提交条窄窗排布修正**：底部行原为 `justify_between + flex_wrap` + 无开关时塞
+     `div()` 空槽占位——`justify_between` 在换行后会把零宽空槽当作两端之一，
+     实际动作组贴左而非靠右。改为「开关槽（`flex_none`）+ 动作组 `ml_auto`」：
+     单行时开关居左、动作靠右；窄窗换行时动作组整体落第二行且仍靠右。
+     动作组自身的 `flex_wrap + justify_end` 保留（按钮组内部换行时逐行靠右）。
+   - **守卫语义纯函数化**（计划 §5「禁用条件以真实业务守卫为准」）：新增
+     `commit_action_enabled` / `commit_and_push_enabled` 两个 `const fn`，把
+     「普通提交不因空暂存禁用（amend 允许只改信息）」「推送要求远端存在」
+     「合并中透传 `merge_can_finish`」三条规则从 render 内联表达式提升为可测签名；
+     render 改为调用纯函数，行为等价。
+   - 新增 6 个单测（`unstaged_empty_text_separates_clean_worktree_from_one_side_empty`、
+     `commit_action_enabled_ignores_staging_state`、`commit_and_push_requires_remote_and_hides_during_merge`、
+     `empty_state_builder_keeps_detail_and_actions_optional`、`empty_state_shortcut_stays_non_filling_without_actions`
+     及本批守卫测试组）。测试编写中发现并修正了守卫函数对 busy 透传的语义混淆
+     （merge 分支的 busy 由 `merge_can_finish` 统一把关，纯函数不再重复判定）。
+   - 验证：`cargo check --all-targets` 零错误零警告；`cargo test --lib` 526 通过；
+     `cargo test --bin khaslana` 325 通过（+6）；`cargo build --release` 成功。
+   - **仍未完成**：长 diff 性能与视觉实机对照截图（860×520 窄窗提交条换行、
+     M5 各页深浅主题）需要真实前台会话，留待 M7 验收矩阵执行。
+7. **M6 专业视图与工作流/AI 迁移（本轮，五个批次）**：
+   - **批次 1 · 工作流动态字段迁 Kit（M4 遗留项收口）**：`WorkflowInput(usize)` 与
+     `WorkflowEditor(WorkflowEditorFieldId)` 两类动态字段此前被 `kit_field_migrated`
+     排除、走自绘渲染，本批迁入 Kit。动态字段不进 `DEDICATED_FIELDS`，宿主生命周期
+     由 `ensure_kit_fields` 末段新增的 `reconcile_dynamic_kit_fields` 维护：
+     每帧先按 `active_dynamic_field_ids` 枚举当前应存活的动态字段集合
+     （运行配置 inputs + 编辑器已创建的步骤槽/变量行文本框），对宿主列表
+     「多退少补」——退场字段整条移除（drop 即退订），新字段补建宿主。
+     核心安全点是**严格寻址**：新增 `try_field` / `try_field_mut`（无越界兜底），
+     Kit 的 `Change` / `PressEnter` 回调改走严格版——动态字段被重建/删除后，
+     残留事件静默丢弃，不会经 `field()` 的 `branch_name` 兜底把孤儿输入写进
+     无关表单。工作流输入即查预览、编辑器 `sync_from_fields` 的通知链路
+     （`notify_text_field_changed`）零改动。
+   - **批次 1 · 冲突结果区死路径删除**：`conflict_result_pane_uses_editor()` 恒
+     `false` 使自绘 `conflict_editor_input`（约 113 行）、
+     `sync_conflict_editor_into_state` 写回逻辑、`highlight_selected_conflict_block`
+     的编辑器高亮分支、`multiline_input_should_scroll` / `multiline_scroll_handle_id` /
+     `is_multiline_field` 的 `ConflictEditor` 分支全部不可达。本批删除渲染死路径
+     与死开关函数，`conflict_editor` 字段保留为焦点锚点（工作台两处点击仍
+     `window.focus(&this.conflict_editor.focus, cx)` 把键盘交给工作台），
+     `sync_conflict_editor_into_state` 留空操作并注释「恢复可编辑结果区时的接回点」。
+     计划 §M6「若保留定制草稿画布，须记录它为必要领域组件」的决策落为：
+     结果区 = 只读文档视图 + 按块接受/AI 回填，草稿编辑不再作为产品路径。
+   - **批次 2 · submodule_view 旧 token 迁移**：`submodule_status_pill` 的 5 处
+     `COLOR_SUCCESS/WARNING/ERROR(+_FOREGROUND)` 实心状态色改为 `FEEDBACK_*`
+     BG/BORDER/TEXT 配对 token（与冲突工作台徽章同一套语义）；全文件旧一代
+     token（`BORDER/CARD/FOREGROUND/MUTED_FOREGROUND/SECONDARY`）换为
+     `BORDER_MUTED/SURFACE_BASE/CONTENT_*/STATE_HOVER`，字号 10/11/12/14
+     字面值换 `TYPE_META/TYPE_BODY/TYPE_TITLE`。列表行为普通 div 滚动
+     （非 uniform_list），`truncate()` 保留不触测量陷阱。
+   - **批次 3 · browse/blame 视觉收口**：分支浏览与分支比较的「文件树」
+     「差异文件 · N」分组标题从自绘 `border_b_1` 行迁到 `panel_section_header`
+     （`padding_x(SPACE_4)` 保持与列内边距一致）；分支比较面板去掉自绘
+     `border_r_1`（右侧分隔线由列分割条统一绘制，与分支浏览同一约定）。
+     blame 注释栏四处行内 `truncate()`（哈希/作者/摘要列）改为
+     `overflow_hidden + whitespace_nowrap` 硬裁剪——这些文本在 `uniform_list`
+     行内，坍缩测量会把省略号固化成「永远只显示 …」； blame 头部自绘关闭
+     按钮改用 `self.button`（编码按钮保留自绘：它切换菜单而非执行业务动作）。
+     清理 `ROW_HEIGHT_REGULAR` 常量（分组标题迁移后生产代码无引用，
+     history 测试改与 `ROW_HEIGHT_COMPACT` 对比，theme 测试改字面断言）。
+   - **批次 4 · commit_graph_view 工具行与详情卡**：工具行分段控件（scope
+     当前分支/所有分支）、分支高亮触发器、泳道圆点外圈、下拉菜单项的旧 token
+     批量换为语义 token（选中态底从 `ACCENT` 改为 `WB_SECTION_HEADER` 分组带，
+     与 M5 变更分区同一语义）；详情卡空态从自绘居中文字改为 `panel_empty_row`
+     （列表/区块级占位）。复制 SHA / 复制信息按钮经评估保留自绘：项目级
+     `button` 的回调是 `Fn` 签名，收不下需要 `cx.listener`（FnMut）的
+     clipboard + toast 组合——已在该处注释记录原因，避免后人反复重试。
+   - **批次 5 · ai_view / workflow_view / conflicts 收尾**：评审历史弹窗的
+     加载/错误/空三态从纯文字 div 改为 `panel_empty_row` + `inline_error_bubble`；
+     全文件旧 token 与字号字面值 token 化。Runbook Studio 模板导航列头
+     （标题 + 新建/刷新/目录三按钮）从自绘 `justify_between + border_b_1` 迁到
+     `panel_section_header(...).action(×3)`，目录标签行 `truncate()` 改硬裁剪。
+     冲突工作区变更摘要「存在 N 个冲突文件」迁到 `panel_section_header`，
+     与工作台其他面板头统一；`conflict_row`（变更列表卡片行，非 uniform_list）
+     保留边框卡片形态——平面列表行规则只约束虚拟列表与设置表单行。
+   - 验证：`cargo check --all-targets` 零错误零警告；`cargo test --lib` 526 通过；
+     `cargo test --bin khaslana` 322 通过；五个批次之间逐批编译 + 测试回归。
+   - **仍未完成（M6 剩余）**：① 真实前台的 Kit 输入键盘/焦点矩阵（工作流编辑器
+     动态字段的 Tab 序、多行 AiDescription 的 Enter/Ctrl+Enter、picker 搜索框）
+     需按 M7 验收矩阵复验；② 工作流编辑器第 2 步卡片内多步骤同屏渲染时动态宿主
+     的增删性能未实测；③ conflicts 三栏同步滚动、workflow 控制台与运行配置的
+     视觉实机对照留待 M7。
+
+8. **M7 清理与验收（本轮，工程检查批次）**：
+   - **旧引用扫描（计划 §M7 第 1 项）**：`grep` 全项目 + `Cargo.toml` + `build.rs`，
+     `yororen` / `gpui-ce` 仅剩注释与测试字符串（如 `tests/code_index_view.rs` 的
+     "gpui-ce" 是数据样本）；`cargo tree` 确认单一 GPUI 家族（gpui-pre 0.3.5 +
+     gpui-kit 0.6.4，`-d` 的多路径是同一 crate 复用，无第二运行时版本）；
+     `Application::new()` 等孤立旧初始化无残留。
+   - **自绘输入通路整体删除（计划 §M7 第 2 项）**。M6 收口后全部字段（静态 +
+     工作流动态）均已有 Kit 宿主，自绘路径成为不可达死代码：
+     - `repository_ui.rs`：删 `input()` 的自绘回退分支与 `single_line_input` /
+       `multi_line_input`（约 250 行）；无宿主改为 `debug_assert!` + 空占位，
+       不再静默回退第二套输入实现。
+     - `repository_core.rs`：删 16 个自绘 `text_*` handler（约 190 行）；
+       `submit_focused_field` 的 `ConflictEditor` 分支随 M6 结果区只读化已删。
+     - `main.rs`：删 `impl EntityInputHandler for RepositoryView`（约 110 行，
+       自绘输入时代的 IME 通路——Kit `InputState` 自带 handler）；删
+       `actions!` 中 16 个自绘 action 与 22 条 "TextInput" context 键位
+       （自绘输入删除后无任何元素声明该 context），只留 `TextSubmit`
+       （"Input" context 由 Kit 输入组件内部声明，Ctrl/Cmd+Enter 与
+       secondary-enter 提交路径不变）。
+     - `text_input.rs`：1183 行重建为 108 行业务真值容器——`TextFieldState`
+       （focus + placeholder + `TextEditState` 值/密文/光标）保留（约两百处
+       表单读写点直接访问，Kit 宿主每帧经 `ensure_kit_fields` 对齐），
+       自绘输入元素、29 个编辑/IME/utf16 方法、`multiline_caret_follow_decision`
+       与 `EntityInputHandler` 依赖的私有函数全部删除；配套单测文件
+       `tests/text_input.rs`（11 个自绘编辑行为测试）随之删除。
+     - 死开关链收尾：`sync_conflict_editor_into_state` 空操作与 7 个调用点删除
+       （M6 已注释「恢复可编辑结果区时的接回点」，删除不影响任何行为）。
+     - `ui_helpers.rs`：7 个旧 `COLOR_*` 兼容别名从 `pub(crate) use` 降为私有
+       `use`（使用全在文件内部，AGENTS.md「不得作为新 UI 代码导入来源」）。
+   - **工程检查（计划 §6.4 四项，全部实跑）**：`cargo check --all-targets`
+     零错误零警告；`cargo test --lib` 526 通过 / 2 ignored；`cargo test
+     --bin khaslana` 310 通过 / 0 失败；`cargo build --release` 成功。
+     测试数变化：bin 322 → 310（删除 12 个随自绘通路移除的测试：text_input
+     11 个 + main.rs 的 multiline/conflict 开关 2 个，另 fields.rs 迁移
+     断言改写为「唯一例外 ConflictEditor」）；lib 526 不变。
+   - **文档同步（计划 §M7 第 4 项）**：README 技术栈改 gpui-pre + gpui-kit；
+     AGENTS.md 重写 text_input 相关三条（自绘通路已删、只剩业务真值、目录
+     清单补新职责条目）、键盘交互条目标注 `text_input::` 仅存 `TextSubmit`；
+     `docs/ui-design-system.md` 的「Yororen 桥接」改「Kit 主题桥接」、
+     `icon_command_button` 与「所有按钮纯鼠标」两条旧规则更新为 Kit 标准
+     交互（覆盖声明见两份文档开头）。
+   - **遗留项（需真实前台会话或实机对照，不在本计划自动发版）**：
+     ① 约 400 处旧一代 token 引用（`FOREGROUND`/`MUTED_FOREGROUND`/`CARD`/
+     `SECONDARY`/`BORDER`，集中于 dialog_view / workflow_editor /
+     repository_ui 等）换 `CONTENT_*`/`SURFACE_*`/`STATE_*` 语义层——新旧
+     token 色值不同（如 FOREGROUND `0x2A2933` vs CONTENT_PRIMARY `0x20232B`），
+     属视觉变更，须按 §6.2 逐屏对照后执行；
+     ② 工作流编辑器动态字段真实键盘矩阵（Tab 序、AiDescription Enter 语义、
+     picker 搜索框）与 M5/M6 各页视觉实机验收；
+     ③ 性能验收（§6.3：20,000 行 diff / 10,000 行列表 p95 ≤16.7ms、启动与
+     内存对比基线）；
+     ④ 便携包 / 安装器按原发布流程评估（`installer/khaslana.iss`），本计划
+     不自动发版。
 
 阶段编号沿用原计划；24–39 人日是初始总量估算，不代表当前剩余工期。M2 的实际改动量远低于
 原预期（依赖切换 + 约 60 处 API 适配，而非 35 个文件的导入重写），M3 之后可按实际差异重估。
+
+---
+
+## 9. 2026-09-22 总审查修正轮（R1–R8）
+
+> 二次审查后的实现已更新：焦点返回改为逐层栈、在新元素树挂载后设置焦点；评审历史纳入模态隔离，受跟踪菜单独立接管焦点；工作流 AI 回填增加编辑会话身份。具体修正与验证边界见 [二次审查修正记录](gpui-kit-refactor-recheck-2026-09-22.md#本轮代码修正记录)。下文为第一轮实施记录，完整前台验收仍未完成。
+
+依据 [GPUI Kit 重构总审查](gpui-kit-refactor-review-2026-09-22.md) 执行 A–D 四批修正，
+只改相关代码与文档，不夹带格式化或业务架构重写。
+
+**批次 A · 模态与关闭安全（R1 / R4 / R7）**
+- 统一模态宿主：普通对话框、设置中心、「需要凭据」面板、AI 思考窗、全局符号搜索面板
+  的遮罩经 Kit `focus_trap` 挂焦点圈（`dialog_focus` / `settings_center_focus` /
+  `credential_prompt_focus` / `ai_thinking_focus` / `code_palette_focus`）；打开时
+  `maintain_overlay_focus` 把焦点移入圈内，Tab/Shift+Tab 经 Kit Root 的 trap 逻辑
+  在圈内循环，不漏到遮罩下层。
+- Esc 关闭顺序改为按实际绘制层级自顶到底（待输凭据 → 无遮罩弹层 → AI 思考窗 →
+  代码面板 → 评审历史 → 对话框 → 设置中心）；AI 思考窗 Esc 复用「后台运行」语义
+  （只收起不终止，绝不穿透关闭父层）；`close_dialog` 对工作流编辑器改走
+  `close_workflow_editor` 完整状态清理。
+- 焦点归还进入浮层前的触发器（`OverlayFocusReturn` 弱句柄；目标已销毁回退父层
+  焦点圈，最后回应用根）；鼠标关闭（遮罩按钮、点外部关菜单）与 Esc 同一策略。
+- `text_submit` 增加顶层模态归属校验：焦点不在最上层模态内时忽略 Enter/Ctrl+Enter。
+
+**批次 B · 输入与任务身份（R5 / R8）**
+- `TextFieldState` 新增构造期 uid；Kit 宿主记录业务身份（uid + placeholder），
+  业务对象被整体更换（模板加载 / 编辑器重建 / 步骤交换 / AI 回填）时
+  `rebind_kit_field` 完整重绑：占位符、焦点指向重指、强制 `set_value` 清撤销
+  历史——位置相同、文本也相同的不一定是同一个输入框。
+- 一次性 AI 生成任务拆为「运行态」（`ai_thinking_task`，持互斥）与「可见态」
+  （`ai_thinking_overlay`）：后台运行只收起弹窗，互斥到任务完成/失败才释放；
+  增量/成功/失败事件携带任务 id 按身份寻址，迟到事件不影响其他任务；共用
+  `AiRequestFailed` 按任务归属只复位本业务 loading（连接测试失败拆为独立事件
+  `AiConnectionTestFailed`）。
+
+**批次 C · 组件与主题收口（R2 / R3 / R6）**
+- `kit_theme::apply` 重建主题后按变体显式写入 Kit `ThemeMode`（`Theme::from` 恒写
+  Light，深色下 `Theme::is_dark()` 分支此前全错）。
+- 大弹窗面板尺寸统一经 `dialog_panel_size` 按视口钳制 `min(设计尺寸, 可用空间)`
+  （安全边距 24px、下限 480×320）：设置中心、工作流编辑器、远端管理、代码面板、
+  AI 思考窗；最小窗与高 DPI 下不再越界被根圆角裁掉。
+- 右键菜单键盘模型：九个上下文菜单打开时构建条目清单（稳定业务 id + 动作闭包），
+  ↑/↓ 循环选择（跳禁用项）、Enter 执行选中项、Esc 关闭、焦点归还触发器；菜单容器
+  挂焦点圈。设置中心九类分类行与关闭按钮改用 Kit 基础按钮（Tab 聚焦 + Enter/Space）。
+
+**批次 D · 视觉 token 迁移与文档收口**
+- 旧一代 token 引用全量迁移：文字色 `FOREGROUND`/`MUTED_FOREGROUND` 及
+  `*_FOREGROUND` 族 → `CONTENT_PRIMARY`/`CONTENT_SECONDARY`（237 处）；表面色
+  `CARD`→`WB_PANEL`、`SECONDARY`→`WB_ROW_HOVER`、`BORDER`→`BORDER_MUTED`、
+  `ACCENT`→`STATE_HOVER`、`TILE`→`SURFACE_SUNKEN`、`POPOVER`→`SURFACE_OVERLAY`
+  （171 处，17 个文件）。逐屏修正：分段按钮/筛选 chip/代码面板选中行改用
+  `STATE_SELECTION`（与悬停区分），Kit Switch 轨道取 `BORDER_STRONG`（与 input
+  同档）。语义色（`FEEDBACK_*`/`REF_*`/`COLOR_*`/`DESTRUCTIVE*`/`TOOLTIP_*`）不在
+  本轮范围，保持原_token。
+- 文档同步：`ui/fields.rs` 模块文档改为「全部字段已迁入 Kit（含动态字段 + uid 重绑）」；
+  计划 §6.1 功能/验收矩阵的冲突工作台两行改为「只读结果区 + 按块接受/AI 回填」。
+
+**剩余自绘通用组件与保留理由**（不进 Kit 迁移清单）：
+- `Notification`/toast 气泡栈（`ui/components.rs`）：应用自有生命周期（过期回收、
+  可点击动作、双通道错误提示），Kit Notification 无等价语义，保留自绘。
+- `tooltip_text`：窄档图标命令的轻量提示，Kit Tooltip 需要实体宿主，保留自绘。
+- `scrollable_frame_when`/自绘滚动条：统一悬停出现与主题 token，保留。
+- 右键菜单容器与条目：业务动作寻址与锚定策略特殊，保留自绘 + 自建键盘模型
+  （见批次 C）；迁移到 Kit PopupMenu 需重做锚定与视觉，列为后续评估项。
+
+**工程检查**：`cargo check --all-targets` 零错误零警告；`cargo test --lib` 526 通过 /
+2 ignored；`cargo test --bin khaslana` 317 通过 / 0 失败（较审查基线 310 新增 7 个
+守卫测试：浮层层级序、模态分类、打开/替换判定各一组、Kit mode 映射、面板钳制、
+宿主身份重绑判定）；`cargo build --release` 成功；`cargo fmt --check` 通过。
+
+**仍需真实前台/实机验收（不以源码推断代替通过）**：R1 焦点圈两轮往返 Tab 与嵌套
+弹窗关闭回父层、R5 双模板同位置字段切换后 placeholder/Ctrl+Z、R6 菜单方向键循环
+与九类设置键盘遍历、R7 各关闭路径焦点归还、R8 后台运行互斥假流；§6.2 视觉矩阵
+（860×520 / 1280×820 / 1440×900 / 最大化 × 深浅 × 100–200% DPI）与 §6.3 性能
+矩阵；IME、多显示器、托盘、安装包验证。

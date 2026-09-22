@@ -101,7 +101,11 @@ fn push_code_index_entry(
 /// 同帧多卡渲染的交互元素必须唯一 ElementId：`app_button` 等内部以 label
 /// 作为元素 id，卡片列里多个同 label 按钮会共享元素状态（第一张卡可点、
 /// 其余点击丢失）。用仓库键 + 动作包一层有 id 的容器隔离状态路径。
-fn code_index_interactive_host(repo_key: &str, action: &str, inner: impl IntoElement) -> gpui::AnyElement {
+fn code_index_interactive_host(
+    repo_key: &str,
+    action: &str,
+    inner: impl IntoElement,
+) -> gpui::AnyElement {
     div()
         .id(format!("code-index-{action}-{}", repo_key))
         .child(inner)
@@ -202,7 +206,7 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(10.5))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("多仓库模式：一条配置服务所有已索引仓库"),
                             ),
                     )
@@ -372,7 +376,7 @@ impl RepositoryView {
         card = card.child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(entry.path.clone()),
@@ -445,9 +449,14 @@ impl RepositoryView {
                 code_index_interactive_host(
                     &entry.repo_key,
                     "cancel",
-                    self.button("取消", true, |this, _, cx| {
-                        this.cancel_code_index(cx);
-                    }, cx),
+                    self.button(
+                        "取消",
+                        true,
+                        |this, _, cx| {
+                            this.cancel_code_index(cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
@@ -464,39 +473,70 @@ impl RepositoryView {
                 code_index_interactive_host(
                     &entry.repo_key,
                     "increment",
-                    self.button("增量更新", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_increment, false, cx);
-                    }, cx),
+                    self.button(
+                        "增量更新",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_increment, false, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "rebuild",
-                    self.button("重建索引", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_rebuild, true, cx);
-                    }, cx),
+                    self.button(
+                        "重建索引",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_rebuild, true, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "delete",
-                    self.danger_button("删除索引数据", true, move |this, _, _| {
-                        this.request_delete_code_index(display_delete.clone(), repo_delete.clone());
-                    }, cx),
+                    self.danger_button(
+                        "删除索引数据",
+                        true,
+                        move |this, _, _| {
+                            this.request_delete_code_index(
+                                display_delete.clone(),
+                                repo_delete.clone(),
+                            );
+                        },
+                        cx,
+                    ),
                 ),
             ],
             CodeIndexEntryStatus::DisabledWithData => vec![
                 code_index_interactive_host(
                     &entry.repo_key,
                     "rebuild",
-                    self.button("重建索引", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_rebuild_disabled, true, cx);
-                    }, cx),
+                    self.button(
+                        "重建索引",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_rebuild_disabled, true, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "delete",
-                    self.danger_button("删除索引数据", true, move |this, _, _| {
-                        this.request_delete_code_index(display_delete_2.clone(), repo_delete_2.clone());
-                    }, cx),
+                    self.danger_button(
+                        "删除索引数据",
+                        true,
+                        move |this, _, _| {
+                            this.request_delete_code_index(
+                                display_delete_2.clone(),
+                                repo_delete_2.clone(),
+                            );
+                        },
+                        cx,
+                    ),
                 ),
             ],
             CodeIndexEntryStatus::NotIndexed => vec![],
@@ -510,7 +550,7 @@ impl RepositoryView {
                 row = row.child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .child("同一时间只能有一个索引任务"),
@@ -686,11 +726,7 @@ impl RepositoryView {
         }
     }
 
-    pub(crate) fn confirm_delete_code_index_now(
-        &mut self,
-        repo_key: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_delete_code_index_now(&mut self, repo_key: &str, cx: &mut Context<Self>) {
         self.active_dialog = None;
         let Some(db_path) = Self::index_db_path(repo_key) else {
             return;
@@ -739,21 +775,13 @@ impl RepositoryView {
         // 1) 当前打开的仓库（按 tab 顺序）。
         for tab in &self.tabs {
             if let Some(path) = &tab.repo_path {
-                push_code_index_entry(
-                    path.to_string_lossy().to_string(),
-                    &mut entries,
-                    &mut seen,
-                );
+                push_code_index_entry(path.to_string_lossy().to_string(), &mut entries, &mut seen);
             }
         }
         // 2) 最近打开的仓库（按最近时间倒序，主库已排序）。
         if let Ok(recents) = self.storage.load_recent_repos() {
             for (path, _) in recents {
-                push_code_index_entry(
-                    path.to_string_lossy().to_string(),
-                    &mut entries,
-                    &mut seen,
-                );
+                push_code_index_entry(path.to_string_lossy().to_string(), &mut entries, &mut seen);
             }
         }
         // 3) 索引偏好中剩余的仓库（老记录不在最近列表里也可见，可清理）。
@@ -919,7 +947,7 @@ fn code_index_status_pill(status: CodeIndexEntryStatus) -> gpui::AnyElement {
             (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
         }
         CodeIndexEntryStatus::DisabledWithData | CodeIndexEntryStatus::NotIndexed => {
-            (ui_theme::TILE, ui_theme::CONTENT_SECONDARY)
+            (ui_theme::SURFACE_SUNKEN, ui_theme::CONTENT_SECONDARY)
         }
     };
     div()
@@ -969,7 +997,11 @@ fn code_index_stats_line(stats: &khaslana::code_index::IndexStats) -> String {
         stats.calls,
         stats.db_bytes as f64 / (1024.0 * 1024.0),
         format_indexed_at(stats.indexed_at),
-        if stats.branch.is_empty() { "-" } else { &stats.branch },
+        if stats.branch.is_empty() {
+            "-"
+        } else {
+            &stats.branch
+        },
     )
 }
 
@@ -998,7 +1030,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(format!("确认删除 {display_name} 的代码索引数据？")),
             )
             .child(

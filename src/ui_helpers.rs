@@ -1,25 +1,30 @@
 // 本文件包含通用渲染辅助函数，其中部分 helper 为预留或过渡用途，可能暂未被调用。
 #![allow(dead_code)]
 
+use std::rc::Rc;
+
 use gpui::{
-    Bounds, Context, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, StyledText, UniformListScrollHandle,
-    Window, canvas, div, fill, point, prelude::*, px,
+    Bounds, Context, Div, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, StyledText,
+    UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px,
 };
 use khaslana::syntax::SyntaxSpan;
 use khaslana::{ChangeState, DiffLineKind, DiffScope, FileDiff};
 
+use crate::ui::components as ui_components;
 use crate::ui::theme::{rgb, rgba};
 use crate::{DiffHeaderTarget, RepositoryView, ui::theme as ui_theme};
 
-pub(crate) use crate::ui::theme::ACCENT as COLOR_BLUE_SOFT;
-pub(crate) use crate::ui::theme::BORDER as COLOR_BORDER;
-pub(crate) use crate::ui::theme::CARD as COLOR_HEADER_BG;
-pub(crate) use crate::ui::theme::CARD as COLOR_PANEL_BG;
-pub(crate) use crate::ui::theme::CARD as COLOR_SURFACE;
-pub(crate) use crate::ui::theme::FOREGROUND as COLOR_TEXT;
-pub(crate) use crate::ui::theme::MUTED_FOREGROUND as COLOR_TEXT_FAINT;
-pub(crate) use crate::ui::theme::MUTED_FOREGROUND as COLOR_TEXT_MUTED;
+// COLOR_* 别名仅限本文件底层 helper 内部过渡使用（AGENTS.md：不得作为
+// 新 UI 代码的导入来源），因此是私有 use 而非 pub(crate) re-export。
+// 别名来源已随视觉 token 统一迁移到 WB_*/CONTENT_*/STATE_* 新语义色。
+use crate::ui::theme::BORDER_MUTED as COLOR_BORDER;
+use crate::ui::theme::CONTENT_PRIMARY as COLOR_TEXT;
+use crate::ui::theme::CONTENT_SECONDARY as COLOR_TEXT_FAINT;
+use crate::ui::theme::CONTENT_SECONDARY as COLOR_TEXT_MUTED;
+use crate::ui::theme::STATE_HOVER as COLOR_BLUE_SOFT;
+use crate::ui::theme::WB_PANEL as COLOR_HEADER_BG;
+use crate::ui::theme::WB_PANEL as COLOR_SURFACE;
 const SCROLLBAR_THICKNESS: f32 = 8.0;
 const SCROLLBAR_MARGIN: f32 = 2.0;
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
@@ -495,47 +500,19 @@ fn set_axis_offset(
     handle.set_offset(offset);
 }
 
+/// 区块标题行 —— 统一走悬浮工作台的分组底色样式（无贯穿分割线），
+/// 见 `ui::components::PanelSectionHeader`。历史页/图谱页等列表列使用。
 pub(crate) fn section_header(label: impl Into<SharedString>) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(rgb(ui_theme::BORDER))
-        .bg(rgb(COLOR_HEADER_BG))
-        .text_size(px(12.0))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(ui_theme::FOREGROUND))
-        .child(label.into())
+    ui_components::PanelSectionHeader::new(label).build()
 }
 
 pub(crate) fn section_header_action(
     label: impl Into<SharedString>,
     action: Option<gpui::AnyElement>,
 ) -> impl IntoElement {
-    let header = div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(rgb(ui_theme::BORDER))
-        .bg(rgb(COLOR_HEADER_BG))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(ui_theme::FOREGROUND))
-                .child(label.into()),
-        );
-    if let Some(action) = action {
-        header.child(action)
-    } else {
-        header
-    }
+    ui_components::PanelSectionHeader::new(label)
+        .actions(action)
+        .build()
 }
 
 pub(crate) fn history_scope_button(
@@ -552,23 +529,23 @@ pub(crate) fn history_scope_button(
         .rounded_sm()
         .border_1()
         .border_color(if selected {
-            rgb(ui_theme::ACCENT)
+            rgb(ui_theme::STATE_HOVER)
         } else {
             rgb(COLOR_BORDER)
         })
         .bg(if selected {
-            rgb(ui_theme::ACCENT)
+            rgb(ui_theme::STATE_HOVER)
         } else {
-            rgb(ui_theme::CARD)
+            rgb(ui_theme::WB_PANEL)
         })
         .text_size(px(11.0))
         .text_color(if selected {
             rgb(ui_theme::PRIMARY)
         } else {
-            rgb(ui_theme::MUTED_FOREGROUND)
+            rgb(ui_theme::CONTENT_SECONDARY)
         })
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             action(this);
             cx.notify();
@@ -592,11 +569,11 @@ pub(crate) fn diff_hunk_action_button(
         .px(px(6.0))
         .py(px(1.0))
         .rounded(px(ui_theme::RADIUS_XS))
-        .bg(rgb(ui_theme::TILE))
+        .bg(rgb(ui_theme::SURFACE_SUNKEN))
         .text_size(px(11.0))
         .text_color(rgb(ui_theme::PRIMARY))
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+        .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             action(this);
             cx.notify();
@@ -653,11 +630,11 @@ pub(crate) fn nav_row(
         .rounded_sm()
         .cursor_pointer()
         .bg(if selected {
-            rgb(ui_theme::ACCENT)
+            rgb(ui_theme::STATE_HOVER)
         } else if emphasized {
-            rgb(ui_theme::ACCENT)
+            rgb(ui_theme::STATE_HOVER)
         } else {
-            rgb(ui_theme::CARD)
+            rgb(ui_theme::WB_PANEL)
         })
         .border_1()
         .border_color(if selected {
@@ -669,22 +646,11 @@ pub(crate) fn nav_row(
         })
 }
 
+/// 列表内空状态/加载提示行 —— 统一走悬浮工作台的弱化提示样式
+/// （无卡片框、无边框，见 `ui::components::panel_empty_row`）。
+/// 行高保持 `NAV_ROW_HEIGHT`，虚拟列表的占位行行为不变。
 pub(crate) fn placeholder_row(text: &'static str) -> impl IntoElement {
-    div()
-        .flex_none()
-        .min_h(px(NAV_ROW_HEIGHT))
-        .mx_1()
-        .my_1()
-        .px_3()
-        .py_2()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(ui_theme::BORDER))
-        .bg(rgb(ui_theme::CARD))
-        .text_size(px(12.0))
-        .text_color(rgb(COLOR_TEXT_FAINT))
-        .line_height(px(18.0))
-        .child(text)
+    ui_components::panel_empty_row(text, NAV_ROW_HEIGHT, ui_components::PlaceholderAlign::Start)
 }
 
 /// 把字节数格式化为人类可读大小（1024 进制）：`512 B`、`1 KB`、`1.5 KB`、`1.2 MB`。
@@ -734,7 +700,8 @@ pub(crate) fn binary_diff_placeholder(diff: &FileDiff) -> impl IntoElement + use
         .items_center()
         .justify_center()
         .p_4()
-        .bg(rgb(ui_theme::CARD))
+        // 与逐行差异共用差异正文底色，占位不额外浮起。
+        .bg(rgb(ui_theme::WB_DIFF_SURFACE))
         .child(
             div()
                 .flex()
@@ -745,26 +712,26 @@ pub(crate) fn binary_diff_placeholder(diff: &FileDiff) -> impl IntoElement + use
                 .py_5()
                 .rounded_sm()
                 .border_1()
-                .border_color(rgb(ui_theme::BORDER))
-                .bg(rgb(ui_theme::TILE))
+                .border_color(rgb(ui_theme::BORDER_MUTED))
+                .bg(rgb(ui_theme::SURFACE_SUNKEN))
                 .child(
                     div()
                         .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(ui_theme::FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                         .child("二进制文件"),
                 )
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("无法以文本形式展示差异"),
                 )
                 .when(!size_label.is_empty(), |this| {
                     this.child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(size_label),
                     )
                 }),
@@ -927,68 +894,103 @@ pub(crate) fn change_state_badge(state: Option<&ChangeState>) -> impl IntoElemen
         .child(label)
 }
 
+/// 右键菜单条目行：键盘选中态用主题色打底（与悬停区分），禁用态弱化。
+/// 元素 id 用稳定业务 id（`context-menu-{id}`），不用中文 label。
+pub(crate) fn context_menu_row(
+    id: &str,
+    label: &'static str,
+    enabled: bool,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(format!("context-menu-{id}"))
+        .px_3()
+        .py_1()
+        .text_color(if !enabled {
+            rgb(COLOR_TEXT_FAINT)
+        } else if selected {
+            rgb(ui_theme::PRIMARY)
+        } else {
+            rgb(COLOR_TEXT)
+        })
+        .bg(if selected {
+            rgb(ui_theme::STATE_SELECTION)
+        } else {
+            rgb(ui_theme::WB_PANEL)
+        })
+        .cursor_pointer()
+        .when(enabled, |this| {
+            this.hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
+        })
+        .child(label)
+}
+
+/// 右键菜单条目（无 Context 版）：登记键盘动作 + 鼠标点击。
+///
+/// `menu_id` 标识所属菜单（浮层切换时重置键盘选中），`id` 是条目的稳定
+/// 业务身份——键盘执行与测试寻址都用它，不用中文 label（审查 R6）。
 pub(crate) fn context_menu_item(
+    view: &RepositoryView,
+    menu_id: &str,
+    id: &str,
     label: &'static str,
     enabled: bool,
     on_click: impl Fn(&mut RepositoryView) + 'static,
     cx: &mut Context<RepositoryView>,
 ) -> impl IntoElement {
-    div()
-        .id(format!("context-menu-{label}"))
-        .px_3()
-        .py_1()
-        .text_color(if enabled {
-            rgb(COLOR_TEXT)
-        } else {
-            rgb(COLOR_TEXT_FAINT)
-        })
-        .bg(rgb(ui_theme::CARD))
-        .cursor_pointer()
-        .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-        })
-        .on_click(cx.listener(move |this, _event, _window, cx| {
+    let on_click = Rc::new(on_click);
+    let key_action = {
+        let on_click = on_click.clone();
+        Rc::new(move |this: &mut RepositoryView, _cx: &mut Context<RepositoryView>| on_click(this))
+            as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
+    };
+    let selected = view.register_context_menu_action(menu_id, id, enabled, key_action);
+    context_menu_row(id, label, enabled, selected).on_click(cx.listener(
+        move |this, _event, _window, cx| {
             cx.stop_propagation();
             if enabled {
                 on_click(this);
                 cx.notify();
             }
-        }))
-        .child(label)
+        },
+    ))
 }
 
+/// 右键菜单条目（带 Context 版）：动作需要 `Context`（剪贴板、弹窗等）时用。
 pub(crate) fn context_menu_item_with_context(
+    view: &RepositoryView,
+    menu_id: &str,
+    id: &str,
     label: &'static str,
     enabled: bool,
     on_click: impl Fn(&mut RepositoryView, &mut Context<RepositoryView>) + 'static,
     cx: &mut Context<RepositoryView>,
 ) -> impl IntoElement {
-    div()
-        .id(format!("context-menu-{label}"))
-        .px_3()
-        .py_1()
-        .text_color(if enabled {
-            rgb(COLOR_TEXT)
-        } else {
-            rgb(COLOR_TEXT_FAINT)
-        })
-        .bg(rgb(ui_theme::CARD))
-        .cursor_pointer()
-        .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
-        })
-        .on_click(cx.listener(move |this, _event, _window, cx| {
+    let on_click = Rc::new(on_click);
+    let key_action = {
+        let on_click = on_click.clone();
+        Rc::new(
+            move |this: &mut RepositoryView, cx: &mut Context<RepositoryView>| on_click(this, cx),
+        ) as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
+    };
+    let selected = view.register_context_menu_action(menu_id, id, enabled, key_action);
+    context_menu_row(id, label, enabled, selected).on_click(cx.listener(
+        move |this, _event, _window, cx| {
             cx.stop_propagation();
             if enabled {
                 on_click(this, cx);
                 cx.notify();
             }
-        }))
-        .child(label)
+        },
+    ))
 }
 
 pub(crate) fn menu_separator() -> impl IntoElement {
-    div().h(px(1.0)).mx_1().my_1().bg(rgb(ui_theme::BORDER))
+    div()
+        .h(px(1.0))
+        .mx_1()
+        .my_1()
+        .bg(rgb(ui_theme::BORDER_MUTED))
 }
 
 /// 语法高亮文本：有 span 时整行一个 StyledText 元素、按 utf8 字节区间上色；
@@ -1087,16 +1089,18 @@ pub(crate) fn diff_line(
         DiffLineKind::Added => (ui_theme::DIFF_ADDED_BG, ui_theme::DIFF_ADDED_TEXT),
         DiffLineKind::Removed => (ui_theme::DIFF_REMOVED_BG, ui_theme::DIFF_REMOVED_TEXT),
         DiffLineKind::Header => (ui_theme::DIFF_HEADER_BG, ui_theme::DIFF_HEADER_TEXT),
-        DiffLineKind::Context => (COLOR_PANEL_BG, COLOR_TEXT),
+        // 上下文行与差异正文区同底色（`WB_DIFF_SURFACE`），代码区保持平整、
+        // 不随面板悬浮感分色；行号列同理，否则 gutter 会出现一条色带。
+        DiffLineKind::Context => (ui_theme::WB_DIFF_SURFACE, ui_theme::CONTENT_PRIMARY),
     };
     let is_hunk_header = kind == DiffLineKind::Header && content.starts_with("@@");
     let old_lineno = old_lineno.map(|line| line.to_string()).unwrap_or_default();
     let new_lineno = new_lineno.map(|line| line.to_string()).unwrap_or_default();
-    // hunk 头的行号列与正文同底色，避免与行号列的 CARD 底色形成色带断裂。
+    // hunk 头的行号列与正文同底色，避免与行号列的底色形成色带断裂。
     let lineno_bg = if is_hunk_header {
         ui_theme::DIFF_HUNK_BG
     } else {
-        COLOR_HEADER_BG
+        ui_theme::WB_DIFF_SURFACE
     };
     // 语法高亮只作用于正文行：文本色来自语法 span，行背景仍按 kind 表达
     // 增删语义（GitHub 式）；hunk 头/文件头不受影响。
@@ -1116,9 +1120,9 @@ pub(crate) fn diff_line(
                 // hunk 分隔行：更明显的底色 + 上下边框，与整体底色拉开层次。
                 this.border_t_1()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .bg(rgb(ui_theme::DIFF_HUNK_BG))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
             } else {
                 this.bg(rgb(bg)).text_color(rgb(fg))
             }
@@ -1138,7 +1142,7 @@ pub(crate) fn diff_line(
                         // 行号范围渲染为圆角小胶囊，进一步与正文区分。
                         this.px_2()
                             .rounded(px(ui_theme::RADIUS_XS))
-                            .bg(rgb(ui_theme::TILE))
+                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_size(px(11.0))
                     } else {

@@ -1162,6 +1162,9 @@ impl RepositoryView {
 
     /// 关闭评审历史弹窗。
     pub(crate) fn close_ai_review_history(&mut self) {
+        if self.ai_review_history.is_some() {
+            self.request_overlay_focus_restore();
+        }
         self.ai_review_history = None;
     }
 
@@ -2366,6 +2369,7 @@ impl RepositoryView {
             Err(khaslana::GitError::Credential("已取消凭据输入".into())),
         );
         self.show_next_credential_request();
+        self.request_overlay_focus_restore();
         self.apply_status_event(pending.tab_id, |this| {
             this.status = "凭据输入已取消".into();
             this.last_error = None;

@@ -28,13 +28,16 @@ impl RepositoryView {
             .w_full()
             .gap(px(ui_theme::SPACE_4))
             .child(
-                crate::ui::components::settings_card("代理模式", Some(proxy_mode_help(self.proxy_mode)))
-                    .child(
-                        crate::ui::components::settings_segmented_group()
-                            .child(self.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
-                            .child(self.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
-                            .child(self.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx)),
-                    ),
+                crate::ui::components::settings_card(
+                    "代理模式",
+                    Some(proxy_mode_help(self.proxy_mode)),
+                )
+                .child(
+                    crate::ui::components::settings_segmented_group()
+                        .child(self.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
+                        .child(self.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
+                        .child(self.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx)),
+                ),
             )
             .when(custom_enabled, |this| {
                 this.child(
@@ -44,36 +47,44 @@ impl RepositoryView {
                     )
                     .child(self.input(FieldId::ProxyHttpUrl, false, window, cx))
                     .child(self.input(FieldId::ProxyHttpsUrl, false, window, cx))
-                    .child(self.input(FieldId::ProxySocks5Url, false, window, cx)),
+                    .child(self.input(
+                        FieldId::ProxySocks5Url,
+                        false,
+                        window,
+                        cx,
+                    )),
                 )
             })
             .child(
-                crate::ui::components::settings_card("连接测试", Some("在保存前可以先测试一次代理连通性。"))
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_BODY))
-                            .line_height(px(18.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(remote_label),
-                    )
-                    .child(
-                        dialog_actions()
-                            .child(self.button(
-                                "测试代理",
-                                !self.busy,
-                                |this, _, _| this.test_network_proxy_settings(),
-                                cx,
-                            ))
-                            .child(self.primary_button(
-                                "保存",
-                                !self.busy,
-                                |this, _, cx| {
-                                    this.save_network_proxy_settings();
-                                    this.notify_settings_save("代理设置已保存", cx);
-                                },
-                                cx,
-                            )),
-                    ),
+                crate::ui::components::settings_card(
+                    "连接测试",
+                    Some("在保存前可以先测试一次代理连通性。"),
+                )
+                .child(
+                    div()
+                        .text_size(px(ui_theme::TYPE_BODY))
+                        .line_height(px(18.0))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .child(remote_label),
+                )
+                .child(
+                    dialog_actions()
+                        .child(self.button(
+                            "测试代理",
+                            !self.busy,
+                            |this, _, _| this.test_network_proxy_settings(),
+                            cx,
+                        ))
+                        .child(self.primary_button(
+                            "保存",
+                            !self.busy,
+                            |this, _, cx| {
+                                this.save_network_proxy_settings();
+                                this.notify_settings_save("代理设置已保存", cx);
+                            },
+                            cx,
+                        )),
+                ),
             )
     }
 
