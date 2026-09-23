@@ -1,13 +1,9 @@
 // 提交图谱页（MainMode::CommitGraph）：拓扑专注型的独立页面。
 //
-// 职责分工：主历史页负责「解剖单个提交」（四象限检查器），本页负责
-// 「看提交之间的关系」——全宽泳道列表 + 分支动向高亮（全谱系/仅领先 HEAD
-// 两档）+ 合并提交淡化 + 搜索过滤；底部轻量详情卡提供「在提交记录页查看」
-// 跳转（跳转后主页面四象限直接就位），返回本页时工具行开关、搜索词与
-// 滚动位置全部保留（专用模式切换不重置状态 + 持久滚动句柄注册表）。
+// 图谱工具行和泳道列表由提交记录页与独立图谱页共用；独立页保留轻量详情卡。
+// 模式切换不重置工具行、搜索词和滚动位置。
 //
-// 泳道算法与画布渲染自 history_view.rs 迁入：主历史页已去掉泳道列，
-// 本模块是泳道唯一的使用方。
+// 泳道算法与画布渲染集中在本模块，两个入口使用同一套行行为。
 
 use std::sync::Arc;
 
@@ -475,7 +471,7 @@ impl RepositoryView {
     /// 单行工具行（用户要求不浪费纵向空间）：分支动向追踪组（高亮下拉、仅领先
     /// HEAD、淡化合并提交）+ 列表范围（互斥分段控件）+ 文件过滤 chip + 搜索框。
     /// 高亮下拉放行首，弹出菜单锚定左缘即对齐触发器。
-    fn render_commit_graph_toolbar(
+    pub(crate) fn render_commit_graph_toolbar(
         &self,
         window: &gpui::Window,
         cx: &mut Context<Self>,
@@ -657,7 +653,7 @@ impl RepositoryView {
 
     /// 分支高亮下拉菜单（glass_menu，锚定在工具行下方）。
     /// 分支高亮下拉：顶部搜索框（打开即聚焦）+ 本地/远端分组列表 + 底部「关闭高亮」。
-    fn render_commit_graph_branch_menu(
+    pub(crate) fn render_commit_graph_branch_menu(
         &self,
         window: &gpui::Window,
         cx: &mut Context<Self>,
@@ -879,7 +875,7 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    fn render_commit_graph_list(
+    pub(crate) fn render_commit_graph_list(
         &self,
         search_query: String,
         cx: &mut Context<Self>,
@@ -1330,7 +1326,7 @@ impl RepositoryView {
     }
 
     /// 拖拽泳道列宽期间的窗口级鼠标事件承载层：无命中区，不拦截列表点击。
-    fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         gpui::canvas(
             |_, _, _| (),

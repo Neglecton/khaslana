@@ -388,9 +388,12 @@ const MIN_COLUMN_WIDTH: f32 = 240.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const CHANGE_ROW_HEIGHT: f32 = 36.0;
 // 提交详情区高度（历史检查器上半部）：默认紧凑展示摘要+正文+元信息，可拖拽调整。
-const DEFAULT_HISTORY_DETAILS_HEIGHT: f32 = 260.0;
+const DEFAULT_HISTORY_DETAILS_HEIGHT: f32 = 140.0;
 const MIN_HISTORY_DETAILS_HEIGHT: f32 = 120.0;
 const MAX_HISTORY_DETAILS_HEIGHT: f32 = 720.0;
+const DEFAULT_HISTORY_INSPECTOR_HEIGHT: f32 = 360.0;
+const MIN_HISTORY_INSPECTOR_HEIGHT: f32 = 120.0;
+const MAX_HISTORY_INSPECTOR_HEIGHT: f32 = 720.0;
 const DEFAULT_HISTORY_FILES_WIDTH: f32 = 520.0;
 const MIN_HISTORY_FILES_WIDTH: f32 = 260.0;
 // 提交导航列上限放宽到 1080：宽屏下摘要 + ref 徽标有足够信息密度可铺更宽。
@@ -2080,6 +2083,7 @@ pub(crate) enum ResizeTarget {
     HistoryFiles,
     HistoryInspectorFiles,
     HistoryDetails,
+    HistoryInspectorHeight,
     HistoryGraph,
     BrowseFiles,
 }
@@ -3325,9 +3329,9 @@ pub(crate) struct RepositoryView {
     pub(crate) history_files_width: f32,
     /// 历史检查器内「提交文件 | 差异」分栏宽度（四象限下半部，视图偏好不持久化）。
     pub(crate) history_inspector_files_width: f32,
-    /// 提交详情区高度与折叠状态（视图偏好，不持久化）：`None` 表示未手动
-    /// 调整过，检查器使用默认详情高度。
+    /// 提交详情区和下方检查器卡片的高度偏好；详情高度为 `None` 时用默认值。
     pub(crate) history_details_height: Option<f32>,
+    pub(crate) history_inspector_height: f32,
     pub(crate) history_details_collapsed: bool,
     /// 历史检查器顶部窗口坐标（1px 标记 canvas 每帧记录）：首次拖拽时，
     /// 用分割条点击位置减去该坐标推导详情区实际高度并固化。
@@ -3340,6 +3344,7 @@ pub(crate) struct RepositoryView {
     resizing_history_files_width: Option<ResizeState>,
     resizing_history_inspector_files_width: Option<ResizeState>,
     resizing_history_details_height: Option<ResizeState>,
+    resizing_history_inspector_height: Option<ResizeState>,
     resizing_browse_tree_width: Option<ResizeState>,
     resizing_history_graph_width: Option<ResizeState>,
     scroll_handles: RefCell<HashMap<String, ScrollHandle>>,
@@ -3894,7 +3899,7 @@ impl Render for RepositoryView {
                                 MainMode::Conflict => self
                                     .render_conflict_workbench(window, cx)
                                     .into_any_element(),
-                                MainMode::History => self.render_history_view(cx).into_any_element(),
+                                MainMode::History => self.render_history_view(window, cx).into_any_element(),
                                 MainMode::Workflow => {
                                     self.render_workflow_view(window, cx).into_any_element()
                                 }

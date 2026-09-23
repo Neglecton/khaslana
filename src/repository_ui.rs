@@ -1579,7 +1579,10 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let entity = cx.entity();
         let active = self.resize_state(target).is_some();
-        let horizontal = target == ResizeTarget::HistoryDetails;
+        let horizontal = matches!(
+            target,
+            ResizeTarget::HistoryDetails | ResizeTarget::HistoryInspectorHeight
+        );
         // 弹窗或弹层菜单打开期间分割线不响应：不显示拖拽光标、不高亮、不响应鼠标，
         // 避免弹层边缘容差区内的悬停/点击被分割线抢走。
         let interactive = column_splitter_accepts_mouse_events(
@@ -1591,6 +1594,8 @@ impl RepositoryView {
         // 页面内部相邻面板仍用 8px。
         let gap = if target == ResizeTarget::Sidebar {
             crate::chrome_view::SHELL_PADDING
+        } else if target == ResizeTarget::HistoryInspectorHeight {
+            12.0
         } else {
             ui_theme::SPACE_2
         };
@@ -1631,19 +1636,37 @@ impl RepositoryView {
                 }),
             )
             .child(if horizontal {
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .top(px(3.0))
-                    .h(px(2.0))
-                    .rounded_full()
-                    .when(!active, |this| this.opacity(0.0))
-                    .when(interactive && !active, |this| {
-                        this.group_hover("column-splitter", |this| this.opacity(1.0))
-                    })
-                    .bg(indicator_color)
-                    .into_any_element()
+                if target == ResizeTarget::HistoryInspectorHeight {
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .top(px(4.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .w(px(48.0))
+                                .h(px(4.0))
+                                .rounded_full()
+                                .bg(indicator_color),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .top(px(3.0))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .when(!active, |this| this.opacity(0.0))
+                        .when(interactive && !active, |this| {
+                            this.group_hover("column-splitter", |this| this.opacity(1.0))
+                        })
+                        .bg(indicator_color)
+                        .into_any_element()
+                }
             } else {
                 div()
                     .absolute()

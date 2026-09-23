@@ -94,6 +94,12 @@ impl RepositoryView {
             history_details_height: layout_preferences
                 .history_details_height
                 .map(|height| height.clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT)),
+            history_inspector_height: layout_preferences
+                .history_inspector_height
+                .map(|height| {
+                    height.clamp(MIN_HISTORY_INSPECTOR_HEIGHT, MAX_HISTORY_INSPECTOR_HEIGHT)
+                })
+                .unwrap_or(DEFAULT_HISTORY_INSPECTOR_HEIGHT),
             history_details_collapsed: layout_preferences.history_details_collapsed,
             history_details_top_hint: Arc::new(Cell::new(0.0)),
             browse_tree_width: layout_preferences
@@ -110,6 +116,7 @@ impl RepositoryView {
             resizing_history_files_width: None,
             resizing_history_inspector_files_width: None,
             resizing_history_details_height: None,
+            resizing_history_inspector_height: None,
             resizing_browse_tree_width: None,
             resizing_history_graph_width: None,
             scroll_handles: RefCell::new(HashMap::new()),
@@ -814,6 +821,7 @@ impl RepositoryView {
             history_graph_width: Some(self.history_graph_width),
             browse_tree_width: Some(self.browse_tree_width),
             history_details_height: self.history_details_height,
+            history_inspector_height: Some(self.history_inspector_height),
             history_details_collapsed: self.history_details_collapsed,
         };
         if let Err(err) = self.storage.save_layout_preferences(&preferences) {

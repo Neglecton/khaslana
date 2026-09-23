@@ -373,6 +373,9 @@ impl RepositoryView {
                 self.resizing_history_inspector_files_width = Some(state)
             }
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = Some(state),
+            ResizeTarget::HistoryInspectorHeight => {
+                self.resizing_history_inspector_height = Some(state)
+            }
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = Some(state),
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = Some(state),
         }
@@ -390,6 +393,13 @@ impl RepositoryView {
                 let delta = current_y - resize.start_y;
                 let height = (resize.start_height + delta)
                     .clamp(MIN_HISTORY_DETAILS_HEIGHT, MAX_HISTORY_DETAILS_HEIGHT);
+                self.set_row_height(target, height);
+            }
+            ResizeTarget::HistoryInspectorHeight => {
+                let current_y: f32 = event.position.y.into();
+                let delta = current_y - resize.start_y;
+                let height = (resize.start_height - delta)
+                    .clamp(MIN_HISTORY_INSPECTOR_HEIGHT, MAX_HISTORY_INSPECTOR_HEIGHT);
                 self.set_row_height(target, height);
             }
             ResizeTarget::HistoryFiles => {
@@ -436,6 +446,7 @@ impl RepositoryView {
                 self.resizing_history_inspector_files_width = None
             }
             ResizeTarget::HistoryDetails => self.resizing_history_details_height = None,
+            ResizeTarget::HistoryInspectorHeight => self.resizing_history_inspector_height = None,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width = None,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width = None,
         }
@@ -457,6 +468,9 @@ impl RepositoryView {
             }
             // 双击复位：回到检查器的默认详情高度。
             ResizeTarget::HistoryDetails => self.history_details_height = None,
+            ResizeTarget::HistoryInspectorHeight => {
+                self.history_inspector_height = DEFAULT_HISTORY_INSPECTOR_HEIGHT
+            }
             ResizeTarget::BrowseFiles => self.browse_tree_width = DEFAULT_BROWSE_TREE_WIDTH,
             ResizeTarget::HistoryGraph => self.history_graph_width = DEFAULT_HISTORY_GRAPH_WIDTH,
         }
@@ -471,7 +485,7 @@ impl RepositoryView {
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width,
             ResizeTarget::HistoryFiles => self.history_files_width,
             ResizeTarget::HistoryInspectorFiles => self.history_inspector_files_width,
-            ResizeTarget::HistoryDetails => 0.0,
+            ResizeTarget::HistoryDetails | ResizeTarget::HistoryInspectorHeight => 0.0,
             ResizeTarget::BrowseFiles => self.browse_tree_width,
             ResizeTarget::HistoryGraph => self.history_graph_width,
         }
@@ -484,7 +498,7 @@ impl RepositoryView {
             ResizeTarget::WorkflowTemplates => self.workflow_templates_width = width,
             ResizeTarget::HistoryFiles => self.history_files_width = width,
             ResizeTarget::HistoryInspectorFiles => self.history_inspector_files_width = width,
-            ResizeTarget::HistoryDetails => {}
+            ResizeTarget::HistoryDetails | ResizeTarget::HistoryInspectorHeight => {}
             ResizeTarget::BrowseFiles => self.browse_tree_width = width,
             ResizeTarget::HistoryGraph => self.history_graph_width = width,
         }
@@ -495,6 +509,7 @@ impl RepositoryView {
             ResizeTarget::HistoryDetails => self
                 .history_details_height
                 .unwrap_or(DEFAULT_HISTORY_DETAILS_HEIGHT),
+            ResizeTarget::HistoryInspectorHeight => self.history_inspector_height,
             ResizeTarget::Sidebar
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
@@ -508,6 +523,7 @@ impl RepositoryView {
     fn set_row_height(&mut self, target: ResizeTarget, height: f32) {
         match target {
             ResizeTarget::HistoryDetails => self.history_details_height = Some(height),
+            ResizeTarget::HistoryInspectorHeight => self.history_inspector_height = height,
             ResizeTarget::Sidebar
             | ResizeTarget::Changes
             | ResizeTarget::WorkflowTemplates
@@ -526,6 +542,7 @@ impl RepositoryView {
             ResizeTarget::HistoryFiles => self.resizing_history_files_width,
             ResizeTarget::HistoryInspectorFiles => self.resizing_history_inspector_files_width,
             ResizeTarget::HistoryDetails => self.resizing_history_details_height,
+            ResizeTarget::HistoryInspectorHeight => self.resizing_history_inspector_height,
             ResizeTarget::BrowseFiles => self.resizing_browse_tree_width,
             ResizeTarget::HistoryGraph => self.resizing_history_graph_width,
         }
