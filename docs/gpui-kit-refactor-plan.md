@@ -344,8 +344,12 @@ Kit 主题的单向映射；窗口初始化改用 `gpui_kit::application()` + `g
      （首次落地即踩，实测覆盖前四角 `#FFFFFF`、覆盖后该处无任何绘制；
      `GWL_EXSTYLE` 的 `WS_EX_NOREDIRECTIONBITMAP` 为真证明走 DWM 直合成、透明有效）。
      去边框的副作用是左右下三边的系统缩放带一起消失（gpui 只补了顶边），
-     `render_window_resize_bands` 补 6px 透明带并在按下时发 `WM_NCLBUTTONDOWN` + 边界命中码
-     把缩放交回系统的模态循环；**真机鼠标拖拽仍待你实测一次**（本会话无前台输入通路）。
+     M3 曾用 `render_window_resize_bands` 补 6px 透明带并在按下时发 `WM_NCLBUTTONDOWN` + 边界命中码
+     把缩放交回系统的模态循环；**该方案 2026-09-23 实测无效**（无 `WS_THICKFRAME` 时
+     `DefWindowProc` 不起 size loop，`SendMessageW` 0ms 返回），已改为行业标准做法：
+     样式全保留 + `shell_frame` 子类化补偿（NCCALCSIZE 铺满、自算边框命中、放行边框按下），
+     自绘缩放带已删除。经过合成消息验证（命中码、缩放循环、最小尺寸、最大化还原），
+     **真实鼠标拖拽手感与圆角/边框线目视仍未验证**（开发会话无前台输入通路）。
    - 顶栏 60px：品牌（窄档只留标志）、仅仓库名的仓库下拉（白底薄实体 + 文件夹图标）、
      全局搜索入口（点击开 Ctrl+P 面板，面板仍持有输入状态）、刷新/获取/拉取/推送中文命令
      （窄档退化为图标 + tooltip）、贮藏/子模块恒为图标按钮、32 × 32 窗口按钮（间距 2、右边距 12）。

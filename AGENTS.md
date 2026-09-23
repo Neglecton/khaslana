@@ -74,8 +74,8 @@ Khaslana 是 Rust 桌面 Git 客户端，支持多仓库、Git 工作流、差�
 ## 7. Windows 窗口已确认决策
 
 - 透明窗口背景 + 外壳自绘 24px 圆角；Kit `Root` 显式 `.bordered(false).bg(rgba(0x00000000))`，否则圆角外会被主题底色填满。
-- `apply_window_chrome` 去除 `WS_THICKFRAME | WS_CAPTION` 并刷新边框偏移；不要回退为仅去 caption。保留自绘缩放带与系统缩放循环，弹窗打开时仍可缩放。
-- 铺满窗口的背景与遮罩共用 `window_radius()`；最大化时圆角归零并隐藏缩放带。`overflow_hidden` 不能代替圆角绘制。
+- 窗口边框采用无边框自绘标题栏的行业标准做法：`apply_window_chrome` **不动任何样式位**（`WS_THICKFRAME | WS_CAPTION` 全保留），系统缩放循环、`WM_NCHITTEST` 边框命中、Aero Snap、双击顶边最大化都依赖这套样式。自绘圆角外观由 `chrome_view::shell_frame` 子类化实现，三件事缺一不可：非最大化时 `WM_NCCALCSIZE` 把客户区四边恢复成 proposed 窗口矩形（gpui 只恢复了 top；客户区铺满后 DWM 无边框可画，白线消失）、`WM_NCHITTEST` 按系统 frame 厚度补左/右/下三边与两个下角的命中码（客户区铺满后 DefWindowProc 只给 HTCLIENT；顶边与两个上角 gpui 已按 DPI 给出）、边框命中码的 `WM_NCLBUTTONDOWN`/`DBLCLK` 直接放行 `DefWindowProc`（gpui 会把 NC 按下派发给元素树，被消费后系统缩放循环起不来）。不要改回去边框 + 自绘缩放带的方案：无 `WS_THICKFRAME` 时 DefWindowProc 不起模态缩放循环，自绘带发 `WM_NCLBUTTONDOWN` 无效（2026-09-23 实测）。
+- 铺满窗口的背景与遮罩共用 `window_radius()`；最大化时圆角归零（系统无可缩放空间，边框命中由 `IsZoomed` 短路）。`overflow_hidden` 不能代替圆角绘制。
 - 最大化按钮使用 `WindowControlArea::Max` 支持最大化/还原，不改成只最大化的 `zoom_window()`。
 - 不补自绘窗口投影、不为投影增加窗口内边距；内部面板层次按当前视觉规范处理。
 

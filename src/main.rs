@@ -3934,8 +3934,6 @@ impl Render for RepositoryView {
             .child(self.render_operation_blocker())
             .child(self.render_credentials(window, cx))
             .child(self.render_feedback_layer(cx))
-            // 窗口缩放带挂最外层：弹窗遮罩打开时窗口四边也仍然可缩放。
-            .child(self.render_window_resize_bands(window, cx))
     }
 }
 

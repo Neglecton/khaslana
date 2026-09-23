@@ -6,7 +6,7 @@
 //! 保护原生控制区。
 
 use gpui::{
-    Context, CursorStyle, IntoElement, MouseButton, Stateful, Window, WindowControlArea, div,
+    Context, CursorStyle, IntoElement, MouseButton, Window, WindowControlArea, div,
     prelude::*, px, svg,
 };
 use gpui_kit::base::Button as BaseButton;
@@ -34,27 +34,38 @@ pub(crate) const COMFORTABLE_LAYOUT_WIDTH: f32 = 1440.0;
 /// 悬浮工作台的内容区留白：四周与面板间隙同值（画板 16px）。
 pub(crate) const SHELL_PADDING: f32 = theme::SPACE_4;
 
-/// 圆角窗口的系统边框处理（Windows）。
+/// 圆角窗口的边框处理（Windows）。
 ///
-/// 外壳是「透明窗口背景 + 自绘圆角」，必须把系统边框真正去掉，否则圆角形同虚设：
-/// - `WS_THICKFRAME`：gpui-pre 为可缩放保留它，隐藏标题栏时 `DefWindowProc` 会把它
-///   变成沿窗口顶边的持久 1px 边框；圆角外是透明区域，这条线正好从那里透出来，
-///   用户看到的是「顶部圆角上的一道白线」（M1 样板实测，见验证报告 §3.5）；
-/// - `WS_CAPTION`（= `WS_BORDER | WS_DLGFRAME`）：gpui 只传 `WS_THICKFRAME`，Windows
-///   会为它补上 caption，它让客户区比窗口矩形小 16 × 8。
+/// 采用无边框/自绘标题栏窗口的行业标准做法（Electron / tao / winit / egui 同款）：
+/// **一个样式位都不动**——gpui 创建时的 `WS_THICKFRAME | WS_MAXIMIZEBOX` 与系统
+/// 补上的 `WS_CAPTION` 全部保留。系统的缩放循环、`WM_NCHITTEST` 边框命中区、
+/// Aero Snap、双击顶边最大化都依赖这套样式（实测：只去 `WS_CAPTION` 后
+/// `DefWindowProc` 的四边命中退回 `HTCLIENT`，缩放带失效；ZCode 的可缩放无边框
+/// 窗口同样是 caption + thickframe 全保留）。
 ///
-/// 去掉边框后 gpui 记录的 `border_offset` 仍是旧的 16 × 8，它会继续参与尺寸换算
-/// （最小窗 860 × 520 会变成 876 × 528）。发一条 `WM_SETTINGCHANGE` 让 gpui 重算；
-/// gpui 对非滚轮类 action 是空操作，无副作用。
+/// 自绘圆角外观不靠去样式实现，靠 `shell_frame` 子类化把客户区铺满窗口矩形：
+/// 1. `WM_NCCALCSIZE`：非最大化时把客户区 left/right/bottom 恢复成 proposed
+///    窗口矩形（gpui 只恢复了 top）。客户区与窗口等大，非客户区面积为 0，
+///    DWM 没有边框可画，M1 记录的「顶部白线 / 客户区内缩 14 × 7」随之消失
+///    （白线的来源是内缩出的非客户区环带，不是 caption 样式位本身）。
+///    最大化时保持系统内缩，内容才不会超出屏幕。
+/// 2. `WM_NCLBUTTONDOWN` / `WM_NCLBUTTONDBLCLK`：命中码落在边框区（`HTLEFT` /
+///    `HTTOP` / 两个上角 / 底边及底角）时直接放行 `DefWindowProc`。gpui 会把
+///    非客户区按下派发给元素树，被任何控件消费（`stop_propagation`）后
+///    `DefWindowProc` 就收不到，系统缩放循环起不来；放行后缩放必然走系统的
+///    modal loop（最小尺寸、DPI、贴边都由系统负责），弹窗遮罩打开时四边
+///    同样可缩放。
 ///
-/// 窗口创建后调用一次、下一帧再调用一次（系统会在窗口显示后补回 caption）。
+/// 顶边与两个上角由 gpui 自己的命中测试按 DPI 给出（`handle_hit_test_msg`），
+/// 与系统边框命中区重叠时以 gpui 优先。
+///
+/// 窗口创建后调用一次、下一帧再调用一次。
 #[cfg(windows)]
 pub(crate) fn apply_window_chrome(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetWindowLongPtrW, SPI_SETWORKAREA, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, WM_SETTINGCHANGE, WS_CAPTION,
-        WS_THICKFRAME,
+        SPI_SETWORKAREA, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+        SetWindowPos, WM_SETTINGCHANGE,
     };
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
@@ -65,12 +76,9 @@ pub(crate) fn apply_window_chrome(window: &Window) {
     };
     let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
     unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if style == 0 {
-            return;
-        }
-        let frame = WS_THICKFRAME as isize | WS_CAPTION as isize;
-        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame);
+        // 装上子类化后重算一次非客户区：CreateWindow 时的 WM_NCCALCSIZE 发生在
+        // 子类化安装之前，客户区还是内缩的，FRAMECHANGED 让窗口按新逻辑重算。
+        shell_frame::install(hwnd);
         let _ = SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
@@ -80,6 +88,10 @@ pub(crate) fn apply_window_chrome(window: &Window) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
+        // gpui 的 border_offset 是窗口创建、客户区内缩时记下的 16 × 8，它参与
+        // 尺寸换算（最小窗 860 × 520 会变成 876 × 528）。border_offset 按
+        // 「窗口矩形 − 客户区」实测，客户区铺满后应为 0；发一条 WM_SETTINGCHANGE
+        // 让 gpui 在这个时机重算（gpui 对非滚轮类 action 是空操作，无副作用）。
         SendMessageW(hwnd, WM_SETTINGCHANGE, SPI_SETWORKAREA as usize, 0);
     }
 }
@@ -87,80 +99,181 @@ pub(crate) fn apply_window_chrome(window: &Window) {
 #[cfg(not(windows))]
 pub(crate) fn apply_window_chrome(_window: &Window) {}
 
-/// 无边框窗口的缩放带宽度（逻辑像素）。
+/// 窗口边框子类化（Windows）：自绘圆角窗口保留系统样式的三个补偿。
 ///
-/// 去了系统边框，四边就再没有系统缩放带（gpui 只自己补了顶边一条），
-/// 窗口会变得只剩「顶边能拖大」——这里在左/右/下三边补一条透明带。
-pub(crate) const WINDOW_RESIZE_BAND: f32 = 6.0;
-/// 顶边留给 gpui 自己的命中测试（`get_frame_thickness` 一档），缩放带不要压上去。
-const WINDOW_RESIZE_TOP_EXCLUSION: f32 = 8.0;
-
-/// 需要我们自己补的系统缩放边（顶边与两个上角由 gpui 处理）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WindowResizeEdge {
-    Left,
-    Right,
-    Bottom,
-    BottomLeft,
-    BottomRight,
-}
-
-impl WindowResizeEdge {
-    /// 该边对应的系统命中码：`HTLEFT = 10`、`HTRIGHT = 11`、`HTBOTTOM = 15`、
-    /// `HTBOTTOMLEFT = 16`、`HTBOTTOMRIGHT = 17`（`WinUser.h`）。
-    pub(crate) const fn hit_code(self) -> u32 {
-        match self {
-            Self::Left => 10,
-            Self::Right => 11,
-            Self::Bottom => 15,
-            Self::BottomLeft => 16,
-            Self::BottomRight => 17,
-        }
-    }
-
-    const fn cursor(self) -> CursorStyle {
-        match self {
-            Self::Left | Self::Right => CursorStyle::ResizeColumn,
-            Self::Bottom => CursorStyle::ResizeRow,
-            Self::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
-            Self::BottomRight => CursorStyle::ResizeUpLeftDownRight,
-        }
-    }
-}
-
-/// 把缩放交回系统：无边框窗口的标准做法是发 `WM_NCLBUTTONDOWN` + 边界命中码，
-/// 由 `DefWindowProc` 起它自己的模态缩放循环——最小尺寸（`WM_GETMINMAXINFO`）、
-/// DPI 换算、贴边都由系统负责，我们不必自己算增量。
+/// gpui 的窗口过程把所有消息据为己有（`handle_msg` 未处理才转 DefWindowProc），
+/// 且把非客户区鼠标消息也派发给元素树，所以必须在它的 WndProc 之外包一层：
+/// - `WM_NCCALCSIZE`：非最大化时把客户区 left/right/bottom 恢复成 proposed
+///   窗口矩形（gpui 只恢复了 top），客户区与窗口等大，非客户区环带消失；
+/// - `WM_NCHITTEST`：客户区铺满后 DefWindowProc 不再给边框命中（实测左右下
+///   均返回 HTCLIENT），按系统 frame 厚度补左/右/下三边与两个下角的命中码
+///   （顶边与两个上角 gpui 已按 DPI 自行给出）；
+/// - `WM_NCLBUTTONDOWN` / `WM_NCLBUTTONDBLCLK`：命中码是边框区时直接放行
+///   DefWindowProc，系统 modal 缩放循环必然启动，不受元素树消费影响。
 #[cfg(windows)]
-pub(crate) fn start_window_resize(edge: WindowResizeEdge, window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, SendMessageW, WM_NCLBUTTONDOWN,
-    };
+mod shell_frame {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetWindowRect, IsZoomed, NCCALCSIZE_PARAMS,
+        SetWindowLongPtrW, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, WM_NCCALCSIZE, WM_NCDESTROY,
+        WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WNDPROC,
     };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-    unsafe {
-        // 命中码的 lparam 是**屏幕**坐标；缩放循环用它算起始偏移，取当前光标位置即可。
-        let mut point = POINT { x: 0, y: 0 };
-        if GetCursorPos(&mut point) == 0 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT};
+
+    /// 边框命中码区间（`WinUser.h`）：`HTLEFT = 10` … `HTBOTTOMRIGHT = 17`。
+    /// 覆盖左/右/上/下四边与四个角（`HTCAPTION`、`HTMIN/MAX/CLOSE` 等不在内）。
+    const FRAME_HIT_FIRST: u32 = 10;
+    const FRAME_HIT_LAST: u32 = 17;
+
+    thread_local! {
+        /// hwnd → 被替换掉的 gpui 窗口过程。同窗口只装一次；销毁时移除。
+        static PREV_PROCS: RefCell<HashMap<isize, isize>> = RefCell::new(HashMap::new());
+    }
+
+    /// 安装子类化；重复调用是空操作（`apply_window_chrome` 每帧都会调到）。
+    pub(crate) unsafe fn install(hwnd: HWND) {
+        let key = hwnd as isize;
+        let installed = PREV_PROCS.with(|procs| procs.borrow().contains_key(&key));
+        if installed {
             return;
         }
-        // 不进 ReleaseCapture：gpui 的鼠标按下不设系统捕获，系统的缩放循环
-        // 自己会 SetCapture（也没必要为一个 `Win32_UI_Input_KeyboardAndMouse` feature 加依赖）。
-        let lparam = ((point.y as isize) << 16) | (point.x as isize & 0xFFFF);
-        SendMessageW(hwnd, WM_NCLBUTTONDOWN, edge.hit_code() as usize, lparam);
+        // 把 gpui 的窗口过程换成我们的子类过程，原过程登记后继续转发。
+        let subclass: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
+            shell_subclass_proc;
+        let prev = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass as usize as isize) };
+        if prev == 0 {
+            return;
+        }
+        PREV_PROCS.with(|procs| {
+            procs.borrow_mut().insert(key, prev);
+        });
+    }
+
+    /// 取登记的原窗口过程；WNDPROC 本身就是 Option<fn>，未登记返回 None。
+    fn prev_wnd_proc(hwnd: HWND) -> WNDPROC {
+        PREV_PROCS
+            .with(|procs| procs.borrow().get(&(hwnd as isize)).copied())
+            .and_then(|prev| unsafe { std::mem::transmute::<isize, WNDPROC>(prev) })
+    }
+
+    fn is_frame_hit(hit: u32) -> bool {
+        (FRAME_HIT_FIRST..=FRAME_HIT_LAST).contains(&hit)
+    }
+
+    /// 系统边框带的物理像素宽（左右用 x、上下用 y，均含 padded border）。
+    fn frame_thickness(hwnd: HWND) -> (i32, i32) {
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let x = unsafe { GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) }
+            + unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
+        let y = unsafe { GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) }
+            + unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
+        (x, y)
+    }
+
+    /// 光标（lparam 是屏幕坐标）落在哪条系统缩放边上；不在边框带内返回 0。
+    ///
+    /// 顶边与两个上角不在这里判：gpui 的 `handle_hit_test_msg` 已按 DPI 给出
+    /// HTTOP/HTTOPLEFT/HTTOPRIGHT，且它的判定先于我们执行。
+    fn frame_hit_test(hwnd: HWND, lparam: LPARAM) -> isize {
+        let x = (lparam & 0xFFFF) as i16 as i32;
+        let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+        let mut rect = windows_sys::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let ok = unsafe { GetWindowRect(hwnd, &mut rect) };
+        if ok == 0 {
+            return 0;
+        }
+        let (frame_x, frame_y) = frame_thickness(hwnd);
+        let on_left = x - rect.left < frame_x;
+        let on_right = rect.right - x < frame_x;
+        let on_bottom = rect.bottom - y < frame_y;
+        if on_left && on_bottom {
+            HTBOTTOMLEFT as isize
+        } else if on_right && on_bottom {
+            HTBOTTOMRIGHT as isize
+        } else if on_left {
+            HTLEFT as isize
+        } else if on_right {
+            HTRIGHT as isize
+        } else if on_bottom {
+            HTBOTTOM as isize
+        } else {
+            0
+        }
+    }
+
+    unsafe extern "system" fn shell_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        unsafe {
+            let Some(prev) = prev_wnd_proc(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            };
+            match msg {
+                // wparam != 0 时 lparam 指向 NCCALCSIZE_PARAMS，rgrc[0] 是 proposed
+                // 窗口矩形（进入默认处理前的值）。转发给 gpui 后它已把 rgrc[0] 改成
+                // 内缩后的客户区，这里用转发前存的 proposed 矩形把三边恢复回去。
+                // 最大化时保持系统内缩：最大化窗口矩形含被屏幕裁掉的边框外扩，
+                // 客户区若铺满会把内容顶出屏幕（gpui 对 top 也是同样处理）。
+                WM_NCCALCSIZE if wparam != 0 && IsZoomed(hwnd) == 0 => {
+                    let params = lparam as *mut NCCALCSIZE_PARAMS;
+                    let proposed = (*params).rgrc[0];
+                    let result = CallWindowProcW(Some(prev), hwnd, msg, wparam, lparam);
+                    (*params).rgrc[0].left = proposed.left;
+                    (*params).rgrc[0].right = proposed.right;
+                    (*params).rgrc[0].bottom = proposed.bottom;
+                    result
+                }
+                // 客户区铺满后 DefWindowProc 不再给边框命中（实测左右下均
+                // HTCLIENT），gpui 自己只补顶边与两个上角。这里补左/右/下三边
+                // 与两个下角：gpui 或 DefWindowProc 已给出的判定（HTTOP 系列、
+                // HTCAPTION、窗口按钮）原样透传，只在结果是 HTCLIENT（=1）或
+                // 空结果时按边框带重算。
+                WM_NCHITTEST if IsZoomed(hwnd) == 0 => {
+                    let forwarded = CallWindowProcW(Some(prev), hwnd, msg, wparam, lparam);
+                    let forwarded_hit = forwarded;
+                    if forwarded_hit > 1 {
+                        return forwarded;
+                    }
+                    let hit = frame_hit_test(hwnd, lparam);
+                    if hit != 0 {
+                        hit
+                    } else {
+                        forwarded
+                    }
+                }
+                // 边框按下/双击不走 gpui 的元素树：否则任何消费按下
+                // （stop_propagation）的控件都会让 DefWindowProc 收不到消息，
+                // 系统缩放循环起不来。顶角双击的放大/还原语义由系统 loop 负责。
+                WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if is_frame_hit(wparam as u32) => {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+                WM_NCDESTROY => {
+                    let result = CallWindowProcW(Some(prev), hwnd, msg, wparam, lparam);
+                    // 窗口即将销毁：卸掉子类化并清理登记，避免遗留指向已析构窗口的记录。
+                    let restore = std::mem::transmute::<WNDPROC, isize>(Some(prev));
+                    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, restore);
+                    PREV_PROCS.with(|procs| {
+                        procs.borrow_mut().remove(&(hwnd as isize));
+                    });
+                    result
+                }
+                _ => CallWindowProcW(Some(prev), hwnd, msg, wparam, lparam),
+            }
+        }
     }
 }
-
-#[cfg(not(windows))]
-pub(crate) fn start_window_resize(_edge: WindowResizeEdge, _window: &Window) {}
 
 /// 根壳中间区使用确定高度，避免页面最小高度把状态栏和导航器底部推出视口。
 ///
@@ -753,109 +866,6 @@ impl RepositoryView {
                     .with_size(Size::Size(px(18.0)))
                     .text_color(rgb(theme::CONTENT_SECONDARY)),
             )
-    }
-
-    /// 视口四边的窗口缩放带（左/右/下 + 两个下角）。
-    ///
-    /// 窗口去掉了系统边框，系统不再给四边缩放带，只有顶边由 gpui 自行命中，
-    /// 所以这里把其余三条边补回来：透明带本身不画任何东西，按下就把该边交给
-    /// 系统的缩放循环。带子挂在最外层，弹窗遮罩之上也要能缩放窗口。
-    pub(crate) fn render_window_resize_bands(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // 最大化时四边都贴屏，没有可缩放的空间。
-        if window.is_maximized() {
-            return div().into_any_element();
-        }
-        let band = WINDOW_RESIZE_BAND;
-        let corner = band * 2.0;
-        div()
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
-            .child(self.window_resize_band(
-                WindowResizeEdge::Left,
-                move |this| {
-                    this.left(px(0.0))
-                        .top(px(WINDOW_RESIZE_TOP_EXCLUSION))
-                        .bottom(px(0.0))
-                        .w(px(band))
-                },
-                cx,
-            ))
-            .child(self.window_resize_band(
-                WindowResizeEdge::Right,
-                move |this| {
-                    this.right(px(0.0))
-                        .top(px(WINDOW_RESIZE_TOP_EXCLUSION))
-                        .bottom(px(0.0))
-                        .w(px(band))
-                },
-                cx,
-            ))
-            .child(self.window_resize_band(
-                WindowResizeEdge::Bottom,
-                move |this| {
-                    this.left(px(0.0))
-                        .right(px(0.0))
-                        .bottom(px(0.0))
-                        .h(px(band))
-                },
-                cx,
-            ))
-            // 两个下角后挂：命中优先于相邻的直边（后绘制者在上层）。
-            .child(self.window_resize_band(
-                WindowResizeEdge::BottomLeft,
-                move |this| {
-                    this.left(px(0.0))
-                        .bottom(px(0.0))
-                        .w(px(corner))
-                        .h(px(corner))
-                },
-                cx,
-            ))
-            .child(self.window_resize_band(
-                WindowResizeEdge::BottomRight,
-                move |this| {
-                    this.right(px(0.0))
-                        .bottom(px(0.0))
-                        .w(px(corner))
-                        .h(px(corner))
-                },
-                cx,
-            ))
-            .into_any_element()
-    }
-
-    fn window_resize_band(
-        &self,
-        edge: WindowResizeEdge,
-        place: impl Fn(Stateful<gpui::Div>) -> Stateful<gpui::Div> + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        place(
-            div()
-                .id(match edge {
-                    WindowResizeEdge::Left => "window-resize-left",
-                    WindowResizeEdge::Right => "window-resize-right",
-                    WindowResizeEdge::Bottom => "window-resize-bottom",
-                    WindowResizeEdge::BottomLeft => "window-resize-bottom-left",
-                    WindowResizeEdge::BottomRight => "window-resize-bottom-right",
-                })
-                .absolute()
-                .cursor(edge.cursor())
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |_this, _event, window, cx| {
-                        start_window_resize(edge, window);
-                        cx.stop_propagation();
-                    }),
-                ),
-        )
     }
 
     /// 品牌区：应用标志 + 字标。窄档只留标志，把宽度让给命令与搜索。
