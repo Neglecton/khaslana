@@ -208,6 +208,7 @@ impl RepositoryView {
             CHANGE_MENU_HEIGHT
         };
         let (x, y) = clamped_menu_position(event, window, CHANGE_MENU_WIDTH, menu_height);
+        self.reset_context_menu_selection();
         self.change_context_menu = Some(ChangeContextMenu { path, scope, x, y });
     }
 
@@ -228,6 +229,7 @@ impl RepositoryView {
         self.active_dialog = None;
         let (x, y) =
             clamped_menu_position(event, window, FILE_PATH_MENU_WIDTH, FILE_PATH_MENU_HEIGHT);
+        self.reset_context_menu_selection();
         self.file_path_context_menu = Some(FilePathContextMenu { path, x, y });
     }
 
@@ -235,7 +237,7 @@ impl RepositoryView {
         let x: f32 = event.position.x.into();
         let y: f32 = event.position.y.into();
         self.branch_context_menu.as_ref().is_some_and(|menu| {
-            point_in_menu(x, y, menu.x, menu.y, BRANCH_MENU_WIDTH, BRANCH_MENU_HEIGHT)
+            point_in_menu(x, y, menu.x, menu.y, BRANCH_MENU_WIDTH, menu.height)
         }) || self.remote_context_menu.as_ref().is_some_and(|menu| {
             point_in_menu(x, y, menu.x, menu.y, REMOTE_MENU_WIDTH, REMOTE_MENU_HEIGHT)
         }) || self.change_context_menu.as_ref().is_some_and(|menu| {
@@ -325,6 +327,7 @@ impl RepositoryView {
                     .iter()
                     .any(|reference| reference.kind == khaslana::CommitRefKind::Head)
             });
+        self.reset_context_menu_selection();
         self.commit_context_menu = Some(CommitContextMenu {
             oid,
             short_oid,

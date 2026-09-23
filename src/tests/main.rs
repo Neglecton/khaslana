@@ -731,6 +731,24 @@ fn context_menu_position_uses_viewport_bounds_for_bottom_clamp() {
 }
 
 #[test]
+fn branch_context_menu_position_uses_visible_variant_height() {
+    let current_height = sidebar_view::branch_context_menu_height(&BranchKind::Local, true, false);
+    let local_height = sidebar_view::branch_context_menu_height(&BranchKind::Local, false, true);
+    let remote_height = sidebar_view::branch_context_menu_height(&BranchKind::Remote, false, false);
+
+    assert!(current_height < remote_height);
+    assert!(remote_height < local_height);
+    assert_eq!(
+        context_menu_position(100.0, 510.0, 900.0, 540.0, BRANCH_MENU_WIDTH, current_height).1,
+        540.0 - current_height - MENU_VIEWPORT_MARGIN
+    );
+    assert_eq!(
+        context_menu_position(100.0, 510.0, 900.0, 540.0, BRANCH_MENU_WIDTH, local_height).1,
+        540.0 - local_height - MENU_VIEWPORT_MARGIN
+    );
+}
+
+#[test]
 fn diff_encoding_preferences_round_trip() {
     let mut preferences = DiffEncodingPreferences::default();
     preferences

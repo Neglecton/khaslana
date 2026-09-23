@@ -10,6 +10,10 @@ use gpui::{
     prelude::*, px, svg,
 };
 use gpui_kit::base::Button as BaseButton;
+use gpui_kit::{
+    assets::IconName,
+    component::{Icon, Sizable, Size},
+};
 
 use crate::{
     MainMode, RemoteBranchOperationKind, RepositoryView, WINDOW_CONTROLS_WIDTH,
@@ -23,8 +27,8 @@ use crate::{
 /// 原生控制区固定在标题栏最右侧，窗口不能缩到把它们挤出视口。
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 520.0;
-/// 底部状态栏高度：Kit StatusBar 单行小字，压到 10px 给中间内容区让路。
-pub(crate) const STATUS_BAR_HEIGHT: f32 = 10.0;
+/// 底部状态栏保持单行高度，避免占用工作区。
+pub(crate) const STATUS_BAR_HEIGHT: f32 = 18.0;
 pub(crate) const NARROW_LAYOUT_WIDTH: f32 = 1120.0;
 pub(crate) const COMFORTABLE_LAYOUT_WIDTH: f32 = 1440.0;
 /// 悬浮工作台的内容区留白：四周与面板间隙同值（画板 16px）。
@@ -160,10 +164,9 @@ pub(crate) fn start_window_resize(_edge: WindowResizeEdge, _window: &Window) {}
 
 /// 根壳中间区使用确定高度，避免页面最小高度把状态栏和导航器底部推出视口。
 ///
-/// 中间区自身带 SHELL_PADDING 的四周留白（顶栏与主界面之间也要有空隙），
-/// 所以这里先把上下两段留白扣掉，再交给页面容器。
+/// 中间区的固定高度已包含上下内边距，不再重复扣除留白。
 pub(crate) fn shell_content_height(viewport_height: f32) -> f32 {
-    (viewport_height - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * SHELL_PADDING).max(0.0)
+    (viewport_height - theme::TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,7 +224,7 @@ fn navigator_mode_label(mode: MainMode) -> &'static str {
     }
 }
 
-/// 顶栏命令组：药丸按钮之间 10px、与搜索框之间 12px（画板间距）。
+/// 顶栏命令组：药丸按钮之间 10px，与仓库切换器之间 12px。
 fn chrome_command_group() -> gpui::Div {
     div()
         .flex()
@@ -341,12 +344,11 @@ impl RepositoryView {
             .rounded_tr(px(theme::window_radius()))
             .child(self.render_chrome_brand(compact))
             .child(self.render_repo_switcher_button(cx))
-            .child(self.render_chrome_search_entry(compact, cx))
             .child(
                 chrome_command_group()
                     .child(self.chrome_command_button(
                         "刷新",
-                        ToolbarIcon::Refresh,
+                        IconName::RefreshCw,
                         None,
                         repo_open && !self.busy,
                         compact,
@@ -355,7 +357,7 @@ impl RepositoryView {
                     ))
                     .child(self.chrome_command_button(
                         "获取",
-                        ToolbarIcon::Fetch,
+                        IconName::CloudDownload,
                         None,
                         repo_open && remote_open && !self.busy,
                         compact,
@@ -364,7 +366,7 @@ impl RepositoryView {
                     ))
                     .child(self.chrome_command_button(
                         "拉取",
-                        ToolbarIcon::Pull,
+                        IconName::ArrowDownToLine,
                         (behind_count > 0).then(|| format!("↓{behind_count}")),
                         repo_open && remote_open && !self.busy && !merge_in_progress,
                         compact,
@@ -375,7 +377,7 @@ impl RepositoryView {
                     ))
                     .child(self.chrome_command_button(
                         "推送",
-                        ToolbarIcon::Push,
+                        IconName::ArrowUpFromLine,
                         (ahead_count > 0).then(|| format!("↑{ahead_count}")),
                         repo_open && remote_open && !self.busy && !merge_in_progress,
                         compact,
@@ -388,7 +390,7 @@ impl RepositoryView {
                     // 图标 + 文字，窄档（< 1120）自动收成纯图标，顶栏宽度可控。
                     .child(self.chrome_command_button(
                         "贮藏",
-                        ToolbarIcon::Stash,
+                        IconName::Archive,
                         None,
                         repo_open && !self.busy && !merge_in_progress,
                         compact,
@@ -397,7 +399,7 @@ impl RepositoryView {
                     ))
                     .child(self.chrome_command_button(
                         "子模块",
-                        ToolbarIcon::Submodule,
+                        IconName::Boxes,
                         None,
                         repo_open && !self.busy,
                         compact,
@@ -405,6 +407,7 @@ impl RepositoryView {
                         cx,
                     )),
             )
+            .child(self.render_chrome_search_entry(compact, cx))
             .child(self.render_chrome_drag_area())
             .child(self.render_chrome_window_controls(window))
     }
@@ -745,12 +748,11 @@ impl RepositoryView {
                 window.focus(&this.settings_center_focus, cx);
                 cx.notify();
             }))
-            .child(toolbar_icon_with_size(
-                ToolbarIcon::Settings,
-                theme::CONTENT_SECONDARY,
-                18.0,
-                18.0,
-            ))
+            .child(
+                Icon::new(IconName::Settings)
+                    .with_size(Size::Size(px(18.0)))
+                    .text_color(rgb(theme::CONTENT_SECONDARY)),
+            )
     }
 
     /// 视口四边的窗口缩放带（左/右/下 + 两个下角）。
@@ -981,7 +983,7 @@ impl RepositoryView {
     fn chrome_command_button(
         &self,
         label: &'static str,
-        icon_kind: ToolbarIcon,
+        icon_kind: IconName,
         sync_label: Option<String>,
         enabled: bool,
         compact: bool,
@@ -1040,16 +1042,15 @@ impl RepositoryView {
                     cx.notify();
                 }
             }))
-            .child(toolbar_icon_with_size(
-                icon_kind,
-                if enabled {
-                    theme::CONTENT_SECONDARY
-                } else {
-                    theme::CONTENT_TERTIARY
-                },
-                16.0,
-                16.0,
-            ))
+            .child(
+                Icon::new(icon_kind)
+                    .with_size(Size::Size(px(16.0)))
+                    .text_color(rgb(if enabled {
+                        theme::CONTENT_SECONDARY
+                    } else {
+                        theme::CONTENT_TERTIARY
+                    })),
+            )
             .when(!compact, |this| this.child(label))
             .when_some(sync_label, |this, label| {
                 this.child(

@@ -1192,6 +1192,7 @@ impl RepositoryView {
                     WORKFLOW_TEMPLATE_MENU_WIDTH,
                     WORKFLOW_TEMPLATE_MENU_HEIGHT,
                 );
+                this.reset_context_menu_selection();
                 this.workflow_template_context_menu = Some(WorkflowTemplateContextMenu {
                     path: right_click_path.clone(),
                     x,

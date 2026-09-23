@@ -4,7 +4,8 @@ use std::{
     thread,
 };
 
-use gpui::{Context, IntoElement, Window, div, prelude::*, px};
+use gpui::{App, Context, Window, div, prelude::*, px};
+use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
 
 use crate::ui::theme::rgb;
 use crate::{
@@ -56,11 +57,32 @@ pub(crate) fn clear_pending_external_merge_path() {
 }
 
 impl RepositoryView {
-    pub(crate) fn render_external_merge_settings_dialog(
+    /// 合并工具页的分组（Kit `SettingGroup` 列表）。
+    ///
+    /// 对应旧弹窗 `render_external_merge_settings_dialog` 的迁移：「外部合并」=
+    /// pending 待续提示 + 两个开关；「IDEA 程序」= 路径输入 + 浏览按钮 +
+    /// 说明 + last_error + 检测/保存按钮组。`save_label` / `detection_label`
+    /// 的计算时机与旧弹窗一致：分组每次渲染重建，捕获值等价于渲染期读取。
+    pub(crate) fn settings_external_merge_groups(
         &self,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Vec<SettingGroup> {
+        // 外层 `_window` 不进闭包：render 闭包必须 'static，函数参级的
+        // `&Window` 生命周期不够；输入框所需的 `&mut Window` 由 Kit 渲染时
+        // 经闭包参数传入。
+        let view = cx.entity();
+        // render 闭包必须 'static，每个闭包各持一份 Entity 克隆（廉价句柄）。
+        let banner_view = view.clone();
+        let enabled_value_view = view.clone();
+        let enabled_set_view = view.clone();
+        let auto_open_value_view = view.clone();
+        let auto_open_set_view = view.clone();
+        let path_view = view.clone();
+        let browse_view = view.clone();
+        let note_view = view.clone();
+        let error_view = view.clone();
+        let actions_view = view.clone();
         let pending_path = pending_external_merge_path();
         let save_label = if pending_path.is_some() {
             "保存并继续"
@@ -71,115 +93,140 @@ impl RepositoryView {
             &self.external_merge_form_settings(),
             self.external_merge_detection.as_ref(),
         );
+        let has_last_error = self.last_error.is_some();
+        let last_error_text = self.last_error.clone().unwrap_or_default();
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .when_some(pending_path, |this, path| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(ui_theme::RADIUS_XS))
-                        .border_1()
-                        .border_color(rgb(ui_theme::BORDER_STRONG))
-                        .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
-                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                        .child(format!(
-                            "尚未找到可用的 IntelliJ IDEA。配置完成后将继续解决：{path}"
-                        )),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(self.toggle_row(
-                        "external-merge-enabled",
+        vec![
+            {
+                let mut group = SettingGroup::new().item(
+                    crate::settings_center::settings_group_heading("外部合并", None),
+                );
+                // 冲突解决被 IDEA 缺失阻断时的待续提示：沿用旧弹窗的 when_some 条件。
+                if let Some(path) = pending_path {
+                    group = group.item(SettingItem::render(move |_options, _window, cx| {
+                        banner_view.update(cx, |_this, _cx| {
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .border_1()
+                                .border_color(rgb(ui_theme::BORDER_STRONG))
+                                .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .child(format!(
+                                    "尚未找到可用的 IntelliJ IDEA。配置完成后将继续解决：{path}"
+                                ))
+                        })
+                    }));
+                }
+                group
+                    .item(SettingItem::new(
                         "启用 IntelliJ IDEA 外部合并",
-                        self.external_merge_enabled_form,
-                        |this, _, _| {
-                            this.set_external_merge_enabled_form_with_detection(
-                                !this.external_merge_enabled_form,
-                            );
-                        },
-                        cx,
+                        SettingField::switch(
+                            move |cx: &App| {
+                                enabled_value_view.read(cx).external_merge_enabled_form
+                            },
+                            move |value: bool, cx: &mut App| {
+                                enabled_set_view.update(cx, |this, cx| {
+                                    this.set_external_merge_enabled_form_with_detection(value);
+                                    cx.notify();
+                                });
+                            },
+                        ),
                     ))
-                    .child(self.toggle_row(
-                        "external-merge-auto-open",
+                    .item(SettingItem::new(
                         "选中冲突文件时自动打开 IDEA",
-                        self.external_merge_auto_open_form,
-                        |this, _, _| {
-                            this.set_external_merge_auto_open_form_with_detection(
-                                !this.external_merge_auto_open_form,
-                            );
-                        },
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("IDEA 程序"),
-                    )
-                    .child(self.input(FieldId::ExternalMergeIntellijPath, false, window, cx))
-                    .child(self.button(
-                        "选择 IDEA 程序",
-                        !self.busy,
-                        |this, _, _| this.browse_external_merge_executable(),
-                        cx,
+                        SettingField::switch(
+                            move |cx: &App| {
+                                auto_open_value_view
+                                    .read(cx)
+                                    .external_merge_auto_open_form
+                            },
+                            move |value: bool, cx: &mut App| {
+                                auto_open_set_view.update(cx, |this, cx| {
+                                    this.set_external_merge_auto_open_form_with_detection(value);
+                                    cx.notify();
+                                });
+                            },
+                        ),
                     ))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child("路径可留空。留空时会依次检测 KHASLANA_IDEA_PATH、PATH 中的 idea64 / idea，以及常见 JetBrains 安装目录。开启或保存时会立即验证；未找到工具时不会静默结束，而是保留当前操作并提示配置。"),
-                    ),
-            )
-            .when(self.last_error.is_some(), |this| {
-                this.child(
-                    div()
-                        .pt_3()
-                        .border_t_1()
-                        .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::DESTRUCTIVE))
-                        .child(self.last_error.clone().unwrap_or_default()),
-                )
-            })
-            .child(
-                dialog_actions()
-                    .child(self.button(
-                        detection_label,
-                        !self.busy,
-                        |this, _, _| this.test_external_merge_settings_from_form(),
-                        cx,
+            },
+            {
+                let mut group = SettingGroup::new().item(
+                    crate::settings_center::settings_group_heading("IDEA 程序", None),
+                );
+                group = group
+                    .item(SettingItem::new(
+                        "IDEA 路径",
+                        SettingField::render(move |_options, window, cx| {
+                            path_view.update(cx, |this, cx| {
+                                div().w(px(280.0)).max_w_full().child(this.input(
+                                    FieldId::ExternalMergeIntellijPath,
+                                    false,
+                                    window,
+                                    cx,
+                                ))
+                            })
+                        }),
                     ))
-                    .child(self.primary_button(
-                        save_label,
-                        !self.busy,
-                        |this, _, cx| {
-                            this.save_external_merge_settings_from_form_and_resume();
-                            this.notify_settings_save("合并工具设置已保存", cx);
-                        },
-                        cx,
-                    )),
-            )
+                    .item(SettingItem::render(move |_options, _window, cx| {
+                        browse_view.update(cx, |this, cx| {
+                            // 按钮元素的 opaque 类型捕获 `this` / `cx` 的借用，
+                            // 不能直接作为 render 闭包返回值（要求 'static）；
+                            // 包一层 div 让按钮以子元素存入，类型即与借用脱钩
+                            // （`Element: 'static`，子元素通道不受影响）。
+                            div().child(this.button(
+                                "选择 IDEA 程序",
+                                !this.busy,
+                                |this, _, _| this.browse_external_merge_executable(),
+                                cx,
+                            ))
+                        })
+                    }))
+                    .item(SettingItem::render(move |_options, _window, cx| {
+                        note_view.update(cx, |_this, _cx| {
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .child("路径可留空。留空时会依次检测 KHASLANA_IDEA_PATH、PATH 中的 idea64 / idea，以及常见 JetBrains 安装目录。开启或保存时会立即验证；未找到工具时不会静默结束，而是保留当前操作并提示配置。")
+                        })
+                    }));
+                // last_error 行沿用旧弹窗的 when 条件。
+                if has_last_error {
+                    group = group.item(SettingItem::render(move |_options, _window, cx| {
+                        error_view.update(cx, |_this, _cx| {
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(ui_theme::DESTRUCTIVE))
+                                .child(last_error_text.clone())
+                        })
+                    }));
+                }
+                group.item(SettingItem::render(move |_options, _window, cx| {
+                    actions_view.update(cx, |this, cx| {
+                        dialog_actions()
+                            .child(this.button(
+                                detection_label,
+                                !this.busy,
+                                |this, _, _| this.test_external_merge_settings_from_form(),
+                                cx,
+                            ))
+                            .child(this.primary_button(
+                                save_label,
+                                !this.busy,
+                                |this, _, cx| {
+                                    this.save_external_merge_settings_from_form_and_resume();
+                                    this.notify_settings_save("合并工具设置已保存", cx);
+                                },
+                                cx,
+                            ))
+                    })
+                }).keywords(["检测 IDEA", "测试", "保存"]))
+            },
+        ]
     }
 
     pub(crate) fn request_external_merge_for_path(&mut self, path: String) -> bool {

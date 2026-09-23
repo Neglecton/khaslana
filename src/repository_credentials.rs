@@ -652,6 +652,7 @@ impl RepositoryView {
         self.encoding_menu_target = None;
         let (x, y) =
             clamped_menu_position(event, window, CREDENTIAL_MENU_WIDTH, CREDENTIAL_MENU_HEIGHT);
+        self.reset_context_menu_selection();
         self.credential_context_menu = Some(CredentialContextMenu { record_id, x, y });
     }
 

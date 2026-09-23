@@ -125,7 +125,11 @@ pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette)
     theme.radius = px(ui_theme::RADIUS_SM);
     theme.radius_lg = px(ui_theme::RADIUS_MD);
     theme.shadow = true;
-    theme.font_size = px(ui_theme::TYPE_BODY);
+    // `font_size` 同时是 Kit 全部 rem 尺寸（间距、行高、控件高）的换算基准：
+    // `Root::render` 会把它写进 `window.set_rem_size`。这里刻意用
+    // `KIT_REM_BASE`(16) 而不是 `TYPE_BODY`(12)，否则整套 Kit 会缩到 75%，
+    // 且 `SettingItem` 的标签列（`max_w_3_5` = 0.875rem）会被压成 10.5px。
+    theme.font_size = px(ui_theme::KIT_REM_BASE);
     theme.mono_font_size = px(ui_theme::TYPE_BODY);
     // 画板与主界面都按「悬停出现」显示滚动条，避免常驻占宽。
     theme.scrollbar_mode = ScrollbarMode::Hover;

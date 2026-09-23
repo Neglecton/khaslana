@@ -2,6 +2,7 @@
 
 use crate::*;
 use gpui_kit::base::FocusTrapElement;
+use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
 use gpui_kit::component::{Disableable, button::Button, menu::DropdownMenu};
 
 impl RepositoryView {
@@ -937,10 +938,21 @@ impl RepositoryView {
 
     // ── 更新对话框渲染 ──────────────────────────────────────────────────
 
-    pub(crate) fn render_update_settings_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let auto_check = self.update_preferences.auto_check;
-        let include_beta = self.update_preferences.include_beta;
-        let skipped = self.update_preferences.skipped_version.clone();
+    /// 更新设置页的分组（Kit `SettingGroup` 列表）。
+    ///
+    /// 两组：「更新」承载版本信息、渠道开关与检查动作；「渠道与迁移」承载
+    /// 新版本卡片与数据目录 / 程序位置入口。开关走 `SettingField::switch`
+    /// （内部即 Kit `Switch`）：值闭包读 `update_preferences`，写回闭包落状态
+    /// 并 `save_update_preferences()`；新版本卡片、目录入口与按钮组是复合
+    /// 自绘内容，走 `render` 通道原样保留。
+    ///
+    /// `Entity` 非 `Copy`：每个 `move` 闭包各自 `cx.entity()` 取一份句柄，
+    /// 多个闭包不能共用同一份（迁移样板曾在此报 use of moved value）。
+    ///
+    /// 主线把本函数接入 `settings_pane_groups` 前暂无调用方。
+    #[allow(dead_code)]
+    pub(crate) fn settings_update_groups(&self, cx: &mut Context<Self>) -> Vec<SettingGroup> {
+        let version = env!("CARGO_PKG_VERSION");
         // 新版本卡片数据：版本号 / 发布时间 / 版本说明 / 包大小。
         let available_update_display = self.available_update.as_ref().map(|manifest| {
             let size = manifest
@@ -966,279 +978,302 @@ impl RepositoryView {
         let current_db_label = khaslana::default_database_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "未知".to_string());
-        let migrate_btn = self.primary_button(
-            "迁移到便携目录",
-            true,
-            |this, _, _| {
-                this.active_dialog = Some(DialogState::PortableMigrationPrompt);
-            },
-            cx,
-        );
         // 程序位于临时/聊天软件接收/下载目录时，常驻「移动到安全目录」入口；
         // dismiss 标记只抑制启动时的自动弹窗，不影响此处手动入口。
         let relocation_available = self.exe_relocation_available();
-        // 第一个 when 闭包会 move current_db_label，这里单独克隆一份。
+        // 迁移入口的闭包会 move current_db_label，这里单独克隆一份。
         let relocation_db_label = current_db_label.clone();
-        let relocate_btn = self.primary_button(
-            "移动到安全目录",
-            true,
-            |this, _, _| {
-                this.active_dialog = Some(DialogState::ExeRelocationPrompt);
-            },
-            cx,
-        );
+        let skipped_label = self
+            .update_preferences
+            .skipped_version
+            .clone()
+            .map(|v| format!("v{v}"))
+            .unwrap_or_else(|| "无".to_string());
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(12.0))
-                    .child(
-                        div()
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("当前版本"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                    ),
-            )
-            .child(self.toggle_row(
-                "auto_check_update",
+        let update_group = SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "更新",
+                Some("启动时自动检查与手动检查；跳过版本只影响自动提示。".into()),
+            ))
+            .item(SettingItem::new(
+                "当前版本",
+                SettingField::render({
+                    let view = cx.entity();
+                    move |_options, _window, cx| {
+                        view.update(cx, |_this, _cx| {
+                            div()
+                                .text_size(px(ui_theme::TYPE_BODY))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .child(format!("v{version}"))
+                        })
+                    }
+                }),
+            ))
+            .item(SettingItem::new(
                 "自动检查更新",
-                auto_check,
-                |this, _, _| {
-                    this.update_preferences.auto_check = !this.update_preferences.auto_check;
-                    this.save_update_preferences();
-                },
-                cx,
+                SettingField::switch(
+                    {
+                        let view = cx.entity();
+                        move |cx: &App| view.read(cx).update_preferences.auto_check
+                    },
+                    {
+                        let view = cx.entity();
+                        move |value: bool, cx: &mut App| {
+                            view.update(cx, |this, cx| {
+                                this.update_preferences.auto_check = value;
+                                this.save_update_preferences();
+                                cx.notify();
+                            })
+                        }
+                    },
+                ),
             ))
             // 测试版（Beta）更新渠道：勾选后检测/安装所有版本（含预发布），
             // 未勾选只走正式版清单（与旧版本行为一致）。切换后下次检查生效。
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(self.toggle_switch(
-                        "include_beta_updates",
-                        include_beta,
-                        false,
-                        |this, _next, _, _| {
-                            this.update_preferences.include_beta =
-                                !this.update_preferences.include_beta;
-                            this.save_update_preferences();
+            .item(
+                SettingItem::new(
+                    "接收测试版（Beta）更新",
+                    SettingField::switch(
+                        {
+                            let view = cx.entity();
+                            move |cx: &App| view.read(cx).update_preferences.include_beta
                         },
-                        cx,
-                    ))
-                    .child(
+                        {
+                            let view = cx.entity();
+                            move |value: bool, cx: &mut App| {
+                                view.update(cx, |this, cx| {
+                                    this.update_preferences.include_beta = value;
+                                    this.save_update_preferences();
+                                    cx.notify();
+                                })
+                            }
+                        },
+                    ),
+                )
+                .description("开启后同时检测并安装测试版；测试版可能不稳定"),
+            )
+            .item(SettingItem::new(
+                "已跳过版本",
+                SettingField::render({
+                    let view = cx.entity();
+                    move |_options, _window, cx| {
+                        view.update(cx, |_this, _cx| {
+                            div()
+                                .text_size(px(ui_theme::TYPE_BODY))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .child(skipped_label.clone())
+                        })
+                    }
+                }),
+            ))
+            .item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        dialog_actions()
+                            .child(this.primary_button(
+                                "立即检查",
+                                !this.update_checking && !this.busy,
+                                |this, _, _| this.start_update_check(UpdateCheckTrigger::Manual),
+                                cx,
+                            ))
+                            .child(this.button(
+                                "清除跳过",
+                                this.update_preferences.skipped_version.is_some(),
+                                |this, _, _| this.clear_skipped_version(),
+                                cx,
+                            ))
+                    })
+                }
+            }));
+
+        let mut channel_group = SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "渠道与迁移",
+                Some("待安装的新版本，以及数据目录与程序位置的迁移入口。".into()),
+            ));
+        // 检测到新版本：页内常驻展示版本信息 + 版本说明 + 立即更新入口。
+        if let Some((update_version, update_published_at, update_notes, update_size)) =
+            available_update_display
+        {
+            channel_group = channel_group.item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
                         div()
-                            .id("include_beta_updates-label")
-                            .cursor(CursorStyle::PointingHand)
+                            .id("available-update-card")
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
-                            .text_size(px(12.0))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.update_preferences.include_beta =
-                                    !this.update_preferences.include_beta;
-                                this.save_update_preferences();
-                                cx.notify();
-                            }))
+                            .gap_2()
+                            .p(px(ui_theme::SPACE_3))
+                            .rounded(px(ui_theme::RADIUS_XS))
+                            .border_1()
+                            .border_color(rgb(ui_theme::PRIMARY))
+                            .bg(rgb(ui_theme::PRIMARY_SUBTLE))
                             .child(
                                 div()
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child("接收测试版（Beta）更新"),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .text_size(px(12.0))
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgb(ui_theme::PRIMARY))
+                                            .child(format!("发现新版本 v{update_version}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                            .child(format!("发布于 {update_published_at}"))
+                                            .child(format!("包大小 {update_size}")),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                    .child("开启后同时检测并安装测试版；测试版可能不稳定"),
-                            ),
-                    ),
-            )
-            // 检测到新版本：页内常驻展示版本信息 + 版本说明 + 立即更新入口。
-            .when_some(available_update_display, |container, update| {
-                let (update_version, update_published_at, update_notes, update_size) = update;
-                container.child(
-                    div()
-                        .id("available-update-card")
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p(px(ui_theme::SPACE_3))
-                        .rounded(px(ui_theme::RADIUS_XS))
-                        .border_1()
-                        .border_color(rgb(ui_theme::PRIMARY))
-                        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .text_size(px(12.0))
-                                .child(
-                                    div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgb(ui_theme::PRIMARY))
-                                        .child(format!("发现新版本 v{update_version}")),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                        .child(format!("发布于 {update_published_at}"))
-                                        .child(format!("包大小 {update_size}")),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("available-update-notes")
-                                .max_h(px(180.0))
-                                .overflow_y_scroll()
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
-                                .children(
-                                    update_notes
-                                        .lines()
-                                        .map(|line| div().child(if line.is_empty() { " ".to_string() } else { line.to_string() })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(self.primary_button(
-                                    "立即更新",
-                                    !self.update_downloading,
-                                    |this, _window, cx| {
-                                        this.start_update_download();
-                                        cx.notify();
-                                    },
-                                    cx,
-                                ))
-                                .when(self.update_downloading, |this| {
-                                    this.child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                            .child(
-                                                self.update_download_progress
-                                                    .clone()
-                                                    .unwrap_or_else(|| "准备下载...".into()),
-                                            ),
-                                    )
-                                }),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(12.0))
-                    .child(
+                                    .id("available-update-notes")
+                                    .max_h(px(180.0))
+                                    .overflow_y_scroll()
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
+                                    .children(update_notes.lines().map(|line| {
+                                        div().child(if line.is_empty() {
+                                            " ".to_string()
+                                        } else {
+                                            line.to_string()
+                                        })
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(this.primary_button(
+                                        "立即更新",
+                                        !this.update_downloading,
+                                        |this, _window, cx| {
+                                            this.start_update_download();
+                                            cx.notify();
+                                        },
+                                        cx,
+                                    ))
+                                    .when(this.update_downloading, |card| {
+                                        card.child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                                .child(
+                                                    this.update_download_progress
+                                                        .clone()
+                                                        .unwrap_or_else(|| "准备下载...".into()),
+                                                ),
+                                        )
+                                    }),
+                            )
+                    })
+                }
+            }));
+        }
+        if migration_available {
+            channel_group = channel_group.item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
                         div()
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("已跳过版本"),
-                    )
-                    .child(
-                        div().text_color(rgb(ui_theme::CONTENT_SECONDARY)).child(
-                            skipped
-                                .map(|v| format!("v{v}"))
-                                .unwrap_or_else(|| "无".to_string()),
-                        ),
-                    ),
-            )
-            .when(migration_available, move |container| {
-                container.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_size(px(12.0))
-                        .child(
-                            div()
-                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                .child("数据目录"),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(format!("当前：{current_db_label}")),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(
-                                    "可将数据从 C 盘系统目录迁移到程序所在目录，便于整体备份并减少 C 盘占用。",
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_size(px(12.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .child("数据目录"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child(format!("当前：{current_db_label}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child(
+                                        "可将数据从 C 盘系统目录迁移到程序所在目录，便于整体备份并减少 C 盘占用。",
+                                    ),
+                            )
+                            .child(this.primary_button(
+                                "迁移到便携目录",
+                                true,
+                                |this, _, _| {
+                                    this.active_dialog = Some(DialogState::PortableMigrationPrompt);
+                                },
+                                cx,
+                            ))
+                    })
+                }
+            }));
+        }
+        if relocation_available {
+            channel_group = channel_group.item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_size(px(12.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .child("程序位置"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child(format!("当前：{relocation_db_label}")),
+                            )
+                            .child(
+                                div().text_color(rgb(ui_theme::CONTENT_SECONDARY)).child(
+                                    "程序当前位于可能被清理的目录（临时/聊天软件接收/下载目录），\
+                                     建议把程序与数据移动到独立的安全目录。",
                                 ),
-                        )
-                        .child(migrate_btn),
-                )
-            })
-            .when(relocation_available, move |container| {
-                container.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_size(px(12.0))
-                        .child(
-                            div()
-                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                .child("程序位置"),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(format!("当前：{relocation_db_label}")),
-                        )
-                        .child(
-                            div().text_color(rgb(ui_theme::CONTENT_SECONDARY)).child(
-                                "程序当前位于可能被清理的目录（临时/聊天软件接收/下载目录），\
-                                 建议把程序与数据移动到独立的安全目录。",
-                            ),
-                        )
-                        .child(relocate_btn),
-                )
-            })
-            .child(
-                dialog_actions()
-                    .child(self.primary_button(
-                        "立即检查",
-                        !self.update_checking && !self.busy,
-                        |this, _, _| this.start_update_check(UpdateCheckTrigger::Manual),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "清除跳过",
-                        self.update_preferences.skipped_version.is_some(),
-                        |this, _, _| this.clear_skipped_version(),
-                        cx,
-                    )),
-            )
+                            )
+                            .child(this.primary_button(
+                                "移动到安全目录",
+                                true,
+                                |this, _, _| {
+                                    this.active_dialog = Some(DialogState::ExeRelocationPrompt);
+                                },
+                                cx,
+                            ))
+                    })
+                }
+            }));
+        }
+
+        vec![update_group, channel_group]
     }
 
-    /// 「关于」页：无设置项，展示当前版本号、发布渠道与版本说明
-    /// （版本说明由发版流水线经 KHASLANA_RELEASE_NOTES 编译期嵌入；本地
-    /// 开发构建或未配置时显示占位文案）。
-    pub(crate) fn render_about_settings(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    /// 「关于」页的分组（Kit `SettingGroup` 列表）。
+    ///
+    /// 纯展示条目：版本号 + 渠道徽标 + 版本说明，没有可写字段，因此不声明
+    /// `on_reset` / `default_value`——页头「重置」按钮对本页不适用
+    /// （`resettable` 由页面构建方控制，展示项也不会被判定为脏）。
+    /// 版本说明由发版流水线经 KHASLANA_RELEASE_NOTES 编译期嵌入；本地
+    /// 开发构建或未配置时显示占位文案。
+    ///
+    /// 主线把本函数接入 `settings_pane_groups` 前暂无调用方。
+    #[allow(dead_code)]
+    pub(crate) fn settings_about_groups(&self, cx: &mut Context<Self>) -> Vec<SettingGroup> {
         let version = env!("CARGO_PKG_VERSION");
         let channel = update::current_channel();
         let notes = update::current_release_notes();
@@ -1247,81 +1282,80 @@ impl RepositoryView {
         } else {
             notes.to_string()
         };
+        let beta_channel = channel == "测试版";
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_PAGE_TITLE))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child(format!("Khaslana v{version}")),
-                    )
-                    .child(
-                        // 渠道徽标：按版本号预发布段推断（正式版 / 测试版）。
-                        div()
-                            .id("about-channel-badge")
-                            .flex_none()
-                            .px(px(6.0))
-                            .py(px(1.0))
-                            .rounded(px(ui_theme::RADIUS_PILL))
-                            .bg(rgb(if channel == "测试版" {
-                                ui_theme::FEEDBACK_WARNING_BG
-                            } else {
-                                ui_theme::PRIMARY_SUBTLE
-                            }))
-                            .text_size(px(10.0))
-                            .text_color(rgb(if channel == "测试版" {
-                                ui_theme::FEEDBACK_WARNING_TEXT
-                            } else {
-                                ui_theme::PRIMARY
-                            }))
-                            .child(channel),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("版本说明"),
-                    )
-                    .child(
-                        div()
-                            .id("about-release-notes")
-                            .max_h(px(280.0))
-                            .overflow_y_scroll()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
-                            .children(notes_display.lines().map(|line| {
-                                div().child(if line.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    line.to_string()
-                                })
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("更新渠道与自动检查可在「更新设置」中配置"),
-            )
+        vec![SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "版本",
+                Some("更新渠道与自动检查可在「更新设置」中配置。".into()),
+            ))
+            .item(SettingItem::new(
+                "版本号",
+                SettingField::render({
+                    let view = cx.entity();
+                    move |_options, _window, cx| {
+                        view.update(cx, |_this, _cx| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(ui_theme::TYPE_BODY))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                        .child(format!("Khaslana v{version}")),
+                                )
+                                .child(
+                                    // 渠道徽标：按版本号预发布段推断（正式版 / 测试版）。
+                                    div()
+                                        .id("about-channel-badge")
+                                        .flex_none()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(ui_theme::RADIUS_PILL))
+                                        .bg(rgb(if beta_channel {
+                                            ui_theme::FEEDBACK_WARNING_BG
+                                        } else {
+                                            ui_theme::PRIMARY_SUBTLE
+                                        }))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(if beta_channel {
+                                            ui_theme::FEEDBACK_WARNING_TEXT
+                                        } else {
+                                            ui_theme::PRIMARY
+                                        }))
+                                        .child(channel),
+                                )
+                        })
+                    }
+                }),
+            ))
+            .item(SettingItem::new(
+                "版本说明",
+                SettingField::render({
+                    let view = cx.entity();
+                    move |_options, _window, cx| {
+                        view.update(cx, |_this, _cx| {
+                            div()
+                                .id("about-release-notes")
+                                .max_h(px(280.0))
+                                .overflow_y_scroll()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                // GPUI 无 pre-wrap：按行拆分渲染，空行用空格占位保持行高。
+                                .children(notes_display.lines().map(|line| {
+                                    div().child(if line.is_empty() {
+                                        " ".to_string()
+                                    } else {
+                                        line.to_string()
+                                    })
+                                }))
+                        })
+                    }
+                }),
+            ))]
     }
 
     fn render_new_version_dialog(
@@ -2283,98 +2317,119 @@ impl RepositoryView {
             )
     }
 
-    pub(crate) fn render_credential_manager_dialog(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let rows = if self.credential_records.is_empty() {
-            vec![
-                placeholder_row("暂无已保存凭据。远程操作时勾选保存后会出现在这里。")
-                    .into_any_element(),
-            ]
-        } else {
-            self.credential_records
-                .iter()
-                .cloned()
-                .map(|record| self.credential_record_row(record, cx).into_any_element())
-                .collect::<Vec<_>>()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div().flex().items_center().justify_between().child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(self.primary_button(
-                            "添加凭据",
-                            !self.busy,
-                            |this, _, _| this.open_credential_form(),
-                            cx,
-                        ))
-                        .child(self.button(
-                            "刷新",
-                            !self.busy,
-                            |this, _, _| this.reload_credential_records("凭据列表已刷新"),
-                            cx,
-                        )),
+    /// 凭据管理页的分组（Kit `SettingGroup` 列表）。
+    ///
+    /// 一组「凭据」：操作按钮 + 凭据列表（行内点击看详情、右键菜单、测试 /
+    /// 删除）；新增/编辑表单打开时内嵌在列表之后。表单的 Enter 提交、IME
+    /// 与操作遮罩语义都挂在 `active_dialog == CredentialForm` 上，不随承载
+    /// 从模态弹窗改为页内分区而改变。表单输入全部经
+    /// `this.input(FieldId, compact, window, cx)` 复用 `src/ui/fields.rs` 的
+    /// `TextFieldState` 宿主，不新建第二套输入状态。
+    ///
+    /// `Entity` 非 `Copy`：每个 `move` 闭包各自 `cx.entity()` 取一份句柄。
+    ///
+    /// 主线把本函数接入 `settings_pane_groups` 前暂无调用方。
+    #[allow(dead_code)]
+    pub(crate) fn settings_credentials_groups(&self, cx: &mut Context<Self>) -> Vec<SettingGroup> {
+        let group = SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "凭据",
+                Some(
+                    "密文仅保存在系统凭据管理器；这里不显示、不复制密码、PAT 或 SSH 密码短语。"
+                        .into(),
                 ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(
-                        "密文仅保存在系统凭据管理器；这里不显示、不复制密码、PAT 或 SSH 密码短语。",
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .min_h(px(0.0))
-                    .max_h(px(440.0))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .rounded_sm()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                        cx.stop_propagation();
+            ))
+            .item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(this.primary_button(
+                                "添加凭据",
+                                !this.busy,
+                                |this, _, _| this.open_credential_form(),
+                                cx,
+                            ))
+                            .child(this.button(
+                                "刷新",
+                                !this.busy,
+                                |this, _, _| this.reload_credential_records("凭据列表已刷新"),
+                                cx,
+                            ))
                     })
-                    .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
-                        cx.stop_propagation();
-                    })
-                    .child(self.credential_manager_header())
-                    .child({
-                        let handle = self.scroll_handle("credential-record-list");
-                        let content = div()
-                            .id("credential-record-list")
+                }
+            }))
+            .item(SettingItem::render({
+                let view = cx.entity();
+                move |_options, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        let rows = if this.credential_records.is_empty() {
+                            vec![
+                                placeholder_row(
+                                    "暂无已保存凭据。远程操作时勾选保存后会出现在这里。",
+                                )
+                                .into_any_element(),
+                            ]
+                        } else {
+                            this.credential_records
+                                .iter()
+                                .cloned()
+                                .map(|record| {
+                                    this.credential_record_row(record, cx).into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        div()
                             .flex()
                             .flex_col()
-                            .flex_1()
                             .w_full()
-                            .gap_0()
                             .min_w(px(0.0))
                             .min_h(px(0.0))
-                            .overflow_y_scroll()
-                            .track_scroll(&handle)
-                            .children(rows)
-                            .into_any_element();
-                        scrollable_frame_when(
-                            "credential-record-list",
-                            ScrollbarMode::Vertical,
-                            content,
-                            handle,
-                            !self.credential_records.is_empty(),
-                            cx,
-                        )
-                    }),
-            )
+                            .max_h(px(440.0))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(rgb(ui_theme::BORDER_MUTED))
+                            .rounded_sm()
+                            .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(this.credential_manager_header())
+                            .child({
+                                let handle = this.scroll_handle("credential-record-list");
+                                let content = div()
+                                    .id("credential-record-list")
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .w_full()
+                                    .gap_0()
+                                    .min_w(px(0.0))
+                                    .min_h(px(0.0))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&handle)
+                                    .children(rows)
+                                    .into_any_element();
+                                scrollable_frame_when(
+                                    "credential-record-list",
+                                    ScrollbarMode::Vertical,
+                                    content,
+                                    handle,
+                                    !this.credential_records.is_empty(),
+                                    cx,
+                                )
+                            })
+                    })
+                }
+            }));
+
+
+        vec![group]
     }
 
     fn render_credential_details_dialog(

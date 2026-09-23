@@ -19,7 +19,6 @@ use crate::{DiffHeaderTarget, RepositoryView, ui::theme as ui_theme};
 // 新 UI 代码的导入来源），因此是私有 use 而非 pub(crate) re-export。
 // 别名来源已随视觉 token 统一迁移到 WB_*/CONTENT_*/STATE_* 新语义色。
 use crate::ui::theme::BORDER_MUTED as COLOR_BORDER;
-use crate::ui::theme::CONTENT_PRIMARY as COLOR_TEXT;
 use crate::ui::theme::CONTENT_SECONDARY as COLOR_TEXT_FAINT;
 use crate::ui::theme::CONTENT_SECONDARY as COLOR_TEXT_MUTED;
 use crate::ui::theme::STATE_HOVER as COLOR_BLUE_SOFT;
@@ -902,25 +901,35 @@ pub(crate) fn context_menu_row(
     enabled: bool,
     selected: bool,
 ) -> Stateful<Div> {
+    let destructive = id.starts_with("delete-") || id.starts_with("discard-") || id == "reset-hard";
     div()
         .id(format!("context-menu-{id}"))
-        .px_3()
-        .py_1()
+        .mx_1()
+        .px_2()
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .rounded(px(ui_theme::RADIUS_XS))
         .text_color(if !enabled {
-            rgb(COLOR_TEXT_FAINT)
+            rgb(ui_theme::CONTENT_TERTIARY)
         } else if selected {
             rgb(ui_theme::PRIMARY)
+        } else if destructive {
+            rgb(ui_theme::DESTRUCTIVE)
         } else {
-            rgb(COLOR_TEXT)
+            rgb(ui_theme::CONTENT_PRIMARY)
         })
         .bg(if selected {
             rgb(ui_theme::STATE_SELECTION)
         } else {
             rgb(ui_theme::WB_PANEL)
         })
-        .cursor_pointer()
         .when(enabled, |this| {
-            this.hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
+            this.cursor_pointer()
+                .hover(|this| {
+                    this.bg(rgb(ui_theme::STATE_SELECTION))
+                        .text_color(rgb(ui_theme::PRIMARY))
+                })
         })
         .child(label)
 }
@@ -945,6 +954,8 @@ pub(crate) fn context_menu_item(
             as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
     };
     let selected = view.register_context_menu_action(menu_id, id, enabled, key_action);
+    let hover_menu_id = menu_id.to_string();
+    let hover_id = id.to_string();
     context_menu_row(id, label, enabled, selected).on_click(cx.listener(
         move |this, _event, _window, cx| {
             cx.stop_propagation();
@@ -954,6 +965,11 @@ pub(crate) fn context_menu_item(
             }
         },
     ))
+    .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
+        if enabled && this.select_context_menu_action(&hover_menu_id, &hover_id) {
+            cx.notify();
+        }
+    }))
 }
 
 /// 右键菜单条目（带 Context 版）：动作需要 `Context`（剪贴板、弹窗等）时用。
@@ -974,6 +990,8 @@ pub(crate) fn context_menu_item_with_context(
         ) as Rc<dyn Fn(&mut RepositoryView, &mut Context<RepositoryView>)>
     };
     let selected = view.register_context_menu_action(menu_id, id, enabled, key_action);
+    let hover_menu_id = menu_id.to_string();
+    let hover_id = id.to_string();
     context_menu_row(id, label, enabled, selected).on_click(cx.listener(
         move |this, _event, _window, cx| {
             cx.stop_propagation();
@@ -983,6 +1001,11 @@ pub(crate) fn context_menu_item_with_context(
             }
         },
     ))
+    .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
+        if enabled && this.select_context_menu_action(&hover_menu_id, &hover_id) {
+            cx.notify();
+        }
+    }))
 }
 
 pub(crate) fn menu_separator() -> impl IntoElement {

@@ -125,6 +125,7 @@ impl RepositoryView {
             progress_phase: 0,
             active_dialog: None,
             settings_center: None,
+            settings_center_generation: 0,
             shortcut_bindings: Self::load_shortcut_bindings(&storage),
             workflow_shortcut_bindings: Self::load_workflow_shortcut_bindings(&storage),
             recording_shortcut: None,
@@ -2133,8 +2134,8 @@ impl RepositoryView {
     }
 
     /// 登记一个右键菜单条目的键盘动作（渲染时与视觉条目同序调用），
-    /// 返回该条目当前是否被键盘选中（供高亮）。菜单身份变化时重置
-    /// 动作表与选中；首个可用条目自动选中（Enter 直接执行它）。
+    /// 返回该条目当前是否被选中（供高亮）。菜单身份变化时重置
+    /// 动作表与选中；打开菜单不预选，鼠标或方向键再确定选中项。
     pub(crate) fn register_context_menu_action(
         &self,
         menu_id: &str,
@@ -2154,14 +2155,35 @@ impl RepositoryView {
             enabled,
             action,
         });
-        match keyboard.selected {
-            Some(selected) => selected == index,
-            None if enabled => {
-                keyboard.selected = Some(index);
-                true
-            }
-            None => false,
+        keyboard.selected == Some(index) && enabled
+    }
+
+    /// 每次打开菜单都丢弃上一次的选择；同类菜单换目标也算新菜单。
+    pub(crate) fn reset_context_menu_selection(&self) {
+        let mut keyboard = self.context_menu_keyboard.borrow_mut();
+        keyboard.menu_id = None;
+        keyboard.selected = None;
+        keyboard.actions.clear();
+    }
+
+    /// 鼠标经过条目时同步键盘选中，确保菜单中只有一处高亮。
+    pub(crate) fn select_context_menu_action(&self, menu_id: &str, id: &str) -> bool {
+        let mut keyboard = self.context_menu_keyboard.borrow_mut();
+        if keyboard.menu_id.as_deref() != Some(menu_id) {
+            return false;
         }
+        let Some(index) = keyboard
+            .actions
+            .iter()
+            .position(|action| action.id == id && action.enabled)
+        else {
+            return false;
+        };
+        if keyboard.selected == Some(index) {
+            return false;
+        }
+        keyboard.selected = Some(index);
+        true
     }
 
     /// 选中失效（未选 / 指向禁用项）时吸附到首个可用条目。
@@ -2178,7 +2200,6 @@ impl RepositoryView {
 
     /// ↑/↓ 移动键盘选中：只在可用条目间循环（分隔线不登记、禁用项跳过）。
     fn move_context_menu_selection(&mut self, delta: i32) {
-        self.snap_context_menu_selection();
         let mut keyboard = self.context_menu_keyboard.borrow_mut();
         let selectable: Vec<usize> = keyboard
             .actions
@@ -2367,6 +2388,7 @@ impl RepositoryView {
     /// 打开设置中心，默认显示凭据管理分类。
     pub(crate) fn open_settings_center(&mut self) {
         self.close_popups();
+        self.settings_center_generation = self.settings_center_generation.wrapping_add(1);
         self.settings_center = Some(SettingsCategory::Credentials);
         self.reload_credential_records("凭据列表已加载");
     }
@@ -2374,11 +2396,37 @@ impl RepositoryView {
     /// 通知气泡「点击查看更新」的直达入口：打开设置中心并定位到更新设置页。
     pub(crate) fn open_update_settings_center(&mut self) {
         self.close_popups();
+        self.settings_center_generation = self.settings_center_generation.wrapping_add(1);
         self.settings_center = Some(SettingsCategory::Update);
+    }
+
+    /// 设置中心的分类键盘导航：按固定顺序循环切换（↑ 上一个、↓ 下一个）。
+    ///
+    /// 焦点停在 overlay 容器时用 ↑/↓ 快速切换分类；焦点进入搜索框或
+    /// 内容控件后，方向键归控件自身语义。
+    pub(crate) fn cycle_settings_category(&mut self, forward: bool) {
+        let order = crate::settings_center::SETTINGS_CATEGORY_ORDER;
+        let current = self
+            .settings_center
+            .map(crate::settings_center::settings_page_index)
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % order.len()
+        } else {
+            (current + order.len() - 1) % order.len()
+        };
+        self.select_settings_category(order[next]);
     }
 
     /// 切换设置中心的分类。
     pub(crate) fn select_settings_category(&mut self, category: SettingsCategory) {
+        // Kit 原版 Settings 只在创建时读取默认页；程序选页要换一个实例 ID。
+        self.settings_center_generation = self.settings_center_generation.wrapping_add(1);
+        self.apply_settings_category(category);
+    }
+
+    /// Kit 侧栏或搜索已自行切页时只同步业务状态，保留搜索与侧栏宽度。
+    pub(crate) fn apply_settings_category(&mut self, category: SettingsCategory) {
         self.settings_center = Some(category);
         match category {
             SettingsCategory::Credentials => {

@@ -661,6 +661,7 @@ pub(crate) fn glass_panel() -> Div {
 /// 菜单容器 — 弹出菜单使用
 pub(crate) fn glass_menu() -> Div {
     glass_panel()
+        .rounded(px(theme::RADIUS_SM))
         .py_1()
         .flex()
         .flex_col()

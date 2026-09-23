@@ -9,7 +9,7 @@ use gpui_kit::base::FocusTrapElement;
 use khaslana::{BranchInfo, BranchKind, BranchName, RemoteInfo, StashInfo, TagInfo};
 
 use crate::{
-    BRANCH_MENU_HEIGHT, BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, REMOTE_MENU_HEIGHT,
+    BRANCH_MENU_WIDTH, BranchContextMenu, FieldId, REMOTE_MENU_HEIGHT,
     REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT, STASH_MENU_WIDTH,
     ScrollbarMode, SidebarSection, SidebarSectionState, StashContextMenu, TAG_MENU_HEIGHT,
     TAG_MENU_WIDTH, TagContextMenu, clamped_menu_position, context_menu_item,
@@ -20,6 +20,25 @@ use crate::{
         theme as ui_theme,
     },
 };
+
+/// 与可见条目使用同一套高度，避免短菜单按最长菜单偏移或误判外部点击。
+pub(crate) fn branch_context_menu_height(kind: &BranchKind, is_head: bool, has_upstream: bool) -> f32 {
+    let rows = if *kind == BranchKind::Local {
+        3 + usize::from(has_upstream) + if is_head { 0 } else { 5 }
+    } else if is_head {
+        5
+    } else {
+        8
+    };
+    let separators = if *kind == BranchKind::Local {
+        if is_head { usize::from(has_upstream) } else { 2 }
+    } else if is_head {
+        1
+    } else {
+        3
+    };
+    10.0 + rows as f32 * 28.0 + separators as f32 * 9.0
+}
 
 #[cfg(test)]
 fn sidebar_branch_matches_query(branch: &BranchInfo, query: &str) -> bool {
@@ -886,6 +905,7 @@ impl RepositoryView {
                     this.encoding_menu_target = None;
                     let (x, y) =
                         clamped_menu_position(event, window, REMOTE_MENU_WIDTH, REMOTE_MENU_HEIGHT);
+                    this.reset_context_menu_selection();
                     this.remote_context_menu = Some(RemoteContextMenu {
                         remote: right_click_name.clone(),
                         x,
@@ -961,6 +981,7 @@ impl RepositoryView {
                     this.active_dialog = None;
                     let (x, y) =
                         clamped_menu_position(event, window, TAG_MENU_WIDTH, TAG_MENU_HEIGHT);
+                    this.reset_context_menu_selection();
                     this.tag_context_menu = Some(TagContextMenu {
                         tag: right_click_name.clone(),
                         x,
@@ -1017,6 +1038,7 @@ impl RepositoryView {
                     this.active_dialog = None;
                     let (x, y) =
                         clamped_menu_position(event, window, STASH_MENU_WIDTH, STASH_MENU_HEIGHT);
+                    this.reset_context_menu_selection();
                     this.stash_context_menu = Some(StashContextMenu { index, x, y });
                     cx.notify();
                 }),
@@ -1033,6 +1055,7 @@ impl RepositoryView {
         let right_click_name = branch.name.clone();
         let right_click_kind = branch.kind.clone();
         let right_click_is_head = branch.is_head;
+        let right_click_has_upstream = branch.upstream.is_some();
         let selected = self.selected_branch.as_deref() == Some(&branch.name);
         let upstream = branch.upstream.clone();
         let ahead = branch.ahead.unwrap_or(0);
@@ -1152,12 +1175,19 @@ impl RepositoryView {
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.selected_branch = Some(right_click_name.clone());
                 this.active_dialog = None;
-                let (x, y) =
-                    clamped_menu_position(event, window, BRANCH_MENU_WIDTH, BRANCH_MENU_HEIGHT);
+                let height = branch_context_menu_height(
+                    &right_click_kind,
+                    right_click_is_head,
+                    right_click_has_upstream,
+                );
+                let (x, y) = clamped_menu_position(event, window, BRANCH_MENU_WIDTH, height);
+                this.reset_context_menu_selection();
                 this.branch_context_menu = Some(BranchContextMenu {
                     branch: right_click_name.clone(),
                     kind: right_click_kind.clone(),
                     is_head: right_click_is_head,
+                    has_upstream: right_click_has_upstream,
+                    height,
                     x,
                     y,
                 });
@@ -1177,14 +1207,7 @@ impl RepositoryView {
         };
         let is_local = menu.kind == BranchKind::Local;
         let merge_in_progress = self.merge_in_progress();
-        let can_pull_local = is_local
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.branches.iter().any(|branch| {
-                    branch.kind == BranchKind::Local
-                        && branch.name == menu.branch
-                        && branch.upstream.is_some()
-                })
-            });
+        let can_pull_local = is_local && menu.has_upstream;
 
         glass_menu()
             .id("branch-menu")
@@ -1221,115 +1244,91 @@ impl RepositoryView {
                 ))
                 .child(menu_separator())
             })
-            .child(context_menu_item(
+            .when(is_local && !menu.is_head, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "checkout",
                 "切换到此分支",
-                is_local && !menu.is_head && !self.busy && !merge_in_progress,
+                !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.checkout(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
+            )))
+            .when(can_pull_local, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "pull",
                 "拉取此分支更新",
-                can_pull_local && !self.busy && !merge_in_progress,
+                !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.pull_local_branch_update(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
+            )))
+            .when(!menu.is_head, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "merge",
                 "合并到当前分支",
-                !menu.is_head && !self.busy && !merge_in_progress,
+                !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.merge_branch(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
+            )))
+            .when(!menu.is_head, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "rebase",
                 "变基到当前分支",
-                !menu.is_head && !self.busy && !merge_in_progress,
+                !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.rebase_branch(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
+            )))
+            .when(!is_local, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "fetch-checkout",
                 "拉取到本地并切换",
-                !is_local && !self.busy && !merge_in_progress,
+                !self.busy && !merge_in_progress,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.checkout_remote_branch(branch.clone())
                 },
                 cx,
-            ))
-            .child(menu_separator())
-            .child(context_menu_item(
+            )))
+            .when(!menu.is_head || can_pull_local, |this| this.child(menu_separator()))
+            .when(is_local, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "set-upstream",
                 "设置/修改 upstream...",
-                is_local && !self.busy,
+                !self.busy,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.open_set_branch_upstream_dialog(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
+            )))
+            .when(is_local, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "rename",
                 "重命名...",
-                is_local && !self.busy,
+                !self.busy,
                 {
                     let branch = menu.branch.clone();
                     move |this| this.open_rename_branch_dialog(branch.clone())
                 },
                 cx,
-            ))
-            .child(context_menu_item(
-                self,
-                "branch-menu",
-                "delete-branch",
-                "删除分支",
-                is_local && !menu.is_head && !self.busy,
-                {
-                    let branch = menu.branch.clone();
-                    move |this| this.delete_branch(branch.clone())
-                },
-                cx,
-            ))
-            .child(context_menu_item(
-                self,
-                "branch-menu",
-                "delete-remote-branch",
-                "删除远端分支",
-                !is_local && !self.busy,
-                {
-                    let branch = menu.branch.clone();
-                    move |this| this.open_delete_remote_branch_confirm(branch.clone())
-                },
-                cx,
-            ))
+            )))
             .child(context_menu_item(
                 self,
                 "branch-menu",
@@ -1343,19 +1342,44 @@ impl RepositoryView {
                 },
                 cx,
             ))
-            .child(context_menu_item(
+            .when(!menu.is_head, |this| this.child(context_menu_item(
                 self,
                 "branch-menu",
                 "compare-with-current",
                 "与当前分支比较",
-                !menu.is_head && !self.busy,
+                !self.busy,
                 {
                     let branch = menu.branch.clone();
                     let kind = menu.kind.clone();
                     move |this| this.open_compare_branch(branch.clone(), kind.clone())
                 },
                 cx,
-            ))
+            )))
+            .when(!menu.is_head, |this| this.child(menu_separator()))
+            .when(is_local && !menu.is_head, |this| this.child(context_menu_item(
+                self,
+                "branch-menu",
+                "delete-branch",
+                "删除分支",
+                !self.busy,
+                {
+                    let branch = menu.branch.clone();
+                    move |this| this.delete_branch(branch.clone())
+                },
+                cx,
+            )))
+            .when(!is_local, |this| this.child(context_menu_item(
+                self,
+                "branch-menu",
+                "delete-remote-branch",
+                "删除远端分支",
+                !self.busy,
+                {
+                    let branch = menu.branch.clone();
+                    move |this| this.open_delete_remote_branch_confirm(branch.clone())
+                },
+                cx,
+            )))
             .into_any_element()
     }
 

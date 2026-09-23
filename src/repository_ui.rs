@@ -562,7 +562,10 @@ impl RepositoryView {
             })
     }
 
-    /// 设置中心 overlay：左导航 + 右内容面板。
+    /// 设置中心 overlay：Kit `Settings` 组件族（可拖拽侧栏 + 搜索 + 分组内容）。
+    ///
+    /// 侧栏与搜索由 Kit 渲染，活动页渲染时同步到 `settings_center`；
+    /// 页头、分组和重置按钮仍由 Kit 负责（见 `settings_center::render_settings_kit`）。
     pub(crate) fn render_settings_center_overlay(
         &self,
         window: &Window,
@@ -572,52 +575,7 @@ impl RepositoryView {
             return div().into_any_element();
         };
 
-        let categories = [
-            (
-                SettingsCategory::Credentials,
-                ToolbarIcon::Credentials,
-                "凭据管理",
-            ),
-            (SettingsCategory::Proxy, ToolbarIcon::Proxy, "网络代理"),
-            (SettingsCategory::Ai, ToolbarIcon::Ai, "AI 设置"),
-            (
-                SettingsCategory::ExternalMerge,
-                ToolbarIcon::Workflow,
-                "合并工具",
-            ),
-            (SettingsCategory::CodeIndex, ToolbarIcon::Search, "代码索引"),
-            (SettingsCategory::Theme, ToolbarIcon::Globe, "外观"),
-            (SettingsCategory::Update, ToolbarIcon::Update, "更新设置"),
-            (SettingsCategory::Shortcuts, ToolbarIcon::Keyboard, "快捷键"),
-            (SettingsCategory::About, ToolbarIcon::Info, "关于"),
-        ];
-
-        // 右侧内容面板根据当前分类渲染对应 body。
-        let body: gpui::AnyElement = match category {
-            SettingsCategory::Credentials => {
-                self.render_credential_manager_dialog(cx).into_any_element()
-            }
-            SettingsCategory::Proxy => self
-                .render_network_proxy_settings_dialog(window, cx)
-                .into_any_element(),
-            SettingsCategory::Ai => self
-                .render_ai_provider_settings_dialog(window, cx)
-                .into_any_element(),
-            SettingsCategory::ExternalMerge => self
-                .render_external_merge_settings_dialog(window, cx)
-                .into_any_element(),
-            SettingsCategory::CodeIndex => self
-                .render_code_index_settings_dialog(window, cx)
-                .into_any_element(),
-            SettingsCategory::Theme => self
-                .render_theme_settings_dialog(window, cx)
-                .into_any_element(),
-            SettingsCategory::Update => self.render_update_settings_dialog(cx).into_any_element(),
-            SettingsCategory::Shortcuts => self.render_shortcuts_settings(cx).into_any_element(),
-            SettingsCategory::About => self.render_about_settings(cx).into_any_element(),
-        };
-        // 右侧内容区的滚动句柄，供内容超出固定高度时滚动并绘制滚动条。
-        let settings_content_handle = self.scroll_handle("settings-center-content");
+        let settings = self.render_settings_kit(category, window, cx);
         // 面板尺寸按视口钳制：最小窗（860×520，高 DPI 下逻辑视口更小）里
         // 900×640 的固定尺寸会被根圆角裁掉，标题/关闭与底部内容点不到
         // （审查 R3）。
@@ -635,7 +593,7 @@ impl RepositoryView {
                     .id("settings-center-panel")
                     .w(panel_width)
                     // 高度按视口钳制，弹窗大小不随分类内容多少变化；
-                    // 内容超出由右侧内容区滚动。
+                    // 内容超出由 Kit SettingPage 的虚拟列表滚动。
                     .h(panel_height)
                     .min_w(px(0.0))
                     .rounded(px(ui_theme::RADIUS_PANEL))
@@ -648,7 +606,7 @@ impl RepositoryView {
                     .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
-                    // 顶栏：不画底边线，靠留白与分类导航的底色分区。
+                    // 顶栏：不画底边线，靠留白与侧栏的底色分区。
                     .child(
                         div()
                             .flex()
@@ -689,90 +647,18 @@ impl RepositoryView {
                                     .child("✕"),
                             ),
                     )
-                    // 主体：左导航 + 右内容
+                    // 主体：Kit Settings（左：搜索 + 单层分类导航；右：SettingPage）。
+                    // 底部内距 12px：滚动视口底缘不贴面板底缘，内容溢出时在
+                    // 面板内侧裁切（设计稿 2026-09-23 二次调整）；侧栏底色随之
+                    // 停在底缘上方，露出的面板底色即这条内距。
                     .child(
                         div()
                             .flex()
                             .flex_1()
                             .min_h(px(0.0))
-                            // 左导航：浅凹底分区（不画右边框）
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_none()
-                                    .w(px(168.0))
-                                    .bg(rgb(ui_theme::WB_INPUT_SURFACE))
-                                    .py_2()
-                                    .children(categories.iter().map(|(cat, icon, label)| {
-                                        let is_active = *cat == category;
-                                        let cat = *cat;
-                                        // 分类行用 Kit 基础按钮：九类设置均可
-                                        // Tab 遍历、Enter/Space 进入（审查 R6）。
-                                        BaseButton::new(format!("settings-nav-{label}"))
-                                            .selected(is_active)
-                                            .focus_visible(|this| {
-                                                this.border_1().border_color(rgb(ui_theme::PRIMARY))
-                                            })
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .mx_2()
-                                            .px_3()
-                                            .py_2()
-                                            .w_full()
-                                            .rounded(px(ui_theme::RADIUS_SM))
-                                            .text_size(px(ui_theme::TYPE_BODY))
-                                            .bg(gpui::rgba(0x00000000))
-                                            .when(is_active, |this| {
-                                                this.bg(rgb(ui_theme::PRIMARY_SUBTLE))
-                                                    .text_color(rgb(ui_theme::PRIMARY))
-                                            })
-                                            .when(!is_active, |this| {
-                                                this.text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                                    .hover(|this| {
-                                                        this.bg(rgb(ui_theme::WB_ROW_HOVER))
-                                                    })
-                                            })
-                                            .on_click(cx.listener(
-                                                move |this, _event, _window, cx| {
-                                                    this.select_settings_category(cat);
-                                                    cx.notify();
-                                                },
-                                            ))
-                                            .child(toolbar_icon(
-                                                *icon,
-                                                if is_active {
-                                                    ui_theme::PRIMARY
-                                                } else {
-                                                    ui_theme::CONTENT_TERTIARY
-                                                },
-                                            ))
-                                            .child(*label)
-                                            .into_any_element()
-                                    })),
-                            )
-                            // 右内容：固定高度内滚动，叠加滚动条。
-                            .child(scrollable_frame_when(
-                                "settings-center-content",
-                                ScrollbarMode::Vertical,
-                                div()
-                                    .id("settings-center-content")
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .w_full()
-                                    .min_w(px(0.0))
-                                    .min_h(px(0.0))
-                                    .p_4()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&settings_content_handle)
-                                    .child(body)
-                                    .into_any_element(),
-                                settings_content_handle,
-                                true,
-                                cx,
-                            )),
+                            .w_full()
+                            .pb(px(12.0))
+                            .child(settings),
                     ),
             )
             .into_any_element()
@@ -1884,7 +1770,7 @@ impl RepositoryView {
         // 状态栏用 Kit StatusBar 的三区结构（left 固定左、center 伸缩、right 固定右）。
         // Kit 默认带底色与顶边线，这里覆盖掉：状态栏坐在外壳的环境底上，
         // 自己铺色会糊掉窗口底部两角，面板投影已经足够分层。
-        // 10px 的极矮条：垂直内边距归零、9px 小字，状态点与间距同步缩小。
+        // 单行窄条：垂直内边距归零、9px 小字，状态点与间距同步缩小。
         StatusBar::new()
             .h(px(chrome_view::STATUS_BAR_HEIGHT))
             .py(px(0.0))

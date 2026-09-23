@@ -102,6 +102,7 @@ git diff --check
 | --- | --- |
 | 项目使用与能力 | [README](README.md) |
 | UI 目标、迁移边界与验收矩阵 | [GPUI Kit 重构计划](docs/gpui-kit-refactor-plan.md)、[视觉规范](docs/gpui-kit-visual-spec.md)、[Pencil 设计说明](docs/gpui-kit-pencil-design.md) |
+| 设置中心 Kit Settings 重构设计与页面映射 | [设置中心 Kit Settings 重构设计](docs/gpui-kit-settings-redesign.md) |
 | 焦点、输入与 AI 生命周期修正记录 | [2026-09-22 二次审查及修正](docs/gpui-kit-refactor-recheck-2026-09-22.md)；区分早期发现与末尾修正、未验收项 |
 | 工作流语法与约束 | [工作流文档](docs/workflows.md) |
 | 发布 | [发布工作流](.github/workflows/release.yml)、[版本说明](RELEASE_NOTES.md)、[安装器脚本](installer/khaslana.iss) |

@@ -493,6 +493,20 @@ pub(crate) const TYPE_PAGE_TITLE: f32 = 16.0;
 /// 顶栏品牌字（最新 Pencil 稿的 "Khaslana" 字号）。
 pub(crate) const TYPE_BRAND: f32 = 21.0;
 
+/// GPUI Kit 组件的 rem 尺度基准（**不是**应用正文字号）。
+///
+/// Kit 的 `Root::render` 会执行 `window.set_rem_size(cx.theme().font_size)`，
+/// 而 `gpui-pre` 的间距与字号工具方法全部是 `rems()`（`gpui-pre-macros`
+/// 的 `box_style_suffixes`：`2 => 0.5rem`、`4 => 1rem`、`7 => 1.75rem`）。
+/// 因此 `theme.font_size` 决定的是**整套 Kit 组件几何的缩放基准**，
+/// 而不是「Kit 文字多大」这一件事。
+///
+/// Kit 的 doc 与自带 demo 都按 16px 基准设计；若跟着 `TYPE_BODY`（12）走，
+/// 整套 Kit 会缩到 75%：`SidebarMenuItem` 行高只剩 21px，`SettingItem` 的
+/// 标签列 `max_w_3_5`（0.875rem）被压到 10.5px 直接把标签挤碎。
+/// 所以这里与 `TYPE_BODY` 解耦，固定 16。
+pub(crate) const KIT_REM_BASE: f32 = 16.0;
+
 #[allow(dead_code)]
 pub(crate) const CONTROL_HEIGHT_COMPACT: f32 = 28.0;
 pub(crate) const CONTROL_HEIGHT_REGULAR: f32 = 32.0;

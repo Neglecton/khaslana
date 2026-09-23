@@ -378,9 +378,8 @@ impl RepositoryView {
             .when(height == ChangeSectionHeight::Compact, |this| {
                 this.flex_none()
             })
-            // 两个分区之间不再画贯穿分割线：改用标题行的分组底色 + 顶部留白
-            // 表达分组（悬浮工作台视觉规范：留白代替大部分贯穿分割线）。
-            .when(is_staged, |this| this.mt(px(ui_theme::SPACE_2)))
+            // 仅在前面有其他分区时留白；首个分区的标题必须贴合面板顶部。
+            .when(!top, |this| this.mt(px(ui_theme::SPACE_2)))
             .child(header.actions(actions).build())
             .child({
                 let handle = self.uniform_scroll_handle(id);

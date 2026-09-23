@@ -27,6 +27,7 @@ mod repository_credentials;
 mod repository_events;
 mod repository_operations;
 mod repository_ui;
+mod settings_center;
 mod shortcuts_view;
 mod sidebar_view;
 mod ssh_credentials;
@@ -411,7 +412,6 @@ const MIN_HISTORY_GRAPH_WIDTH: f32 = 64.0;
 const MAX_HISTORY_GRAPH_WIDTH: f32 = 480.0;
 const HISTORY_PAGE_SIZE: usize = 50;
 pub(crate) const BRANCH_MENU_WIDTH: f32 = 190.0;
-pub(crate) const BRANCH_MENU_HEIGHT: f32 = 404.0;
 pub(crate) const REMOTE_MENU_WIDTH: f32 = 170.0;
 pub(crate) const REMOTE_MENU_HEIGHT: f32 = 80.0;
 const CHANGE_MENU_WIDTH: f32 = 210.0;
@@ -429,7 +429,7 @@ pub(crate) const TAG_MENU_HEIGHT: f32 = 200.0;
 pub(crate) const STASH_MENU_WIDTH: f32 = 170.0;
 pub(crate) const STASH_MENU_HEIGHT: f32 = 170.0;
 pub(crate) const WORKFLOW_TEMPLATE_MENU_WIDTH: f32 = 150.0;
-pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 102.0;
+pub(crate) const WORKFLOW_TEMPLATE_MENU_HEIGHT: f32 = 132.0;
 const COMMIT_MENU_WIDTH: f32 = 230.0;
 const COMMIT_MENU_HEIGHT: f32 = 320.0;
 const COMMIT_UNPUSHED_MENU_HEIGHT: f32 = 355.0;
@@ -843,6 +843,8 @@ pub(crate) struct BranchContextMenu {
     pub(crate) branch: String,
     pub(crate) kind: BranchKind,
     pub(crate) is_head: bool,
+    pub(crate) has_upstream: bool,
+    pub(crate) height: f32,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
@@ -986,7 +988,7 @@ impl ChangeListIndexes {
 pub(crate) struct ContextMenuKeyboard {
     /// 当前登记的菜单身份（切换到别的菜单时重置选中与动作表）。
     menu_id: Option<String>,
-    /// 键盘选中的条目索引；None = 尚未选择，吸附首个可用项。
+    /// 当前选中的条目索引；None = 菜单刚打开，尚未经过鼠标或方向键。
     selected: Option<usize>,
     /// 按渲染顺序登记的条目（分隔线不登记）。
     actions: Vec<ContextMenuKeyAction>,
@@ -3355,6 +3357,7 @@ pub(crate) struct RepositoryView {
     pub(crate) active_dialog: Option<DialogState>,
     /// 设置中心当前分类；独立于 active_dialog，凭据子弹窗可叠加其上。
     pub(crate) settings_center: Option<SettingsCategory>,
+    pub(crate) settings_center_generation: u64,
     /// 用户自定义快捷键绑定（action_id → keystroke）。
     pub(crate) shortcut_bindings: ShortcutBindings,
     /// 工作流模板快捷键绑定（模板文件名 → 键位 + 后台执行），机器本地全局单份。
@@ -3667,8 +3670,24 @@ impl Render for RepositoryView {
                     cx.notify();
                 },
             ))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                // 设置中心焦点在 overlay 容器时用 ↑/↓ 快速切换分类；
+                // 焦点在搜索框或内容控件时不拦截方向键。
+                if matches!(key, "up" | "down")
+                    && this.settings_center.is_some()
+                    && window
+                        .focused(cx)
+                        .is_some_and(|handle| handle == this.settings_center_focus)
+                    && {
+                        this.cycle_settings_category(key == "down");
+                        true
+                    }
+                {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if key == "escape"
                     && this.recording_shortcut.is_none()
                     && this.dismiss_topmost_cancellable_overlay()
