@@ -20,10 +20,16 @@
 //!   `src/ui/fields.rs` 的 `TextFieldState` 宿主；
 //! - 分段、色板、卡片、按钮组等同理走 `render` 通道复用既有组件。
 
-use gpui::{Context, FontWeight, SharedString, StyleRefinement, Window, div, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{App, Context, FontWeight, SharedString, StyleRefinement, Window, div, prelude::*, px};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::group_box::GroupBoxVariant;
-use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::setting::{
+    RenderOptions, SelectIndex, SettingGroup, SettingItem, SettingPage, Settings,
+};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Disableable, Sizable, h_flex, v_flex};
 
 use crate::{RepositoryView, SettingsCategory, ui::theme::{self as ui_theme, rgb}};
 
@@ -74,8 +80,9 @@ pub(crate) struct SettingsPaneMeta {
 /// `SettingGroup::title`——后者会同时在侧栏生成手风琴子项（两级导航），
 /// 与设计稿的单层侧栏冲突。
 ///
-/// 排版对齐设计稿：标题 13 SemiBold（介于 `TYPE_BODY` 12 与 `TYPE_TITLE` 14
-/// 之间，设计稿取值）、描述 `TYPE_META` Secondary、两者间距 2px。
+/// 排版：标题 `TYPE_BODY` SemiBold、描述 `TYPE_META` Secondary、间距 2px。
+/// 标题曾取 13（介于 `TYPE_BODY` 12 与 `TYPE_TITLE` 14 之间），现统一到
+/// 正文档——页头标题同为 `TYPE_BODY` SemiBold，层级靠字重而非字号放大。
 /// `keywords` 带标题，保证按分组标题搜索时该组仍可命中。
 pub(crate) fn settings_group_heading(
     title: &'static str,
@@ -88,7 +95,7 @@ pub(crate) fn settings_group_heading(
             .gap(px(2.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(title),
@@ -106,15 +113,105 @@ pub(crate) fn settings_group_heading(
     .keywords([title])
 }
 
+/// 设置项行：标题 + 可选描述 + 右侧控件。
+///
+/// 刻意不走 `SettingItem::new`：Kit 在 `setting/item.rs` 内部给标题挂死
+/// `text_sm()`（0.875rem × `KIT_REM_BASE` 16 = 14px），比项目正文大一号，
+/// 而 `SettingItem` 未实现 `Styled`，业务侧没有任何入口把字号压回来
+/// （与 `src/ui/fields.rs` 里 Kit `Input` 默认字号的情形同源，那处是直接
+/// 在元素自身 `.text_size()` 才生效）。这里改走 `SettingItem::render`
+/// 通道自己排版：标题 `TYPE_BODY`(12)、描述 `TYPE_META`(11)，与业务正文
+/// 一致；凭据管理页整页自绘正是这个模式。
+///
+/// 布局复刻 Kit 横向条目：标题列 `flex_1`、控件右对齐，避免长标题把输入框
+/// 挤出可见区。控件沿用调用方原有的 `SettingField::render` 闭包，输入框仍
+/// 由 `src/ui/fields.rs` 的 Kit 宿主渲染（其字号已压到 `TYPE_BODY`）。
+pub(crate) fn settings_item_row<F, E>(
+    title: &'static str,
+    description: Option<&'static str>,
+    field: F,
+) -> SettingItem
+where
+    F: Fn(&RenderOptions, &mut Window, &mut App) -> E + 'static,
+    E: IntoElement,
+{
+    SettingItem::render(move |options, window, cx| {
+        h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(ui_theme::TYPE_BODY))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                            .child(title),
+                    )
+                    .when_some(description, |this, text| {
+                        this.child(
+                            div()
+                                .text_size(px(ui_theme::TYPE_META))
+                                .line_height(px(16.0))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .child(text),
+                        )
+                    }),
+            )
+            .child(field(options, window, cx))
+    })
+    .keywords([title])
+}
+
+/// 开关类设置项：与 [`settings_item_row`] 同排版，控件为 Kit `Switch`。
+///
+/// 同样绕开 `SettingItem::new(.., SettingField::switch(..))`——那条路径的
+/// 标题字号不可压。`disabled` / `with_size` 跟随 Kit 传入的 `RenderOptions`，
+/// 与其它 Kit 控件的行为保持一致；条目 id 由 Kit 的 `item-N` 外层 div 限定
+/// 作用域，多个开关共用 `"check"` 不会冲突。
+pub(crate) fn settings_switch_row<V, S>(
+    title: &'static str,
+    description: Option<&'static str>,
+    value: V,
+    set_value: S,
+) -> SettingItem
+where
+    V: Fn(&App) -> bool + 'static,
+    S: Fn(bool, &mut App) + 'static,
+{
+    // 条目闭包是 `Fn`（Kit 每次渲染都会调用），`on_click` 却要 move 走写回
+    // 闭包；用 `Rc` 共享一份，与 `repository_ui.rs` 的 `toggle_row` 同法。
+    let set_value = Rc::new(set_value);
+    settings_item_row(title, description, move |options, _window, cx| {
+        let set_value = set_value.clone();
+        Switch::new("check")
+            .checked(value(cx))
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .on_click(move |checked: &bool, _, cx: &mut App| set_value(*checked, cx))
+    })
+}
+
 /// 页头样式：内距与标题/描述间距对齐设计稿（[12,16,8,16]、间距 2px），
 /// 覆盖 Kit 默认的 `p_4` + `gap_3`。
+///
+/// 标题字号必须显式给：Kit 的 `SettingPage` 渲染标题时**不设字号**，标题走
+/// 继承，拿到 `TextStyle::default()` 的 `rems(1.)`（× `KIT_REM_BASE` 16 =
+/// 16px），是全屏最大的字。这里压到正文档并加 SemiBold——层级不靠字号放大，
+/// 靠字重区分（分组卡标题同为 `TYPE_BODY` SemiBold）。
 fn settings_page_header_style() -> StyleRefinement {
-    StyleRefinement::default()
+    let mut style = StyleRefinement::default()
         .pt(px(12.0))
         .pr(px(16.0))
         .pb(px(8.0))
         .pl(px(16.0))
-        .gap(px(2.0))
+        .gap(px(2.0));
+    style.text.font_size = Some(px(ui_theme::TYPE_BODY).into());
+    style.text.font_weight = Some(FontWeight::SEMIBOLD);
+    style
 }
 
 /// 分类的页头标题与描述（Kit `SettingPage` 的 title / description）。
@@ -207,7 +304,9 @@ impl RepositoryView {
         let generation = self.settings_center_generation;
         SettingPage::new(meta.title)
             .icon(category_icon(category))
-            .description(meta.description)
+            // 描述不走 `SettingPage::description`：Kit 给它挂死 `text_sm()`
+            // （14px），而页头容器样式压不到元素自身。改由 `title_suffix`
+            // 自绘，字号取 `TYPE_META`，与分组卡描述一致。
             .header_style(&settings_page_header_style())
             .title_suffix(move |_window, cx| {
                 if view.read(cx).settings_center != Some(category) {
@@ -224,7 +323,14 @@ impl RepositoryView {
                         });
                     });
                 }
+                // 标题行是 `h_flex`（默认 items_center）：描述占满剩余宽度，
+                // 长文案自然换行，不会把标题挤出可见区。
                 div()
+                    .flex_1()
+                    .text_size(px(ui_theme::TYPE_META))
+                    .line_height(px(16.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child(meta.description)
             })
             .groups(self.settings_pane_groups(category, window, cx))
     }

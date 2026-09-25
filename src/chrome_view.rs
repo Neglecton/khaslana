@@ -688,7 +688,9 @@ impl RepositoryView {
             .gap(px(theme::SPACE_2))
             .rounded(px(theme::RADIUS_MD))
             .cursor_pointer()
-            .text_size(px(theme::TYPE_TITLE))
+            // 正文字号：导航是次级信息，不应压过页面内容；此前取 TYPE_TITLE(14)
+            // 比正文大一号，与设置中心、差异区的列表文字不齐。
+            .text_size(px(theme::TYPE_BODY))
             .bg(if active {
                 rgb(theme::PRIMARY_SUBTLE)
             } else {

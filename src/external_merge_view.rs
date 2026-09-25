@@ -5,7 +5,7 @@ use std::{
 };
 
 use gpui::{App, Context, Window, div, prelude::*, px};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 
 use crate::ui::theme::rgb;
 use crate::{
@@ -122,35 +122,33 @@ impl RepositoryView {
                     }));
                 }
                 group
-                    .item(SettingItem::new(
+                    .item(crate::settings_center::settings_switch_row(
                         "启用 IntelliJ IDEA 外部合并",
-                        SettingField::switch(
-                            move |cx: &App| {
-                                enabled_value_view.read(cx).external_merge_enabled_form
-                            },
-                            move |value: bool, cx: &mut App| {
-                                enabled_set_view.update(cx, |this, cx| {
-                                    this.set_external_merge_enabled_form_with_detection(value);
-                                    cx.notify();
-                                });
-                            },
-                        ),
+                        None,
+                        move |cx: &App| {
+                            enabled_value_view.read(cx).external_merge_enabled_form
+                        },
+                        move |value: bool, cx: &mut App| {
+                            enabled_set_view.update(cx, |this, cx| {
+                                this.set_external_merge_enabled_form_with_detection(value);
+                                cx.notify();
+                            });
+                        },
                     ))
-                    .item(SettingItem::new(
+                    .item(crate::settings_center::settings_switch_row(
                         "选中冲突文件时自动打开 IDEA",
-                        SettingField::switch(
-                            move |cx: &App| {
-                                auto_open_value_view
-                                    .read(cx)
-                                    .external_merge_auto_open_form
-                            },
-                            move |value: bool, cx: &mut App| {
-                                auto_open_set_view.update(cx, |this, cx| {
-                                    this.set_external_merge_auto_open_form_with_detection(value);
-                                    cx.notify();
-                                });
-                            },
-                        ),
+                        None,
+                        move |cx: &App| {
+                            auto_open_value_view
+                                .read(cx)
+                                .external_merge_auto_open_form
+                        },
+                        move |value: bool, cx: &mut App| {
+                            auto_open_set_view.update(cx, |this, cx| {
+                                this.set_external_merge_auto_open_form_with_detection(value);
+                                cx.notify();
+                            });
+                        },
                     ))
             },
             {
@@ -158,9 +156,10 @@ impl RepositoryView {
                     crate::settings_center::settings_group_heading("IDEA 程序", None),
                 );
                 group = group
-                    .item(SettingItem::new(
+                    .item(crate::settings_center::settings_item_row(
                         "IDEA 路径",
-                        SettingField::render(move |_options, window, cx| {
+                        None,
+                        move |_options, window, cx| {
                             path_view.update(cx, |this, cx| {
                                 div().w(px(280.0)).max_w_full().child(this.input(
                                     FieldId::ExternalMergeIntellijPath,
@@ -169,7 +168,7 @@ impl RepositoryView {
                                     cx,
                                 ))
                             })
-                        }),
+                        },
                     ))
                     .item(SettingItem::render(move |_options, _window, cx| {
                         browse_view.update(cx, |this, cx| {

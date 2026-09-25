@@ -1,7 +1,7 @@
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::NetworkProxyMode;
 
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 
 use crate::ui::{components::tooltip_text, theme::rgb};
 use crate::{
@@ -35,16 +35,17 @@ impl RepositoryView {
                 "代理模式",
                 Some(proxy_mode_help(self.proxy_mode).into()),
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "模式",
-                SettingField::render(move |_options, _window, cx| {
+                None,
+                move |_options, _window, cx| {
                     view.update(cx, |this, cx| {
                         crate::ui::components::settings_segmented_group()
                             .child(this.proxy_mode_button("不使用代理", NetworkProxyMode::Disabled, cx))
                             .child(this.proxy_mode_button("使用系统代理", NetworkProxyMode::System, cx))
                             .child(this.proxy_mode_button("自定义代理", NetworkProxyMode::Custom, cx))
                     })
-                }),
+                },
             ))];
 
         if custom_enabled {
@@ -56,35 +57,38 @@ impl RepositoryView {
                     ))
                     .item({
                         let view = cx.entity();
-                        SettingItem::new(
+                        crate::settings_center::settings_item_row(
                             "HTTP 代理",
-                            SettingField::render(move |_options, window, cx| {
+                            None,
+                            move |_options, window, cx| {
                                 view.update(cx, |this, cx| {
                                     this.input(FieldId::ProxyHttpUrl, false, window, cx)
                                 })
-                            }),
+                            },
                         )
                     })
                     .item({
                         let view = cx.entity();
-                        SettingItem::new(
+                        crate::settings_center::settings_item_row(
                             "HTTPS 代理",
-                            SettingField::render(move |_options, window, cx| {
+                            None,
+                            move |_options, window, cx| {
                                 view.update(cx, |this, cx| {
                                     this.input(FieldId::ProxyHttpsUrl, false, window, cx)
                                 })
-                            }),
+                            },
                         )
                     })
                     .item({
                         let view = cx.entity();
-                        SettingItem::new(
+                        crate::settings_center::settings_item_row(
                             "SOCKS5 代理",
-                            SettingField::render(move |_options, window, cx| {
+                            None,
+                            move |_options, window, cx| {
                                 view.update(cx, |this, cx| {
                                     this.input(FieldId::ProxySocks5Url, false, window, cx)
                                 })
-                            }),
+                            },
                         )
                     }),
             );
@@ -98,9 +102,10 @@ impl RepositoryView {
                 ))
                 .item({
                     let view = cx.entity();
-                    SettingItem::new(
+                    crate::settings_center::settings_item_row(
                         "当前远端",
-                        SettingField::render(move |_options, _window, cx| {
+                        None,
+                        move |_options, _window, cx| {
                             view.update(cx, |_this, _cx| {
                                 div()
                                     .text_size(px(ui_theme::TYPE_BODY))
@@ -108,7 +113,7 @@ impl RepositoryView {
                                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child(remote_label.clone())
                             })
-                        }),
+                        },
                     )
                 })
                 .item({

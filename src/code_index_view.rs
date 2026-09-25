@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gpui::{Context, Window, div, prelude::*, px};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 
 use crate::tasks::TaskKind;
 use crate::ui::{
@@ -192,9 +192,10 @@ impl RepositoryView {
                 })
             }));
         let view = cx.entity();
-        let mcp_group = mcp_group.item(SettingItem::new(
+        let mcp_group = mcp_group.item(crate::settings_center::settings_item_row(
             "启动命令",
-            SettingField::render(move |_options, _window, cx| {
+            None,
+            move |_options, _window, cx| {
                 // 闭包是 Fn：每次渲染克隆两份配置，分别供只读值与复制按钮消费。
                 let display_config = mcp_config_value.clone();
                 let copy_config = mcp_config_copy.clone();
@@ -234,7 +235,7 @@ impl RepositoryView {
                             cx,
                         ))
                 })
-            }),
+            },
         ));
 
         // 仓库组：过滤输入 + 仓库卡片 + 空列表提示 + 索引说明。
@@ -244,9 +245,10 @@ impl RepositoryView {
                 "仓库",
                 Some(format!("共 {} 个仓库；可按名称或路径过滤。", entries.len()).into()),
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "过滤仓库",
-                SettingField::render(move |_options, window, cx| {
+                None,
+                move |_options, window, cx| {
                     view.update(cx, |this, cx| {
                         div().w(px(280.0)).max_w_full().child(this.input(
                             FieldId::CodeIndexFilter,
@@ -255,7 +257,7 @@ impl RepositoryView {
                             cx,
                         ))
                     })
-                }),
+                },
             ));
         for entry in &entries {
             // CodeIndexListEntry 未 derive Clone，而 render 闭包要求 'static：

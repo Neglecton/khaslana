@@ -2,7 +2,7 @@
 
 use crate::*;
 use gpui_kit::base::FocusTrapElement;
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 use gpui_kit::component::{Disableable, button::Button, menu::DropdownMenu};
 
 impl RepositoryView {
@@ -995,9 +995,10 @@ impl RepositoryView {
                 "更新",
                 Some("启动时自动检查与手动检查；跳过版本只影响自动提示。".into()),
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "当前版本",
-                SettingField::render({
+                None,
+                {
                     let view = cx.entity();
                     move |_options, _window, cx| {
                         view.update(cx, |_this, _cx| {
@@ -1007,54 +1008,50 @@ impl RepositoryView {
                                 .child(format!("v{version}"))
                         })
                     }
-                }),
+                },
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_switch_row(
                 "自动检查更新",
-                SettingField::switch(
-                    {
-                        let view = cx.entity();
-                        move |cx: &App| view.read(cx).update_preferences.auto_check
-                    },
-                    {
-                        let view = cx.entity();
-                        move |value: bool, cx: &mut App| {
-                            view.update(cx, |this, cx| {
-                                this.update_preferences.auto_check = value;
-                                this.save_update_preferences();
-                                cx.notify();
-                            })
-                        }
-                    },
-                ),
+                None,
+                {
+                    let view = cx.entity();
+                    move |cx: &App| view.read(cx).update_preferences.auto_check
+                },
+                {
+                    let view = cx.entity();
+                    move |value: bool, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.update_preferences.auto_check = value;
+                            this.save_update_preferences();
+                            cx.notify();
+                        })
+                    }
+                },
             ))
             // 测试版（Beta）更新渠道：勾选后检测/安装所有版本（含预发布），
             // 未勾选只走正式版清单（与旧版本行为一致）。切换后下次检查生效。
-            .item(
-                SettingItem::new(
-                    "接收测试版（Beta）更新",
-                    SettingField::switch(
-                        {
-                            let view = cx.entity();
-                            move |cx: &App| view.read(cx).update_preferences.include_beta
-                        },
-                        {
-                            let view = cx.entity();
-                            move |value: bool, cx: &mut App| {
-                                view.update(cx, |this, cx| {
-                                    this.update_preferences.include_beta = value;
-                                    this.save_update_preferences();
-                                    cx.notify();
-                                })
-                            }
-                        },
-                    ),
-                )
-                .description("开启后同时检测并安装测试版；测试版可能不稳定"),
-            )
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_switch_row(
+                "接收测试版（Beta）更新",
+                Some("开启后同时检测并安装测试版；测试版可能不稳定"),
+                {
+                    let view = cx.entity();
+                    move |cx: &App| view.read(cx).update_preferences.include_beta
+                },
+                {
+                    let view = cx.entity();
+                    move |value: bool, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            this.update_preferences.include_beta = value;
+                            this.save_update_preferences();
+                            cx.notify();
+                        })
+                    }
+                },
+            ))
+            .item(crate::settings_center::settings_item_row(
                 "已跳过版本",
-                SettingField::render({
+                None,
+                {
                     let view = cx.entity();
                     move |_options, _window, cx| {
                         view.update(cx, |_this, _cx| {
@@ -1064,7 +1061,7 @@ impl RepositoryView {
                                 .child(skipped_label.clone())
                         })
                     }
-                }),
+                },
             ))
             .item(SettingItem::render({
                 let view = cx.entity();
@@ -1289,9 +1286,10 @@ impl RepositoryView {
                 "版本",
                 Some("更新渠道与自动检查可在「更新设置」中配置。".into()),
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "版本号",
-                SettingField::render({
+                None,
+                {
                     let view = cx.entity();
                     move |_options, _window, cx| {
                         view.update(cx, |_this, _cx| {
@@ -1329,11 +1327,12 @@ impl RepositoryView {
                                 )
                         })
                     }
-                }),
+                },
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "版本说明",
-                SettingField::render({
+                None,
+                {
                     let view = cx.entity();
                     move |_options, _window, cx| {
                         view.update(cx, |_this, _cx| {
@@ -1354,7 +1353,7 @@ impl RepositoryView {
                                 }))
                         })
                     }
-                }),
+                },
             ))]
     }
 

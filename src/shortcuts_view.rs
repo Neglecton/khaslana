@@ -3,7 +3,7 @@
 use std::ops::DerefMut;
 
 use gpui::{Context, KeyDownEvent, div, prelude::*, px};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 
 use crate::ui::{components::tooltip_text, theme::rgb};
 use crate::{
@@ -113,9 +113,10 @@ impl RepositoryView {
                 "应用快捷键",
                 None,
             ))
-            .item(SettingItem::new(
+            .item(crate::settings_center::settings_item_row(
                 "说明",
-                SettingField::render(move |_options, _window, cx| {
+                None,
+                move |_options, _window, cx| {
                     view.update(cx, |_this, _cx| {
                         div()
                             .w_full()
@@ -124,7 +125,7 @@ impl RepositoryView {
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("点击「重新绑定」后按下组合键录入；按 Esc 取消录制。点「恢复默认」复位单条快捷键。")
                     })
-                }),
+                },
             ));
 
         for action in ShortcutAction::ALL {

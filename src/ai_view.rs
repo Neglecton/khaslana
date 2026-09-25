@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_channel::Sender;
 use gpui::{App, Context, IntoElement, Window, canvas, div, point, prelude::*, px};
 use gpui_kit::base::FocusTrapElement;
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 use khaslana::{
     AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
 };
@@ -377,37 +377,38 @@ impl RepositoryView {
         vec![
             SettingGroup::new()
                 .item(crate::settings_center::settings_group_heading("功能", None))
-                .item(SettingItem::new(
+                .item(crate::settings_center::settings_switch_row(
                     "启用 AI 功能",
-                    SettingField::switch(
-                        move |cx: &App| enabled_value_view.read(cx).ai_enabled_form,
-                        move |value: bool, cx: &mut App| {
-                            enabled_set_view.update(cx, |this, cx| {
-                                this.set_ai_enabled_form(value);
-                                cx.notify();
-                            });
-                        },
-                    ),
+                    None,
+                    move |cx: &App| enabled_value_view.read(cx).ai_enabled_form,
+                    move |value: bool, cx: &mut App| {
+                        enabled_set_view.update(cx, |this, cx| {
+                            this.set_ai_enabled_form(value);
+                            cx.notify();
+                        });
+                    },
                 )),
             SettingGroup::new()
                 .item(crate::settings_center::settings_group_heading(
                     "连接配置",
                     Some("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。".into()),
                 ))
-                .item(SettingItem::new(
+                .item(crate::settings_center::settings_item_row(
                     "接口类型",
-                    SettingField::render(move |_options, _window, cx| {
+                    None,
+                    move |_options, _window, cx| {
                         api_type_view.update(cx, |_this, _cx| {
                             div()
                                 .text_size(px(ui_theme::TYPE_BODY))
                                 .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child(AiApiType::ChatCompletions.label())
                         })
-                    }),
+                    },
                 ))
-                .item(SettingItem::new(
+                .item(crate::settings_center::settings_item_row(
                     "接口地址（Base URL）",
-                    SettingField::render(move |_options, window, cx| {
+                    None,
+                    move |_options, window, cx| {
                         base_url_view.update(cx, |this, cx| {
                             div().w(px(280.0)).max_w_full().child(this.input(
                                 FieldId::AiBaseUrl,
@@ -416,11 +417,12 @@ impl RepositoryView {
                                 cx,
                             ))
                         })
-                    }),
+                    },
                 ))
-                .item(SettingItem::new(
+                .item(crate::settings_center::settings_item_row(
                     "API Key",
-                    SettingField::render(move |_options, window, cx| {
+                    None,
+                    move |_options, window, cx| {
                         api_key_view.update(cx, |this, cx| {
                             div().w(px(280.0)).max_w_full().child(this.input(
                                 FieldId::AiApiKey,
@@ -429,11 +431,12 @@ impl RepositoryView {
                                 cx,
                             ))
                         })
-                    }),
+                    },
                 ))
-                .item(SettingItem::new(
+                .item(crate::settings_center::settings_item_row(
                     "模型",
-                    SettingField::render(move |_options, window, cx| {
+                    None,
+                    move |_options, window, cx| {
                         model_view.update(cx, |this, cx| {
                             div().w(px(280.0)).max_w_full().child(this.input(
                                 FieldId::AiModel,
@@ -442,7 +445,7 @@ impl RepositoryView {
                                 cx,
                             ))
                         })
-                    }),
+                    },
                 )),
             {
                 // 状态行沿用旧弹窗的 when 条件：busy 时只显示进度，不显示错误行。

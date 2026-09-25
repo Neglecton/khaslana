@@ -5,7 +5,7 @@
 //! tokens（M1 在隔离样板上实测过）。这里只做映射，不改写 Khaslana 自己的
 //! 语义色板——业务视图继续用 `ui::theme`，两边由同一组 token 驱动。
 
-use gpui::{App, Hsla, px, rgb};
+use gpui::{App, Hsla, px, rgb, rgba};
 use gpui_kit::component::Theme;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::scroll::ScrollbarMode;
@@ -37,6 +37,15 @@ pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette)
             ThemeVariant::Dark => rgb(pair.1).into(),
         }
     };
+    // 选区底色是 accent 里唯一带透明度（`0xRRGGBBAA`）的字段，必须走 rgba：
+    // rgb() 只认低 24 位，会把 alpha 字节当成蓝色，把 `0x16A34A33` 截成
+    // `0xA34A33` 暗红棕色块（实测在输入框里全选文字时复现）。
+    let accent_selection = |pair: (u32, u32)| -> Hsla {
+        match variant {
+            ThemeVariant::Light => rgba(pair.0).into(),
+            ThemeVariant::Dark => rgba(pair.1).into(),
+        }
+    };
 
     let mut colors = Theme::global(cx).colors;
 
@@ -53,7 +62,7 @@ pub(crate) fn apply(cx: &mut App, variant: ThemeVariant, accent: &AccentPalette)
     colors.popover = color(ui_theme::SURFACE_OVERLAY);
     colors.popover_foreground = color(ui_theme::CONTENT_PRIMARY);
     colors.ring = accent_color(accent.focused_border);
-    colors.selection = accent_color(accent.selection);
+    colors.selection = accent_selection(accent.selection);
 
     // 主色族跟随用户强调色偏好
     colors.primary = accent_color(accent.primary);

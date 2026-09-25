@@ -42,7 +42,7 @@ use gpui_kit::component::input::{
     AnyInputState, Input, InputEvent, InputState, Textarea, TextareaState,
 };
 
-use crate::{FieldId, RepositoryView, workflow_editor::WorkflowEditorFieldId};
+use crate::{FieldId, RepositoryView, ui::theme as ui_theme, workflow_editor::WorkflowEditorFieldId};
 
 /// 单行输入框高度（与设置页其余控件同一档）。
 const KIT_INPUT_HEIGHT: f32 = 34.0;
@@ -163,7 +163,13 @@ impl KitField {
     }
 
     /// 渲染成 Kit 输入元素。`blocked` 来自操作遮罩（高风险操作期间禁止输入）。
+    ///
+    /// 字号显式压到 `TYPE_BODY`：Kit 的 `Input`/`Textarea` 默认 `Size::Medium`，
+    /// 其 `input_text_size` 会给 `text_sm`（14px），比项目正文（12px）大一号。
+    /// 这行样式经 `refine_style` 在 `input_text_size` 之后应用，因此能覆盖默认值；
+    /// 高度仍由调用方显式给定，不受字号影响。
     pub(crate) fn render(&self, compact: bool, blocked: bool) -> AnyElement {
+        let text_size = px(ui_theme::TYPE_BODY);
         match &self.input {
             KitFieldInput::Single(state) => Input::new(state)
                 .h(px(if compact {
@@ -171,10 +177,12 @@ impl KitField {
                 } else {
                     KIT_INPUT_HEIGHT
                 }))
+                .text_size(text_size)
                 .disabled(blocked)
                 .into_any_element(),
             KitFieldInput::Multi(state) => Textarea::new(state)
                 .h(px(KIT_TEXTAREA_HEIGHT))
+                .text_size(text_size)
                 .disabled(blocked)
                 .into_any_element(),
         }

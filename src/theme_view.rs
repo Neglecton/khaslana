@@ -1,5 +1,5 @@
 use gpui::{Context, FontWeight, Window, WindowAppearance, div, prelude::*, px, rgb as gpui_rgb};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::setting::SettingGroup;
 use khaslana::ThemeMode;
 
 use crate::{
@@ -93,30 +93,31 @@ impl RepositoryView {
                 ))
                 .item({
                     let view = cx.entity();
-                    SettingItem::new(
+                    crate::settings_center::settings_item_row(
                         "主题模式",
-                        SettingField::render(move |_options, _window, cx| {
-                        view.update(cx, |this, cx| {
-                            crate::ui::components::settings_segmented_group().children(
-                                modes.into_iter().map(move |mode| {
-                                    segmented_button(
-                                        format!("theme-mode-{}", theme_mode_id(mode)),
-                                        this.theme_mode == mode,
-                                        true,
-                                    )
-                                    .flex_1()
-                                    .justify_center()
-                                    .child(theme_mode_label(mode))
-                                    .on_click(cx.listener(
-                                        move |this, _event, window, cx| {
-                                            this.select_theme_mode(mode, window, cx);
-                                        },
-                                    ))
-                                }),
-                            )
-                        })
-                    }),
-                )
+                        None,
+                        move |_options, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                crate::ui::components::settings_segmented_group().children(
+                                    modes.into_iter().map(move |mode| {
+                                        segmented_button(
+                                            format!("theme-mode-{}", theme_mode_id(mode)),
+                                            this.theme_mode == mode,
+                                            true,
+                                        )
+                                        .flex_1()
+                                        .justify_center()
+                                        .child(theme_mode_label(mode))
+                                        .on_click(cx.listener(
+                                            move |this, _event, window, cx| {
+                                                this.select_theme_mode(mode, window, cx);
+                                            },
+                                        ))
+                                    }),
+                                )
+                            })
+                        },
+                    )
                 }),
             SettingGroup::new()
                 .item(crate::settings_center::settings_group_heading(
@@ -125,82 +126,84 @@ impl RepositoryView {
                 ))
                 .item({
                     let view = cx.entity();
-                    SettingItem::new(
+                    crate::settings_center::settings_item_row(
                         "强调色",
-                        SettingField::render(move |_options, _window, cx| {
-                        view.update(cx, |this, cx| {
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .w_full()
-                                .gap(px(ui_theme::SPACE_2))
-                                .children(ui_theme::ACCENT_PRESETS.iter().enumerate().map(
-                                    |(index, (name, palette))| {
-                                        let selected = this.theme_accent == index;
-                                        // 色块展示预设的主色；选中态只用强调边框，不叠加卡片。
-                                        let swatch_color = match active_variant {
-                                            ThemeVariant::Light => palette.primary.0,
-                                            ThemeVariant::Dark => palette.primary.1,
-                                        };
-                                        div()
-                                            .id(format!("theme-accent-{index}"))
-                                            .flex()
-                                            .flex_col()
-                                            .items_center()
-                                            .gap_1()
-                                            .cursor_pointer()
-                                            .hover(|this| {
-                                                this.bg(rgb(ui_theme::WB_ROW_HOVER))
-                                                    .rounded(px(ui_theme::RADIUS_SM))
-                                            })
-                                            .px_2()
-                                            .py_2()
-                                            .rounded(px(ui_theme::RADIUS_SM))
-                                            .child(
-                                                div()
-                                                    .w(px(28.0))
-                                                    .h(px(28.0))
-                                                    .rounded_full()
-                                                    .bg(gpui_rgb(swatch_color)),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(ui_theme::TYPE_META))
-                                                    .text_color(if selected {
-                                                        rgb(ui_theme::CONTENT_PRIMARY)
-                                                    } else {
-                                                        rgb(ui_theme::CONTENT_SECONDARY)
-                                                    })
-                                                    .child(*name),
-                                            )
-                                            .when(selected, |this| {
-                                                this.border_1().border_color(rgb(ui_theme::PRIMARY))
-                                            })
-                                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                                this.select_theme_accent(index, window, cx);
-                                            }))
-                                    },
-                                ))
-                        })
-                    }),
-                )
+                        None,
+                        move |_options, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .w_full()
+                                    .gap(px(ui_theme::SPACE_2))
+                                    .children(ui_theme::ACCENT_PRESETS.iter().enumerate().map(
+                                        |(index, (name, palette))| {
+                                            let selected = this.theme_accent == index;
+                                            // 色块展示预设的主色；选中态只用强调边框，不叠加卡片。
+                                            let swatch_color = match active_variant {
+                                                ThemeVariant::Light => palette.primary.0,
+                                                ThemeVariant::Dark => palette.primary.1,
+                                            };
+                                            div()
+                                                .id(format!("theme-accent-{index}"))
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .gap_1()
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(rgb(ui_theme::WB_ROW_HOVER))
+                                                        .rounded(px(ui_theme::RADIUS_SM))
+                                                })
+                                                .px_2()
+                                                .py_2()
+                                                .rounded(px(ui_theme::RADIUS_SM))
+                                                .child(
+                                                    div()
+                                                        .w(px(28.0))
+                                                        .h(px(28.0))
+                                                        .rounded_full()
+                                                        .bg(gpui_rgb(swatch_color)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(ui_theme::TYPE_META))
+                                                        .text_color(if selected {
+                                                            rgb(ui_theme::CONTENT_PRIMARY)
+                                                        } else {
+                                                            rgb(ui_theme::CONTENT_SECONDARY)
+                                                        })
+                                                        .child(*name),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.border_1().border_color(rgb(ui_theme::PRIMARY))
+                                                })
+                                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                                    this.select_theme_accent(index, window, cx);
+                                                }))
+                                        },
+                                    ))
+                            })
+                        },
+                    )
                 }),
             SettingGroup::new()
                 .item(crate::settings_center::settings_group_heading("当前显示", None))
                 .item({
                     let view = cx.entity();
-                    SettingItem::new(
+                    crate::settings_center::settings_item_row(
                         "当前生效主题",
-                        SettingField::render(move |_options, _window, cx| {
-                        view.update(cx, |_this, _cx| {
-                            div()
-                                .text_size(px(ui_theme::TYPE_BODY))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                .child(theme_variant_label(active_variant))
-                        })
-                    }),
-                )
+                        None,
+                        move |_options, _window, cx| {
+                            view.update(cx, |_this, _cx| {
+                                div()
+                                    .text_size(px(ui_theme::TYPE_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                    .child(theme_variant_label(active_variant))
+                            })
+                        },
+                    )
                 }),
         ]
     }
