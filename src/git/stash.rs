@@ -77,6 +77,17 @@ impl GitService {
     }
 
     pub fn apply_stash(&self, repo: &mut Repository, index: usize) -> Result<RepositorySnapshot> {
+        self.apply_stash_with_options(repo, index, false)
+    }
+
+    /// reinstate_index 供切换分支的自动携带使用：恢复时连同暂存区划分一起
+    /// 还原（git stash apply --index 语义），避免已暂存内容被抹平成未暂存。
+    pub(super) fn apply_stash_with_options(
+        &self,
+        repo: &mut Repository,
+        index: usize,
+        reinstate_index: bool,
+    ) -> Result<RepositorySnapshot> {
         self.ensure_stash_index(repo, index)?;
         self.progress.emit(OperationEvent::Started(format!(
             "正在应用贮藏 stash@{{{index}}}"
@@ -86,6 +97,7 @@ impl GitService {
             repo,
             index,
             &mut options,
+            reinstate_index,
         )?;
         self.progress.emit(OperationEvent::Finished(format!(
             "已应用贮藏 stash@{{{index}}}"
@@ -99,7 +111,12 @@ impl GitService {
             "正在弹出贮藏 stash@{{{index}}}"
         )));
         let mut options = StashApplyOptions::new();
-        super::worktree_compat::pop_stash_preserving_locked_directories(repo, index, &mut options)?;
+        super::worktree_compat::pop_stash_preserving_locked_directories(
+            repo,
+            index,
+            &mut options,
+            false,
+        )?;
         self.progress.emit(OperationEvent::Finished(format!(
             "已弹出贮藏 stash@{{{index}}}"
         )));

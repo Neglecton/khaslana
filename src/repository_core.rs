@@ -184,6 +184,7 @@ impl RepositoryView {
             clone_recursive_submodules: default_clone_recursive_submodules(),
             branch_name: TextFieldState::new(cx, "新分支名称"),
             create_branch_checkout: true,
+            carry_checkout_auto_apply: layout_preferences.carry_checkout_auto_apply,
             create_branch_base: None,
             branch_rename: TextFieldState::new(cx, "重命名为"),
             commit_message: TextFieldState::new(cx, "提交信息"),
@@ -806,11 +807,12 @@ impl RepositoryView {
             .unwrap_or_default()
     }
 
-    /// 保存布局偏好（导航器展开 + 全部分割线位置）。
+    /// 保存布局偏好（导航器展开 + 全部分割线位置 + 切换自动应用记住值）。
     ///
-    /// 仅在离散用户动作后调用（拖拽结束/双击复位/导航器开合/详情卡折叠），
-    /// UI 线程同步写：单行 <200B 的本地 SQLite 写无感知卡顿，同步保证操作
-    /// 顺序落库且「改完即关应用」不丢最后一次修改（与主题/快捷键保存同模式）。
+    /// 仅在离散用户动作后调用（拖拽结束/双击复位/导航器开合/详情卡折叠/
+    /// 自动应用勾选），UI 线程同步写：单行 <200B 的本地 SQLite 写无感知
+    /// 卡顿，同步保证操作顺序落库且「改完即关应用」不丢最后一次修改（与
+    /// 主题/快捷键保存同模式）。
     pub(crate) fn save_layout_preferences(&self) {
         let preferences = khaslana::LayoutPreferences {
             navigator_visible: Some(self.context_navigator_preferences.visible),
@@ -824,6 +826,7 @@ impl RepositoryView {
             history_details_height: self.history_details_height,
             history_inspector_height: Some(self.history_inspector_height),
             history_details_collapsed: self.history_details_collapsed,
+            carry_checkout_auto_apply: self.carry_checkout_auto_apply,
         };
         if let Err(err) = self.storage.save_layout_preferences(&preferences) {
             tracing::warn!("layout preferences write skipped: {err}");

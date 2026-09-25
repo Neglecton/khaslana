@@ -120,6 +120,9 @@ impl RepositoryView {
             DialogState::ConfirmPopStash { index, message } => self
                 .render_confirm_pop_stash_dialog(index, message, cx)
                 .into_any_element(),
+            DialogState::ConfirmCarryCheckout { target } => self
+                .render_confirm_carry_checkout_dialog(&target, cx)
+                .into_any_element(),
             DialogState::WorkflowShortcutBinding { file } => self
                 .render_workflow_shortcut_binding_dialog(file.as_str(), cx)
                 .into_any_element(),

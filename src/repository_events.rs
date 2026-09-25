@@ -1153,6 +1153,35 @@ impl RepositoryView {
                 });
                 self.notify_error(toast_message, cx);
             }
+            UiEvent::CheckoutBlocked { tab_id, target } => {
+                // 切换被未提交修改阻止：工作区与 HEAD 均未改动。清理操作态后
+                // 弹窗询问是否贮藏后重试；tab 已关闭时不再弹。
+                if let Some(tab_id) = tab_id
+                    && self.tab(tab_id).is_none()
+                {
+                    return;
+                }
+                self.apply_status_event(tab_id, |this| {
+                    this.busy = false;
+                    this.operation_blocker = OperationBlocker::None;
+                    this.operation_blocker_started = None;
+                    this.remote_branch_operation.refreshing = false;
+                    this.operation_kind = OperationKind::Local;
+                    this.loading = RepositoryLoading::default();
+                    this.status = "切换已被阻止".to_string();
+                    this.last_error = None;
+                });
+                self.close_popups();
+                self.active_dialog = Some(DialogState::ConfirmCarryCheckout { target });
+            }
+            UiEvent::OperationNotice { tab_id, message } => {
+                if let Some(tab_id) = tab_id
+                    && self.tab(tab_id).is_none()
+                {
+                    return;
+                }
+                self.notify_warning(message, cx);
+            }
             UiEvent::CredentialRequested {
                 tab_id,
                 request,

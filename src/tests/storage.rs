@@ -39,6 +39,7 @@ fn layout_preferences_default_and_round_trip() {
         history_details_height: Some(310.0),
         history_inspector_height: Some(360.0),
         history_details_collapsed: true,
+        carry_checkout_auto_apply: true,
     };
     storage.save_layout_preferences(&preferences).unwrap();
     assert_eq!(storage.load_layout_preferences().unwrap(), preferences);
@@ -107,6 +108,8 @@ fn layout_preferences_tolerates_partial_legacy_payload() {
     assert_eq!(loaded.navigator_visible, None);
     assert_eq!(loaded.history_details_height, None);
     assert!(!loaded.history_details_collapsed);
+    // 旧 payload 没有该字段：回默认关闭，用户每次在弹窗里自行勾选。
+    assert!(!loaded.carry_checkout_auto_apply);
 }
 
 #[test]

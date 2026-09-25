@@ -4016,6 +4016,258 @@ fn drop_stash_removes_entry() {
     assert!(service.stashes(&mut repo).unwrap().is_empty());
 }
 
+// ── 切换分支自动携带未提交修改 ──
+
+#[test]
+fn checkout_branch_checked_blocks_and_keeps_worktree() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "file.txt", "target\n");
+    git_support::commit_all(&repo, "other change");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "file.txt", "local\n");
+
+    let attempt = service
+        .checkout_branch_checked(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
+
+    // 被阻止时工作区与 HEAD 均未改动，修改不丢失，也不产生贮藏。
+    git_support::assert_file_text(dir.path(), "file.txt", "local\n");
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "main");
+    assert!(service.stashes(&mut repo).unwrap().is_empty());
+}
+
+#[test]
+fn checkout_branch_carrying_changes_restores_edits_and_conflicts() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "keep.txt", "keep base\n");
+    git_support::write_file(dir.path(), "clash.txt", "clash base\n");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "clash.txt", "target\n");
+    git_support::commit_all(&repo, "other change");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+
+    // keep.txt 目标分支未动（可无缝恢复）；clash.txt 目标分支也改（恢复必然冲突）。
+    git_support::write_file(dir.path(), "keep.txt", "keep local\n");
+    git_support::write_file(dir.path(), "clash.txt", "clash local\n");
+
+    let attempt = service
+        .checkout_branch_checked(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
+
+    let outcome = service
+        .checkout_branch_carrying_changes(&mut repo, &BranchName::new("other".to_string()), true)
+        .unwrap();
+
+    // 切换成功，无冲突的修改跟随到新分支。
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "other");
+    git_support::assert_file_text(dir.path(), "keep.txt", "keep local\n");
+    // 冲突文件留下冲突标记；原修改保留在贮藏，并带有明确提示。
+    let clash = fs::read_to_string(dir.path().join("clash.txt")).unwrap();
+    assert!(clash.contains("<<<<<<<"));
+    assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
+    assert!(outcome.notice.is_some());
+    assert!(!outcome.snapshot.conflicts.is_empty());
+}
+
+#[test]
+fn checkout_branch_carrying_changes_round_trips_staged_index() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "staged.txt", "base\n");
+    git_support::write_file(dir.path(), "clash.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "clash.txt", "target\n");
+    git_support::commit_all(&repo, "other change");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+
+    // staged.txt 的修改进入暂存区；clash.txt 制造切换冲突以触发携带流程。
+    git_support::write_file(dir.path(), "staged.txt", "staged local\n");
+    {
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+    }
+    git_support::write_file(dir.path(), "clash.txt", "clash local\n");
+
+    let outcome = service
+        .checkout_branch_carrying_changes(&mut repo, &BranchName::new("other".to_string()), true)
+        .unwrap();
+
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "other");
+    git_support::assert_file_text(dir.path(), "staged.txt", "staged local\n");
+    // reinstantiate_index 生效：暂存区划分被还原，已暂存内容不会掉成未暂存。
+    let staged_change = outcome
+        .snapshot
+        .changes
+        .iter()
+        .find(|change| change.path == "staged.txt")
+        .expect("staged.txt 应仍在变更列表中");
+    assert!(staged_change.staged.is_some());
+}
+
+#[test]
+fn checkout_branch_carrying_changes_moves_untracked_file() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    // 目标分支把 new.txt 纳入管理，内容与本地未跟踪文件不同。
+    git_support::write_file(dir.path(), "new.txt", "tracked in other\n");
+    git_support::commit_all(&repo, "add new.txt");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+
+    git_support::write_file(dir.path(), "new.txt", "untracked local\n");
+
+    let attempt = service
+        .checkout_branch_checked(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
+
+    service
+        .checkout_branch_carrying_changes(&mut repo, &BranchName::new("other".to_string()), true)
+        .unwrap();
+
+    // 切换成功；未跟踪内容不丢失：目标分支有同名文件时，libgit2 的恢复会
+    // 写入冲突标记（与手动「应用贮藏」行为一致），双方内容都在。
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "other");
+    let new_file = fs::read_to_string(dir.path().join("new.txt")).unwrap();
+    assert!(new_file.contains("untracked local"));
+    assert!(new_file.contains("tracked in other"));
+    // 未产生索引级冲突条目（stashes 空）时贮藏被正常清除。
+    assert!(service.stashes(&mut repo).unwrap().is_empty());
+}
+
+#[test]
+fn checkout_branch_carrying_changes_without_auto_apply_keeps_stash() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "keep.txt", "keep base
+");
+    git_support::write_file(dir.path(), "clash.txt", "clash base
+");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "clash.txt", "target
+");
+    git_support::commit_all(&repo, "other change");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "keep.txt", "keep local
+");
+    git_support::write_file(dir.path(), "clash.txt", "clash local
+");
+
+    let outcome = service
+        .checkout_branch_carrying_changes(
+            &mut repo,
+            &BranchName::new("other".to_string()),
+            false,
+        )
+        .unwrap();
+
+    // 切换成功但不自动恢复：工作区是目标分支的干净内容，没有冲突标记，
+    // 未提交修改整体留在贮藏列表第一条。
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "other");
+    git_support::assert_file_text(dir.path(), "keep.txt", "keep base
+");
+    git_support::assert_file_text(dir.path(), "clash.txt", "target
+");
+    assert!(outcome.snapshot.conflicts.is_empty());
+    assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
+    assert!(outcome.notice.is_some());
+}
+
+#[test]
+fn checkout_branch_checked_propagates_non_conflict_errors() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    git_support::write_file(dir.path(), "file.txt", "local\n");
+
+    let result = service.checkout_branch_checked(&mut repo, &BranchName::new("missing".to_string()));
+    assert!(result.is_err());
+
+    // 非冲突错误不触发携带流程，工作区与贮藏均未动。
+    git_support::assert_file_text(dir.path(), "file.txt", "local\n");
+    assert!(service.stashes(&mut repo).unwrap().is_empty());
+}
+
+#[test]
+fn checkout_tag_carrying_changes_detaches_and_restores() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "base\n");
+    let c1 = git_support::commit_all(&repo, "c1");
+    git_support::write_file(dir.path(), "file.txt", "tagged\n");
+    let c2 = git_support::commit_all(&repo, "c2");
+    repo.tag_lightweight("v1", &repo.find_object(c2, None).unwrap(), false)
+        .unwrap();
+    // 回到 c1 所在分支，制造本地修改后检出标签。
+    repo.branch("at-c1", &repo.find_commit(c1).unwrap(), false).unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("at-c1".to_string()))
+        .unwrap();
+    git_support::write_file(dir.path(), "file.txt", "local\n");
+
+    let attempt = service
+        .checkout_tag_checked(&mut repo, &TagName::new("v1".to_string()))
+        .unwrap();
+    assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
+
+    let outcome = service
+        .checkout_tag_carrying_changes(&mut repo, &TagName::new("v1".to_string()), true)
+        .unwrap();
+
+    assert!(repo.head_detached().unwrap());
+    assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
+    assert!(outcome.notice.is_some());
+    let file = fs::read_to_string(dir.path().join("file.txt")).unwrap();
+    assert!(file.contains("<<<<<<<"));
+}
+
 /// 构造开发者 A/B 分叉场景：裸远端含 main（seed 提交）；
 /// A 已克隆、提交 a.txt 并推送；B（返回的工作仓库）已本地提交 b.txt 但未拉取/推送。
 fn diverged_dev_pair() -> (TempDir, TempDir, Repository, GitService) {

@@ -30,6 +30,7 @@ use smallvec::SmallVec;
 
 mod blame;
 mod browse;
+mod checkout_carry;
 mod commit_trace;
 mod conflicts;
 mod merge;
@@ -52,6 +53,7 @@ pub(crate) mod test_support;
 
 // 重新导出浏览模式引用种类，供二进制 crate 使用
 pub use browse::BrowseRefKind;
+pub use checkout_carry::{CarryingCheckoutOutcome, CheckoutAttempt};
 pub use commit_trace::COMMIT_TRACE_OID_LIMIT;
 pub use partial_stage::{LineSelection, SelectedDiffLine, SelectionSide};
 pub use search::CodeSearchMatch;
@@ -1102,6 +1104,11 @@ impl GitService {
         drop(remote_branch_handle);
         self.checkout_branch(repo, &BranchName::new(local_name))
             .map_err(|err| match err {
+                // 冲突（本地修改会被覆盖）保持 git2 原错误：checked 包装层据此
+                // 判定是否询问用户贮藏后重试，中文包装会丢掉错误码。
+                GitError::Git(git_err) if git_err.code() == ErrorCode::Conflict => {
+                    GitError::Git(git_err)
+                }
                 GitError::Git(git_err) => GitError::Message(format!(
                     "无法切换到本地分支 {local_name}：{}",
                     git_err.message()

@@ -255,7 +255,14 @@ pub(super) fn apply_stash_preserving_locked_directories(
     repo: &mut Repository,
     index: usize,
     options: &mut StashApplyOptions<'_>,
+    reinstate_index: bool,
 ) -> std::result::Result<(), git2::Error> {
+    // git2 的 reinstantiate_index（历史拼写）是赋值而非 OR，且必须在下面
+    // options.raw() 读取之前调用，Windows 的 raw 拷贝才能带上该标志位。
+    // 该位让恢复时同时还原暂存区划分（git stash apply --index 语义）。
+    if reinstate_index {
+        options.reinstantiate_index();
+    }
     #[cfg(windows)]
     {
         let mut raw_options = unsafe { std::ptr::read(options.raw()) };
@@ -317,7 +324,12 @@ pub(super) fn pop_stash_preserving_locked_directories(
     repo: &mut Repository,
     index: usize,
     options: &mut StashApplyOptions<'_>,
+    reinstate_index: bool,
 ) -> std::result::Result<(), git2::Error> {
+    // 时序要求同 apply 版：reinstantiate_index 须早于 options.raw() 的读取。
+    if reinstate_index {
+        options.reinstantiate_index();
+    }
     #[cfg(windows)]
     {
         let mut raw_options = unsafe { std::ptr::read(options.raw()) };

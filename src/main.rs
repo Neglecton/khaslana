@@ -6,6 +6,7 @@ mod blame_view;
 mod browse_compare_view;
 mod browse_view;
 mod chrome_view;
+mod checkout_carry_view;
 mod code_index_view;
 mod code_palette_view;
 mod commit_graph_view;
@@ -70,7 +71,8 @@ use gpui::{
 use khaslana::{
     AiProviderSettings, AiReviewRecord, AiReviewResult, AiReviewStep, BlameView, BranchKind,
     BranchName, BranchSyncStatus, BrowseCompareFile, BrowseEntry, BrowseFileContent,
-    BrowseListMode, BrowseRefKind, BrowseTarget, ChangeState, CommitFileChange, CommitInfo,
+    BrowseListMode, BrowseRefKind, BrowseTarget, CarryingCheckoutOutcome, ChangeState,
+    CheckoutAttempt, CommitFileChange, CommitInfo,
     CommitMessage, ConflictBlockResolution, ConflictFileKind, ConflictFileView, CredentialProvider,
     CredentialRecord, CredentialRequest, CredentialScope, CredentialStore, CustomProxySettings,
     DiffEncodingChoice, DiffEncodingInfo, DiffEncodingPreferences, DiffLineKind, DiffScope,
@@ -716,6 +718,29 @@ pub(crate) enum SettingsCategory {
     About,
 }
 
+/// 切换分支/标签的目标：进入「贮藏后重试」确认弹窗与后台执行时按类型
+/// 分发到对应的 GitService 方法。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CheckoutTarget {
+    /// 本地分支。
+    Branch(String),
+    /// 远端分支（检出时自动建/复用本地分支）。
+    RemoteBranch(String),
+    /// 标签（detached HEAD）。
+    Tag(String),
+}
+
+impl CheckoutTarget {
+    /// 面向用户的名称，如「分支 main」「远端分支 origin/feature」「标签 v1.0」。
+    pub(crate) fn label(&self) -> String {
+        match self {
+            CheckoutTarget::Branch(name) => format!("分支 {name}"),
+            CheckoutTarget::RemoteBranch(name) => format!("远端分支 {name}"),
+            CheckoutTarget::Tag(name) => format!("标签 {name}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DialogState {
     CloneRepo,
@@ -815,6 +840,10 @@ pub(crate) enum DialogState {
     ConfirmPopStash {
         index: usize,
         message: String,
+    },
+    /// 切换被未提交修改阻止时的确认弹窗：贮藏当前修改后自动重试切换。
+    ConfirmCarryCheckout {
+        target: CheckoutTarget,
     },
     /// 工作流模板快捷键绑定弹窗（录制键位 + 后台执行开关）。
     WorkflowShortcutBinding {
@@ -2287,6 +2316,18 @@ pub(crate) enum UiEvent {
         snapshot: Option<RepositorySnapshot>,
         diff: Option<FileDiff>,
     },
+    /// 切换被未提交修改阻止：弹窗询问是否贮藏后重试。此时工作区与 HEAD
+    /// 均未改动。
+    CheckoutBlocked {
+        tab_id: Option<RepoTabId>,
+        target: CheckoutTarget,
+    },
+    /// 操作完成后的附加提示（走 warning 通知），如恢复冲突时原修改仍保留
+    /// 在贮藏中。
+    OperationNotice {
+        tab_id: Option<RepoTabId>,
+        message: String,
+    },
     DiscardChangeFinished {
         tab_id: RepoTabId,
         message: String,
@@ -3455,6 +3496,10 @@ pub(crate) struct RepositoryView {
     clone_recursive_submodules: bool,
     branch_name: TextFieldState,
     create_branch_checkout: bool,
+    /// 「切换被阻止」弹窗「切换后自动应用贮藏」的记住值：false = 只贮藏并
+    /// 切换，不自动恢复（默认关闭）；勾选后经 layout_preferences 持久化，
+    /// 重启仍生效。
+    carry_checkout_auto_apply: bool,
     /// 「新建分支」对话框选中的基础分支；None 表示当前 HEAD（默认）。
     create_branch_base: Option<String>,
     branch_rename: TextFieldState,

@@ -850,9 +850,7 @@ impl RepositoryView {
             return;
         }
         self.close_browse_if_comparing();
-        self.with_repo_blocking("切换分支完成", move |service, repo| {
-            service.checkout_branch(repo, &BranchName::new(name))
-        });
+        self.spawn_checkout_with_carry_prompt(CheckoutTarget::Branch(name), CheckoutRun::Attempt);
     }
 
     pub(crate) fn create_branch(&mut self) {
@@ -901,9 +899,10 @@ impl RepositoryView {
             return;
         }
         self.close_browse_if_comparing();
-        self.with_repo_blocking("远端分支已拉取到本地", move |service, repo| {
-            service.checkout_remote_branch(repo, &BranchName::new(name))
-        });
+        self.spawn_checkout_with_carry_prompt(
+            CheckoutTarget::RemoteBranch(name),
+            CheckoutRun::Attempt,
+        );
     }
 
     pub(crate) fn checkout_tag(&mut self, name: String) {
@@ -911,9 +910,139 @@ impl RepositoryView {
             return;
         }
         self.close_browse_if_comparing();
-        self.with_repo_blocking("检出标签完成", move |service, repo| {
-            service.checkout_tag(repo, &TagName::new(name))
+        self.spawn_checkout_with_carry_prompt(CheckoutTarget::Tag(name), CheckoutRun::Attempt);
+    }
+
+    /// 切换分支/远端分支/标签的统一调度。
+    ///
+    /// 先按普通 safe checkout 直接尝试：目标分支未改动本地已修改的文件时，
+    /// libgit2 原生就会保留修改（与 git 命令行一致），不产生任何额外开销。
+    /// 被未提交修改阻止时经 `UiEvent::CheckoutBlocked` 弹窗询问，用户确认后
+    /// 以 `CheckoutRun::Carry` 重跑：贮藏当前修改（含未跟踪文件）→ 切换 →
+    /// 按弹窗勾选决定是否自动恢复。自建 spawn 而非复用 `with_repo_blocking`：
+    /// 一次操作最多要发两条事件（完成 + 附加提示），且被阻止时发的是专用
+    /// 事件而非失败。
+    fn spawn_checkout_with_carry_prompt(&mut self, target: CheckoutTarget, run: CheckoutRun) {
+        let label = checkout_label_for_target(&target);
+        let Some(tab_id) = self.active_tab_id() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let Some(path) = self.repo_path.clone() else {
+            self.last_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        if self.busy {
+            self.last_error = Some("已有操作正在运行".into());
+            return;
+        }
+        let service = self.service_for_tab(tab_id);
+        let carrying = matches!(run, CheckoutRun::Carry { .. });
+        let started = if carrying {
+            "正在贮藏并切换"
+        } else {
+            started_message_for_label(label)
+        };
+        self.apply_status_event(Some(tab_id), |this| {
+            this.repository_load_id = this.repository_load_id.wrapping_add(1);
+            this.loading = RepositoryLoading::default();
+            this.busy = true;
+            this.operation_blocker = OperationBlocker::Modal;
+            this.operation_blocker_started = Some(Instant::now());
+            this.operation_kind = OperationKind::from_message(started);
+            this.status = started.to_string();
+            this.last_error = None;
         });
+        let tx = self.tx.clone();
+        send_ui_event(
+            &tx,
+            UiEvent::OperationStarted {
+                tab_id: Some(tab_id),
+                message: started.to_string(),
+            },
+        );
+        self.tasks.spawn(TaskKind::Long, move || {
+            let mut repo = match Repository::open(&path) {
+                Ok(repo) => repo,
+                Err(err) => {
+                    send_ui_event(
+                        &tx,
+                        UiEvent::OperationFailed {
+                            tab_id: Some(tab_id),
+                            error: err.to_string(),
+                        },
+                    );
+                    return;
+                }
+            };
+            match run {
+                CheckoutRun::Carry { auto_apply } => {
+                    match run_checkout_carrying(&service, &mut repo, &target, auto_apply) {
+                        Ok(outcome) => {
+                            send_ui_event(
+                                &tx,
+                                UiEvent::OperationFinished {
+                                    tab_id: Some(tab_id),
+                                    message: label.to_string(),
+                                    snapshot: Some(outcome.snapshot),
+                                    diff: None,
+                                },
+                            );
+                            if let Some(notice) = outcome.notice {
+                                send_ui_event(
+                                    &tx,
+                                    UiEvent::OperationNotice {
+                                        tab_id: Some(tab_id),
+                                        message: notice,
+                                    },
+                                );
+                            }
+                        }
+                        Err(err) => send_ui_event(
+                            &tx,
+                            UiEvent::OperationFailed {
+                                tab_id: Some(tab_id),
+                                error: err.to_string(),
+                            },
+                        ),
+                    }
+                }
+                CheckoutRun::Attempt => {
+                    match run_checkout_checked(&service, &mut repo, &target) {
+                        Ok(CheckoutAttempt::Switched(snapshot)) => send_ui_event(
+                            &tx,
+                            UiEvent::OperationFinished {
+                                tab_id: Some(tab_id),
+                                message: label.to_string(),
+                                snapshot: Some(snapshot),
+                                diff: None,
+                            },
+                        ),
+                        Ok(CheckoutAttempt::BlockedByLocalChanges) => send_ui_event(
+                            &tx,
+                            UiEvent::CheckoutBlocked {
+                                tab_id: Some(tab_id),
+                                target: target.clone(),
+                            },
+                        ),
+                        Err(err) => send_ui_event(
+                            &tx,
+                            UiEvent::OperationFailed {
+                                tab_id: Some(tab_id),
+                                error: err.to_string(),
+                            },
+                        ),
+                    }
+                }
+            }
+        });
+    }
+
+    /// 「贮藏并切换」确认入口：先关弹窗，再按弹窗勾选的 auto_apply 重跑切换。
+    pub(crate) fn confirm_carry_checkout(&mut self, target: CheckoutTarget) {
+        let auto_apply = self.carry_checkout_auto_apply;
+        self.close_dialog();
+        self.spawn_checkout_with_carry_prompt(target, CheckoutRun::Carry { auto_apply });
     }
 
     // ── 标签管理 ──────────────────────────────────────────────
@@ -1408,5 +1537,64 @@ impl RepositoryView {
         self.status = "已复制 checkout 命令".into();
         self.last_error = None;
         self.notify_success(self.status.clone(), cx);
+    }
+}
+
+/// 切换目标对应的完成消息：`operation_requires_repository_refresh` 等
+/// 白名单按该消息决定是否完整重载仓库，必须沿用既有静态文案。
+fn checkout_label_for_target(target: &CheckoutTarget) -> &'static str {
+    match target {
+        CheckoutTarget::Branch(_) => "切换分支完成",
+        CheckoutTarget::RemoteBranch(_) => "远端分支已拉取到本地",
+        CheckoutTarget::Tag(_) => "检出标签完成",
+    }
+}
+
+/// 后台线程分发：直接尝试切换，被未提交修改阻止时返回 BlockedByLocalChanges。
+fn run_checkout_checked(
+    service: &GitService,
+    repo: &mut Repository,
+    target: &CheckoutTarget,
+) -> khaslana::Result<CheckoutAttempt> {
+    match target {
+        CheckoutTarget::Branch(name) => {
+            service.checkout_branch_checked(repo, &BranchName::new(name.clone()))
+        }
+        CheckoutTarget::RemoteBranch(name) => {
+            service.checkout_remote_branch_checked(repo, &BranchName::new(name.clone()))
+        }
+        CheckoutTarget::Tag(name) => {
+            service.checkout_tag_checked(repo, &TagName::new(name.clone()))
+        }
+    }
+}
+
+/// 切换的后台执行模式：直接尝试切换，或已确认携带。
+enum CheckoutRun {
+    /// 直接尝试；被未提交修改阻止时发 `CheckoutBlocked` 弹窗询问。
+    Attempt,
+    /// 贮藏后切换；`auto_apply` 为 false 时只贮藏并切换，不自动恢复。
+    Carry { auto_apply: bool },
+}
+
+/// 后台线程分发：贮藏当前修改后切换，按 `auto_apply` 决定是否自动恢复。
+fn run_checkout_carrying(
+    service: &GitService,
+    repo: &mut Repository,
+    target: &CheckoutTarget,
+    auto_apply: bool,
+) -> khaslana::Result<CarryingCheckoutOutcome> {
+    match target {
+        CheckoutTarget::Branch(name) => service
+            .checkout_branch_carrying_changes(repo, &BranchName::new(name.clone()), auto_apply),
+        CheckoutTarget::RemoteBranch(name) => service
+            .checkout_remote_branch_carrying_changes(
+                repo,
+                &BranchName::new(name.clone()),
+                auto_apply,
+            ),
+        CheckoutTarget::Tag(name) => {
+            service.checkout_tag_carrying_changes(repo, &TagName::new(name.clone()), auto_apply)
+        }
     }
 }

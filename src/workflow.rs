@@ -8,8 +8,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchInfo, BranchKind, BranchName, GitError, GitService, RemoteName, RepositorySnapshot,
-    Result, WorktreeChange,
+    BranchInfo, BranchKind, BranchName, CheckoutAttempt, GitError, GitService, RemoteName,
+    RepositorySnapshot, Result, WorktreeChange,
 };
 
 mod expressions;
@@ -637,9 +637,27 @@ impl ResolvedWorkflowStep {
 
     fn execute(&self, service: &GitService, repo: &mut Repository) -> Result<StepOutcome> {
         match self {
-            ResolvedWorkflowStep::Checkout { branch } => Ok(StepOutcome::snapshot(
-                service.checkout_branch(repo, &BranchName::new(branch.clone()))?,
-            )),
+            ResolvedWorkflowStep::Checkout { branch } => {
+                let branch = BranchName::new(branch.clone());
+                // 工作流无人值守，不能弹窗确认：被未提交修改阻止时直接按
+                // 「贮藏后重试」执行，恢复冲突的说明写进步骤明细。
+                match service.checkout_branch_checked(repo, &branch)? {
+                    CheckoutAttempt::Switched(snapshot) => Ok(StepOutcome::snapshot(snapshot)),
+                    CheckoutAttempt::BlockedByLocalChanges => {
+                        // 工作流无人值守，没有勾选开关：贮藏并切换后自动恢复。
+                        let outcome = service
+                            .checkout_branch_carrying_changes(repo, &branch, true)?;
+                        let mut details = Vec::new();
+                        if let Some(notice) = outcome.notice {
+                            details.push(notice);
+                        }
+                        Ok(StepOutcome::snapshot_with_details(
+                            outcome.snapshot,
+                            details,
+                        ))
+                    }
+                }
+            }
             ResolvedWorkflowStep::Fetch { remote } => Ok(StepOutcome::snapshot(
                 service.fetch(repo, &RemoteName::new(remote.clone()))?,
             )),

@@ -20,8 +20,9 @@ pub use credentials::{
 };
 pub use external_merge::ExternalMergeSettings;
 pub use git::{
-    BrowseRefKind, FULL_FILE_TOO_LARGE_MESSAGE, GitService, HistoryRefsCache, LineSelection,
-    NoopProgress, ProgressEmitter, SelectedDiffLine, SelectionSide,
+    BrowseRefKind, CarryingCheckoutOutcome, CheckoutAttempt, FULL_FILE_TOO_LARGE_MESSAGE,
+    GitService, HistoryRefsCache, LineSelection, NoopProgress, ProgressEmitter, SelectedDiffLine,
+    SelectionSide,
 };
 pub use proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 pub use storage::{
