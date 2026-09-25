@@ -2,3 +2,4 @@
 dist/
 .zcode/
 .idea/
+/kit-spike/target
