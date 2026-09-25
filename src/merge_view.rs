@@ -132,8 +132,10 @@ impl RepositoryView {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .border_b_1()
-                .border_color(rgb(ui_theme::BORDER))
+                .mb(px(ui_theme::SPACE_2))
+                // 页面容器透明后，状态条是浮在环境底色上的独立实体：
+                // 用圆角 + 留白与下方分栏分隔，不再画贯穿的底边线。
+                .rounded(px(ui_theme::RADIUS_MD))
                 .bg(rgb(ui_theme::COLOR_WARNING))
                 .child(
                     div()
@@ -159,7 +161,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child("确定要中止当前合并吗？"),
             )
             .child(

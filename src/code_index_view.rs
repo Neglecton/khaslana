@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gpui::{Context, Window, div, prelude::*, px};
+use gpui_kit::component::setting::{SettingGroup, SettingItem};
 
 use crate::tasks::TaskKind;
 use crate::ui::{
@@ -101,7 +102,11 @@ fn push_code_index_entry(
 /// 同帧多卡渲染的交互元素必须唯一 ElementId：`app_button` 等内部以 label
 /// 作为元素 id，卡片列里多个同 label 按钮会共享元素状态（第一张卡可点、
 /// 其余点击丢失）。用仓库键 + 动作包一层有 id 的容器隔离状态路径。
-fn code_index_interactive_host(repo_key: &str, action: &str, inner: impl IntoElement) -> gpui::AnyElement {
+fn code_index_interactive_host(
+    repo_key: &str,
+    action: &str,
+    inner: impl IntoElement,
+) -> gpui::AnyElement {
     div()
         .id(format!("code-index-{action}-{}", repo_key))
         .child(inner)
@@ -130,11 +135,20 @@ impl RepositoryView {
     // 设置页渲染
     // ------------------------------------------------------------------
 
-    pub(crate) fn render_code_index_settings_dialog(
+    /// 设置中心「代码索引」页的分组（Kit `SettingGroup` 列表）。
+    ///
+    /// 内容与旧 `render_code_index_settings_dialog` 对应，拆成两组：
+    /// 「MCP 服务器」（说明 + 启动命令只读值与复制按钮）与「仓库」
+    /// （过滤输入 + 仓库卡片 + 空列表提示 + 索引说明）。卡片仍由
+    /// `render_code_index_repo_card` 渲染：交互 id 隔离、全局单任务守卫与
+    /// `TextFieldState` 输入宿主语义不变；复制按钮行为与旧页一致。
+    /// `Entity` 非 `Copy`，每个 `move` 闭包前重新取 `view`，避免所有权
+    /// 已转移后再用；闭包均为 `Fn`，捕获的配置串在闭包体内克隆消费。
+    pub(crate) fn settings_code_index_groups(
         &self,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Vec<SettingGroup> {
         let repo_display = self
             .active_tab()
             .and_then(|tab| tab.repo_path.as_ref())
@@ -156,153 +170,150 @@ impl RepositoryView {
             )
         };
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            // 页头。
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("代码索引"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .line_height(px(17.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child("为每个仓库建立本机代码知识图谱（tree-sitter 解析 → 符号与调用关系 → SQLite），供全局符号搜索（Ctrl+P）与 MCP 工具使用。仓库列表在页面底部，可分别启用、重建或删除索引。"),
-                    ),
-            )
-            // MCP 服务器接入卡：把索引暴露给外部 AI 工具。
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child("MCP 服务器"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                                    .child("多仓库模式：一条配置服务所有已索引仓库"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child("把代码索引以 MCP 工具暴露给外部 AI 工具（Claude Code / Cursor / ZCode 等）。命令：khaslana mcp（多仓库模式，工具按 repo 参数选择目标；也可写 khaslana mcp <仓库路径> 固定单仓库）；启动后首次使用仓库时自动建立或增量刷新索引。"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                                    .text_size(px(11.0))
-                                    .line_height(px(16.0))
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(mcp_config.clone()),
-                            )
-                            .child(self.button(
-                                "复制 MCP 配置",
-                                true,
-                                move |this, _, cx| {
-                                    let config = mcp_config.clone();
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(config));
-                                    this.notify_success("已复制 MCP 配置", cx);
-                                },
-                                cx,
-                            )),
-                    ),
-            )
-            // 仓库列表区（页面底部）：标题 + 过滤框 + 卡片列。
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child(format!("仓库（{}）", entries.len())),
-                            )
-                            .child(
-                                div().w(px(220.0)).child(
-                                    self.input(FieldId::CodeIndexFilter, true, window, cx),
-                                ),
-                            ),
-                    )
-                    .children(entries.iter().map(|entry| {
-                        self.render_code_index_repo_card(entry, cx)
-                    }))
-                    .when(entries.is_empty(), |this| {
-                        this.child(
+        let view = cx.entity();
+        let mcp_config_value = mcp_config.clone();
+        let mcp_config_copy = mcp_config;
+        // 说明条目单独成链：说明闭包移走 view 后，启动命令条目重新取一份
+        // （Entity 非 Copy，不能跨 move 闭包复用）。
+        let mcp_group = SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "MCP 服务器",
+                Some("多仓库模式：一条配置服务所有已索引仓库".into()),
+            ))
+            // 说明走 Element 条目：全宽文字容器内自然换行，不受设置项
+            // 行内控件区 auto 宽度挤压。
+            .item(SettingItem::render(move |_options, _window, cx| {
+                view.update(cx, |_this, _cx| {
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        .child("把代码索引以 MCP 工具暴露给外部 AI 工具（Claude Code / Cursor / ZCode 等）。命令：khaslana mcp（多仓库模式，工具按 repo 参数选择目标；也可写 khaslana mcp <仓库路径> 固定单仓库）；启动后首次使用仓库时自动建立或增量刷新索引。")
+                })
+            }));
+        let view = cx.entity();
+        let mcp_group = mcp_group.item(crate::settings_center::settings_item_row(
+            "启动命令",
+            None,
+            move |_options, _window, cx| {
+                // 闭包是 Fn：每次渲染克隆两份配置，分别供只读值与复制按钮消费。
+                let display_config = mcp_config_value.clone();
+                let copy_config = mcp_config_copy.clone();
+                view.update(cx, |this, cx| {
+                    div()
+                        .flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .child(
                             div()
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(match repo_display {
-                                    Some(_) => "没有匹配的仓库。".to_string(),
-                                    None => "当前没有打开的仓库。先在仓库切换下拉中打开一个仓库，再回到此页启用索引。".to_string(),
-                                }),
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .px_2()
+                                .py_1()
+                                .rounded(px(ui_theme::RADIUS_XS))
+                                .bg(rgb(ui_theme::SURFACE_SUNKEN))
+                                .text_size(px(11.0))
+                                // 启动命令值等宽显示（设计稿 settings-light-code-index）。
+                                .font_family("Consolas")
+                                .line_height(px(16.0))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(display_config),
                         )
-                    }),
-            )
-            // 说明文案。
-            .child(
+                        .child(this.button(
+                            "复制 MCP 配置",
+                            true,
+                            move |this, _, cx| {
+                                // on_click 是 Fn：闭包体内克隆写入，不能直接消费捕获的配置。
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy_config.clone(),
+                                ));
+                                this.notify_success("已复制 MCP 配置", cx);
+                            },
+                            cx,
+                        ))
+                })
+            },
+        ));
+
+        // 仓库组：过滤输入 + 仓库卡片 + 空列表提示 + 索引说明。
+        let view = cx.entity();
+        let mut repo_group = SettingGroup::new()
+            .item(crate::settings_center::settings_group_heading(
+                "仓库",
+                Some(format!("共 {} 个仓库；可按名称或路径过滤。", entries.len()).into()),
+            ))
+            .item(crate::settings_center::settings_item_row(
+                "过滤仓库",
+                None,
+                move |_options, window, cx| {
+                    view.update(cx, |this, cx| {
+                        div().w(px(280.0)).max_w_full().child(this.input(
+                            FieldId::CodeIndexFilter,
+                            true,
+                            window,
+                            cx,
+                        ))
+                    })
+                },
+            ));
+        for entry in &entries {
+            // CodeIndexListEntry 未 derive Clone，而 render 闭包要求 'static：
+            // 按字段克隆构造一份移入闭包。
+            let card_entry = CodeIndexListEntry {
+                repo_key: entry.repo_key.clone(),
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+            };
+            // Element 条目无 keywords 时 Kit 搜索期间不可见；补仓库名与路径，
+            // 搜索即可直接定位到对应卡片。
+            let card_keywords = [card_entry.name.clone(), card_entry.path.clone()];
+            let view = cx.entity();
+            repo_group = repo_group.item(
+                SettingItem::render(move |_options, _window, cx| {
+                    view.update(cx, |this, cx| this.render_code_index_repo_card(&card_entry, cx))
+                })
+                .keywords(card_keywords),
+            );
+        }
+        if entries.is_empty() {
+            // 空列表两种口径与旧页一致：有活动仓库是过滤无结果，否则是未开仓库。
+            let empty_hint = match repo_display {
+                Some(_) => "没有匹配的仓库。".to_string(),
+                None => "当前没有打开的仓库。先在仓库切换下拉中打开一个仓库，再回到此页启用索引。"
+                    .to_string(),
+            };
+            let view = cx.entity();
+            repo_group = repo_group.item(SettingItem::render(move |_options, _window, cx| {
+                view.update(cx, |_this, _cx| {
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                        // render 闭包是 Fn：文案克隆后消费，不能直接移入 child。
+                        .child(empty_hint.clone())
+                })
+            }));
+        }
+        // 底部索引说明并入「仓库」组末尾：侧栏仍保持「MCP 服务器 / 仓库」
+        // 两个锚点（设计文档 §3 映射），不新增分组。
+        let view = cx.entity();
+        repo_group = repo_group.item(SettingItem::render(move |_options, _window, cx| {
+            view.update(cx, |_this, _cx| {
                 div()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(format!(
                         "索引基于 tree-sitter 解析仓库工作区（遵循 .gitignore），提取文件、符号、调用与导入关系存入本机 SQLite 库；{}。支持符号提取的语言：Rust、Python、JavaScript、TypeScript/TSX、Go、Java、C、C++、C#、PHP、Kotlin；其余文本文件仅登记为文件节点。",
                         "数据位于应用数据目录 code-index/ 下，按仓库哈希隔离",
-                    )),
-            )
+                    ))
+            })
+        }));
+
+        vec![mcp_group, repo_group]
     }
 
     /// 单张仓库卡片：头行（头像 + 名称 + 状态徽标 + 滑动开关）、路径、
@@ -320,9 +331,8 @@ impl RepositoryView {
         let stats = self.code_index_stats.get(&entry.repo_key);
         let status = code_index_entry_status(running, enabled, stats.is_some());
 
-        // 开关：点击切换该仓库偏好；开启且无在途任务时立即全量建索引。
+        // 开关：切换该仓库偏好；开启且无在途任务时立即全量建索引。
         let toggle_repo = entry.repo_key.clone();
-        let toggle_enabled = enabled;
 
         // 全局单任务守卫：任一任务运行时，其它仓库（及本仓库非取消操作）禁用。
         let actions_free = self.code_index_task.is_none();
@@ -359,23 +369,21 @@ impl RepositoryView {
                 )
                 .child(code_index_status_pill(status))
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .id(format!("code-index-toggle-{}", entry.repo_key))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.set_code_index_enabled_for(&toggle_repo, !toggle_enabled, cx);
-                        }))
-                        .child(code_index_switch(enabled)),
-                ),
+                .child(self.toggle_switch(
+                    format!("code-index-toggle-{}", entry.repo_key),
+                    enabled,
+                    false,
+                    move |this, next, _, cx| {
+                        this.set_code_index_enabled_for(&toggle_repo, next, cx);
+                    },
+                    cx,
+                )),
         );
         // 路径行。
         card = card.child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(entry.path.clone()),
@@ -448,9 +456,14 @@ impl RepositoryView {
                 code_index_interactive_host(
                     &entry.repo_key,
                     "cancel",
-                    self.button("取消", true, |this, _, cx| {
-                        this.cancel_code_index(cx);
-                    }, cx),
+                    self.button(
+                        "取消",
+                        true,
+                        |this, _, cx| {
+                            this.cancel_code_index(cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
@@ -467,39 +480,70 @@ impl RepositoryView {
                 code_index_interactive_host(
                     &entry.repo_key,
                     "increment",
-                    self.button("增量更新", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_increment, false, cx);
-                    }, cx),
+                    self.button(
+                        "增量更新",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_increment, false, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "rebuild",
-                    self.button("重建索引", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_rebuild, true, cx);
-                    }, cx),
+                    self.button(
+                        "重建索引",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_rebuild, true, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "delete",
-                    self.danger_button("删除索引数据", true, move |this, _, _| {
-                        this.request_delete_code_index(display_delete.clone(), repo_delete.clone());
-                    }, cx),
+                    self.danger_button(
+                        "删除索引数据",
+                        true,
+                        move |this, _, _| {
+                            this.request_delete_code_index(
+                                display_delete.clone(),
+                                repo_delete.clone(),
+                            );
+                        },
+                        cx,
+                    ),
                 ),
             ],
             CodeIndexEntryStatus::DisabledWithData => vec![
                 code_index_interactive_host(
                     &entry.repo_key,
                     "rebuild",
-                    self.button("重建索引", actions_free, move |this, _, cx| {
-                        this.start_code_index_task_for_repo(&repo_rebuild_disabled, true, cx);
-                    }, cx),
+                    self.button(
+                        "重建索引",
+                        actions_free,
+                        move |this, _, cx| {
+                            this.start_code_index_task_for_repo(&repo_rebuild_disabled, true, cx);
+                        },
+                        cx,
+                    ),
                 ),
                 code_index_interactive_host(
                     &entry.repo_key,
                     "delete",
-                    self.danger_button("删除索引数据", true, move |this, _, _| {
-                        this.request_delete_code_index(display_delete_2.clone(), repo_delete_2.clone());
-                    }, cx),
+                    self.danger_button(
+                        "删除索引数据",
+                        true,
+                        move |this, _, _| {
+                            this.request_delete_code_index(
+                                display_delete_2.clone(),
+                                repo_delete_2.clone(),
+                            );
+                        },
+                        cx,
+                    ),
                 ),
             ],
             CodeIndexEntryStatus::NotIndexed => vec![],
@@ -513,7 +557,7 @@ impl RepositoryView {
                 row = row.child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .child("同一时间只能有一个索引任务"),
@@ -689,11 +733,7 @@ impl RepositoryView {
         }
     }
 
-    pub(crate) fn confirm_delete_code_index_now(
-        &mut self,
-        repo_key: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_delete_code_index_now(&mut self, repo_key: &str, cx: &mut Context<Self>) {
         self.active_dialog = None;
         let Some(db_path) = Self::index_db_path(repo_key) else {
             return;
@@ -742,21 +782,13 @@ impl RepositoryView {
         // 1) 当前打开的仓库（按 tab 顺序）。
         for tab in &self.tabs {
             if let Some(path) = &tab.repo_path {
-                push_code_index_entry(
-                    path.to_string_lossy().to_string(),
-                    &mut entries,
-                    &mut seen,
-                );
+                push_code_index_entry(path.to_string_lossy().to_string(), &mut entries, &mut seen);
             }
         }
         // 2) 最近打开的仓库（按最近时间倒序，主库已排序）。
         if let Ok(recents) = self.storage.load_recent_repos() {
             for (path, _) in recents {
-                push_code_index_entry(
-                    path.to_string_lossy().to_string(),
-                    &mut entries,
-                    &mut seen,
-                );
+                push_code_index_entry(path.to_string_lossy().to_string(), &mut entries, &mut seen);
             }
         }
         // 3) 索引偏好中剩余的仓库（老记录不在最近列表里也可见，可清理）。
@@ -914,27 +946,6 @@ impl RepositoryView {
 // 渲染纯函数与小部件
 // ----------------------------------------------------------------------
 
-/// 滑动开关（设计稿样式）：34×19 圆角胶囊 + 15px 圆形滑块，开启时滑块
-/// 右置、胶囊主题色；区别于复选框样式的 `toggle_box`。
-fn code_index_switch(enabled: bool) -> impl IntoElement {
-    div()
-        .w(px(34.0))
-        .h(px(19.0))
-        .rounded_full()
-        .bg(rgb(if enabled {
-            ui_theme::PRIMARY
-        } else {
-            ui_theme::BORDER
-        }))
-        .px(px(2.0))
-        .py(px(2.0))
-        .flex()
-        .items_center()
-        .when(enabled, |this| this.justify_end())
-        .when(!enabled, |this| this.justify_start())
-        .child(div().size(px(15.0)).rounded_full().bg(rgb(ui_theme::CARD)))
-}
-
 /// 状态徽标 pill（圆点 + 文字）。
 fn code_index_status_pill(status: CodeIndexEntryStatus) -> gpui::AnyElement {
     let (bg, text) = match status {
@@ -943,7 +954,7 @@ fn code_index_status_pill(status: CodeIndexEntryStatus) -> gpui::AnyElement {
             (ui_theme::COLOR_SUCCESS, ui_theme::COLOR_SUCCESS_FOREGROUND)
         }
         CodeIndexEntryStatus::DisabledWithData | CodeIndexEntryStatus::NotIndexed => {
-            (ui_theme::TILE, ui_theme::CONTENT_SECONDARY)
+            (ui_theme::SURFACE_SUNKEN, ui_theme::CONTENT_SECONDARY)
         }
     };
     div()
@@ -993,7 +1004,11 @@ fn code_index_stats_line(stats: &khaslana::code_index::IndexStats) -> String {
         stats.calls,
         stats.db_bytes as f64 / (1024.0 * 1024.0),
         format_indexed_at(stats.indexed_at),
-        if stats.branch.is_empty() { "-" } else { &stats.branch },
+        if stats.branch.is_empty() {
+            "-"
+        } else {
+            &stats.branch
+        },
     )
 }
 
@@ -1022,7 +1037,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .child(format!("确认删除 {display_name} 的代码索引数据？")),
             )
             .child(

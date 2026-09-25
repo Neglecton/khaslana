@@ -1,5 +1,12 @@
 # Khaslana UI 设计系统：Calm Technical
 
+## GPUI Kit 重构已确认决策（2026-09-21）
+
+本次重构采用 Kit 标准交互：Tab/Shift+Tab、按钮 Enter/Space、菜单方向键、可取消浮层 Esc 与焦点恢复，并保留可见焦点指示。迁移范围内，此决策覆盖下文旧的普通控件纯鼠标、禁止聚焦和键盘导航规则；现有应用快捷键及录制、Ctrl+P、文本编辑、IME、业务守卫、危险确认与任务生命周期保持原语义。该条是迁移目标，不表示现有代码已实现。
+
+视觉以最新 Pencil 稿及 `docs/gpui-kit-refactor-plan.md` 为准：60px 顶栏、仅仓库名的切换下拉、中文命令、设置位于侧栏底部、紧凑窗口按钮、Diff 下方提交区及按暂存状态切换单双列表。对应的旧 44px 顶栏、右上设置位置约束在迁移范围内被替代；既有业务操作仍须可达。
+
+
 ## 目标
 
 Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常工作，但降低装饰竞争。界面以清晰的层级、稳定的空间节奏、可预测的悬停与选中反馈帮助用户持续定位，而不是用渐变、玻璃或堆叠卡片吸引注意力。
@@ -57,9 +64,9 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - `list_row_surface`：默认无完整边框、无阴影；选中态为淡强调色背景与左侧 2px 指示条。
 - `icon_button`：无状态的图标按钮视觉底座，统一尺寸、悬停、禁用原因 tooltip 和标签 tooltip；它不创建临时 `FocusHandle`。
-- `icon_command_button`：壳层图标命令按钮（原 `focusable_icon_button`），**纯鼠标交互**——不可聚焦、无 Enter/Space 激活（gpui-ce 会对聚焦元素在 Enter/Space 松开时合成点击且鼠标按下自动聚焦，剥夺可聚焦性是唯一根治手段；键盘白名单见 AGENTS.md §8）。已全局移除键盘焦点可视环（`focus_visible`）：按 Ctrl/Alt/空格/Tab 等修饰键不再让控件出现额外边框或背景突变。不能在 render 中临时创建焦点句柄。
+- `icon_command_button`：壳层图标命令按钮（原 `focusable_icon_button`），M3 起改用 Kit 基础按钮承载——可 Tab 聚焦、Enter/Space 激活，并保留可见焦点指示（此决策覆盖早期「普通控件纯鼠标、禁止聚焦与键盘导航」规则；键盘白名单与验收矩阵见 AGENTS.md §8 与重构计划 §6）。图标按钮必须有可访问标签 tooltip，禁用态必须解释不可用原因。不能在 render 中临时创建焦点句柄。
 - `page_header`、`command_group`、`empty_state`：页面级标题、命令排列和空状态的基础结构。
-- 现有 `button`、`input_frame`、`dialog_*`、反馈 API 保持兼容。自定义文本输入继续只由 `src/text_input.rs` 管理编辑、IME、选区与光标逻辑。
+- 普通控件（按钮、分段按钮、图标命令按钮）以 Kit 基础按钮承载：可 Tab 聚焦、Enter/Space 激活、保留可见焦点指示。全部输入框使用 Kit `Input` / `Textarea`（适配层 `src/ui/fields.rs`）；自绘输入元素与 `EntityInputHandler` 通路已随 M7 删除，`src/text_input.rs` 只剩 `TextFieldState` 业务真值容器。
 
 图标沿用嵌入式 SVG，单色图标继承语义前景色；品牌 logo 保持原始多色资源渲染。不要用 emoji 作为产品图标。
 
@@ -67,7 +74,7 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 
 - 默认页面、列表、行和导航使用平面 surface；阴影只用于菜单、对话框、toast 和遮罩上方的明确浮层。
 - 不新增装饰性渐变、玻璃态或多层卡片边框。
-- 所有按钮纯鼠标交互：不可聚焦、无键盘激活、无焦点环（键盘白名单见 AGENTS.md §8——仅保留应用级可配置快捷键、文本框内编辑/提交、变更列表 Shift/Ctrl 点选）。后续新控件同样不得添加 `focus_visible` 样式、`track_focus`/`tab_index` 或按键激活。
+- 普通控件（按钮、分段按钮、图标命令、输入框）参与 Tab/Shift+Tab 导航，按钮支持 Enter/Space 激活，可取消浮层支持 Esc 与焦点恢复（M3 起的 Kit 标准交互，覆盖早期「按钮纯鼠标、无焦点环」规则）。键盘白名单见 AGENTS.md §8——应用级可配置快捷键、文本框内编辑/提交、变更列表 Shift/Ctrl 点选、Ctrl+P 面板保持原有业务守卫。
 - 禁用控件保留可解释 tooltip；普通可点击按钮不强制 tooltip，图标-only 控件提供标签。
 - 保持键盘快捷键和原有点击目标；Context Navigator 的模式按钮只是增加入口，不能移除原业务操作。
 
@@ -78,6 +85,6 @@ Focus Workbench 使用「Calm Technical」风格：信息密度适合 Git 日常
 - 浮层仍须遵循根层捕获、菜单锚定、overlay 顺序和 blocker 约束。
 - 可滚动内容继续采用项目规定的有界外层、`scrollable_frame_when` 与内容滚动容器结构；壳层不改变页面内部滚动/虚拟化策略。
 
-## Yororen 桥接
+## Kit 主题桥接
 
-`yororen_ui 0.2` 的公开 `Theme` API 提供 `surface`、`content`、`border`、`action`、`status` 与 `shadow` 字段。`src/theme_view.rs` 直接以 Khaslana token 和当前 accent 填充这些字段，不使用私有 API、hack 或依赖升级。若未来 0.2 API 改为私有，应保留 Khaslana token 与默认 Yororen fallback，并记录限制，而不是绕过可见性。
+`src/ui/kit_theme.rs` 把 Khaslana 语义 token 单向映射到 Kit（gpui-kit）的 `ThemeColor`，再 `Theme::from(&colors)` 重建整个 `Theme`——Kit 组件外观由 `ThemeColor` 一比一派生，只改零散字段不生效。`src/theme_view.rs` 在主题切换时同步重建 Kit 全局主题（含聚焦边框跟随主题色）。映射是单向的：Kit 不写回 Khaslana token，两侧不共享可变状态。

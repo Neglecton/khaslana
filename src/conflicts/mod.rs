@@ -13,7 +13,10 @@ use khaslana::{
 
 use crate::{
     MainMode, RepositoryView,
-    ui::{components::app_panel, theme as ui_theme},
+    ui::{
+        components::{PanelHeaderSurface, app_panel, floating_panel, panel_section_header},
+        theme as ui_theme,
+    },
     ui_helpers::{ScrollbarMode, scrollable_uniform_frame},
 };
 
@@ -25,7 +28,7 @@ enum ConflictDocumentPane {
 }
 
 /// 冲突工作台的平面层级：画布、文件 rail、标题栏与代码内容各自使用稳定语义层。
-/// 集中在纯函数中，避免视图重新引入旧 CARD/ACCENT 作为通用容器颜色。
+/// 集中在纯函数中，避免视图重新引入旧 WB_PANEL/STATE_HOVER 作为通用容器颜色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ConflictWorkbenchSurfaces {
     canvas: u32,
@@ -210,7 +213,7 @@ fn conflict_pane_viewport(
         bottom: top + height,
         offset_x: f32::from(offset.x),
         offset_y: f32::from(offset.y),
-        max_offset_y: f32::from(state.base_handle.max_offset().height).max(0.0),
+        max_offset_y: f32::from(state.base_handle.max_offset().y).max(0.0),
         row_height,
         handle: handle.clone(),
     })
@@ -323,12 +326,12 @@ fn paint_conflict_connectors(data: ConflictConnectorData, window: &mut Window) {
     };
 
     for anchor in &data.anchors {
-        // 非选中块用 MUTED_FOREGROUND 实色（BORDER 与背景融为一体），
+        // 非选中块用 CONTENT_SECONDARY 实色（BORDER_MUTED 与背景融为一体），
         // 选中块主题色加粗。
         let (color, width) = if anchor.selected {
-            (ui_theme::ACCENT, 2.5)
+            (ui_theme::STATE_HOVER, 2.5)
         } else {
-            (ui_theme::MUTED_FOREGROUND, 1.5)
+            (ui_theme::CONTENT_SECONDARY, 1.5)
         };
         if let (Some(from_y), Some(to_y)) = (
             anchor_y(ours, &anchor.ours_lines),
@@ -535,10 +538,9 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let surfaces = conflict_workbench_surfaces();
-        app_panel()
+        // 冲突工作台整页是一张悬浮面板（内部 rail / 详情列再分层）。
+        floating_panel()
             .flex()
-            .bg(rgb(surfaces.canvas))
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
@@ -640,7 +642,7 @@ impl RepositoryView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.conflict_editor.focus);
+                    window.focus(&this.conflict_editor.focus, cx);
                     this.main_mode = MainMode::Conflict;
                     this.select_conflict_file(path_for_select.clone());
                     cx.notify();
@@ -715,7 +717,7 @@ impl RepositoryView {
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("请选择一个冲突文件")
                     .into_any_element(),
             })
@@ -811,7 +813,7 @@ impl RepositoryView {
                     .when(ignored > 0, |this| {
                         this.child(self.conflict_count_badge(
                             format!("已忽略 {ignored}"),
-                            ui_theme::ACCENT,
+                            ui_theme::STATE_HOVER,
                             ui_theme::PRIMARY,
                         ))
                     })
@@ -1298,7 +1300,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .p_3()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
@@ -1375,7 +1377,7 @@ impl RepositoryView {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .p_3()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
@@ -1437,9 +1439,11 @@ impl RepositoryView {
     ) -> impl IntoElement {
         let (label, bg, fg) = match status {
             ConflictBlockStatus::Ignored => {
-                ("已忽略", ui_theme::ACCENT, ui_theme::MUTED_FOREGROUND)
+                ("已忽略", ui_theme::STATE_HOVER, ui_theme::CONTENT_SECONDARY)
             }
-            ConflictBlockStatus::Resolved(_) => ("已处理", ui_theme::ACCENT, ui_theme::PRIMARY),
+            ConflictBlockStatus::Resolved(_) => {
+                ("已处理", ui_theme::STATE_HOVER, ui_theme::PRIMARY)
+            }
             ConflictBlockStatus::Merged => (
                 "已合并",
                 ui_theme::FEEDBACK_SUCCESS_BG,
@@ -1527,17 +1531,10 @@ impl RepositoryView {
     }
 
     fn render_conflict_summary(&self, count: usize) -> impl IntoElement {
-        div()
-            .flex_none()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::SURFACE_SUNKEN))
-            .text_size(px(ui_theme::TYPE_BODY))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-            .child(format!("存在 {count} 个冲突文件"))
+        // 与工作台内其他面板头统一走分组标题（分组底色带替代贯穿分割线）。
+        panel_section_header(format!("存在 {count} 个冲突文件"))
+            .surface(PanelHeaderSurface::Grouped)
+            .build()
     }
 
     fn conflict_row(&self, path: String, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1569,7 +1566,7 @@ impl RepositoryView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                            window.focus(&this.conflict_editor.focus);
+                            window.focus(&this.conflict_editor.focus, cx);
                             this.main_mode = MainMode::Conflict;
                             this.select_conflict_file(path_for_switch.clone());
                             this.change_context_menu = None;
@@ -1581,7 +1578,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(24.0))
                             .text_size(px(ui_theme::TYPE_META))
-                            .font_family("monospace")
+                            .font_family("Consolas")
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("!"),
                     )

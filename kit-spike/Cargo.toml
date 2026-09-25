@@ -1,0 +1,20 @@
+[package]
+name = "kit-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 隔离验证工程（重构计划 M1）：只服务 GPUI Kit 原生样板，不属于主工程依赖图。
+[workspace]
+
+[dependencies]
+gpui-kit = "=0.6.4"
+# M2 前置验证：主工程以 `gpui = { package = "gpui-ce" }` 的方式引用旧运行时，
+# 若这里把别名指向 gpui-pre，现有 `use gpui::...` 是否还需要逐个改写？
+# 版本与主工程一致精确锁 =0.3.5：gpui-pre 的补丁版本之间有破坏性变更。
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

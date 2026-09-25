@@ -111,6 +111,8 @@ pub struct LayoutPreferences {
     #[serde(default)]
     pub history_details_height: Option<f32>,
     #[serde(default)]
+    pub history_inspector_height: Option<f32>,
+    #[serde(default)]
     pub history_details_collapsed: bool,
 }
 

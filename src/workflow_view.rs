@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -27,7 +28,9 @@ use crate::{
     system::open_directory,
     tasks::TaskKind,
     ui::{
-        components::{command_group, list_row_surface, page_header},
+        components::{
+            command_group, floating_panel, list_row_surface, page_header, panel_section_header,
+        },
         theme as ui_theme,
     },
 };
@@ -38,7 +41,8 @@ pub(crate) struct WorkflowInputFieldState {
     label: String,
     description: Option<String>,
     required: bool,
-    field: TextFieldState,
+    /// 持业务真值的文本框（Kit 输入宿主经 `try_field` 读写这里）。
+    pub(crate) field: TextFieldState,
 }
 
 /// 一条工作流日志：标题行 + 可选的明细行（如逐个删除/命中的分支）。
@@ -633,62 +637,50 @@ impl RepositoryView {
             )
             // 「后台执行」勾选框：默认不勾选（触发时跳转到工作流页并运行）；
             // 勾选后留在当前页后台运行（进度走状态栏，完成/失败走 toast）。
-            // 未绑定键位时不可勾选（无绑定即无触发语义）。
-            .child(
+            // 未绑定键位时不可开启（无绑定即无触发语义）。
+            .child({
+                let toggle: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)> = {
+                    let file = file.to_string();
+                    Rc::new(move |this, _window, cx| {
+                        if let Some(binding) =
+                            this.workflow_shortcut_bindings.bindings.get_mut(&file)
+                        {
+                            binding.background = !binding.background;
+                            this.persist_workflow_shortcut_bindings(cx);
+                        }
+                    })
+                };
+                let toggle_for_label = toggle.clone();
                 div()
-                    .id("workflow-shortcut-background-toggle")
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .when(binding.is_some(), |this| {
-                        this.cursor_pointer()
-                            .on_click(cx.listener({
-                                let file = file.to_string();
-                                move |this, _event, _window, cx| {
-                                    if let Some(binding) = this
-                                        .workflow_shortcut_bindings
-                                        .bindings
-                                        .get_mut(&file)
-                                    {
-                                        binding.background = !binding.background;
-                                        this.persist_workflow_shortcut_bindings(cx);
-                                    }
-                                }
-                            }))
-                    })
-                    .when(binding.is_none(), |this| {
-                        this.opacity(0.62).cursor_not_allowed()
-                    })
+                    .child(self.toggle_switch(
+                        "workflow-shortcut-background-toggle",
+                        background_checked,
+                        binding.is_none(),
+                        move |this, _next, window, cx| toggle(this, window, cx),
+                        cx,
+                    ))
                     .child(
                         div()
-                            .flex_none()
-                            .size(px(14.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .border_1()
-                            .border_color(rgb(if background_checked {
-                                ui_theme::PRIMARY
-                            } else {
-                                ui_theme::BORDER
-                            }))
-                            .bg(rgb(if background_checked {
-                                ui_theme::PRIMARY
-                            } else {
-                                ui_theme::SURFACE_BASE
-                            }))
-                            .text_size(px(10.0))
-                            .text_color(rgb(ui_theme::PRIMARY_FOREGROUND))
-                            .when(background_checked, |this| this.child("✓")),
-                    )
-                    .child(
-                        div()
+                            .id("workflow-shortcut-background-label")
+                            .when(binding.is_some(), |this| {
+                                this.cursor_pointer().on_click(cx.listener(
+                                    move |this, _event, window, cx| {
+                                        toggle_for_label(this, window, cx);
+                                        cx.notify();
+                                    },
+                                ))
+                            })
+                            .when(binding.is_none(), |this| {
+                                this.opacity(0.62).cursor_not_allowed()
+                            })
                             .text_size(px(12.0))
                             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child("后台执行（触发时不切换到工作流页）"),
-                    ),
-            )
+                    )
+            })
             .child(
                 dialog_actions()
                     .child(
@@ -728,7 +720,7 @@ impl RepositoryView {
                                         // dispatch_path 经过 overlay），跳过全部快捷键
                                         // 绑定，按键直达根捕获层。
                                         this.recording_shortcut = Some(target.clone());
-                                        window.focus(&this.workflow_shortcut_binding_focus);
+                                        window.focus(&this.workflow_shortcut_binding_focus, cx);
                                         crate::register_all_key_bindings(
                                             &mut cx.deref_mut(),
                                             &this.shortcut_bindings,
@@ -818,12 +810,12 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 模板列表与 Runbook Studio 各是一张悬浮面板，页面根不铺底色。
         div()
             .flex()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_workflow_template_column(cx))
             .child(self.render_column_splitter(ResizeTarget::WorkflowTemplates, cx))
             .child(self.render_workflow_detail(window, cx))
@@ -881,13 +873,14 @@ impl RepositoryView {
             ui_theme::CONTENT_SECONDARY
         };
 
-        div()
+        // Runbook Studio 是右侧独立悬浮面板：输入、步骤预览与运行日志
+        // 都在同一张卡内分层，卡与模板列表之间只隔拖拽区的空隙。
+        floating_panel()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 page_header("Runbook Studio", None).child(
                     command_group()
@@ -1003,69 +996,59 @@ impl RepositoryView {
         let list_handle = scroll_handle.clone();
         let model_for_rows = Arc::clone(&model);
 
-        div()
+        // 模板导航列是独立悬浮面板（白底 + 圆角 + 投影），与右侧内容面板
+        // 之间只隔拖拽区的空隙；右侧分隔线由列分割条统一绘制。
+        floating_panel()
             .flex()
             .flex_col()
             .flex_none()
             .w(px(width))
             .min_w(px(crate::MIN_WORKFLOW_TEMPLATES_WIDTH))
             .min_h(px(0.0))
-            // 右侧分隔线由紧随的列分割条（WorkflowTemplates）统一绘制，
-            // 面板不自画右边框，避免出现两条平行框线。
-            .bg(rgb(ui_theme::SURFACE_SUNKEN))
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(ui_theme::SPACE_2))
-                    .px(px(ui_theme::SPACE_3))
-                    .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("模板导航"),
+                panel_section_header("模板导航")
+                    .top_rounded()
+                    .action(
+                        self.button(
+                            "新建",
+                            !self.busy,
+                            |this, _, cx| this.open_workflow_editor(cx),
+                            cx,
+                        )
+                        .into_any_element(),
                     )
-                    .child(
-                        command_group()
-                            .child(self.button(
-                                "新建",
-                                !self.busy,
-                                |this, _, cx| this.open_workflow_editor(cx),
-                                cx,
-                            ))
-                            .child(self.button(
-                                "刷新",
-                                !self.busy,
-                                |this, _, cx| {
-                                    this.refresh_workflow_templates();
-                                    cx.notify();
-                                },
-                                cx,
-                            ))
-                            .child(self.button(
-                                "目录",
-                                !self.busy,
-                                |this, _, _| this.open_workflow_template_dir(),
-                                cx,
-                            )),
-                    ),
+                    .action(
+                        self.button(
+                            "刷新",
+                            !self.busy,
+                            |this, _, cx| {
+                                this.refresh_workflow_templates();
+                                cx.notify();
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
+                    )
+                    .action(
+                        self.button(
+                            "目录",
+                            !self.busy,
+                            |this, _, _| this.open_workflow_template_dir(),
+                            cx,
+                        )
+                        .into_any_element(),
+                    )
+                    .build(),
             )
             .child(
                 div()
                     .flex_none()
                     .px(px(ui_theme::SPACE_3))
                     .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .text_size(px(10.0))
+                    .text_size(px(ui_theme::TYPE_META))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .truncate()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .child(dir_label),
             )
             .child({
@@ -1209,6 +1192,7 @@ impl RepositoryView {
                     WORKFLOW_TEMPLATE_MENU_WIDTH,
                     WORKFLOW_TEMPLATE_MENU_HEIGHT,
                 );
+                this.reset_context_menu_selection();
                 this.workflow_template_context_menu = Some(WorkflowTemplateContextMenu {
                     path: right_click_path.clone(),
                     x,
@@ -1273,7 +1257,7 @@ impl RepositoryView {
                             .rounded(px(ui_theme::RADIUS_XS))
                             .bg(rgb(ui_theme::STATE_HOVER))
                             .text_size(px(10.0))
-                            .font_family("Consolas, monospace")
+                            .font_family("Consolas")
                             .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child(crate::shortcuts_view::format_keystroke(&keystroke)),
                     )
@@ -1284,9 +1268,9 @@ impl RepositoryView {
                                 .px(px(5.0))
                                 .py(px(1.0))
                                 .rounded(px(ui_theme::RADIUS_PILL))
-                                .bg(rgb(ui_theme::SECONDARY))
+                                .bg(rgb(ui_theme::WB_ROW_HOVER))
                                 .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::SECONDARY_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                 .child("后台"),
                         )
                     }),

@@ -176,7 +176,6 @@ fn recording_visual_state_only_marks_the_active_action() {
     ));
 }
 
-// 按钮无键盘激活（键盘白名单见 AGENTS.md §8）；快捷键录制/恢复默认均为纯鼠标点击。
 #[test]
 fn reset_default_is_disabled_during_recording_with_reason() {
     let target = crate::ShortcutRecordingTarget::App(ShortcutAction::Refresh);

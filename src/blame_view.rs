@@ -14,7 +14,7 @@ use khaslana::BlameView;
 use crate::{
     EncodingMenuTarget, RepositoryView,
     ui::{
-        components::{command_group, page_header, tooltip_text},
+        components::{command_group, floating_panel, page_header, tooltip_text},
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
@@ -92,14 +92,13 @@ fn cached_widest_blame_line_index(
 
 impl RepositoryView {
     pub(crate) fn render_blame_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        floating_panel()
             .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(self.render_blame_header(cx))
             .child(self.render_blame_body(cx))
             // 编码选择下拉菜单（复用 diff 编码选择）
@@ -167,35 +166,7 @@ impl RepositoryView {
                         )
                         .child(format!("编码：{encoding_label}")),
                 )
-                .child(
-                    div()
-                        .id("blame-close")
-                        .flex_none()
-                        .min_h(px(ui_theme::CONTROL_HEIGHT_COMPACT))
-                        .px(px(ui_theme::SPACE_2))
-                        .rounded(px(ui_theme::RADIUS_XS))
-                        .border_1()
-                        .border_color(rgb(ui_theme::BORDER_MUTED))
-                        .bg(rgb(ui_theme::SURFACE_RAISED))
-                        .text_size(px(ui_theme::TYPE_BODY))
-                        .text_color(rgb(if self.busy {
-                            ui_theme::CONTENT_TERTIARY
-                        } else {
-                            ui_theme::CONTENT_PRIMARY
-                        }))
-                        .when(!self.busy, |this| {
-                            this.cursor_pointer()
-                                .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
-                        })
-                        .when(self.busy, |this| this.cursor_not_allowed().opacity(0.6))
-                        .on_click(cx.listener(|this, _event, _window, cx| {
-                            if !this.busy {
-                                this.close_blame();
-                                cx.notify();
-                            }
-                        }))
-                        .child("关闭"),
-                ),
+                .child(self.button("关闭", !self.busy, |this, _, _| this.close_blame(), cx)),
         )
     }
 
@@ -218,8 +189,11 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(12.0))
+            // 追溯页是整页单卡：代码区是面板最后一行，gpui 的 overflow_hidden
+            // 裁不住圆角，方角底色会盖住面板底部两角，这里显式补上。
+            .rounded_b(px(ui_theme::RADIUS_PANEL))
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
@@ -371,23 +345,27 @@ impl RepositoryView {
                 this.tooltip(move |_window, cx| tooltip_text(tooltip.clone(), cx))
             })
             .when_some(commit, |this, commit| {
+                // uniform_list 行内文本一律 overflow_hidden + whitespace_nowrap
+                // 硬裁剪：truncate() 的省略号会被 MinContent 测量坍缩固化。
                 this.child(
                     div()
                         .flex_none()
                         .w(px(BLAME_GUTTER_HASH_WIDTH))
-                        .font_family("Consolas, monospace")
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family("Consolas")
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::PRIMARY))
-                        .truncate()
                         .child(commit.short_oid.clone()),
                 )
                 .child(
                     div()
                         .flex_none()
                         .w(px(BLAME_GUTTER_AUTHOR_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .truncate()
                         .child(commit.author.clone()),
                 )
                 .child(
@@ -402,9 +380,10 @@ impl RepositoryView {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_size(px(11.0))
                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .truncate()
                         .child(commit.summary.clone()),
                 )
             })

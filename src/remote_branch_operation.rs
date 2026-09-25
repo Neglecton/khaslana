@@ -2,15 +2,14 @@ use crate::ui::theme::rgb;
 use gpui::{
     Animation, AnimationExt, Context, IntoElement, MouseButton, Window, div, prelude::*, px,
 };
+use gpui_kit::component::{Disableable, button::Button, menu::DropdownMenu};
 use khaslana::{BranchInfo, BranchKind, RepositorySnapshot};
-use yororen_ui::animation::{constants::duration, ease_out_quint_clamped};
-use yororen_ui::component::{ArrowDirection, IconName, icon, select, select_option};
-use yororen_ui::theme::ActiveTheme;
 
 use crate::{
     FieldId, RepositoryView, ScrollbarMode, scrollable_frame_intrinsic,
     ui::{
-        components::{dialog_actions, toggle_box},
+        components::dialog_actions,
+        icons::{ToolbarIcon, toolbar_icon_rotated},
         theme as ui_theme,
     },
 };
@@ -18,6 +17,8 @@ use crate::{
 const REMOTE_OPERATION_DIALOG_WIDTH: f32 = 640.0;
 const REMOTE_OPERATION_CONTROL_HEIGHT: f32 = 34.0;
 const REMOTE_OPERATION_BRANCH_MENU_HEIGHT: f32 = 240.0;
+/// 菜单展开动画时长，与 `ui_theme::MOTION_FAST_MS` 同一档（120ms）。
+const MENU_OPEN_ANIMATION: std::time::Duration = std::time::Duration::from_millis(120);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteBranchOperationKind {
@@ -237,14 +238,14 @@ impl RepositoryView {
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                     .child("当前本地分支"),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(ui_theme::FOREGROUND))
+                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate()
                                     .child(local_branch_label),
                             ),
@@ -259,7 +260,7 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(kind.help()),
             )
             .child(self.remote_selector(remotes, selected_remote.clone(), cx))
@@ -271,7 +272,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                             .child("远程分支"),
                     )
                     .child(self.remote_branch_editable_selector(
@@ -293,25 +294,30 @@ impl RepositoryView {
                 let checked = self.remote_branch_operation.use_rebase;
                 this.child(
                     div()
-                        .id("pull-use-rebase-toggle")
                         .flex()
                         .items_center()
                         .gap_2()
-                        .cursor_pointer()
-                        .hover(|this| this.opacity(0.8))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
+                        .child(self.toggle_switch(
+                            "pull-use-rebase-toggle",
+                            checked,
+                            false,
+                            |this, _next, _, _| {
                                 this.remote_branch_operation.use_rebase =
                                     !this.remote_branch_operation.use_rebase;
-                                cx.notify();
-                            }),
-                        )
-                        .child(toggle_box(checked))
+                            },
+                            cx,
+                        ))
                         .child(
                             div()
+                                .id("pull-use-rebase-label")
+                                .cursor_pointer()
                                 .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.remote_branch_operation.use_rebase =
+                                        !this.remote_branch_operation.use_rebase;
+                                    cx.notify();
+                                }))
                                 .child("用变基代替合并"),
                         ),
                 )
@@ -328,25 +334,23 @@ impl RepositoryView {
             )
     }
 
+    /// 远端选择：Kit DropdownMenu 提供方向键、Esc、外部关闭、滚动与焦点恢复。
     fn remote_selector(
         &self,
         remotes: Vec<khaslana::RemoteInfo>,
         selected_remote: String,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected_url = remotes
             .iter()
             .find(|remote| remote.name == selected_remote)
             .map(|remote| remote.url.clone());
-        let options = remotes
-            .iter()
-            .map(|remote| {
-                select_option()
-                    .value(remote.name.clone())
-                    .label(remote.name.clone())
-            })
-            .collect::<Vec<_>>();
-        let entity = cx.entity();
+        let disabled = remotes.is_empty() || self.busy;
+        let trigger_label = if selected_remote.is_empty() {
+            "选择远端".to_string()
+        } else {
+            selected_remote.clone()
+        };
 
         div()
             .flex()
@@ -355,33 +359,39 @@ impl RepositoryView {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("远端"),
             )
             .child(
-                div().w_full().text_size(px(12.0)).child(
-                    select("remote-branch-operation-remote-select")
-                        .w_full()
-                        .h(px(REMOTE_OPERATION_CONTROL_HEIGHT))
-                        .options(options)
-                        .placeholder("选择远端")
-                        .value(selected_remote)
-                        .disabled(remotes.is_empty() || self.busy)
-                        .height(px(REMOTE_OPERATION_CONTROL_HEIGHT).into())
-                        .menu_width(px(REMOTE_OPERATION_DIALOG_WIDTH - 32.0))
-                        .on_change(move |value, _window, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.select_remote_branch_operation_remote(value);
-                                cx.notify();
-                            });
-                        }),
-                ),
+                Button::new("remote-branch-operation-remote-select")
+                    .label(trigger_label)
+                    .accessibility_label("选择远端")
+                    .outline()
+                    .dropdown_caret(true)
+                    .disabled(disabled)
+                    .w_full()
+                    .h(px(REMOTE_OPERATION_CONTROL_HEIGHT))
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        remotes.iter().fold(
+                            menu.scrollable(true)
+                                .max_h(px(REMOTE_OPERATION_BRANCH_MENU_HEIGHT)),
+                            |menu, remote| {
+                                menu.menu_with_check(
+                                    remote.name.clone(),
+                                    remote.name == selected_remote,
+                                    Box::new(crate::SelectRemoteBranchOperationRemote {
+                                        remote: remote.name.clone(),
+                                    }),
+                                )
+                            },
+                        )
+                    }),
             )
             .when_some(selected_url, |this, url| {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .truncate()
                         .child(url),
                 )
@@ -422,12 +432,12 @@ impl RepositoryView {
                     .items_center()
                     .justify_center()
                     .border_l_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .bg(rgb(ui_theme::INPUT_BG))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .when(!disabled, |this| {
                         this.cursor_pointer()
-                            .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                            .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
                     })
                     .when(disabled, |this| this.opacity(0.55).cursor_not_allowed())
                     .on_mouse_down(
@@ -440,19 +450,19 @@ impl RepositoryView {
                             this.remote_branch_operation.branch_dropdown_open = next_open;
                             this.remote_branch_search.clear();
                             if next_open {
-                                window.focus(&this.remote_branch_search.focus);
+                                window.focus(&this.remote_branch_search.focus, cx);
                             } else {
-                                window.focus(&this.remote_branch_name.focus);
+                                window.focus(&this.remote_branch_name.focus, cx);
                             }
                             cx.stop_propagation();
                             cx.notify();
                         }),
                     )
-                    .child(
-                        icon(IconName::Arrow(ArrowDirection::Down))
-                            .size(px(12.0))
-                            .color(rgb(ui_theme::MUTED_FOREGROUND)),
-                    ),
+                    .child(toolbar_icon_rotated(
+                        ToolbarIcon::ChevronRight,
+                        ui_theme::CONTENT_SECONDARY,
+                        90.0,
+                    )),
             )
             .when(dropdown_open, |this| {
                 let menu = self.remote_branch_dropdown_menu(selected_remote, branches, window, cx);
@@ -485,13 +495,12 @@ impl RepositoryView {
         let handle = self.scroll_handle("remote-branch-operation-branch-list");
         let entity = cx.entity();
         let close_entity = entity.clone();
-        let theme = cx.theme().clone();
-        let menu_bg = theme.surface.raised;
-        let menu_border = theme.border.default;
-        let row_fg = theme.content.primary;
-        let row_hover_bg = theme.surface.hover;
-        let row_selected_bg = theme.action.primary.bg.alpha(0.10);
-        let check_color = theme.action.primary.bg;
+        let menu_bg = rgb(ui_theme::SURFACE_RAISED);
+        let menu_border = rgb(ui_theme::BORDER_MUTED);
+        let row_fg = rgb(ui_theme::CONTENT_PRIMARY);
+        let row_hover_bg = rgb(ui_theme::STATE_HOVER);
+        let row_selected_bg = rgb(ui_theme::PRIMARY_SUBTLE);
+        let check_color = rgb(ui_theme::PRIMARY);
 
         let content = div()
             .id("remote-branch-operation-branch-list")
@@ -508,7 +517,7 @@ impl RepositoryView {
                         .px_3()
                         .py_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("暂无远端分支，请点击刷新获取"),
                 )
             })
@@ -538,14 +547,20 @@ impl RepositoryView {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.remote_branch_name.set_value(value.clone());
                                     this.remote_branch_operation.branch_dropdown_open = false;
-                                    window.focus(&this.remote_branch_name.focus);
+                                    window.focus(&this.remote_branch_name.focus, cx);
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
                             })
                             .child(div().min_w(px(0.0)).truncate().child(label))
                             .when(selected, |this| {
-                                this.child(icon(IconName::Check).size(px(12.0)).color(check_color))
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.0))
+                                        .text_color(check_color)
+                                        .child("\u{2713}"),
+                                )
                             })
                     })
                     .collect::<Vec<_>>(),
@@ -575,7 +590,7 @@ impl RepositoryView {
                     .px_2()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(self.input(FieldId::RemoteBranchSearch, false, window, cx)),
             )
             .child(
@@ -595,7 +610,12 @@ impl RepositoryView {
             )
             .with_animation(
                 "remote-branch-operation-branch-menu",
-                Animation::new(duration::MENU_OPEN).with_easing(ease_out_quint_clamped),
+                // gpui-pre 的 `easing` 模块是私有的（`ease_out_quint` 不对外导出），
+                // 这里内联同一条 quint ease-out 曲线，行为与迁移前一致。
+                Animation::new(MENU_OPEN_ANIMATION).with_easing(|delta: f32| {
+                    let delta = delta.clamp(0.0, 1.0);
+                    1.0 - (1.0 - delta).powi(5)
+                }),
                 |this, value| this.opacity(value).mt(px(6.0 - 6.0 * value)),
             )
     }

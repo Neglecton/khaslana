@@ -37,6 +37,7 @@ fn layout_preferences_default_and_round_trip() {
         history_graph_width: Some(140.0),
         browse_tree_width: Some(420.0),
         history_details_height: Some(310.0),
+        history_inspector_height: Some(360.0),
         history_details_collapsed: true,
     };
     storage.save_layout_preferences(&preferences).unwrap();

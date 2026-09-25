@@ -62,34 +62,20 @@ fn author_label_includes_email_when_present() {
 }
 
 #[test]
-fn history_commit_rows_fit_two_line_metadata_and_badges() {
-    assert_eq!(HISTORY_COMMIT_ROW_HEIGHT, 48.0);
-    assert!(HISTORY_COMMIT_ROW_HEIGHT > ui_theme::ROW_HEIGHT_REGULAR);
-}
+fn history_inspector_layout_keeps_graph_and_diff_space_stable() {
+    let layout = history_inspector_layout(900.0, 360.0, 300.0, None, false);
 
-// 主历史页导航列较窄：行内引用标签上限收紧到 1（HEAD/首个本地分支优先），
-// 其余收进「+n」徽标；完整标签展示交给图谱页（上限 3）与详情卡（全量）。
-#[test]
-fn main_history_rows_cap_inline_ref_labels_to_one() {
-    assert_eq!(MAX_COMMIT_REF_LABELS, 1);
-    assert_eq!(crate::commit_graph_view::GRAPH_REF_LABEL_CAP, 3);
-}
-
-#[test]
-fn history_inspector_layout_keeps_navigator_and_diff_space_stable() {
-    let layout = history_inspector_layout(372.0, 300.0, None, false);
-
-    assert_eq!(layout.navigator_width, 372.0);
+    assert_eq!(layout.inspector_height, 360.0);
     assert_eq!(layout.details_height, DEFAULT_HISTORY_DETAILS_HEIGHT);
     assert_eq!(layout.file_list_width, 300.0);
 }
 
 #[test]
 fn history_inspector_layout_preserves_manual_details_or_collapses_it() {
-    let expanded = history_inspector_layout(320.0, 280.0, Some(276.0), false);
+    let expanded = history_inspector_layout(900.0, 400.0, 280.0, Some(276.0), false);
     assert_eq!(expanded.details_height, 276.0);
 
-    let collapsed = history_inspector_layout(320.0, 280.0, Some(276.0), true);
+    let collapsed = history_inspector_layout(900.0, 400.0, 280.0, Some(276.0), true);
     assert_eq!(
         collapsed.details_height,
         HISTORY_INSPECTOR_COLLAPSED_DETAILS_HEIGHT
@@ -100,14 +86,21 @@ fn history_inspector_layout_preserves_manual_details_or_collapses_it() {
 #[test]
 fn history_inspector_layout_clamps_manual_file_list_width() {
     // 拖拽越界时由布局层钳制到可拖动范围，宽度状态不会写出极端值。
-    let too_wide = history_inspector_layout(320.0, 5000.0, None, false);
+    let too_wide = history_inspector_layout(900.0, 360.0, 5000.0, None, false);
     assert_eq!(
         too_wide.file_list_width,
         crate::MAX_HISTORY_INSPECTOR_FILES_WIDTH
     );
-    let too_narrow = history_inspector_layout(320.0, 8.0, None, false);
+    let too_narrow = history_inspector_layout(900.0, 360.0, 8.0, None, false);
     assert_eq!(
         too_narrow.file_list_width,
         crate::MIN_HISTORY_INSPECTOR_FILES_WIDTH
     );
+}
+
+#[test]
+fn history_inspector_layout_preserves_graph_space_in_narrow_window() {
+    let layout = history_inspector_layout(400.0, 360.0, 280.0, Some(276.0), false);
+    assert_eq!(layout.inspector_height, 228.0);
+    assert_eq!(layout.details_height, 128.0);
 }

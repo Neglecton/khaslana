@@ -1,8 +1,8 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use gpui::{AssetSource, SharedString};
+use gpui_kit::assets::AllAssets;
 use rust_embed::Embed;
-use yororen_ui::assets::UiAsset;
 
 #[derive(Embed)]
 #[folder = "assets/"]
@@ -22,17 +22,21 @@ impl AssetSource for KhaslanaAsset {
     }
 }
 
-/// 合并项目自绘图标与 Yororen 内置资源，避免本地图标依赖运行目录。
+/// 合并项目自绘图标与 Kit 内置资源，避免本地图标依赖运行目录。
+///
+/// 用 `AllAssets` 而不是默认的 `Assets`：后者只带 101 个组件图标，
+/// `IconName` 里的导航/文件类图标（Git 分支、云、标签等）不在其中，
+/// 缺失时图标会静默不渲染。体积代价约 +1 MB，图标来源优化留到 M7。
 pub(crate) struct AppAssets {
     app: KhaslanaAsset,
-    ui: UiAsset,
+    ui: AllAssets,
 }
 
 impl AppAssets {
     pub(crate) fn new() -> Self {
         Self {
             app: KhaslanaAsset,
-            ui: UiAsset,
+            ui: AllAssets,
         }
     }
 }

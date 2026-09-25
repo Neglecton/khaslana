@@ -1,13 +1,9 @@
 // 提交图谱页（MainMode::CommitGraph）：拓扑专注型的独立页面。
 //
-// 职责分工：主历史页负责「解剖单个提交」（四象限检查器），本页负责
-// 「看提交之间的关系」——全宽泳道列表 + 分支动向高亮（全谱系/仅领先 HEAD
-// 两档）+ 合并提交淡化 + 搜索过滤；底部轻量详情卡提供「在提交记录页查看」
-// 跳转（跳转后主页面四象限直接就位），返回本页时工具行开关、搜索词与
-// 滚动位置全部保留（专用模式切换不重置状态 + 持久滚动句柄注册表）。
+// 图谱工具行和泳道列表由提交记录页与独立图谱页共用；独立页保留轻量详情卡。
+// 模式切换不重置工具行、搜索词和滚动位置。
 //
-// 泳道算法与画布渲染自 history_view.rs 迁入：主历史页已去掉泳道列，
-// 本模块是泳道唯一的使用方。
+// 泳道算法与画布渲染集中在本模块，两个入口使用同一套行行为。
 
 use std::sync::Arc;
 
@@ -28,8 +24,8 @@ use crate::{
     sidebar_view::sidebar_branch_matches_normalized_query,
     ui::{
         components::{
-            command_group, glass_menu, list_row_surface, page_header, segmented_button,
-            tooltip_text,
+            PlaceholderAlign, command_group, floating_panel, glass_menu, list_row_surface,
+            page_header, panel_empty_row, segmented_button, tooltip_text,
         },
         theme::{self as ui_theme, rgb},
     },
@@ -294,9 +290,9 @@ fn render_commit_graph_cell(graph: CommitGraphRow, width: f32, dimmed: bool) -> 
                     .bottom(px(0.0))
                     .flex()
                     .items_center()
-                    .text_size(px(10.0))
-                    .font_family("Consolas, monospace")
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_size(px(ui_theme::TYPE_META))
+                    .font_family("Consolas")
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child("..."),
             )
         })
@@ -321,7 +317,7 @@ fn paint_graph_line(
 fn paint_graph_dot(window: &mut gpui::Window, x: gpui::Pixels, y: gpui::Pixels, color: gpui::Rgba) {
     let outer = px(5.0);
     let inner = px(4.0);
-    paint_graph_circle(window, x, y, outer, rgb(ui_theme::CARD));
+    paint_graph_circle(window, x, y, outer, rgb(ui_theme::SURFACE_BASE));
     paint_graph_circle(window, x, y, inner, color);
 }
 
@@ -382,8 +378,8 @@ fn commit_graph_branch_group_label(label: &'static str) -> gpui::AnyElement {
         .px_3()
         .pt(px(6.0))
         .pb(px(2.0))
-        .text_size(px(10.0))
-        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+        .text_size(px(ui_theme::TYPE_META))
+        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
         .child(label)
         .into_any_element()
 }
@@ -404,7 +400,7 @@ fn scope_segment_option(
         .items_center()
         .min_h(px(28.0))
         .px_3()
-        .text_size(px(12.0))
+        .text_size(px(ui_theme::TYPE_BODY))
         .font_weight(if selected {
             gpui::FontWeight::BOLD
         } else {
@@ -413,12 +409,12 @@ fn scope_segment_option(
         .text_color(rgb(if selected {
             ui_theme::PRIMARY
         } else {
-            ui_theme::MUTED_FOREGROUND
+            ui_theme::CONTENT_SECONDARY
         }))
         .bg(rgb(if selected {
-            ui_theme::ACCENT
+            ui_theme::WB_SECTION_HEADER
         } else {
-            ui_theme::CARD
+            ui_theme::SURFACE_BASE
         }))
         .cursor_pointer()
         .when(!selected, |this| {
@@ -442,7 +438,7 @@ impl RepositoryView {
         // 搜索或文件过滤激活时隐藏泳道列（过滤后中间提交缺失，泳道线会断裂）。
         let graph_visible = !search_active && self.history_file_filter.is_none();
 
-        div()
+        floating_panel()
             .relative()
             .id("commit-graph-page")
             .flex()
@@ -450,7 +446,6 @@ impl RepositoryView {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::CARD))
             .child(page_header("提交图谱", Some("分支拓扑与动向追踪")).child(
                 command_group().child(self.button(
                     "关闭",
@@ -476,7 +471,7 @@ impl RepositoryView {
     /// 单行工具行（用户要求不浪费纵向空间）：分支动向追踪组（高亮下拉、仅领先
     /// HEAD、淡化合并提交）+ 列表范围（互斥分段控件）+ 文件过滤 chip + 搜索框。
     /// 高亮下拉放行首，弹出菜单锚定左缘即对齐触发器。
-    fn render_commit_graph_toolbar(
+    pub(crate) fn render_commit_graph_toolbar(
         &self,
         window: &gpui::Window,
         cx: &mut Context<Self>,
@@ -517,9 +512,9 @@ impl RepositoryView {
                     .h(px(28.0))
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .overflow_hidden()
-                    .bg(rgb(ui_theme::CARD))
+                    .bg(rgb(ui_theme::SURFACE_BASE))
                     // 真分段控件：共享外框与圆角，内部选项无独立边框、
                     // 以 1px 分隔线区隔，选中项主色底——同一时刻只有一个
                     // 选中态（history_scope 单值），互斥且是一个视觉整体。
@@ -535,7 +530,7 @@ impl RepositoryView {
                             .flex_none()
                             .w(px(1.0))
                             .h_full()
-                            .bg(rgb(ui_theme::BORDER)),
+                            .bg(rgb(ui_theme::BORDER_MUTED)),
                     )
                     .child(scope_segment_option(
                         "commit-graph-scope-all",
@@ -557,30 +552,30 @@ impl RepositoryView {
                     .rounded(px(ui_theme::RADIUS_XS))
                     .border_1()
                     .border_color(rgb(if highlight_active {
-                        ui_theme::ACCENT
+                        ui_theme::WB_SECTION_HEADER
                     } else {
-                        ui_theme::BORDER
+                        ui_theme::BORDER_MUTED
                     }))
                     .bg(rgb(if highlight_active {
-                        ui_theme::ACCENT
+                        ui_theme::WB_SECTION_HEADER
                     } else {
-                        ui_theme::CARD
+                        ui_theme::SURFACE_BASE
                     }))
-                    .text_size(px(12.0))
+                    .text_size(px(ui_theme::TYPE_BODY))
                     .text_color(rgb(if highlight_active {
                         ui_theme::PRIMARY
                     } else {
-                        ui_theme::MUTED_FOREGROUND
+                        ui_theme::CONTENT_SECONDARY
                     }))
                     .max_w(px(220.0))
                     .min_w(px(0.0))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.toggle_commit_graph_branch_menu(window);
+                            this.toggle_commit_graph_branch_menu(window, cx);
                             cx.notify();
                         }),
                     )
@@ -627,8 +622,8 @@ impl RepositoryView {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child(hint),
                 )
             })
@@ -636,8 +631,8 @@ impl RepositoryView {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                        .text_size(px(ui_theme::TYPE_META))
+                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                         .child("谱系计算中..."),
                 )
             })
@@ -658,7 +653,7 @@ impl RepositoryView {
 
     /// 分支高亮下拉菜单（glass_menu，锚定在工具行下方）。
     /// 分支高亮下拉：顶部搜索框（打开即聚焦）+ 本地/远端分组列表 + 底部「关闭高亮」。
-    fn render_commit_graph_branch_menu(
+    pub(crate) fn render_commit_graph_branch_menu(
         &self,
         window: &gpui::Window,
         cx: &mut Context<Self>,
@@ -789,7 +784,7 @@ impl RepositoryView {
                                         .px_3()
                                         .py_1()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child("远端分支加载中...")
                                         .into_any_element(),
                                     _ => div()
@@ -797,7 +792,7 @@ impl RepositoryView {
                                         .px_3()
                                         .py_1()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child("没有匹配的分支")
                                         .into_any_element(),
                                 };
@@ -855,19 +850,19 @@ impl RepositoryView {
             .id(id)
             .px_3()
             .py_1()
-            .text_size(px(12.0))
+            .text_size(px(ui_theme::TYPE_BODY))
             // 远端分支名（origin/…）用次要色与本地分支区分（选中仍以主色突出）。
             .text_color(rgb(if selected {
                 ui_theme::PRIMARY
             } else if remote {
                 ui_theme::CONTENT_SECONDARY
             } else {
-                ui_theme::FOREGROUND
+                ui_theme::CONTENT_PRIMARY
             }))
             .bg(rgb(if selected {
                 ui_theme::PRIMARY_SUBTLE
             } else {
-                ui_theme::CARD
+                ui_theme::SURFACE_BASE
             }))
             .cursor_pointer()
             .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
@@ -880,7 +875,7 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    fn render_commit_graph_list(
+    pub(crate) fn render_commit_graph_list(
         &self,
         search_query: String,
         cx: &mut Context<Self>,
@@ -909,7 +904,7 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p_2()
-            .bg(rgb(ui_theme::CARD))
+            .bg(rgb(ui_theme::SURFACE_BASE))
             .child(
                 uniform_list(
                     COMMIT_GRAPH_LIST_SCROLL_ID,
@@ -1098,16 +1093,11 @@ impl RepositoryView {
                 .flex_none()
                 .h(px(COMMIT_GRAPH_DETAILS_HEIGHT))
                 .child(section_header_action("提交详情", None))
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-                        .child("点击泳道行选中提交，查看完整信息"),
-                )
+                .child(panel_empty_row(
+                    "点击泳道行选中提交，查看完整信息",
+                    COMMIT_GRAPH_DETAILS_HEIGHT - 36.0,
+                    PlaceholderAlign::Center,
+                ))
                 .into_any_element();
         };
 
@@ -1165,12 +1155,10 @@ impl RepositoryView {
             .gap_x_3()
             .gap_y_1()
             .text_size(px(11.0))
-            .text_color(rgb(ui_theme::MUTED_FOREGROUND))
-            .child(
-                div()
-                    .font_family("Consolas, monospace")
-                    .child(commit.oid.clone()),
-            )
+            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+            .child(div().font_family("Consolas").child(commit.oid.clone()))
+            // 复制类小按钮保留自绘：回调需要 `cx.listener` 的 FnMut 语义
+            // （项目级 button 的回调是 Fn，收不下可变的 cx）。
             .child(
                 div()
                     .id("commit-graph-copy-sha")
@@ -1179,9 +1167,9 @@ impl RepositoryView {
                     .py(px(1.0))
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .child("复制 SHA")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.copy_commit_sha(oid_for_copy.clone(), cx);
@@ -1195,9 +1183,9 @@ impl RepositoryView {
                     .py(px(1.0))
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER))
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ui_theme::SECONDARY)))
+                    .hover(|this| this.bg(rgb(ui_theme::STATE_HOVER)))
                     .child("复制信息")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1238,9 +1226,9 @@ impl RepositoryView {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.0))
+                            .text_size(px(ui_theme::TYPE_BODY))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::FOREGROUND))
+                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                             .child(commit.summary.clone()),
                     )
                     // 详情卡全量展示引用标签（不受行内 3 个上限约束）。
@@ -1253,8 +1241,8 @@ impl RepositoryView {
                         this.child(
                             div()
                                 .flex_none()
-                                .text_size(px(10.0))
-                                .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                                .text_size(px(ui_theme::TYPE_META))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                 .child("无引用标签"),
                         )
                     }),
@@ -1263,7 +1251,7 @@ impl RepositoryView {
                 div()
                     .min_w(px(0.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::MUTED_FOREGROUND))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(text)
             }))
             .child(meta_row);
@@ -1332,13 +1320,13 @@ impl RepositoryView {
                     .bg(if active {
                         rgb(ui_theme::PRIMARY)
                     } else {
-                        rgb(ui_theme::BORDER)
+                        rgb(ui_theme::BORDER_MUTED)
                     }),
             )
     }
 
     /// 拖拽泳道列宽期间的窗口级鼠标事件承载层：无命中区，不拦截列表点击。
-    fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn history_graph_resize_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         gpui::canvas(
             |_, _, _| (),

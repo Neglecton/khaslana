@@ -18,7 +18,9 @@ use crate::ui::theme::rgb;
 use crate::{
     CHANGE_ROW_HEIGHT, RepositoryView,
     ui::{
-        components::{command_group, empty_state, list_row_surface, page_header},
+        components::{
+            command_group, empty_state, list_row_surface, page_header, panel_section_header,
+        },
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, change_state_badge, placeholder_row, scrollable_uniform_frame},
@@ -311,8 +313,8 @@ impl RepositoryView {
             .min_w(px(self.browse_tree_width))
             .min_h(px(0.0))
             .h_full()
-            .border_r_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
+            // 右侧分隔线由列分割条（BrowseFiles）统一绘制，面板不自画边框
+            // （与分支浏览左树同一约定）。
             .bg(rgb(ui_theme::SURFACE_BASE))
             .child(page_header("分支比较", Some("目标分支领先当前分支的变更")))
             .child(
@@ -324,8 +326,6 @@ impl RepositoryView {
                     .gap(px(ui_theme::SPACE_2))
                     .px(px(ui_theme::SPACE_4))
                     .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
                             .flex()
@@ -344,7 +344,7 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
+                                    .font_family("Consolas")
                                     .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),
@@ -357,14 +357,9 @@ impl RepositoryView {
                     ))),
             )
             .child(
-                div()
-                    .flex_none()
-                    .px(px(ui_theme::SPACE_4))
-                    .py(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child(format!("差异文件 · {file_count}")),
+                panel_section_header(format!("差异文件 · {file_count}"))
+                    .padding_x(ui_theme::SPACE_4)
+                    .build(),
             )
             .child(scrollable_uniform_frame(
                 "browse-compare-scroll",

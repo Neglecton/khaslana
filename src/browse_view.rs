@@ -36,7 +36,10 @@ use crate::{
     BrowseViewMode, CHANGE_ROW_HEIGHT, EncodingMenuTarget, RepositoryView, ResizeTarget,
     diff_encoding_label, encoding_info_label,
     ui::{
-        components::{command_group, empty_state, list_row_surface, page_header, segmented_button},
+        components::{
+            command_group, empty_state, floating_panel, list_row_surface, page_header,
+            panel_section_header, segmented_button,
+        },
         theme as ui_theme,
     },
     ui_helpers::{ScrollbarMode, placeholder_row, scrollable_uniform_frame},
@@ -129,12 +132,11 @@ fn cached_widest_browse_line_index(
 
 impl RepositoryView {
     pub(crate) fn render_browse_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        floating_panel()
             .flex()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .bg(rgb(ui_theme::SURFACE_CANVAS))
             .child(match self.browse.list_mode {
                 BrowseListMode::Tree => self.render_browse_file_tree(cx).into_any_element(),
                 BrowseListMode::Compare => self.render_browse_compare_files(cx).into_any_element(),
@@ -245,8 +247,6 @@ impl RepositoryView {
                     .gap(px(ui_theme::SPACE_2))
                     .px(px(ui_theme::SPACE_4))
                     .py(px(ui_theme::SPACE_2))
-                    .border_b_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
                     .child(
                         div()
                             .flex()
@@ -265,7 +265,7 @@ impl RepositoryView {
                                 div()
                                     .flex_none()
                                     .text_size(px(ui_theme::TYPE_META))
-                                    .font_family("Consolas, monospace")
+                                    .font_family("Consolas")
                                     .text_color(rgb(ui_theme::CONTENT_TERTIARY))
                                     .child(short_oid),
                             ),
@@ -278,14 +278,9 @@ impl RepositoryView {
                     ))),
             )
             .child(
-                div()
-                    .flex_none()
-                    .px(px(ui_theme::SPACE_4))
-                    .py(px(ui_theme::SPACE_2))
-                    .text_size(px(ui_theme::TYPE_META))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("文件树"),
+                panel_section_header("文件树")
+                    .padding_x(ui_theme::SPACE_4)
+                    .build(),
             )
             .child(scrollable_uniform_frame(
                 "browse-tree-scroll",
@@ -561,11 +556,10 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .p(px(ui_theme::SPACE_3))
-            .font_family("Consolas, monospace")
+            .font_family("Consolas")
             .text_size(px(ui_theme::TYPE_BODY))
             .bg(rgb(ui_theme::SURFACE_BASE))
-            // 内容区行选择纯鼠标（拖选）；不设键盘上下文/焦点——键盘复制/全选
-            // 仅保留在文本框内（键盘白名单见 AGENTS.md §8）。
+            // 内容区是只读代码画布，行选择继续使用拖选；不伪装成文本输入控件。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
