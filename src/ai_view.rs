@@ -3,12 +3,14 @@
 // 复杂 AI 逻辑（HTTP 请求、prompt 构造）在 src/ai/ 中实现；
 // 这里只负责组合布局、状态、交互和渲染。
 
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 use async_channel::Sender;
 use gpui::{App, Context, IntoElement, Window, canvas, div, point, prelude::*, px};
 use gpui_kit::base::FocusTrapElement;
-use gpui_kit::component::setting::{SettingGroup, SettingItem};
+use gpui_kit::component::setting::SettingGroup;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Disableable, Sizable};
 use khaslana::{
     AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
 };
@@ -17,6 +19,9 @@ use crate::ui::theme::rgb;
 use crate::{
     AiThinkingOverlayState, AiThinkingTask, AiThinkingTaskKind, FieldId, RepositoryView, UiEvent,
     dialog_panel_size,
+    settings_center::{
+        settings_compact_heading, settings_compact_item, settings_compact_list, settings_item_body,
+    },
     ui::{
         components::{
             PlaceholderAlign, dialog_actions, dialog_overlay, inline_error_bubble, panel_empty_row,
@@ -349,25 +354,32 @@ impl RepositoryView {
     /// 说明原文案整体移作分组描述（不按设计稿拆分改写）；「连接测试」=
     /// 按钮组 + busy / last_error 状态行。输入仍走 `self.input`：
     /// `TextFieldState` 是业务真值，不引入第二套输入状态。
+    ///
+    /// 每组用 [`settings_compact_item`] 整卡单条目自排 8px 行距（对齐旧弹窗
+    /// `gap_2`）；Kit `SettingGroup` 逐条排的 16px 行距会把表单撑散。
     pub(crate) fn settings_ai_groups(
         &self,
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<SettingGroup> {
-        // 外层 `_window` 不进闭包：render 闭包必须 'static，函数参级的
-        // `&Window` 生命周期不够；输入框所需的 `&mut Window` 由 Kit 渲染时
-        // 经闭包参数传入。
-        let view = cx.entity();
         // render 闭包必须 'static，每个闭包各持一份 Entity 克隆（廉价句柄）。
+        let view = cx.entity();
         let enabled_value_view = view.clone();
-        let enabled_set_view = view.clone();
-        let api_type_view = view.clone();
         let base_url_view = view.clone();
         let api_key_view = view.clone();
         let model_view = view.clone();
-        let busy_view = view.clone();
-        let error_view = view.clone();
         let actions_view = view.clone();
+        // 开关写回闭包经 Rc 共享：渲染闭包是 Fn（Kit 每次渲染调用），
+        // on_click 每帧各 move 一份克隆。
+        let enabled_set: Rc<dyn Fn(bool, &mut App)> = {
+            let view = view.clone();
+            Rc::new(move |value: bool, cx: &mut App| {
+                view.update(cx, |this, cx| {
+                    this.set_ai_enabled_form(value);
+                    cx.notify();
+                });
+            })
+        };
         // busy 与 last_error 互斥展示，沿用旧弹窗的 when 条件。
         let busy = self.busy;
         let has_last_error = !busy && self.last_error.is_some();
@@ -375,106 +387,101 @@ impl RepositoryView {
         let last_error_text = self.last_error.clone().unwrap_or_default();
 
         vec![
-            SettingGroup::new()
-                .item(crate::settings_center::settings_group_heading("功能", None))
-                .item(crate::settings_center::settings_switch_row(
-                    "启用 AI 功能",
-                    None,
-                    move |cx: &App| enabled_value_view.read(cx).ai_enabled_form,
-                    move |value: bool, cx: &mut App| {
-                        enabled_set_view.update(cx, |this, cx| {
-                            this.set_ai_enabled_form(value);
-                            cx.notify();
-                        });
-                    },
-                )),
-            SettingGroup::new()
-                .item(crate::settings_center::settings_group_heading(
-                    "连接配置",
-                    Some("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。".into()),
-                ))
-                .item(crate::settings_center::settings_item_row(
-                    "接口类型",
-                    None,
-                    move |_options, _window, cx| {
-                        api_type_view.update(cx, |_this, _cx| {
+            SettingGroup::new().item(settings_compact_item(
+                &["功能", "启用 AI 功能"],
+                move |options, _window, cx| {
+                    let enabled = enabled_value_view.read(cx).ai_enabled_form;
+                    let set_value = enabled_set.clone();
+                    settings_compact_list()
+                        .child(settings_compact_heading("功能", None))
+                        .child(settings_item_body(
+                            "启用 AI 功能",
+                            None,
+                            Switch::new("ai-enabled")
+                                .checked(enabled)
+                                .disabled(options.is_disabled())
+                                .with_size(options.size())
+                                .on_click(move |checked: &bool, _, cx: &mut App| {
+                                    set_value(*checked, cx)
+                                }),
+                        ))
+                },
+            )),
+            SettingGroup::new().item(settings_compact_item(
+                &["连接配置", "接口类型", "接口地址", "API Key", "模型"],
+                move |_options, window, cx| {
+                    // 输入框在渲染闭包内经 view.update 构造：元素包进 div 后
+                    // 与 this / cx 的借用脱钩，可直接作为行内容。
+                    let base_url_input = base_url_view.update(cx, |this, cx| {
+                        div().w(px(280.0)).max_w_full().child(this.input(
+                            FieldId::AiBaseUrl,
+                            false,
+                            window,
+                            cx,
+                        ))
+                    });
+                    let api_key_input = api_key_view.update(cx, |this, cx| {
+                        div().w(px(280.0)).max_w_full().child(this.input(
+                            FieldId::AiApiKey,
+                            false,
+                            window,
+                            cx,
+                        ))
+                    });
+                    let model_input = model_view.update(cx, |this, cx| {
+                        div().w(px(280.0)).max_w_full().child(this.input(
+                            FieldId::AiModel,
+                            false,
+                            window,
+                            cx,
+                        ))
+                    });
+                    settings_compact_list()
+                        .child(settings_compact_heading(
+                            "连接配置",
+                            Some("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。".into()),
+                        ))
+                        .child(settings_item_body(
+                            "接口类型",
+                            None,
                             div()
                                 .text_size(px(ui_theme::TYPE_BODY))
                                 .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(AiApiType::ChatCompletions.label())
-                        })
-                    },
-                ))
-                .item(crate::settings_center::settings_item_row(
-                    "接口地址（Base URL）",
-                    None,
-                    move |_options, window, cx| {
-                        base_url_view.update(cx, |this, cx| {
-                            div().w(px(280.0)).max_w_full().child(this.input(
-                                FieldId::AiBaseUrl,
-                                false,
-                                window,
-                                cx,
-                            ))
-                        })
-                    },
-                ))
-                .item(crate::settings_center::settings_item_row(
-                    "API Key",
-                    None,
-                    move |_options, window, cx| {
-                        api_key_view.update(cx, |this, cx| {
-                            div().w(px(280.0)).max_w_full().child(this.input(
-                                FieldId::AiApiKey,
-                                false,
-                                window,
-                                cx,
-                            ))
-                        })
-                    },
-                ))
-                .item(crate::settings_center::settings_item_row(
-                    "模型",
-                    None,
-                    move |_options, window, cx| {
-                        model_view.update(cx, |this, cx| {
-                            div().w(px(280.0)).max_w_full().child(this.input(
-                                FieldId::AiModel,
-                                false,
-                                window,
-                                cx,
-                            ))
-                        })
-                    },
-                )),
-            {
-                // 状态行沿用旧弹窗的 when 条件：busy 时只显示进度，不显示错误行。
-                let mut group = SettingGroup::new().item(
-                    crate::settings_center::settings_group_heading("连接测试", None),
-                );
-                if busy {
-                    group = group.item(SettingItem::render(move |_options, _window, cx| {
-                        busy_view.update(cx, |_this, _cx| {
+                                .child(AiApiType::ChatCompletions.label()),
+                        ))
+                        .child(settings_item_body(
+                            "接口地址（Base URL）",
+                            None,
+                            base_url_input,
+                        ))
+                        .child(settings_item_body("API Key", None, api_key_input))
+                        .child(settings_item_body("模型", None, model_input))
+                },
+            )),
+            SettingGroup::new().item(settings_compact_item(
+                &["连接测试", "测试连接", "保存"],
+                move |_options, _window, cx| {
+                    // 状态行沿用旧弹窗的 when 条件：busy 时只显示进度，不显示错误行。
+                    let mut list = settings_compact_list()
+                        .child(settings_compact_heading("连接测试", None));
+                    if busy {
+                        list = list.child(
                             div()
                                 .text_size(px(ui_theme::TYPE_BODY))
                                 .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(status_text.clone())
-                        })
-                    }));
-                }
-                if has_last_error {
-                    group = group.item(SettingItem::render(move |_options, _window, cx| {
-                        error_view.update(cx, |_this, _cx| {
+                                .child(status_text.clone()),
+                        );
+                    }
+                    if has_last_error {
+                        list = list.child(
                             div()
                                 .text_size(px(ui_theme::TYPE_BODY))
                                 .text_color(rgb(ui_theme::DESTRUCTIVE))
                                 .truncate()
-                                .child(last_error_text.clone())
-                        })
-                    }));
-                }
-                group.item(SettingItem::render(move |_options, _window, cx| {
-                    actions_view.update(cx, |this, cx| {
+                                .child(last_error_text.clone()),
+                        );
+                    }
+                    let actions = actions_view.update(cx, |this, cx| {
                         dialog_actions()
                             .child(this.button(
                                 "测试连接",
@@ -491,9 +498,10 @@ impl RepositoryView {
                                 },
                                 cx,
                             ))
-                    })
-                }).keywords(["测试连接", "保存"]))
-            },
+                    });
+                    list.child(actions)
+                },
+            )),
         ]
     }
 

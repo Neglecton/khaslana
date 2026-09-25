@@ -3,7 +3,18 @@
 use crate::*;
 use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::setting::{SettingGroup, SettingItem};
-use gpui_kit::component::{Disableable, button::Button, menu::DropdownMenu};
+use gpui_kit::component::{Disableable, Sizable, Size, button::Button, menu::DropdownMenu};
+
+/// 凭据表冻结操作列宽度（按钮区 112px + 行右内边距 8px）。
+const CREDENTIAL_TABLE_OP_COL_W: f32 = 120.0;
+/// 凭据表数据列最小总宽：固定列 512px + 列间距 40px + 行内边距 16px +
+/// 「站点 / 远端」列最小 120px；窄视口时经横向滚动查看完整内容。
+const CREDENTIAL_TABLE_DATA_MIN_W: f32 = 688.0;
+/// 凭据表「站点 / 远端」列最小宽（唯一弹性列的收缩下限）。
+const CREDENTIAL_TABLE_TARGET_MIN_W: f32 = 120.0;
+/// 凭据表行高：操作按钮（32px）撑起的高度；左右两栏拆分后行高必须
+/// 固定一致，纵向滚动时行才能对齐。
+const CREDENTIAL_ROW_H: f32 = 48.0;
 
 impl RepositoryView {
     pub(crate) fn render_dialogs(
@@ -352,8 +363,69 @@ impl RepositoryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // 基础分支只列本地分支：远端分支需先检出为本地分支（切换远端分支入口）。
+        // 选中值在打开对话框时已预填为当前 HEAD 分支（分离 HEAD 时为空）。
+        let branches = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .branches
+                    .iter()
+                    .filter(|branch| branch.kind == BranchKind::Local)
+                    .map(|branch| branch.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selected_base = self.create_branch_base.clone();
+        let disabled = self.busy;
         self.dialog_panel("新建分支", cx)
             .child(self.input(FieldId::BranchName, false, window, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child("基于分支"),
+                    )
+                    .child(
+                        Button::new("create-branch-base-select")
+                            .label(
+                                selected_base
+                                    .clone()
+                                    .unwrap_or_else(|| "当前 HEAD".to_string()),
+                            )
+                            .accessibility_label("选择基础分支")
+                            .outline()
+                            .dropdown_caret(true)
+                            .disabled(disabled)
+                            // 控件行以 12px 正文为基准，按钮取最小档对齐输入框字号。
+                            .with_size(Size::XSmall)
+                            .w_full()
+                            .h(px(34.0))
+                            .dropdown_menu(move |menu, _window, _cx| {
+                                // 对话框面板固定 480px、四周 16px 内边距，触发器
+                                // 占满内容行（448px）；菜单按内容自适应，设同宽
+                                // 下限与触发器对齐。
+                                let menu = menu.min_w(px(448.0)).scrollable(true).max_h(px(240.0));
+                                branches.iter().fold(menu, |menu, branch| {
+                                    let selected =
+                                        selected_base.as_deref() == Some(branch.as_str());
+                                    menu.menu_with_check(
+                                        branch.clone(),
+                                        selected,
+                                        Box::new(SelectCreateBranchBase {
+                                            branch: Some(branch.clone()),
+                                        }),
+                                    )
+                                })
+                            }),
+                    ),
+            )
             .child(self.toggle_row(
                 "create-branch-checkout",
                 "创建成功后切换到新分支",
@@ -2365,22 +2437,33 @@ impl RepositoryView {
                 let view = cx.entity();
                 move |_options, _window, cx| {
                     view.update(cx, |this, cx| {
-                        let rows = if this.credential_records.is_empty() {
-                            vec![
+                        let empty = this.credential_records.is_empty();
+                        let mut data_rows = Vec::new();
+                        let mut action_rows = Vec::new();
+                        if empty {
+                            data_rows.push(
                                 placeholder_row(
                                     "暂无已保存凭据。远程操作时勾选保存后会出现在这里。",
                                 )
                                 .into_any_element(),
-                            ]
+                            );
                         } else {
-                            this.credential_records
-                                .iter()
-                                .cloned()
-                                .map(|record| {
-                                    this.credential_record_row(record, cx).into_any_element()
-                                })
-                                .collect::<Vec<_>>()
-                        };
+                            for record in this.credential_records.clone() {
+                                data_rows.push(
+                                    this.credential_record_data_row(record.clone(), cx)
+                                        .into_any_element(),
+                                );
+                                action_rows.push(
+                                    this.credential_record_actions_row(record, cx)
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                        // 左右两栏共用同一垂直句柄：两栏视口高度与内容总高一致，
+                        // 句柄记录的 max_offset 互相覆盖也无偏差，滚动天然同步。
+                        let v_handle = this.scroll_handle("credential-record-list");
+                        let h_handle = this.scroll_handle("credential-table-h");
+                        let entity = cx.entity();
                         div()
                             .flex()
                             .flex_col()
@@ -2398,35 +2481,112 @@ impl RepositoryView {
                             .on_mouse_down(MouseButton::Right, |_event, _window, cx| {
                                 cx.stop_propagation();
                             })
-                            .child(this.credential_manager_header())
-                            .child({
-                                let handle = this.scroll_handle("credential-record-list");
-                                let content = div()
-                                    .id("credential-record-list")
+                            // 表头：数据列部分随横向滚动与行区同步，操作列固定。
+                            .child(
+                                div()
                                     .flex()
-                                    .flex_col()
+                                    .flex_none()
+                                    .min_w(px(0.0))
+                                    .items_stretch()
+                                    .border_b_1()
+                                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                                    .bg(rgb(ui_theme::WB_PANEL))
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                    .child(
+                                        div()
+                                            .id("credential-table-header-h")
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            // restrict_scroll_to_axis：容器只横向滚动，
+                                            // 不把垂直滚轮转成水平滚动，避免抢走行区滚动。
+                                            .overflow_x_scroll()
+                                            .restrict_scroll_to_axis()
+                                            .track_scroll(&h_handle)
+                                            .child(this.credential_manager_header_data()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(CREDENTIAL_TABLE_OP_COL_W))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .py_2()
+                                            .child("操作"),
+                                    ),
+                            )
+                            // 主体：左栏数据列横向滚动，右栏操作列横向冻结；
+                            // 两栏同处一个垂直滚动语义（共享句柄），纵向一起滚。
+                            .child(
+                                div()
+                                    .flex()
                                     .flex_1()
-                                    .w_full()
-                                    .gap_0()
                                     .min_w(px(0.0))
                                     .min_h(px(0.0))
-                                    .overflow_y_scroll()
-                                    .track_scroll(&handle)
-                                    .children(rows)
-                                    .into_any_element();
-                                scrollable_frame_when(
-                                    "credential-record-list",
-                                    ScrollbarMode::Vertical,
-                                    content,
-                                    handle,
-                                    !this.credential_records.is_empty(),
-                                    cx,
-                                )
-                            })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .min_h(px(0.0))
+                                            .relative()
+                                            .child(
+                                                div()
+                                                    .id("credential-table-rows-h")
+                                                    .h_full()
+                                                    .overflow_x_scroll()
+                                                    .restrict_scroll_to_axis()
+                                                    .track_scroll(&h_handle)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w(px(
+                                                                CREDENTIAL_TABLE_DATA_MIN_W,
+                                                            ))
+                                                            .h_full()
+                                                            .child(
+                                                                div()
+                                                                    .id("credential-record-list")
+                                                                    .h_full()
+                                                                    .overflow_y_scroll()
+                                                                    .track_scroll(&v_handle)
+                                                                    .child(
+                                                                        div()
+                                                                            .flex()
+                                                                            .flex_col()
+                                                                            .children(data_rows),
+                                                                    ),
+                                                            ),
+                                                    ),
+                                            )
+                                            .when(!empty, |table| {
+                                                table.child(
+                                                    crate::ui_helpers::table_scrollbar_overlay(
+                                                        entity,
+                                                        "credential-record-table",
+                                                        v_handle.clone(),
+                                                        h_handle.clone(),
+                                                        true,
+                                                    ),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("credential-table-actions-v")
+                                            .flex_none()
+                                            .w(px(CREDENTIAL_TABLE_OP_COL_W))
+                                            .overflow_y_scroll()
+                                            .track_scroll(&v_handle)
+                                            .child(
+                                                div().flex().flex_col().children(action_rows),
+                                            ),
+                                    ),
+                            )
                     })
                 }
             }));
-
 
         vec![group]
     }
@@ -2534,48 +2694,39 @@ impl RepositoryView {
             )
     }
 
-    fn credential_manager_header(&self) -> impl IntoElement {
+    /// 凭据表数据列表头：随横向滚动与行数据列同步；操作列表头固定在右栏。
+    fn credential_manager_header_data(&self) -> impl IntoElement {
         div()
             .flex()
-            .flex_none()
-            .w_full()
-            .min_w(px(0.0))
             .items_center()
             .gap_2()
             .px_2()
             .py_2()
-            .border_b_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .bg(rgb(ui_theme::WB_PANEL))
-            .text_size(px(11.0))
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+            .min_w(px(CREDENTIAL_TABLE_DATA_MIN_W))
+            .flex_1()
             .child(div().flex_none().w(px(112.0)).truncate().child("名称"))
             .child(div().flex_none().w(px(88.0)).truncate().child("类型"))
             .child(div().flex_none().w(px(64.0)).truncate().child("范围"))
             .child(
                 div()
                     .flex_1()
-                    .min_w(px(0.0))
+                    .min_w(px(CREDENTIAL_TABLE_TARGET_MIN_W))
                     .truncate()
                     .child("站点 / 远端"),
             )
             .child(div().flex_none().w(px(72.0)).truncate().child("用户名"))
             .child(div().flex_none().w(px(68.0)).truncate().child("SSH Key"))
             .child(div().flex_none().w(px(108.0)).truncate().child("更新时间"))
-            .child(div().flex_none().w(px(112.0)).truncate().child("操作"))
     }
 
-    fn credential_record_row(
+    /// 凭据表数据行（左栏）：随横向滚动；点击打开详情、右键打开上下文菜单。
+    fn credential_record_data_row(
         &self,
         record: CredentialRecord,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let record_id = record.id.clone();
         let detail_id = record.id.clone();
         let menu_id = record.id.clone();
-        let delete_id = record.id.clone();
-        let actions_id = record.id.clone();
         let label = credential_record_label(&record);
         let target = credential_display_target(&record);
         let key_file = credential_key_filename(&record);
@@ -2585,11 +2736,10 @@ impl RepositoryView {
             .flex()
             .flex_none()
             .w_full()
-            .min_w(px(0.0))
+            .h(px(CREDENTIAL_ROW_H))
             .items_center()
             .gap_2()
             .px_2()
-            .py_2()
             .border_b_1()
             .border_color(rgb(ui_theme::BORDER_MUTED))
             .text_size(px(12.0))
@@ -2610,7 +2760,6 @@ impl RepositoryView {
             )
             .child(
                 div()
-                    .id(format!("credential-record-actions-{actions_id}"))
                     .flex_none()
                     .w(px(112.0))
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
@@ -2636,7 +2785,7 @@ impl RepositoryView {
             .child(
                 div()
                     .flex_1()
-                    .min_w(px(0.0))
+                    .min_w(px(CREDENTIAL_TABLE_TARGET_MIN_W))
                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                     .truncate()
                     .child(target),
@@ -2665,10 +2814,48 @@ impl RepositoryView {
                     .truncate()
                     .child(timestamp_label(record.updated_at)),
             )
+    }
+
+    /// 凭据表操作行（右栏冻结列）：横向不滚动，与左栏数据行共享垂直句柄同步。
+    fn credential_record_actions_row(
+        &self,
+        record: CredentialRecord,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let record_id = record.id.clone();
+        let delete_id = record.id.clone();
+        let detail_id = record.id.clone();
+        let menu_id = record.id.clone();
+        let label = credential_record_label(&record);
+        div()
+            .id(format!("credential-record-actions-row-{}", record.id))
+            .flex()
+            .flex_none()
+            .h(px(CREDENTIAL_ROW_H))
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .text_size(px(12.0))
+            .bg(rgb(ui_theme::WB_PANEL))
+            .cursor_pointer()
+            .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.open_credential_details(detail_id.clone());
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event, window, cx| {
+                    this.open_credential_context_menu(menu_id.clone(), event, window);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(112.0))
                     .flex()
                     .justify_end()
                     .gap_1()

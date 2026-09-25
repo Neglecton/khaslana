@@ -14,15 +14,22 @@
 //! 渲染标题与描述。
 //!
 //! 控件选型（AGENTS.md 防回归约束）：
-//! - 开关走 `SettingField::switch`，内部即 Kit `Switch`，回调写回受控值；
+//! - 开关走 `SettingItem::render` 通道内嵌 Kit `Switch`（Kit 的
+//!   `SettingField::switch` 标题字号不可压），回调写回受控值；
 //! - 文本输入不引入 Kit `StringField` 的第二套状态，统一经
-//!   `SettingItem::new(.., SettingField::render(..))` 通道复用
+//!   `SettingItem::render(..)` 通道复用
 //!   `src/ui/fields.rs` 的 `TextFieldState` 宿主；
 //! - 分段、色板、卡片、按钮组等同理走 `render` 通道复用既有组件。
+//!
+//! 行距分两档：常规页用逐条 `SettingItem`（Kit `GroupBox` 条目间距 16px）；
+//! 表单型页面（AI、合并工具）行多而密，用 [`settings_compact_item`] 把整卡
+//! 合并成单条目自排 8px 行距，避免 Kit 硬编码的 16px 把表单撑散。
 
 use std::rc::Rc;
 
-use gpui::{App, Context, FontWeight, SharedString, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, Div, FontWeight, SharedString, StyleRefinement, Window, div, prelude::*, px,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::setting::{
@@ -81,36 +88,45 @@ pub(crate) struct SettingsPaneMeta {
 /// 与设计稿的单层侧栏冲突。
 ///
 /// 排版：标题 `TYPE_BODY` SemiBold、描述 `TYPE_META` Secondary、间距 2px。
-/// 标题曾取 13（介于 `TYPE_BODY` 12 与 `TYPE_TITLE` 14 之间），现统一到
-/// 正文档——页头标题同为 `TYPE_BODY` SemiBold，层级靠字重而非字号放大。
+/// 标题曾取 13（介于 `TYPE_BODY` 12 与 `TYPE_TITLE` 14 之间），后统一到
+/// 正文档；页头标题则取 `TYPE_TITLE`，见 [`settings_page_header_style`]。
 /// `keywords` 带标题，保证按分组标题搜索时该组仍可命中。
 pub(crate) fn settings_group_heading(
     title: &'static str,
     description: Option<SharedString>,
 ) -> SettingItem {
     SettingItem::render(move |_options, _window, _cx| {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .text_size(px(ui_theme::TYPE_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                    .child(title),
-            )
-            .when_some(description.clone(), |this, description| {
-                this.child(
-                    div()
-                        .text_size(px(ui_theme::TYPE_META))
-                        .line_height(px(16.0))
-                        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                        .child(description),
-                )
-            })
+        settings_compact_heading(title, description.clone())
     })
     .keywords([title])
+}
+
+/// 分组标题行内容（Div 级）：排版同 [`settings_group_heading`]，供其与
+/// [`settings_compact_item`]（整卡单条目）共用。
+pub(crate) fn settings_compact_heading(
+    title: &'static str,
+    description: Option<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(ui_theme::TYPE_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                .child(title),
+        )
+        .when_some(description, |this, description| {
+            this.child(
+                div()
+                    .text_size(px(ui_theme::TYPE_META))
+                    .line_height(px(16.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child(description),
+            )
+        })
 }
 
 /// 设置项行：标题 + 可选描述 + 右侧控件。
@@ -136,34 +152,72 @@ where
     E: IntoElement,
 {
     SettingItem::render(move |options, window, cx| {
-        h_flex()
-            .w_full()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(ui_theme::TYPE_BODY))
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child(title),
-                    )
-                    .when_some(description, |this, text| {
-                        this.child(
-                            div()
-                                .text_size(px(ui_theme::TYPE_META))
-                                .line_height(px(16.0))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(text),
-                        )
-                    }),
-            )
-            .child(field(options, window, cx))
+        settings_item_body(title, description, field(options, window, cx))
     })
     .keywords([title])
+}
+
+/// 设置项行内容（Div 级）：排版同 [`settings_item_row`]，`field` 直接收
+/// 渲染好的元素，供其与 [`settings_compact_item`] 共用。
+pub(crate) fn settings_item_body(
+    title: &'static str,
+    description: Option<&'static str>,
+    field: impl IntoElement,
+) -> Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(ui_theme::TYPE_BODY))
+                        .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                        .child(title),
+                )
+                .when_some(description, |this, text| {
+                    this.child(
+                        div()
+                            .text_size(px(ui_theme::TYPE_META))
+                            .line_height(px(16.0))
+                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                            .child(text),
+                    )
+                }),
+        )
+        .child(field)
+}
+
+/// 紧凑分组：整卡内容合并进单个 Kit 条目渲染，行距由业务自控。
+///
+/// 背景：Kit `SettingGroup` 经 `GroupBox` 渲染，条目间距硬编码 `gap_4`
+/// （16px）、内容区内边距 `p_4`，而 `SettingGroup` 的 `Styled` 只 refine
+/// 到外层 v_flex（Outline 变体下外层仅 content 一个子元素），业务侧没有
+/// 入口压回条目间距。表单型页面（AI、合并工具）迁移自旧弹窗——旧弹窗行距
+/// 是 `gap_2`（8px）——迁移后行距翻倍，观感松散。这里走 `SettingItem::render`
+/// 通道整卡自排：行容器用 [`settings_compact_list`]，标题用
+/// [`settings_compact_heading`]，普通行用 [`settings_item_body`]。
+///
+/// `keywords` 手动给全组的关键词：合并后整组是一个条目，Kit 按条目过滤
+/// 搜索命中，命中即整卡显示。
+pub(crate) fn settings_compact_item<E, F>(
+    keywords: &'static [&'static str],
+    body: F,
+) -> SettingItem
+where
+    F: Fn(&RenderOptions, &mut Window, &mut App) -> E + 'static,
+    E: IntoElement,
+{
+    SettingItem::render(body).keywords(keywords.iter().copied())
+}
+
+/// 紧凑分组的行容器：行距 `SPACE_2`（8px），对齐旧弹窗 `gap_2` 的节奏。
+pub(crate) fn settings_compact_list() -> Div {
+    v_flex().w_full().gap(px(ui_theme::SPACE_2))
 }
 
 /// 开关类设置项：与 [`settings_item_row`] 同排版，控件为 Kit `Switch`。
@@ -200,8 +254,9 @@ where
 ///
 /// 标题字号必须显式给：Kit 的 `SettingPage` 渲染标题时**不设字号**，标题走
 /// 继承，拿到 `TextStyle::default()` 的 `rems(1.)`（× `KIT_REM_BASE` 16 =
-/// 16px），是全屏最大的字。这里压到正文档并加 SemiBold——层级不靠字号放大，
-/// 靠字重区分（分组卡标题同为 `TYPE_BODY` SemiBold）。
+/// 16px）。标题取 `TYPE_TITLE`(14) SemiBold：页头要压过正文与设置项标题
+/// （`TYPE_BODY` 12），与旁边 `TYPE_META`(11) 的介绍拉开明显一档；不回到
+/// Kit 默认 16，避免页头在紧凑设置窗里过重。
 fn settings_page_header_style() -> StyleRefinement {
     let mut style = StyleRefinement::default()
         .pt(px(12.0))
@@ -209,7 +264,7 @@ fn settings_page_header_style() -> StyleRefinement {
         .pb(px(8.0))
         .pl(px(16.0))
         .gap(px(2.0));
-    style.text.font_size = Some(px(ui_theme::TYPE_BODY).into());
+    style.text.font_size = Some(px(ui_theme::TYPE_TITLE).into());
     style.text.font_weight = Some(FontWeight::SEMIBOLD);
     style
 }

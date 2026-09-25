@@ -168,15 +168,14 @@ fn scrollable_frame_base(
                     register_scrollbar_mouse_down(
                         entity.clone(),
                         scroll_id.clone(),
-                        handle.clone(),
-                        mode,
+                        axis_handles_for_mode(mode, &handle),
                         bounds,
                         window,
                     );
                     register_scrollbar_mouse_move(
                         entity.clone(),
                         scroll_id.clone(),
-                        handle.clone(),
+                        axis_handles_for_mode(mode, &handle),
                         window,
                     );
                     register_scrollbar_mouse_up(entity.clone(), window);
@@ -188,6 +187,73 @@ fn scrollable_frame_base(
             .right(px(0.0))
             .bottom(px(0.0)),
         )
+}
+
+/// 滚动条各轴对应的滚动句柄。单 handle 的 Both 模式要求横纵滚动发生在同一
+/// 容器；表格类布局（冻结列、表头横滚同步）横纵分属不同容器，需要为每轴
+/// 提供独立 handle，注册与绘制按轴取用。
+type AxisHandles = Rc<[(ScrollbarAxis, ScrollHandle)]>;
+
+fn axis_handles_for_mode(mode: ScrollbarMode, handle: &ScrollHandle) -> AxisHandles {
+    let mut handles = Vec::new();
+    if mode.has_vertical() {
+        handles.push((ScrollbarAxis::Vertical, handle.clone()));
+    }
+    if mode.has_horizontal() {
+        handles.push((ScrollbarAxis::Horizontal, handle.clone()));
+    }
+    Rc::from(handles)
+}
+
+/// 表格型双轴滚动的滚动条画布：纵轴与横轴使用各自独立的 ScrollHandle。
+/// 画布铺满宿主容器，滚动条因此固定在可视边缘，不随内容滚动；调用方负责
+/// 保证纵轴容器的视口高度与横轴容器的视口宽度可从 handle 几何正确推出。
+pub(crate) fn table_scrollbar_overlay(
+    entity: gpui::Entity<RepositoryView>,
+    scroll_id: &'static str,
+    vertical: ScrollHandle,
+    horizontal: ScrollHandle,
+    content_present: bool,
+) -> gpui::AnyElement {
+    let scroll_id = SharedString::from(scroll_id);
+    let axis_handles: AxisHandles = Rc::from(vec![
+        (ScrollbarAxis::Vertical, vertical),
+        (ScrollbarAxis::Horizontal, horizontal),
+    ]);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            if !content_present {
+                return;
+            }
+            let active_axis = entity
+                .read(cx)
+                .scrollbar_drag
+                .as_ref()
+                .filter(|drag| drag.scroll_id == scroll_id)
+                .map(|drag| drag.axis);
+            for (axis, handle) in axis_handles.iter() {
+                if let Some(geometry) = scrollbar_geometry(handle, &scroll_id, bounds, *axis) {
+                    paint_scrollbar_axis(&geometry, *axis, active_axis, window);
+                }
+            }
+            register_scrollbar_mouse_down(
+                entity.clone(),
+                scroll_id.clone(),
+                axis_handles.clone(),
+                bounds,
+                window,
+            );
+            register_scrollbar_mouse_move(entity.clone(), scroll_id.clone(), axis_handles.clone(), window);
+            register_scrollbar_mouse_up(entity, window);
+        },
+    )
+    .absolute()
+    .top(px(0.0))
+    .left(px(0.0))
+    .right(px(0.0))
+    .bottom(px(0.0))
+    .into_any_element()
 }
 
 fn paint_scrollbars(
@@ -231,8 +297,7 @@ fn paint_scrollbar_axis(
 fn register_scrollbar_mouse_down(
     entity: gpui::Entity<RepositoryView>,
     scroll_id: SharedString,
-    handle: ScrollHandle,
-    mode: ScrollbarMode,
+    axis_handles: AxisHandles,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
@@ -241,18 +306,15 @@ fn register_scrollbar_mouse_down(
             return;
         }
 
-        let axis_and_geometry = [
-            mode.has_vertical().then_some(ScrollbarAxis::Vertical),
-            mode.has_horizontal().then_some(ScrollbarAxis::Horizontal),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|axis| {
-            scrollbar_geometry(&handle, &scroll_id, bounds, axis).map(|geometry| (axis, geometry))
-        })
-        .find(|(_, geometry)| geometry.track.contains(&event.position));
+        let axis_and_geometry = axis_handles
+            .iter()
+            .filter_map(|(axis, handle)| {
+                scrollbar_geometry(handle, &scroll_id, bounds, *axis)
+                    .map(|geometry| (*axis, handle.clone(), geometry))
+            })
+            .find(|(_, _, geometry)| geometry.track.contains(&event.position));
 
-        let Some((axis, geometry)) = axis_and_geometry else {
+        let Some((axis, handle, geometry)) = axis_and_geometry else {
             return;
         };
 
@@ -286,7 +348,7 @@ fn register_scrollbar_mouse_down(
 fn register_scrollbar_mouse_move(
     entity: gpui::Entity<RepositoryView>,
     scroll_id: SharedString,
-    handle: ScrollHandle,
+    axis_handles: AxisHandles,
     window: &mut Window,
 ) {
     window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
@@ -301,6 +363,14 @@ fn register_scrollbar_mouse_move(
         if drag.scroll_id != scroll_id {
             return;
         }
+
+        let Some((_, handle)) = axis_handles
+            .iter()
+            .find(|(axis, _)| *axis == drag.axis)
+            .map(|(axis, handle)| (*axis, handle.clone()))
+        else {
+            return;
+        };
 
         cx.stop_propagation();
         apply_scrollbar_drag(&handle, &drag, event.position);

@@ -171,6 +171,13 @@ pub(crate) struct SelectTagPushRemote {
     pub(crate) remote: String,
 }
 
+/// 「新建分支」对话框选择基础分支的动作：`branch` 为 None 表示当前 HEAD。
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ui_action, no_json)]
+pub(crate) struct SelectCreateBranchBase {
+    pub(crate) branch: Option<String>,
+}
+
 /// 可配置快捷键的功能枚举，用于持久化与设置中心 UI。
 /// action_id 是序列化键（存入 ShortcutBindings），default_keystroke 是内置默认组合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3448,6 +3455,8 @@ pub(crate) struct RepositoryView {
     clone_recursive_submodules: bool,
     branch_name: TextFieldState,
     create_branch_checkout: bool,
+    /// 「新建分支」对话框选中的基础分支；None 表示当前 HEAD（默认）。
+    create_branch_base: Option<String>,
     branch_rename: TextFieldState,
     commit_message: TextFieldState,
     /// 修补提交模式：开启后主提交按钮变“修补提交”，以当前暂存区重写 HEAD。
@@ -3672,6 +3681,12 @@ impl Render for RepositoryView {
             .on_action(cx.listener(
                 |this, action: &SelectTagPushRemote, _window, cx| {
                     this.tag_push_remote = Some(action.remote.clone());
+                    cx.notify();
+                },
+            ))
+            .on_action(cx.listener(
+                |this, action: &SelectCreateBranchBase, _window, cx| {
+                    this.create_branch_base = action.branch.clone();
                     cx.notify();
                 },
             ))

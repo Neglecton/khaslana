@@ -862,8 +862,11 @@ impl RepositoryView {
             return;
         }
         let checkout = self.create_branch_checkout;
+        // None 表示当前 HEAD，Some 时经 find_branch_reference 解析为引用。
+        let base = self.create_branch_base.clone();
         self.with_repo("分支已创建", move |service, repo| {
-            service.create_branch_from(repo, &BranchName::new(name), None, checkout)
+            let from = base.map(BranchName::new);
+            service.create_branch_from(repo, &BranchName::new(name), from.as_ref(), checkout)
         });
     }
 

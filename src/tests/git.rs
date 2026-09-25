@@ -473,6 +473,45 @@ fn branch_create_rename_delete() {
     assert!(repo.find_branch("topic", BranchType::Local).is_err());
 }
 
+#[test]
+fn create_branch_from_uses_given_base_branch_not_head() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "README.md", "hello");
+    let base_commit = git_support::commit_all(&repo, "initial");
+
+    // 制造分叉：other 前进一个提交，HEAD 停在 main 的初始提交。
+    service
+        .create_branch(&mut repo, &BranchName::new("other"))
+        .unwrap();
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other"))
+        .unwrap();
+    git_support::write_file(dir.path(), "other.txt", "advance");
+    let other_tip = git_support::commit_all(&repo, "on other");
+    service
+        .checkout_branch(&mut repo, &BranchName::new("main"))
+        .unwrap();
+
+    // 以 other 为基础创建 feature：应指向 other 的尖端，而非当前 HEAD。
+    service
+        .create_branch_from(
+            &mut repo,
+            &BranchName::new("feature"),
+            Some(&BranchName::new("other")),
+            false,
+        )
+        .unwrap();
+    let feature_tip = repo
+        .find_branch("feature", BranchType::Local)
+        .unwrap()
+        .into_reference()
+        .peel_to_commit()
+        .unwrap()
+        .id();
+    assert_eq!(feature_tip, other_tip);
+    assert_ne!(feature_tip, base_commit);
+}
+
 #[cfg(windows)]
 #[test]
 fn checkout_branch_keeps_vscode_locked_directory_and_switches() {

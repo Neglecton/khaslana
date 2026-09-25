@@ -184,6 +184,7 @@ impl RepositoryView {
             clone_recursive_submodules: default_clone_recursive_submodules(),
             branch_name: TextFieldState::new(cx, "新分支名称"),
             create_branch_checkout: true,
+            create_branch_base: None,
             branch_rename: TextFieldState::new(cx, "重命名为"),
             commit_message: TextFieldState::new(cx, "提交信息"),
             amend_mode: false,
@@ -1785,6 +1786,13 @@ impl RepositoryView {
         self.close_popups();
         self.branch_name.clear();
         self.create_branch_checkout = true;
+        // 基础分支默认当前 HEAD 所在分支（与触发器显示一致，菜单勾选落点相同）；
+        // 分离 HEAD 时留空，创建时以 HEAD 提交为起点。
+        self.create_branch_base = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| remote_branch_operation::current_local_branch(snapshot))
+            .map(|branch| branch.name.clone());
         self.active_dialog = Some(DialogState::CreateBranch);
         self.last_error = None;
     }
