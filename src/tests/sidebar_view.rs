@@ -246,3 +246,14 @@ fn sidebar_stash_section_appears_only_when_data_exists() {
         true
     ));
 }
+
+#[test]
+fn sidebar_stash_label_drops_git_prefix() {
+    assert_eq!(sidebar_stash_label("On main: 修复登录"), "main: 修复登录");
+    assert_eq!(
+        sidebar_stash_label("WIP on main: 1a2b3c4 修复登录\n"),
+        "main: 1a2b3c4 修复登录"
+    );
+    assert_eq!(sidebar_stash_label("自定义消息"), "自定义消息");
+    assert_eq!(sidebar_stash_label(""), "");
+}

@@ -278,6 +278,19 @@ pub(crate) fn sidebar_stash_entries(stash_count: usize) -> Vec<SidebarNavItem> {
     (0..stash_count).map(SidebarNavItem::Stash).collect()
 }
 
+/// 贮藏列表标签。libgit2 给每条贮藏消息统一加上 "On <分支>: " 或
+/// "WIP on <分支>: " 样板前缀，逐条显示只是重复噪音，这里去掉前缀，
+/// 保留分支名与用户消息；命令行等外部工具写入的其它格式原样展示。
+pub(crate) fn sidebar_stash_label(message: &str) -> String {
+    let trimmed = message.trim();
+    for prefix in ["WIP on ", "On "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 impl RepositoryView {
     pub(crate) fn render_sidebar(
         &self,
@@ -996,7 +1009,7 @@ impl RepositoryView {
         let index = stash.index;
         // 左键条目直接查看贮藏（右键菜单的「查看贮藏」保留同一路径）。
         let click_index = stash.index;
-        let label = format!("stash@{{{}}} {}", stash.index, stash.message);
+        let label = sidebar_stash_label(&stash.message);
 
         // 设计图：与分支行一致的样式
         sidebar_full_width_row()
