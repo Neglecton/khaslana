@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use git2::{ErrorCode, Repository, RepositoryState};
 
 use crate::{
@@ -154,31 +156,92 @@ impl GitService {
                 )),
             });
         }
-        // 恢复分两步而非 pop：libgit2 的 git_stash_pop 在恢复冲突时也会删除
-        // 贮藏条目（与 git 命令行“保留条目”不同），会丢掉用户的兜底拷贝。
-        // 先 apply，仅在没有冲突时才显式 drop。
-        match self.apply_stash_with_options(repo, 0, true) {
-            Ok(snapshot) if snapshot.conflicts.is_empty() => {
-                let snapshot = self.drop_stash(repo, 0)?;
-                Ok(CarryingCheckoutOutcome { snapshot, notice: None })
-            }
-            Ok(snapshot) => Ok(CarryingCheckoutOutcome {
-                snapshot,
-                notice: Some(format!(
-                    "已切换到{target}，但未提交修改恢复时存在冲突；原修改已保留在贮藏列表第一条，解决冲突后可手动删除该贮藏"
-                )),
-            }),
-            Err(_) => {
-                // apply 报错（恢复冲突）：冲突标记已落入工作区，贮藏条目仍在。
+        // 恢复：apply 后按冲突类型决定是否删除贮藏条目。
+        let snapshot = match self.apply_stash_with_options(repo, 0, true) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                // 分支已经切换，必须把新状态回传给 UI；贮藏保留供用户重试。
                 let snapshot = self.snapshot_after_operation(repo)?;
-                Ok(CarryingCheckoutOutcome {
+                return Ok(CarryingCheckoutOutcome {
                     snapshot,
                     notice: Some(format!(
-                        "已切换到{target}，但未提交修改恢复时存在冲突；原修改已保留在贮藏列表第一条，解决冲突后可手动删除该贮藏"
+                        "已切换到{target}，但恢复修改失败：{err}；原修改保留在贮藏列表第一条，请检查工作区后手动应用"
                     )),
-                })
+                });
+            }
+        };
+        if snapshot.conflicts.is_empty() {
+            let snapshot = self.drop_stash(repo, 0)?;
+            return Ok(CarryingCheckoutOutcome { snapshot, notice: None });
+        }
+        // 「贮藏新增、目标分支没有」型的索引冲突可自动落定；仅工作区标记
+        // 的冲突（无索引阶段）不在此列，落定后仍留在 conflicts 中。
+        let resolved_paths = self.resolve_stash_only_conflicts(repo)?;
+        let remaining = snapshot
+            .conflicts
+            .iter()
+            .filter(|path| !resolved_paths.contains(path))
+            .count();
+        if remaining == 0 {
+            // 冲突全部自动落定，与无缝恢复等价，清除贮藏条目。
+            let snapshot = self.drop_stash(repo, 0)?;
+            return Ok(CarryingCheckoutOutcome { snapshot, notice: None });
+        }
+        let index_conflicts = self.conflicts(repo)?;
+        let worktree_only = snapshot
+            .conflicts
+            .iter()
+            .any(|path| !index_conflicts.contains(path));
+        Ok(CarryingCheckoutOutcome {
+            snapshot,
+            notice: Some(if worktree_only {
+                format!(
+                    "已切换到{target}，但恢复修改时产生工作区冲突；贮藏已保留。请在「冲突」区域查看文件，并用外部编辑器处理冲突标记"
+                )
+            } else {
+                format!(
+                    "已切换到{target}，但未提交修改恢复时存在冲突；原修改已保留在贮藏列表第一条，请在冲突区域解决"
+                )
+            }),
+        })
+    }
+
+    /// 落定「贮藏新增、目标分支没有」型的索引冲突：这类文件只存在于贮藏里
+    /// （目标分支没有该路径），apply 已把贮藏内容写入工作区，只需清除
+    /// 索引冲突阶段，文件仍作为未跟踪修改留在工作区。
+    ///
+    /// 返回成功落定的路径列表；存在目标分支也有改动的真冲突（our 阶段非空）
+    /// 或写入失败时返回空列表（放弃自动落定，保留冲突与贮藏原样）。
+    fn resolve_stash_only_conflicts(&self, repo: &mut Repository) -> Result<Vec<String>> {
+        let mut index = repo.index()?;
+        if !index.has_conflicts() {
+            return Ok(Vec::new());
+        }
+        let mut stash_only_paths = Vec::new();
+        for conflict in index.conflicts()? {
+            let conflict = conflict?;
+            match (conflict.our.as_ref(), conflict.their.as_ref()) {
+                (None, Some(their)) => {
+                    let path = std::str::from_utf8(&their.path).map_err(|_| {
+                        GitError::Message("冲突文件路径不是有效 UTF-8，无法自动落定".into())
+                    })?;
+                    stash_only_paths.push(path.to_string());
+                }
+                // our 阶段存在：目标分支该文件也有内容，属真冲突，不自动处理。
+                _ => return Ok(Vec::new()),
             }
         }
+        let mut resolved = Vec::new();
+        for path in &stash_only_paths {
+            // 目标分支没有该文件；只清除冲突阶段，保留工作区文件为未跟踪，
+            // 不用 add_path 把原本未暂存的修改悄悄放进暂存区。
+            if index.conflict_remove(Path::new(path)).is_err() {
+                return Ok(Vec::new());
+            }
+            resolved.push(path.clone());
+        }
+        index.write()?;
+        Ok(resolved)
     }
 }
 

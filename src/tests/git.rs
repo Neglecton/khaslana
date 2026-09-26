@@ -4161,7 +4161,7 @@ fn checkout_branch_carrying_changes_moves_untracked_file() {
         .unwrap();
     assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
 
-    service
+    let outcome = service
         .checkout_branch_carrying_changes(&mut repo, &BranchName::new("other".to_string()), true)
         .unwrap();
 
@@ -4171,8 +4171,19 @@ fn checkout_branch_carrying_changes_moves_untracked_file() {
     let new_file = fs::read_to_string(dir.path().join("new.txt")).unwrap();
     assert!(new_file.contains("untracked local"));
     assert!(new_file.contains("tracked in other"));
-    // 未产生索引级冲突条目（stashes 空）时贮藏被正常清除。
-    assert!(service.stashes(&mut repo).unwrap().is_empty());
+    // 该型冲突无索引阶段，靠工作区标记识别：纳入冲突列表（UI 进入冲突
+    // 工作台）并保留贮藏条目兜底。
+    assert_eq!(outcome.snapshot.conflicts, vec!["new.txt".to_string()]);
+    assert_eq!(service.snapshot(&mut repo).unwrap().conflicts, vec!["new.txt"]);
+    assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
+    assert!(outcome.notice.is_some());
+    let view = service
+        .conflict_file_view(&repo, Path::new("new.txt"))
+        .unwrap();
+    assert_eq!(view.kind, crate::ConflictFileKind::WorktreeOnly);
+    assert!(view.fallback_reason.is_some());
+    git_support::write_file(dir.path(), "new.txt", "resolved content\n");
+    assert!(service.snapshot(&mut repo).unwrap().conflicts.is_empty());
 }
 
 #[test]
@@ -4219,6 +4230,99 @@ fn checkout_branch_carrying_changes_without_auto_apply_keeps_stash() {
     assert!(outcome.snapshot.conflicts.is_empty());
     assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
     assert!(outcome.notice.is_some());
+}
+
+#[test]
+fn pop_stash_keeps_entry_and_reports_conflict_when_restore_conflicts() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "file.txt", "base
+");
+    git_support::commit_all(&repo, "initial");
+    git_support::write_file(dir.path(), "file.txt", "stashed
+");
+    let sig = signature(&repo).unwrap();
+    repo.stash_save(&sig, "s", None).unwrap();
+    git_support::write_file(dir.path(), "file.txt", "target
+");
+    git_support::commit_all(&repo, "target change");
+
+    let snapshot = service.pop_stash(&mut repo, 0).unwrap();
+
+    // 冲突时保留贮藏条目（git 命令行语义），且冲突进入快照让 UI 打开冲突
+    // 工作台；工作区留下冲突标记。
+    assert_eq!(snapshot.conflicts, vec!["file.txt".to_string()]);
+    assert_eq!(service.stashes(&mut repo).unwrap().len(), 1);
+    let file = fs::read_to_string(dir.path().join("file.txt")).unwrap();
+    assert!(file.contains("<<<<<<<"));
+}
+
+#[test]
+fn pop_stash_does_not_treat_existing_markers_as_a_new_conflict() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "base.txt", "base\n");
+    git_support::commit_all(&repo, "initial");
+    let content = "<<<<<<< example\nours\n=======\ntheirs\n>>>>>>> example\n";
+    git_support::write_file(dir.path(), "sample.txt", content);
+    service.save_stash(&mut repo, "sample", true, false).unwrap();
+
+    let snapshot = service.pop_stash(&mut repo, 0).unwrap();
+
+    assert!(snapshot.conflicts.is_empty());
+    assert!(service.stashes(&mut repo).unwrap().is_empty());
+    git_support::assert_file_text(dir.path(), "sample.txt", content);
+}
+
+#[test]
+fn checkout_branch_checked_blocks_when_target_lacks_locally_modified_file() {
+    let (dir, mut repo, service) = git_support::init_repo();
+    git_support::write_file(dir.path(), "other.txt", "base
+");
+    git_support::commit_all(&repo, "initial");
+
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("other", &head_commit, false).unwrap();
+    drop(head_commit);
+    service
+        .checkout_branch(&mut repo, &BranchName::new("other".to_string()))
+        .unwrap();
+    // other 分支引入 file.txt；main 上没有该文件。
+    git_support::write_file(dir.path(), "file.txt", "in other
+");
+    git_support::commit_all(&repo, "add file.txt");
+    // 在 other 上本地修改 file.txt 后尝试切回 main：目标分支没有该文件，
+    // 切换意味着删除它，与命令行 git 一样属于会丢修改的操作。
+    git_support::write_file(dir.path(), "file.txt", "local edit
+");
+
+    let attempt = service
+        .checkout_branch_checked(&mut repo, &BranchName::new("main".to_string()))
+        .unwrap();
+    assert!(matches!(attempt, CheckoutAttempt::BlockedByLocalChanges));
+    git_support::assert_file_text(dir.path(), "file.txt", "local edit
+");
+
+    // 确认携带后：修改跟随到目标分支（该分支没有此文件，恢复后为未跟踪）。
+    let outcome = service
+        .checkout_branch_carrying_changes(
+            &mut repo,
+            &BranchName::new("main".to_string()),
+            true,
+        )
+        .unwrap();
+    // 切换成功且修改跟随到目标分支：该分支没有此文件，恢复后为未跟踪状态；
+    // 「贮藏新增、目标分支没有」型冲突被自动落定，不误报、不留贮藏。
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "main");
+    git_support::assert_file_text(dir.path(), "file.txt", "local edit
+");
+    assert!(outcome.snapshot.conflicts.is_empty());
+    // 操作快照走 status_fast，不含未跟踪文件；完整状态应保留原未暂存属性。
+    assert!(service.status_full(&repo).unwrap().iter().any(|change| {
+        change.path == "file.txt"
+            && change.staged.is_none()
+            && change.unstaged == Some(ChangeState::Untracked)
+    }));
+    assert!(outcome.notice.is_none());
+    assert!(service.stashes(&mut repo).unwrap().is_empty());
 }
 
 #[test]

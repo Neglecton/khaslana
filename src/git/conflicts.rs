@@ -17,6 +17,32 @@ impl GitService {
         ensure_worktree_relative_path(path, "不能读取冲突详情")?;
         let git_path = path_to_git(path);
 
+        if repo
+            .index()?
+            .conflict_get(path)
+            .is_err_and(|err| err.code() == ErrorCode::NotFound)
+        {
+            let workdir = repo
+                .workdir()
+                .ok_or_else(|| GitError::Message("裸仓库没有工作区".into()))?;
+            let content = fs::read_to_string(workdir.join(path))?;
+            if !super::stash::has_complete_conflict_markers(&content) {
+                return Err(GitError::Message(format!("该文件不存在冲突：{git_path}")));
+            }
+            return Ok(ConflictFileView {
+                path: git_path,
+                kind: ConflictFileKind::WorktreeOnly,
+                draft: String::new(),
+                ours_text: String::new(),
+                theirs_text: String::new(),
+                blocks: Vec::new(),
+                draft_status: ConflictDraftStatus::Clean,
+                fallback_reason: Some(
+                    "贮藏恢复在工作区写入了冲突标记，但 Git 索引没有冲突阶段。请在外部编辑器中打开此文件，处理 <<<<<<<、=======、>>>>>>> 标记后刷新仓库；原修改仍保留在贮藏中。".into(),
+                ),
+            });
+        }
+
         match diff3_merge_text(repo, path)? {
             ConflictMergeText::Unsupported => Ok(ConflictFileView {
                 path: git_path,

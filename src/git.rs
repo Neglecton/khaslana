@@ -359,7 +359,7 @@ impl GitService {
             format!("stashes={}", stashes.len()),
         );
         let conflicts_started = Instant::now();
-        let conflicts = self.conflicts(repo)?;
+        let conflicts = self.conflicts_with_stash_worktree(repo, &stashes)?;
         perf_log(
             "git.snapshot_details.conflicts",
             conflicts_started,
@@ -414,7 +414,7 @@ impl GitService {
             format!("stashes={}", stashes.len()),
         );
         let conflicts_started = Instant::now();
-        let conflicts = self.conflicts(repo)?;
+        let conflicts = self.conflicts_with_stash_worktree(repo, &stashes)?;
         perf_log(
             "git.snapshot_metadata.conflicts",
             conflicts_started,
@@ -2846,6 +2846,25 @@ impl GitService {
             return Ok(branch.into_reference());
         }
         repo.find_reference(name).map_err(GitError::from)
+    }
+
+    fn conflicts_with_stash_worktree(
+        &self,
+        repo: &Repository,
+        stashes: &[StashInfo],
+    ) -> Result<Vec<String>> {
+        let mut conflicts = self.conflicts(repo)?;
+        // 贮藏恢复的未跟踪文件碰到目标分支同名文件时，libgit2 可能只在
+        // 工作区写入冲突标记。刷新后仍保留提示，直到用户处理标记。
+        for stash in stashes {
+            for path in self.worktree_conflict_marked_paths(repo, &stash.oid)? {
+                if !conflicts.contains(&path) {
+                    conflicts.push(path);
+                }
+            }
+        }
+        conflicts.sort();
+        Ok(conflicts)
     }
 
     pub(super) fn conflicts(&self, repo: &Repository) -> Result<Vec<String>> {

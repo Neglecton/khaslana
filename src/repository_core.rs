@@ -184,7 +184,6 @@ impl RepositoryView {
             clone_recursive_submodules: default_clone_recursive_submodules(),
             branch_name: TextFieldState::new(cx, "新分支名称"),
             create_branch_checkout: true,
-            carry_checkout_auto_apply: layout_preferences.carry_checkout_auto_apply,
             create_branch_base: None,
             branch_rename: TextFieldState::new(cx, "重命名为"),
             commit_message: TextFieldState::new(cx, "提交信息"),
@@ -826,7 +825,6 @@ impl RepositoryView {
             history_details_height: self.history_details_height,
             history_inspector_height: Some(self.history_inspector_height),
             history_details_collapsed: self.history_details_collapsed,
-            carry_checkout_auto_apply: self.carry_checkout_auto_apply,
         };
         if let Err(err) = self.storage.save_layout_preferences(&preferences) {
             tracing::warn!("layout preferences write skipped: {err}");

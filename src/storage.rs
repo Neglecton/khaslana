@@ -114,10 +114,6 @@ pub struct LayoutPreferences {
     pub history_inspector_height: Option<f32>,
     #[serde(default)]
     pub history_details_collapsed: bool,
-    /// 「切换被阻止」弹窗「切换后自动应用贮藏」的记住值：false = 只贮藏并
-    /// 切换、不自动恢复（默认关闭）；用户勾选后记住，重启仍生效。
-    #[serde(default)]
-    pub carry_checkout_auto_apply: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]

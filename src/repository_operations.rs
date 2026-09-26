@@ -1038,11 +1038,26 @@ impl RepositoryView {
         });
     }
 
-    /// 「贮藏并切换」确认入口：先关弹窗，再按弹窗勾选的 auto_apply 重跑切换。
-    pub(crate) fn confirm_carry_checkout(&mut self, target: CheckoutTarget) {
-        let auto_apply = self.carry_checkout_auto_apply;
+    /// 「贮藏并切换」确认入口：仅暂存修改并切换，不自动恢复。
+    pub(crate) fn confirm_carry_checkout_stash_only(&mut self, target: CheckoutTarget) {
         self.close_dialog();
-        self.spawn_checkout_with_carry_prompt(target, CheckoutRun::Carry { auto_apply });
+        self.spawn_checkout_with_carry_prompt(
+            target,
+            CheckoutRun::Carry {
+                auto_apply: false,
+            },
+        );
+    }
+
+    /// 「应用修改并切换」确认入口：暂存、切换并自动恢复修改。
+    pub(crate) fn confirm_carry_checkout_apply(&mut self, target: CheckoutTarget) {
+        self.close_dialog();
+        self.spawn_checkout_with_carry_prompt(
+            target,
+            CheckoutRun::Carry {
+                auto_apply: true,
+            },
+        );
     }
 
     // ── 标签管理 ──────────────────────────────────────────────

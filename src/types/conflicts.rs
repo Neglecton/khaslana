@@ -39,6 +39,8 @@ pub enum ConflictFileKind {
     Text,
     Binary,
     Unsupported,
+    /// 贮藏恢复只在工作区写入标记，没有 Git 索引冲突阶段。
+    WorktreeOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

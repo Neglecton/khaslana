@@ -3496,10 +3496,6 @@ pub(crate) struct RepositoryView {
     clone_recursive_submodules: bool,
     branch_name: TextFieldState,
     create_branch_checkout: bool,
-    /// 「切换被阻止」弹窗「切换后自动应用贮藏」的记住值：false = 只贮藏并
-    /// 切换，不自动恢复（默认关闭）；勾选后经 layout_preferences 持久化，
-    /// 重启仍生效。
-    carry_checkout_auto_apply: bool,
     /// 「新建分支」对话框选中的基础分支；None 表示当前 HEAD（默认）。
     create_branch_base: Option<String>,
     branch_rename: TextFieldState,

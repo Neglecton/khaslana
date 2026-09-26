@@ -319,27 +319,3 @@ pub(super) fn save_stash_preserving_locked_directories(
         repo.stash_save(signature, message, Some(flags))
     }
 }
-
-pub(super) fn pop_stash_preserving_locked_directories(
-    repo: &mut Repository,
-    index: usize,
-    options: &mut StashApplyOptions<'_>,
-    reinstate_index: bool,
-) -> std::result::Result<(), git2::Error> {
-    // 时序要求同 apply 版：reinstantiate_index 须早于 options.raw() 的读取。
-    if reinstate_index {
-        options.reinstantiate_index();
-    }
-    #[cfg(windows)]
-    {
-        let mut raw_options = unsafe { std::ptr::read(options.raw()) };
-        raw_options.checkout_options.checkout_strategy |=
-            libgit2_sys::GIT_CHECKOUT_SKIP_LOCKED_DIRECTORIES as u32;
-        raw_git_result(unsafe { libgit2_sys::git_stash_pop(repo.raw(), index, &raw_options) })
-    }
-
-    #[cfg(not(windows))]
-    {
-        repo.stash_pop(index, Some(options))
-    }
-}

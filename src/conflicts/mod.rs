@@ -618,6 +618,7 @@ impl RepositoryView {
             Some(ConflictFileKind::Text) => "文本",
             Some(ConflictFileKind::Binary) => "二进制",
             Some(ConflictFileKind::Unsupported) => "回退",
+            Some(ConflictFileKind::WorktreeOnly) => "工作区",
             None => "加载中",
         };
         let unresolved = view
@@ -862,7 +863,8 @@ impl RepositoryView {
                         } else {
                             "配置 IDEA 并解决"
                         },
-                        view.is_some() && !self.busy,
+                        view.is_some_and(|view| view.kind != ConflictFileKind::WorktreeOnly)
+                            && !self.busy,
                         |this, _, _| this.resolve_selected_conflict_with_intellij_idea(),
                         cx,
                     ))
@@ -1060,6 +1062,7 @@ impl RepositoryView {
         let path_for_ours = path.clone();
         let path_for_theirs = path.clone();
         let path_for_mark = path.clone();
+        let path_for_directory = path.clone();
 
         div()
             .flex()
@@ -1083,7 +1086,17 @@ impl RepositoryView {
                             .unwrap_or_else(|| "该冲突暂不支持可视化文本编辑".into()),
                     ),
             )
-            .child(
+            .when(view.kind == ConflictFileKind::WorktreeOnly, |this| {
+                this.child(self.button(
+                    "打开文件所在目录",
+                    !self.busy,
+                    move |this, _, cx| {
+                        this.open_file_parent_directory(path_for_directory.clone(), cx)
+                    },
+                    cx,
+                ))
+            })
+            .when(view.kind != ConflictFileKind::WorktreeOnly, |this| this.child(
                 div()
                     .flex()
                     .flex_wrap()
@@ -1116,7 +1129,7 @@ impl RepositoryView {
                         move |this, _, _| this.mark_conflict_resolved(path_for_mark.clone()),
                         cx,
                     )),
-            )
+            ))
             .into_any_element()
     }
 
