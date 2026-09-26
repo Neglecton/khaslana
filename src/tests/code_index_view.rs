@@ -89,3 +89,44 @@ fn display_name_takes_last_path_segment() {
     // 无分隔符整体返回。
     assert_eq!(code_index_display_name("repo"), "repo");
 }
+
+// ---------------------------------------------------------------------------
+// 完成/失败事件的任务归属与提示分级
+// ---------------------------------------------------------------------------
+
+fn task(repo: &str, user_initiated: bool) -> CodeIndexTaskState {
+    CodeIndexTaskState {
+        repo_path: repo.to_string(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        user_initiated,
+    }
+}
+
+#[test]
+fn finished_event_of_auto_refresh_stays_silent() {
+    // 自动增量刷新（仓库加载 / 工作区操作后）：在途但不主动，只更新状态。
+    assert_eq!(
+        code_index_task_ownership(Some(&task(r"d:\repo", false)), r"d:\repo"),
+        (true, false)
+    );
+}
+
+#[test]
+fn finished_event_of_button_trigger_notifies() {
+    // 设置页按钮 / 索引开关：主动触发，完成时弹提示。
+    assert_eq!(
+        code_index_task_ownership(Some(&task(r"d:\repo", true)), r"d:\repo"),
+        (true, true)
+    );
+}
+
+#[test]
+fn finished_event_addressed_by_another_repo_is_ignored() {
+    // 事件按仓库键寻址：别的仓库的在途任务不算这条事件的任务。
+    assert_eq!(
+        code_index_task_ownership(Some(&task(r"d:\other", true)), r"d:\repo"),
+        (false, false)
+    );
+    // 任务已结束（迟到事件）：同样不动任务状态。
+    assert_eq!(code_index_task_ownership(None, r"d:\repo"), (false, false));
+}

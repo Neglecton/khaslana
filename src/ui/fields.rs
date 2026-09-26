@@ -15,6 +15,14 @@
 //! 不会再发 `Change`；而用户编辑写回的值在下一帧两侧已经相等，不会再触发
 //! `set_value`（否则每次都把光标重置到末尾）。
 //!
+//! **例外：IME 组合期。** gpui-base 的组合路径 `replace_and_mark_text_in_range`
+//! 只发 `cx.notify()`、不发 `InputEvent::Change`，组合期间 Kit 侧文本（含未上屏
+//! 的拼音/假名）领先于表单真值。此时若按「两侧不一致」回填，正在组合的文本会被
+//! 冲掉，且多行输入的选区被砸成 `0..0`——用户随后每个字都插到最前面，整段文字
+//! 反向。`sync_kit_field` 因此跳过组合期（`has_ime_composition`），等组合提交
+//! （`Change`）后真值自然跟上。同源的另一个坑：Kit 的多行 `set_value` 把光标
+//! 留在最前面（单行在末尾），回填后要按 `TextFieldState::caret` 显式落光标。
+//!
 //! 迁移范围是 [`kit_field_migrated`]：**全部字段**。静态字段
 //! （`DEDICATED_FIELDS`）里除冲突草稿焦点锚点外的全部自 M4 起迁入 Kit；
 //! 工作流动态字段（`WorkflowInput` / `WorkflowEditor`）自 M6 起也迁入
@@ -35,8 +43,8 @@
 //! `notify_text_field_changed`，与自绘 `text_*` handler 保持同一通知点。
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Window, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, SharedString, Subscription, Window, prelude::*, px,
 };
 use gpui_kit::component::input::{
     AnyInputState, Input, InputEvent, InputState, Textarea, TextareaState,
@@ -112,6 +120,37 @@ impl KitFieldInput {
     fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.focus_handle(cx).is_focused(window)
     }
+
+    /// IME 组合期（中文/日文输入法逐键上屏）是否为真。
+    ///
+    /// gpui-base 的组合路径 `replace_and_mark_text_in_range` 只发
+    /// `cx.notify()`、**不发** `InputEvent::Change`（与 `replace_text_in_range`
+    /// 不同），所以组合期间 Kit 侧文本领先于表单真值，业务真值拿不到正在
+    /// 组合的文本。此时任何程序回填都会把组合文本冲掉。
+    fn has_ime_composition(&self, window: &mut Window, cx: &mut App) -> bool {
+        match self {
+            Self::Single(state) => state
+                .update(cx, |state, cx| {
+                    state.marked_text_range(window, cx).is_some()
+                }),
+            Self::Multi(state) => state
+                .update(cx, |state, cx| {
+                    state.marked_text_range(window, cx).is_some()
+                }),
+        }
+    }
+
+    /// 把光标/选区落到给定字节区间（程序回填后调用）。
+    fn set_selected_range(&self, range: std::ops::Range<usize>, cx: &mut App) {
+        match self {
+            Self::Single(state) => {
+                state.update(cx, |state, cx| state.set_selected_range(range, cx))
+            }
+            Self::Multi(state) => {
+                state.update(cx, |state, cx| state.set_selected_range(range, cx))
+            }
+        }
+    }
 }
 
 /// 一个字段的 Kit 输入宿主。
@@ -154,8 +193,26 @@ impl KitField {
     }
 
     /// 程序回填。Kit 侧不会因此发 `Change`，不会回流到表单真值。
-    fn set_value(&self, value: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
+    ///
+    /// `caret` 是表单真值声明光标位置（字节偏移）：`TextFieldState::set_value`
+    /// 统一落到末尾，个别回填点（修补预填）会显式归零。Kit 的 `set_value` 对
+    /// 单行输入把光标放到末尾，对多行输入却把选区清成 `0..0`——多行字段因此
+    /// 会把光标甩到最前面，用户接着输入时第一个字落在开头。这里在回填后按
+    /// 真值声明的位置显式落光标，让两侧语义一致（单行侧 Kit 本就如此，无需
+    /// 再设）。
+    fn set_value(
+        &self,
+        value: impl Into<SharedString>,
+        caret: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let value = value.into();
+        let caret = caret.min(value.len());
         self.input.set_value(value, window, cx);
+        if matches!(self.input, KitFieldInput::Multi(_)) {
+            self.input.set_selected_range(caret..caret, cx);
+        }
     }
 
     fn is_focused(&self, window: &Window, cx: &App) -> bool {
@@ -341,6 +398,7 @@ impl RepositoryView {
         let placeholder = self.field(id).placeholder.clone();
         let secret = self.field(id).secret;
         let initial = self.field(id).value.clone();
+        let caret = self.field(id).caret;
         let uid = self.field(id).uid;
         let multiline = Self::is_multiline_field(id);
         let input = if multiline {
@@ -354,6 +412,11 @@ impl RepositoryView {
             }))
         };
         input.set_value(initial, window, cx);
+        if multiline {
+            // 首帧可能有值（模板加载等预填场景）：多行宿主默认把光标留在最前面，
+            // 这里按真值声明的位置落光标，与后续每次回填的语义保持一致。
+            input.set_selected_range(caret..caret, cx);
+        }
 
         // 把表单真值的 focus handle 指向 Kit 输入：既有的
         // `window.focus(&self.field(id).focus, cx)` 调用点（弹窗打开自动聚焦、
@@ -380,21 +443,31 @@ impl RepositoryView {
     /// 身份变化（业务对象被整体更换）走完整重绑而非普通回填：位置相同、
     /// 文本也相同的不一定是同一个输入框，placeholder、焦点指向与撤销历史
     /// 都绑定在具体那份业务真值上。
+    ///
+    /// IME 组合期直接跳过：组合路径不发 `InputEvent::Change`，真值此时必然
+    /// 落后于 Kit 侧文本，回填会把正在组合的字符冲掉，并把多行选区砸成
+    /// `0..0`——用户随后输入的每个字都插到最前面（文本反向）。组合提交时会
+    /// 发 `Change`，真值随即跟上，之后的同步自然恢复。
     fn sync_kit_field(&mut self, id: FieldId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(truth) = self.try_field(id) else {
             return;
         };
         let value = truth.value.clone();
+        let caret = truth.caret;
         let identity = KitFieldIdentity {
             uid: truth.uid,
             placeholder: truth.placeholder.clone(),
         };
-        let needs_rebind = match self.kit_field(id) {
-            Some(field) => kit_field_needs_rebind(&field.identity, truth.uid, &truth.placeholder),
-            None => return,
+        // 宿主的借用只为读取身份与组合态：读完即结束，后续重绑需要 &mut self。
+        let Some(host) = self.kit_field(id) else {
+            return;
         };
+        let needs_rebind = kit_field_needs_rebind(&host.identity, truth.uid, &truth.placeholder);
+        if host.input.has_ime_composition(window, cx) {
+            return;
+        }
         if needs_rebind {
-            self.rebind_kit_field(id, value, identity, window, cx);
+            self.rebind_kit_field(id, value, caret, identity, window, cx);
             return;
         }
         let Some(field) = self.kit_field(id) else {
@@ -403,7 +476,7 @@ impl RepositoryView {
         if field.value(cx).as_ref() == value {
             return;
         }
-        field.set_value(value, window, cx);
+        field.set_value(value, caret, window, cx);
     }
 
     /// 业务对象更换后的完整重绑：占位符、焦点指向与值全部按新真值写入。
@@ -416,6 +489,7 @@ impl RepositoryView {
         &mut self,
         id: FieldId,
         value: String,
+        caret: usize,
         identity: KitFieldIdentity,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -425,7 +499,7 @@ impl RepositoryView {
         };
         host.input
             .set_placeholder(identity.placeholder.clone(), window, cx);
-        host.input.set_value(value, window, cx);
+        host.set_value(value, caret, window, cx);
         let handle = host.input.focus_handle(cx);
         if let Some(field) = self.try_field_mut(id) {
             field.focus = handle;

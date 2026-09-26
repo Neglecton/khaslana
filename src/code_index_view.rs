@@ -589,7 +589,8 @@ impl RepositoryView {
         if enabled {
             self.code_index_enabled_cache.insert(repo_key.to_string());
             if self.code_index_task.is_none() {
-                self.spawn_code_index_task_for(repo_key, true, cx);
+                // 开关是用户主动动作：开启后的全量建索引算主动触发。
+                self.spawn_code_index_task_for(repo_key, true, true, cx);
             } else {
                 self.status = "已有索引任务在进行中，请稍后手动增量更新".into();
             }
@@ -611,7 +612,7 @@ impl RepositoryView {
             self.notify_error("已有索引任务在进行中", cx);
             return;
         }
-        self.spawn_code_index_task_for(repo_key, force_full, cx);
+        self.spawn_code_index_task_for(repo_key, force_full, true, cx);
     }
 
     /// 「删除索引数据」按钮：打开按仓库键寻址的确认弹窗。
@@ -623,10 +624,14 @@ impl RepositoryView {
     }
 
     /// 发起索引任务（按显式仓库键构造；自动触发可能来自非活动 tab 的事件）。
+    ///
+    /// `user_initiated` 标记是否由用户主动触发：只有主动触发的任务完成时弹
+    /// 提示，自动刷新（仓库加载 / 工作区操作后的增量检查）静默更新状态。
     fn spawn_code_index_task_for(
         &mut self,
         repo_key: &str,
         force_full: bool,
+        user_initiated: bool,
         cx: &mut Context<Self>,
     ) {
         if self.code_index_task.is_some() {
@@ -641,6 +646,7 @@ impl RepositoryView {
         self.code_index_task = Some(CodeIndexTaskState {
             repo_path: repo_key.to_string(),
             cancel: Arc::clone(&cancel),
+            user_initiated,
         });
         self.code_index_progress_message = "准备索引…".to_string();
         self.code_index_progress_done = 0;
@@ -719,7 +725,7 @@ impl RepositoryView {
             return;
         }
         // 自动触发来自后台事件，目标仓库可能不是活动 tab——按显式键构造。
-        self.spawn_code_index_task_for(&repo_key, false, cx);
+        self.spawn_code_index_task_for(&repo_key, false, false, cx);
     }
 
     pub(crate) fn cancel_code_index(&mut self, _cx: &mut Context<Self>) {
@@ -867,10 +873,8 @@ impl RepositoryView {
         stats: Option<IndexRunStats>,
         cx: &mut Context<Self>,
     ) {
-        let was_tracked = self
-            .code_index_task
-            .as_ref()
-            .is_some_and(|t| t.repo_path == repo_path);
+        let (was_tracked, user_initiated) =
+            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path);
         if was_tracked {
             self.code_index_task = None;
             self.code_index_progress_message.clear();
@@ -881,13 +885,21 @@ impl RepositoryView {
             Some(stats) => {
                 self.code_index_stats
                     .insert(repo_path.clone(), to_cached_stats(&stats));
-                if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
+                // 只有用户主动触发（设置页按钮 / 索引开关）才弹完成提示：自动
+                // 增量刷新随时可能发生，逐个弹窗只会变成噪音。进度与统计照常
+                // 更新，状态栏在活动仓库上给出结果。
+                if user_initiated && self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
                     self.notify_success(
                         format!(
                             "代码索引完成：{} 文件 · {} 符号 · {} 关系",
                             stats.files, stats.symbols, stats.edges
                         ),
                         cx,
+                    );
+                } else if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
+                    self.status = format!(
+                        "代码索引已更新：{} 文件 · {} 符号 · {} 关系",
+                        stats.files, stats.symbols, stats.edges
                     );
                 }
                 // 完成即后台重读库统计：to_cached_stats 无 db_bytes/时间/分支
@@ -909,11 +921,9 @@ impl RepositoryView {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .code_index_task
-            .as_ref()
-            .is_some_and(|t| t.repo_path == repo_path)
-        {
+        let (was_tracked, user_initiated) =
+            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path);
+        if was_tracked {
             self.code_index_task = None;
             self.code_index_progress_message.clear();
             self.code_index_progress_done = 0;
@@ -921,7 +931,13 @@ impl RepositoryView {
         }
         tracing::warn!(target: "khaslana::code_index", "索引失败 {repo_path}: {error}");
         if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
-            self.notify_error(format!("代码索引失败:{error}"), cx);
+            // 与完成提示同一规则：只有用户主动触发才弹错误窗；自动刷新失败
+            // 落在状态栏（已写 tracing 日志），不打断当前操作。
+            if user_initiated {
+                self.notify_error(format!("代码索引失败:{error}"), cx);
+            } else {
+                self.status = format!("代码索引失败:{error}");
+            }
         }
         cx.notify();
     }
@@ -945,6 +961,22 @@ impl RepositoryView {
 // ----------------------------------------------------------------------
 // 渲染纯函数与小部件
 // ----------------------------------------------------------------------
+
+/// 索引完成/失败事件的任务归属判定：`(是否在途, 是否用户主动触发)`。
+///
+/// 事件按仓库键寻址：库路径相同但任务已结束时（迟到事件）返回 `(false, false)`，
+/// 两个标志都为假，调用方只更新统计、不动任务状态。
+///
+/// `user_initiated` 决定完成时是弹提示还是只落状态栏：自动增量刷新（仓库加载、
+/// 工作区操作后）随时可能发生，逐个弹「索引已更新」会变成噪音；只有用户点了
+/// 按钮/开关的任务才值得弹窗。
+fn code_index_task_ownership(
+    task: Option<&CodeIndexTaskState>,
+    repo_path: &str,
+) -> (bool, bool) {
+    task.filter(|t| t.repo_path == repo_path)
+        .map_or((false, false), |t| (true, t.user_initiated))
+}
 
 /// 状态徽标 pill（圆点 + 文字）。
 fn code_index_status_pill(status: CodeIndexEntryStatus) -> gpui::AnyElement {
