@@ -1049,17 +1049,6 @@ impl RepositoryView {
         );
     }
 
-    /// 「应用修改并切换」确认入口：暂存、切换并自动恢复修改。
-    pub(crate) fn confirm_carry_checkout_apply(&mut self, target: CheckoutTarget) {
-        self.close_dialog();
-        self.spawn_checkout_with_carry_prompt(
-            target,
-            CheckoutRun::Carry {
-                auto_apply: true,
-            },
-        );
-    }
-
     // ── 标签管理 ──────────────────────────────────────────────
 
     /// 打开创建标签对话框；`target_oid` 为 None 时目标为 HEAD。

@@ -644,9 +644,9 @@ impl ResolvedWorkflowStep {
                 match service.checkout_branch_checked(repo, &branch)? {
                     CheckoutAttempt::Switched(snapshot) => Ok(StepOutcome::snapshot(snapshot)),
                     CheckoutAttempt::BlockedByLocalChanges => {
-                        // 工作流无人值守，没有勾选开关：贮藏并切换后自动恢复。
+                        // 工作流无人值守，没有勾选开关：只贮藏并切换，不自动恢复。
                         let outcome = service
-                            .checkout_branch_carrying_changes(repo, &branch, true)?;
+                            .checkout_branch_carrying_changes(repo, &branch, false)?;
                         let mut details = Vec::new();
                         if let Some(notice) = outcome.notice {
                             details.push(notice);
