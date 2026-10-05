@@ -225,10 +225,11 @@ impl KitField {
     /// 其 `input_text_size` 会给 `text_sm`（14px），比项目正文（12px）大一号。
     /// 这行样式经 `refine_style` 在 `input_text_size` 之后应用，因此能覆盖默认值；
     /// 高度仍由调用方显式给定，不受字号影响。
-    pub(crate) fn render(&self, compact: bool, blocked: bool) -> AnyElement {
+    pub(crate) fn render(&self, compact: bool, blocked: bool, mask_toggle: bool) -> AnyElement {
         let text_size = px(ui_theme::TYPE_BODY);
         match &self.input {
             KitFieldInput::Single(state) => Input::new(state)
+                .when(mask_toggle, |input| input.mask_toggle())
                 .h(px(if compact {
                     KIT_INPUT_COMPACT_HEIGHT
                 } else {
@@ -556,6 +557,9 @@ where
                 return;
             }
             field.set_value(value);
+            if matches!(id, FieldId::AiBaseUrl | FieldId::AiApiKey | FieldId::AiModel) {
+                this.ai_extensions.save_error = None;
+            }
             // 与自绘路径（`text_*` handler）保持同一通知点：输入即查、
             // 工作流字段同步都挂在这里，漏掉会让这些字段迁到 Kit 后失灵。
             this.notify_text_field_changed(id);

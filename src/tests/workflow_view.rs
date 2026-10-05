@@ -68,6 +68,29 @@ fn workflow_template_scan_keeps_invalid_template_with_error() {
 }
 
 #[test]
+fn legacy_remote_templates_import_once_without_duplicates_or_reappearing() {
+    let temp = tempfile::tempdir().unwrap();
+    let managed = temp.path().join(MANAGED_TEMPLATE_DIR);
+    fs::create_dir(&managed).unwrap();
+    let original = "{ version: 1, name: '本地', steps: [{ op: 'ensureClean' }] }";
+    let remote = "{ version: 1, name: '远端', steps: [{ op: 'ensureClean' }] }";
+    fs::write(temp.path().join("same.json5"), original).unwrap();
+    fs::write(managed.join("same.json5"), remote).unwrap();
+    fs::write(managed.join("only-remote.json5"), remote).unwrap();
+
+    import_managed_workflow_templates_once(temp.path()).unwrap();
+    let templates = load_workflow_templates_from_dir(temp.path()).unwrap();
+    assert_eq!(templates.len(), 2);
+    assert_eq!(fs::read_to_string(temp.path().join("same.json5")).unwrap(), original);
+
+    fs::remove_file(temp.path().join("same.json5")).unwrap();
+    import_managed_workflow_templates_once(temp.path()).unwrap();
+    let templates = load_workflow_templates_from_dir(temp.path()).unwrap();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].file_name, "only-remote.json5");
+}
+
+#[test]
 fn workflow_selected_template_path_clears_external_or_stale_selection() {
     let current = Path::new(r"C:\\workflows\\current.json5");
     let external = Path::new(r"C:\\other\\external.json5");

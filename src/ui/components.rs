@@ -15,6 +15,10 @@ use gpui::{
     Render, SharedString, Stateful, Window, div, prelude::*, px,
 };
 use gpui_kit::base::{Button as BaseButton, Checkbox, CheckboxState};
+use gpui_kit::component::{
+    Disableable as _, Sizable as _,
+    button::{Button as KitButton, ButtonCustomVariant, ButtonVariants as _},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppToastKind {
@@ -209,6 +213,45 @@ fn app_button_palette(tone: ButtonTone, enabled: bool) -> ButtonPalette {
             contact_shadow: false,
         },
     }
+}
+
+pub(crate) enum SettingsButtonTone {
+    Primary,
+    Secondary,
+    Quiet,
+    SelectedTab,
+}
+
+/// 设置页命令复用应用语义色；标签单独设字号，避免 Kit 内部的 text_sm 覆盖。
+pub(crate) fn settings_command_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    tone: SettingsButtonTone,
+    enabled: bool,
+    cx: &App,
+) -> KitButton {
+    let label = label.into();
+    let borderless = matches!(tone, SettingsButtonTone::Quiet | SettingsButtonTone::SelectedTab);
+    let mut palette = app_button_palette(if matches!(tone, SettingsButtonTone::Primary) {
+        ButtonTone::Primary
+    } else { ButtonTone::Secondary }, enabled);
+    if enabled && matches!(tone, SettingsButtonTone::SelectedTab) {
+        palette.bg = theme::PRIMARY_SUBTLE;
+        palette.hover_bg = theme::PRIMARY_SUBTLE;
+        palette.fg = theme::PRIMARY;
+    }
+    let variant = ButtonCustomVariant::new(cx)
+        .color(rgb(palette.bg).into()).foreground(rgb(palette.fg).into())
+        .hover(rgb(palette.hover_bg).into()).active(rgb(palette.hover_bg).into());
+    KitButton::new(id).custom(variant).small().disabled(!enabled)
+        .accessibility_label(label.clone())
+        .h(px(32.0)).min_w(px(80.0)).px(px(12.0)).flex_none()
+        .rounded(px(theme::RADIUS_XS))
+        .border_1().border_color(rgb(palette.border))
+        .when(borderless, |this| this.border_0())
+        .bg(rgb(palette.bg)).text_color(rgb(palette.fg))
+        .child(div().text_size(px(theme::TYPE_BODY)).line_height(px(16.0))
+            .font_weight(gpui::FontWeight::MEDIUM).child(label))
 }
 
 /// 区域标题 — Funnel Sans 风格小标题（侧边栏、面板区头等）

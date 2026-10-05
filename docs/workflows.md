@@ -1,6 +1,6 @@
 # Khaslana 工作流使用说明
 
-Khaslana 工作流用于把一组 Git 操作按顺序自动执行，例如：基于 `master` 创建分支、合并另一个分支、再推送到远端。当前版本只支持 JSON5/JSONC 风格的结构化工作流文件，不支持 YAML、JavaScript、Python 或任意 shell 脚本。
+Khaslana 工作流用于把一组 Git 操作按顺序自动执行，例如：基于 `master` 创建分支、合并另一个分支、再推送到远端。当前版本支持 JSON5/JSONC 风格的 v1 与 v2 工作流文件；v2 已接入本地 stdio MCP 与受限 JavaScript，AI Skill 和任意 shell 脚本尚未接入。
 
 ## 可视化创建与编辑模板（推荐新手）
 
@@ -18,6 +18,7 @@ Khaslana 工作流用于把一组 Git 操作按顺序自动执行，例如：基
 - 编辑模式下保存会**覆盖原文件**（即使原文件是 `.jsonc` 扩展名也会原地更新）；修改文件名后等同于重命名：写入新文件并删除旧文件。
 - 切换步骤类型时已填写的同名参数（如分支名）会保留。
 - “删除本地分支”等高风险步骤默认开启试运行模式。
+- 可视化编辑器目前只编辑 v1 文件。v2 文件可以手工编写；在编辑器中载入时会提示不支持，避免保存时丢失 v2 步骤。
 
 ### AI 助手（AI 生成 / AI 编辑）
 
@@ -35,13 +36,15 @@ Khaslana 工作流用于把一组 Git 操作按顺序自动执行，例如：基
 
 1. 打开目标仓库。
 2. 点击右上模式切换中的“工作流”，进入工作流页面。
-3. 在中间“工作流模板”栏单击模板可选中，双击模板会加载到右侧详情；也可以点击“选择文件”加载任意 `.json5` / `.jsonc` 工作流文件。
+3. 在“模板导航”栏单击模板加载到右侧详情；也可以点击“选择文件”加载任意 `.json5` / `.jsonc` 工作流文件。
 4. 如果工作流声明了运行前输入变量，在“变量输入”区域填写这些字符串变量。
 5. 在“步骤预览”中确认变量展开后的步骤。
 6. 点击“运行”。
 7. 在“运行日志”中查看每一步执行状态。
 
 工作流始终作用于当前激活仓库。涉及远端认证时，继续使用 Khaslana 现有凭据机制和认证弹窗。
+
+也可以在本地或远端分支上点击右键，选择“运行工作流…”中的模板。点击后会进入工作流运行页，把右键分支作为来源分支显示；不会自动切换分支或运行。`${git.initialBranch}` 在该入口使用右键分支，普通入口仍使用工作流开始时的当前分支。运行前若该引用已不存在，会报错并停止。
 
 ## 工作流模板目录
 
@@ -51,7 +54,7 @@ Khaslana 会在用户目录下准备一个可见的工作流模板目录：
 C:\Users\<用户名>\.khaslana\workflows
 ```
 
-当前版本会在进入工作流页面时自动创建这个目录。你可以把常用工作流文件放进去，中间“工作流模板”栏会自动发现目录下一级的 `.json5` 和 `.jsonc` 文件。
+应用启动时会在后台扫描模板；你可以把常用工作流文件放进这个目录，模板栏会发现目录下一级的 `.json5` 和 `.jsonc` 文件。
 
 模板区域支持：
 
@@ -59,10 +62,12 @@ C:\Users\<用户名>\.khaslana\workflows
 - 右键模板行可“编辑此模板”、“复制为副本”或“删除模板...”（见上文）。
 - 点击“刷新模板”重新扫描模板目录。
 - 点击“打开目录”用系统文件管理器打开模板目录。
-- 单击模板行只选中模板；双击模板行加载模板。加载后仍会进入变量输入、步骤预览和手动运行流程，不会直接执行 Git 操作。
+- 点击“下载模板”打开 [CNB 工作流模板目录](https://cnb.cool/liuchenchen/work-studio/-/tree/main/work-studio-files) 的模板列表，再逐个点击“下载”。只下载选中的模板；本地同名文件显示“已存在”，不会被覆盖。已下载文件保存在普通模板目录，离线时仍可使用。
+- 单击模板行加载模板。加载后仍会进入变量输入、步骤预览和手动运行流程，不会直接执行 Git 操作。
+- 运行中可点击“取消运行”；遮罩显示时可点击“停止后续步骤”。取消会等待当前 Git 步骤结束，再阻止后续步骤；已完成的步骤不会撤销。
 - 解析失败的模板仍会显示在列表中，双击加载时会显示具体解析错误。
 
-模板目录只用于用户主动管理的工作流文件，不存放凭据、会话或应用内部配置。仓库内的工作流文件不会被自动扫描；如果需要运行仓库中的临时工作流，请继续使用“选择文件”。
+之前版本批量同步到 `remote-cnb` 的模板会一次性导入普通模板目录；同名本地文件优先，旧文件保留作备份但不重复显示，删除已导入的模板后也不会再次出现。下载和浏览不会保存凭据。仓库内的工作流文件不会被自动扫描；如果需要运行仓库中的临时工作流，请继续使用“选择文件”。
 
 ## 文件格式
 
@@ -110,12 +115,109 @@ C:\Users\<用户名>\.khaslana\workflows
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `version` | 是 | 当前只支持 `1`。 |
+| `version` | 是 | 支持 `1` 和 `2`；可视化编辑器当前只生成 v1。 |
 | `name` | 否 | 工作流显示名称。为空时显示“未命名工作流”。 |
 | `defaults` | 否 | 默认行为设置。 |
 | `inputs` | 否 | 运行前让用户在页面填写的字符串变量表。 |
 | `vars` | 否 | 用户自定义变量表，值必须是字符串。 |
 | `steps` | 是 | 要顺序执行的步骤数组，至少需要一个步骤。 |
+
+### v2 可扩展步骤
+
+v2 可以使用 `op: "invoke"`、唯一的 `id`、`uses` 和 `with` 参数调用动作。已内置 `git.checkout`、`git.fetch`、`git.pull`、`git.createBranch`、`git.merge`、`git.push`、`git.guardRemoteBranch`、`git.ensureClean`、`git.assertBranch`、`git.filterBranches`、`git.deleteBranches`，参数与下文同名 v1 步骤一致。v1 文件及步骤运行方式保持原样。
+
+```json5
+{
+  version: 2,
+  steps: [
+    { op: "invoke", id: "clean", uses: "git.ensureClean" },
+    { op: "invoke", id: "create", uses: "git.createBranch",
+      with: { name: "demo", from: "${run.sourceBranch}", checkout: false } },
+  ],
+}
+```
+
+`with` 默认是空对象。`${run.sourceBranch}` 表示本次选定的来源分支，`${run.sourceKind}` 返回 `local` 或 `remote`；从普通入口运行时来源分支为启动时的当前分支。扩展动作可通过 `saveAs` 把 JSON 结果传给后续步骤（如 `${result.branch}`）。内置 `git.*` 动作不支持 `saveAs`，已有输出参数仍按 v1 用法填写。
+
+#### 本地 MCP 服务与 JavaScript
+
+自定义 MCP 服务可在当前数据目录的 `workflow-mcp.json5` 中显式配置；工作流模板本身不能指定启动命令。内置 `browser.edge` 服务无需此配置。可点击工作流页的“目录”打开模板目录，再到上一级数据目录。自定义服务配置示例：
+
+```json5
+{
+  servers: {
+    localTools: {
+      command: "C:\\path\\to\\mcp-server.exe",
+      args: [],
+      tools: {
+        read_page: { access: "read" },
+        submit_form: { access: "write" },
+      },
+    },
+  },
+}
+```
+
+`access` 由本地配置者指定，不采用服务自行声明的只读提示。当前只支持本地 stdio 服务；自定义服务的进程环境继承客户端。需要认证或网络代理的自定义服务须自行处理，客户端不会把自己的代理与凭据隐式传给子进程。配置中的命令及参数不要写入 secret。内置 `browser.edge` 使用客户端代理设置；浏览器代理暂不支持账号密码或 HTTP、HTTPS 分别设置不同代理。
+
+在「设置 → AI 设置 → MCP → 添加服务」中可直接填写 `npx`，参数每行一个，例如 `-y` 和 `chrome-devtools-mcp@latest`。Windows 自动解析 PATH 中的可执行程序及 `.cmd` / `.bat` 入口，保留完整路径与原有 `npx.cmd` 配置；标准 npm / npx 入口优先由同目录的 Node 直接执行。npx 默认使用当前应用数据目录下的 `workflow-npm-cache`，与其它客户端隔离；显式设置 `npm_config_cache` 时沿用该目录。首次连接可能下载 npm 包，连接测试最多等待 120 秒，只读取工具列表，不调用工具。自定义 `npx` 服务需要本机安装 Node.js（含 npm），安装后重启客户端；「运行环境」中的内置浏览器组件不提供通用 npm / npx 安装。
+
+新服务连接成功后默认启用发现的全部工具，无需逐项设置权限即可保存。「高级配置（可选）」默认收起，可关闭个别工具或调整读写提示；重新测试保留本次修改，编辑已保存服务时保留原有工具白名单。读写类型未设置时按写入处理，运行前仍确认工作流实际使用的工具。
+
+直接调用 MCP 工具：
+
+```json5
+{ op: "invoke", id: "read", uses: "mcp.call", saveAs: "page",
+  with: { server: "localTools", tool: "read_page", arguments: { url: "https://example.com" } } }
+```
+
+服务名和工具名必须是固定值；`arguments` 是对象，可引用工作流变量。运行时会连接服务、读取工具清单、根据工具的 JSON Schema 校验参数，之后调用一次；服务声明了输出 schema 时也校验结构化结果。同一工作流运行内会复用同一服务连接，结束或失败后关闭。工具返回的结构化结果优先作为 `saveAs` 输出；没有结构化结果时保存内容数组。出错后停止后续步骤，不自动重试写入工具。预览阶段无法知道工具结果，后续引用 `saveAs` 的表达式会原样显示，运行时才展开。
+
+JavaScript 规则以函数体形式编写，可读取 `input`，通过 `return` 返回 JSON 值。仅当 `tools` 明确列出服务和工具时，才可调用 `mcp.call(server, tool, arguments)`：
+
+```json5
+{ op: "invoke", id: "transform", uses: "js.run", saveAs: "result",
+  with: {
+    input: { text: "hello" },
+    tools: [{ server: "localTools", tool: "read_page" }],
+    script: "const page = mcp.call('localTools', 'read_page', {url: input.text}); return {page};",
+  } }
+```
+
+脚本没有文件、网络或进程 API；JavaScript 源码中的 `${...}` 保留为 JS 模板字符串，`input` 字段可使用工作流变量。每段脚本限制 8 MiB 内存、512 KiB 栈、40 秒、256 KiB 输入与 1 MiB 输出；MCP 参数限制 256 KiB、输出限制 1 MiB。运行前弹框展示脚本摘要及每个 MCP 工具的读写权限，授权只对这一次运行有效；关闭弹框或取消即不执行。MCP/JS 步骤运行中可取消，已完成的写入不会撤销。运行日志只记录服务、工具、状态与耗时，不记录传入参数与输出内容。
+
+#### 本地 AI Skill
+
+将已检查的 Skill 包放在当前数据目录的 `workflow-skills/<名称>/SKILL.md`；这是显式本地安装，不会自动从网络下载或更新。名称只允许小写字母、数字和连字符。`SKILL.md` 顶部需要简短清单，`name` 必须与目录名一致：
+
+```markdown
+---
+name: edge-web-form
+description: 读取公开演示表单并填写文本框。
+---
+
+这里写给 AI 的步骤说明。
+```
+
+可在同包的 `references/` 放最多 16 个 `.md` 或 `.txt` 文件，运行前与主文件一起读取；包内容总量最多 128 KiB。链接、嵌套资源和其他文件类型不会作为资源读取。预览会校验已安装的包与 AI 配置，运行确认前冻结所用包内容并展示摘要指纹。确认只针对本次运行，安装目录后续变化不会改变这次运行的指令。
+
+`skill.run` 使用当前启用的 AI 供应商。`task` 是本次任务；`tools` 声明模型能调用的 MCP 工具，须在自定义配置或客户端内置服务的白名单中，并经过本次运行确认：
+
+```json5
+{ op: "invoke", id: "assistant", uses: "skill.run", saveAs: "answer",
+  with: { skill: "edge-web-form", task: "读取页面并填写示例内容",
+    tools: [{ server: "browser.edge", tool: "browser_snapshot" }] } }
+```
+
+模型最多运行 6 轮、调用工具 8 次；每轮输出上限为当前供应商设置与 4096 token 中的较小值，整体不超过 180 秒，提示与工具结果累计限制 256 KiB，单个工具结果限制 32 KiB。每次工具调用在宿主侧重新核对步骤白名单和 MCP schema。工具失败不自动重试；流式 AI 请求支持取消与截止时间检查，网络读空闲最长 30 秒。运行日志逐条记录 AI 给出的简短操作说明及工具名、状态和耗时，不记录工具参数或完整工具结果。`saveAs` 保存最终文字。
+
+浏览器场景可在 `with.browserGuard` 设置固定 HTTPS `url`、页面快照必须包含的 `contains` 文本和允许填写的 `target`。有守卫时仅允许导航、快照和填写工具；宿主会阻止错误网址、未验证页面、错误输入目标和缺少 `submit: false` 的填写，并要求填写后快照能读到填写内容。页面不匹配或超时会停止工作流。
+
+#### Edge 公开演示样板
+
+[样板目录](examples/workflow-edge-demo/)提供确定性 JS 工作流和 AI Skill 工作流。安装 Microsoft Edge 后，把两个 `.json5` 模板复制到 `workflows/`；运行时若缺少浏览器 MCP 组件，点击“下载并启用”，客户端会先检查本机 Node，必要时将 Node 与固定版本的 [Playwright MCP](https://github.com/microsoft/playwright-mcp) 下载到当前应用数据目录。下载完成后继续本次运行授权。如需 AI 版本，还需将 `workflow-skills/edge-web-form/` 复制到数据目录的同名位置并启用 AI。系统不需要预先安装 npm 或 npx；原样板中的 `edgeDemo` 配置仍可被客户端识别为内置服务，用户自定义过的同名配置保持原样。
+
+两个模板都只访问 [Selenium 公开表单](https://www.selenium.dev/selenium/web/web-form.html)，读取页面并填写 `Text input`，不点击 Submit，也不提交或保存。MCP 白名单只有 `browser_navigate`、`browser_snapshot` 和 `browser_type`。`edge-web-form.json5` 使用 JS 固定校验页面与输入框后填写；`edge-web-form-skill.json5` 让 AI 按包说明操作，同时由页面守卫在宿主侧核对 URL、页面文本、输入目标和填写后的快照。真实页面可能更新；识别失败时应检查演示页结构再修改样板。
 
 ### defaults
 
@@ -466,12 +568,14 @@ vars: {
 | --- | --- |
 | `${run.id}` | 本次运行 ID，基于启动时间毫秒。 |
 | `${run.startedAt:%Y%m%d}` | 本次运行启动时间，可自定义日期格式。 |
+| `${run.sourceBranch}` | 本次运行的来源分支；从分支右键启动时取右键分支。 |
+| `${run.sourceKind}` | 来源分支种类，`local` 或 `remote`。 |
 
 ### Git 变量
 
 | 变量 | 说明 |
 | --- | --- |
-| `${git.initialBranch}` | 工作流开始时的当前分支。运行过程中不会变化。 |
+| `${git.initialBranch}` | 普通入口取工作流开始时的当前分支；分支右键入口取右键分支。运行过程中不会变化。 |
 | `${git.currentBranch}` | 每个步骤执行前读取到的当前分支。切换分支后会变化。 |
 | `${git.head}` | 当前 `HEAD` 指向的提交 SHA。 |
 | `${git.repoName}` | 当前仓库目录名。 |
@@ -648,7 +752,7 @@ vars: {
 ## 当前限制
 
 - 只支持顺序执行，不支持条件、循环、并发或手动暂停。
-- 不支持执行 shell、JavaScript、Python 等脚本。
+- 不支持任意 shell、Python 脚本；JavaScript 仅可通过 v2 `js.run` 在受限运行时执行。
 - 不支持跨仓库编排；工作流只作用于当前激活仓库。
 - 不支持行级别或 hunk 级别操作。
 - 内置方法只支持字符串处理和临时数组取值，不支持循环、条件；正则匹配只在 `filterBranches` 步骤的 `pattern` 中支持，内置管道方法本身不支持正则。

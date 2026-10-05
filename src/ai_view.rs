@@ -3,28 +3,22 @@
 // 复杂 AI 逻辑（HTTP 请求、prompt 构造）在 src/ai/ 中实现；
 // 这里只负责组合布局、状态、交互和渲染。
 
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use async_channel::Sender;
-use gpui::{App, Context, IntoElement, Window, canvas, div, point, prelude::*, px};
+use gpui::{Context, IntoElement, Window, canvas, div, point, prelude::*, px};
 use gpui_kit::base::FocusTrapElement;
-use gpui_kit::component::setting::SettingGroup;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, Sizable};
 use khaslana::{
-    AiApiType, ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
+    ChatClient, ChatMessage, ChatRole, DiffEncodingChoice, DiffScope, StreamDelta,
 };
 
 use crate::ui::theme::rgb;
 use crate::{
-    AiThinkingOverlayState, AiThinkingTask, AiThinkingTaskKind, FieldId, RepositoryView, UiEvent,
+    AiThinkingOverlayState, AiThinkingTask, AiThinkingTaskKind, RepositoryView, UiEvent,
     dialog_panel_size,
-    settings_center::{
-        settings_compact_heading, settings_compact_item, settings_compact_list, settings_item_body,
-    },
     ui::{
         components::{
-            PlaceholderAlign, dialog_actions, dialog_overlay, inline_error_bubble, panel_empty_row,
+            PlaceholderAlign, dialog_overlay, inline_error_bubble, panel_empty_row,
         },
         icons::ToolbarIcon,
         theme as ui_theme,
@@ -347,164 +341,6 @@ impl RepositoryView {
             .into_any_element()
     }
 
-    /// AI 设置页的分组（Kit `SettingGroup` 列表）。
-    ///
-    /// 对应旧弹窗 `render_ai_provider_settings_dialog` 的迁移：「功能」=
-    /// 启用开关；「连接配置」= 接口类型只读 + 三个输入，旧弹窗里的 API Key
-    /// 说明原文案整体移作分组描述（不按设计稿拆分改写）；「连接测试」=
-    /// 按钮组 + busy / last_error 状态行。输入仍走 `self.input`：
-    /// `TextFieldState` 是业务真值，不引入第二套输入状态。
-    ///
-    /// 每组用 [`settings_compact_item`] 整卡单条目自排 8px 行距（对齐旧弹窗
-    /// `gap_2`）；Kit `SettingGroup` 逐条排的 16px 行距会把表单撑散。
-    pub(crate) fn settings_ai_groups(
-        &self,
-        _window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<SettingGroup> {
-        // render 闭包必须 'static，每个闭包各持一份 Entity 克隆（廉价句柄）。
-        let view = cx.entity();
-        let enabled_value_view = view.clone();
-        let base_url_view = view.clone();
-        let api_key_view = view.clone();
-        let model_view = view.clone();
-        let actions_view = view.clone();
-        // 开关写回闭包经 Rc 共享：渲染闭包是 Fn（Kit 每次渲染调用），
-        // on_click 每帧各 move 一份克隆。
-        let enabled_set: Rc<dyn Fn(bool, &mut App)> = {
-            let view = view.clone();
-            Rc::new(move |value: bool, cx: &mut App| {
-                view.update(cx, |this, cx| {
-                    this.set_ai_enabled_form(value);
-                    cx.notify();
-                });
-            })
-        };
-        // busy 与 last_error 互斥展示，沿用旧弹窗的 when 条件。
-        let busy = self.busy;
-        let has_last_error = !busy && self.last_error.is_some();
-        let status_text = self.status.clone();
-        let last_error_text = self.last_error.clone().unwrap_or_default();
-
-        vec![
-            SettingGroup::new().item(settings_compact_item(
-                &["功能", "启用 AI 功能"],
-                move |options, _window, cx| {
-                    let enabled = enabled_value_view.read(cx).ai_enabled_form;
-                    let set_value = enabled_set.clone();
-                    settings_compact_list()
-                        .child(settings_compact_heading("功能", None))
-                        .child(settings_item_body(
-                            "启用 AI 功能",
-                            None,
-                            Switch::new("ai-enabled")
-                                .checked(enabled)
-                                .disabled(options.is_disabled())
-                                .with_size(options.size())
-                                .on_click(move |checked: &bool, _, cx: &mut App| {
-                                    set_value(*checked, cx)
-                                }),
-                        ))
-                },
-            )),
-            SettingGroup::new().item(settings_compact_item(
-                &["连接配置", "接口类型", "接口地址", "API Key", "模型"],
-                move |_options, window, cx| {
-                    // 输入框在渲染闭包内经 view.update 构造：元素包进 div 后
-                    // 与 this / cx 的借用脱钩，可直接作为行内容。
-                    let base_url_input = base_url_view.update(cx, |this, cx| {
-                        div().w(px(280.0)).max_w_full().child(this.input(
-                            FieldId::AiBaseUrl,
-                            false,
-                            window,
-                            cx,
-                        ))
-                    });
-                    let api_key_input = api_key_view.update(cx, |this, cx| {
-                        div().w(px(280.0)).max_w_full().child(this.input(
-                            FieldId::AiApiKey,
-                            false,
-                            window,
-                            cx,
-                        ))
-                    });
-                    let model_input = model_view.update(cx, |this, cx| {
-                        div().w(px(280.0)).max_w_full().child(this.input(
-                            FieldId::AiModel,
-                            false,
-                            window,
-                            cx,
-                        ))
-                    });
-                    settings_compact_list()
-                        .child(settings_compact_heading(
-                            "连接配置",
-                            Some("API Key 可选（本地模型如 Ollama 可留空）；明文保存在本地配置数据库，请勿在共享环境使用。temperature、max_tokens、超时使用默认值（0.3 / 4000 / 60s）。".into()),
-                        ))
-                        .child(settings_item_body(
-                            "接口类型",
-                            None,
-                            div()
-                                .text_size(px(ui_theme::TYPE_BODY))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(AiApiType::ChatCompletions.label()),
-                        ))
-                        .child(settings_item_body(
-                            "接口地址（Base URL）",
-                            None,
-                            base_url_input,
-                        ))
-                        .child(settings_item_body("API Key", None, api_key_input))
-                        .child(settings_item_body("模型", None, model_input))
-                },
-            )),
-            SettingGroup::new().item(settings_compact_item(
-                &["连接测试", "测试连接", "保存"],
-                move |_options, _window, cx| {
-                    // 状态行沿用旧弹窗的 when 条件：busy 时只显示进度，不显示错误行。
-                    let mut list = settings_compact_list()
-                        .child(settings_compact_heading("连接测试", None));
-                    if busy {
-                        list = list.child(
-                            div()
-                                .text_size(px(ui_theme::TYPE_BODY))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .child(status_text.clone()),
-                        );
-                    }
-                    if has_last_error {
-                        list = list.child(
-                            div()
-                                .text_size(px(ui_theme::TYPE_BODY))
-                                .text_color(rgb(ui_theme::DESTRUCTIVE))
-                                .truncate()
-                                .child(last_error_text.clone()),
-                        );
-                    }
-                    let actions = actions_view.update(cx, |this, cx| {
-                        dialog_actions()
-                            .child(this.button(
-                                "测试连接",
-                                !this.busy,
-                                |this, _, _| this.test_ai_connection(),
-                                cx,
-                            ))
-                            .child(this.primary_button(
-                                "保存",
-                                !this.busy,
-                                |this, _, cx| {
-                                    this.save_ai_provider_settings_from_form();
-                                    this.notify_settings_save("AI 设置已保存", cx);
-                                },
-                                cx,
-                            ))
-                    });
-                    list.child(actions)
-                },
-            )),
-        ]
-    }
-
     /// AI 生成提交信息按钮是否可用。
     pub(crate) fn ai_commit_button_enabled(&self) -> bool {
         self.ai_settings.is_usable() && !self.ai_commit_loading && !self.busy
@@ -794,48 +630,40 @@ impl RepositoryView {
 
     /// 测试 AI 连接：发送一个最小请求。
     pub(crate) fn test_ai_connection(&mut self) {
-        if self.busy || self.global_busy_tab.is_some() {
-            self.last_error = Some("已有操作正在运行".into());
+        if self.ai_extensions.connection_test.is_running() {
             return;
         }
         let settings = self.ai_form_settings();
+        let request_id = self.ai_extensions.connection_test.begin(settings.clone());
+        if self.busy || self.global_busy_tab.is_some() {
+            self.ai_extensions.connection_test.finish(request_id, Err("已有操作正在运行".into()));
+            return;
+        }
         if let Err(err) = settings.validate() {
-            self.last_error = Some(err.to_string());
+            self.ai_extensions.connection_test.finish(request_id, Err(err.to_string()));
             return;
         }
         self.begin_global_test_busy("正在测试 AI 连接");
-
-        let proxy_url = self
-            .proxy_settings
-            .proxy_url_for_target(&settings.normalized_base_url());
+        let proxy_url = self.proxy_settings.proxy_url_for_target(&settings.normalized_base_url());
         let tx = self.tx.clone();
         self.tasks.spawn(crate::TaskKind::Long, move || {
-            let client = ChatClient::new(settings, proxy_url);
-            let test_message = ChatMessage {
-                role: ChatRole::User,
-                content: "请回复 OK".into(),
-            };
-            match client.request(&[test_message]) {
-                Ok(result) => {
-                    let message = if result.content.trim().is_empty() {
-                        "AI 连接测试通过（返回空内容）".to_string()
+            // 外层调度器会捕获 panic，但 UI 仍需要一个带身份的事件来收尾。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let client = ChatClient::new(settings, proxy_url);
+                let test_message = ChatMessage { role: ChatRole::User, content: "请回复 OK".into() };
+                client.request(&[test_message]).map_err(|err| err.to_string()).and_then(|result| {
+                    if result.content.trim().is_empty() {
+                        Err("AI 连接返回空内容，请检查模型与接口配置".into())
                     } else {
-                        format!(
-                            "AI 连接测试通过：{}",
-                            result.content.chars().take(50).collect::<String>()
-                        )
-                    };
-                    crate::send_ui_event(&tx, crate::UiEvent::AiConnectionTested { message });
-                }
-                Err(err) => {
-                    crate::send_ui_event(
-                        &tx,
-                        crate::UiEvent::AiConnectionTestFailed {
-                            error: err.to_string(),
-                        },
-                    );
-                }
-            }
+                        Ok(format!("AI 连接测试通过：{}", result.content.chars().take(50).collect::<String>()))
+                    }
+                })
+            })).unwrap_or_else(|payload| Err(format!("连接测试异常：{}", crate::tasks::panic_message(payload))));
+            let event = match result {
+                Ok(message) => crate::UiEvent::AiConnectionTested { request_id, message },
+                Err(error) => crate::UiEvent::AiConnectionTestFailed { request_id, error },
+            };
+            crate::send_ui_event(&tx, event);
         });
     }
 

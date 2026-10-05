@@ -1,4 +1,5 @@
 use unicode_segmentation::UnicodeSegmentation;
+use serde_json::Value;
 
 use crate::{GitError, Result};
 
@@ -6,6 +7,7 @@ use crate::{GitError, Result};
 pub(super) enum WorkflowExpressionValue {
     String(String),
     Array(Vec<String>),
+    Json(Value),
 }
 
 impl WorkflowExpressionValue {
@@ -15,6 +17,19 @@ impl WorkflowExpressionValue {
             Self::Array(_) => Err(GitError::Message(format!(
                 "工作流表达式最终结果是数组，请使用 first、last、nth 或 join 转为字符串：{expression}"
             ))),
+            Self::Json(_) => Err(GitError::Message(format!(
+                "工作流表达式最终结果是对象或非字符串值：{expression}"
+            ))),
+        }
+    }
+
+    pub(super) fn from_json(value: Value) -> Self {
+        match value {
+            Value::String(value) => Self::String(value),
+            Value::Array(items) if items.iter().all(Value::is_string) => Self::Array(
+                items.into_iter().filter_map(|item| item.as_str().map(str::to_string)).collect(),
+            ),
+            value => Self::Json(value),
         }
     }
 }
@@ -162,6 +177,10 @@ fn apply_method(
     match value {
         WorkflowExpressionValue::String(value) => apply_string_method(value, method),
         WorkflowExpressionValue::Array(value) => apply_array_method(value, method),
+        WorkflowExpressionValue::Json(_) => Err(GitError::Message(format!(
+            "工作流方法 {} 不能用于对象或非字符串值",
+            method.name
+        ))),
     }
 }
 

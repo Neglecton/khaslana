@@ -533,7 +533,10 @@ pub(crate) fn workflow_content_has_comments(content: &str) -> bool {
 pub(crate) fn workflow_editor_data_from_definition(
     definition: &WorkflowDefinition,
     file_stem: &str,
-) -> WorkflowEditorData {
+) -> Result<WorkflowEditorData, String> {
+    if definition.version != 1 {
+        return Err("当前可视化编辑器只支持 v1 模板，请使用文本编辑器修改 v2 模板".into());
+    }
     let optional = |value: &Option<String>| value.clone().unwrap_or_default();
     let steps = definition
         .steps
@@ -544,6 +547,9 @@ pub(crate) fn workflow_editor_data_from_definition(
                     .unwrap_or(WorkflowStepKind::Checkout),
             );
             match step {
+                WorkflowStep::Invoke { .. } => {
+                    return Err("当前可视化编辑器无法编辑 invoke 步骤".to_string());
+                }
                 WorkflowStep::Checkout { branch } => editor.branch = branch.clone(),
                 WorkflowStep::Fetch { remote } => editor.remote = optional(remote),
                 WorkflowStep::Pull { remote } => editor.remote = optional(remote),
@@ -606,9 +612,9 @@ pub(crate) fn workflow_editor_data_from_definition(
                     editor.delete_skip_current = *skip_current;
                 }
             }
-            editor
+            Ok(editor)
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     let inputs = definition
         .inputs
@@ -631,7 +637,7 @@ pub(crate) fn workflow_editor_data_from_definition(
         })
         .collect();
 
-    WorkflowEditorData {
+    Ok(WorkflowEditorData {
         name: definition.name.clone().unwrap_or_default(),
         file_name: file_stem.to_string(),
         require_clean_worktree: definition.defaults.require_clean_worktree,
@@ -641,7 +647,7 @@ pub(crate) fn workflow_editor_data_from_definition(
         vars,
         error: None,
         editing_path: None,
-    }
+    })
 }
 
 /// 把 AI 生成的 JSON5 文本解析并回填到编辑器数据（AI 创建/编辑的落地步骤）。
@@ -668,7 +674,7 @@ pub(crate) fn apply_ai_generated_to_editor_data(
             } else {
                 data.file_name.clone()
             };
-            workflow_editor_data_from_definition(&definition, &stem_hint)
+            workflow_editor_data_from_definition(&definition, &stem_hint)?
         }
         Err(err) => return Err(err),
     };
@@ -717,6 +723,7 @@ fn slug_from_display_name(display_name: &str) -> String {
 /// 读取领域步骤的 serde op tag（反映射分发用，与 `WorkflowStepKind::op_name` 对应）。
 fn step_op_name(step: &WorkflowStep) -> &'static str {
     match step {
+        WorkflowStep::Invoke { .. } => "invoke",
         WorkflowStep::Checkout { .. } => "checkout",
         WorkflowStep::Fetch { .. } => "fetch",
         WorkflowStep::Pull { .. } => "pull",
@@ -1351,6 +1358,10 @@ impl RepositoryView {
         as_copy: bool,
         cx: &mut Context<Self>,
     ) {
+        if !as_copy && crate::workflow_view::is_managed_workflow_template_path(&path) {
+            self.notify_error("远端模板请先复制为副本再编辑", cx);
+            return;
+        }
         self.close_popups();
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
@@ -1371,7 +1382,13 @@ impl RepositoryView {
             .and_then(|stem| stem.to_str())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| "template".to_string());
-        let mut data = workflow_editor_data_from_definition(&definition, &file_stem);
+        let mut data = match workflow_editor_data_from_definition(&definition, &file_stem) {
+            Ok(data) => data,
+            Err(err) => {
+                self.notify_error(err, cx);
+                return;
+            }
+        };
         if as_copy {
             // 副本语义：原文件不动，强制另存新文件名。
             data.file_name = format!("{file_stem}-copy");

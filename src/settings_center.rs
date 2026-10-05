@@ -1,6 +1,6 @@
 //! 设置中心的 Kit Settings 页面模型。
 //!
-//! 界面样式由 gpui-kit 的 `Settings` 组件族承载：`Settings`（可拖拽侧栏 +
+//! 所有分类的壳层由 gpui-kit 的 `Settings` 组件族承载：`Settings`（可拖拽侧栏 +
 //! 搜索 + 右侧 `SettingPage`）→ `SettingPage`（页头 + 虚拟列表）→
 //! `SettingGroup`（`GroupBox` 分组）→ `SettingItem`（标题 / 描述 / 控件）。
 //! 每个分类一页，页面内容由各 view 的 `settings_*_groups` 按分组模型提供，
@@ -55,7 +55,7 @@ pub(crate) const SETTINGS_CATEGORY_ORDER: [SettingsCategory; 9] = [
 ];
 
 /// 分类对应的侧栏图标（Kit 内置 Lucide 目录）。
-fn category_icon(category: SettingsCategory) -> IconName {
+pub(crate) fn category_icon(category: SettingsCategory) -> IconName {
     match category {
         SettingsCategory::Credentials => IconName::KeyRound,
         SettingsCategory::Proxy => IconName::Network,
@@ -282,7 +282,7 @@ pub(crate) fn settings_pane_meta(category: SettingsCategory) -> SettingsPaneMeta
         },
         SettingsCategory::Ai => SettingsPaneMeta {
             title: "AI 设置",
-            description: "配置 AI 服务连接，用于提交信息生成、冲突解决建议与代码评审。",
+            description: "配置 AI 服务连接、Skill、MCP 与浏览器运行环境。",
         },
         SettingsCategory::ExternalMerge => SettingsPaneMeta {
             title: "合并工具",
@@ -333,13 +333,14 @@ impl RepositoryView {
         // 侧栏默认 250px、可拖 160–360；Kit 内部换页保留拖拽宽度。
         .sidebar_width(px(250.0))
         .sidebar_size_range(px(160.0)..px(360.0))
-        // 分组用 Outline 变体：BORDER_MUTED 描边 + 主题 radius，与面板语言一致；
-        // 不用 Fill——Kit group_box token 未经桥接配置。
-        .with_group_variant(GroupBoxVariant::Outline)
+        // AI 用 Normal 避免 GroupBox 内层固定的边框和 p_4；其它分类保持 Outline。
+        .with_group_variant(if category == SettingsCategory::Ai {
+            GroupBoxVariant::Normal
+        } else { GroupBoxVariant::Outline })
         .pages(pages)
     }
 
-    /// 全部九页，顺序与 [`SETTINGS_CATEGORY_ORDER`] 一致。
+    /// 九个分类共用同一个导航状态；AI 只定制右侧组内内容。
     fn settings_pane_pages(&self, window: &Window, cx: &mut Context<Self>) -> Vec<SettingPage> {
         SETTINGS_CATEGORY_ORDER
             .iter()
@@ -357,12 +358,17 @@ impl RepositoryView {
         let meta = settings_pane_meta(category);
         let view = cx.entity();
         let generation = self.settings_center_generation;
+        let mut header_style = settings_page_header_style();
+        if category == SettingsCategory::Ai {
+            // AI 自定义主体已经包含页头；原生隐藏页头仍构建 suffix 并同步选页。
+            header_style.display = Some(gpui::Display::None);
+        }
         SettingPage::new(meta.title)
             .icon(category_icon(category))
             // 描述不走 `SettingPage::description`：Kit 给它挂死 `text_sm()`
             // （14px），而页头容器样式压不到元素自身。改由 `title_suffix`
             // 自绘，字号取 `TYPE_META`，与分组卡描述一致。
-            .header_style(&settings_page_header_style())
+            .header_style(&header_style)
             .title_suffix(move |_window, cx| {
                 if view.read(cx).settings_center != Some(category) {
                     let view = view.clone();
@@ -380,9 +386,7 @@ impl RepositoryView {
                 }
                 // 标题行是 `h_flex`（默认 items_center）：描述占满剩余宽度，
                 // 长文案自然换行，不会把标题挤出可见区。
-                div()
-                    .flex_1()
-                    .text_size(px(ui_theme::TYPE_META))
+                div().flex_1().text_size(px(ui_theme::TYPE_META))
                     .line_height(px(16.0))
                     .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                     .child(meta.description)
@@ -392,7 +396,8 @@ impl RepositoryView {
 
     /// 当前分类的内容区分组。
     ///
-    /// 全部页面都按分组模型返回多个分组；分组不设 Kit 标题（否则侧栏出现
+    /// Kit 页面按分组模型返回多个分组；AI 使用自定义无边框分组。
+    /// 分组不设 Kit 标题（否则侧栏出现
     /// 两级手风琴子导航），标题由 [`settings_group_heading`] 在卡内渲染。
     pub(crate) fn settings_pane_groups(
         &self,
@@ -403,7 +408,16 @@ impl RepositoryView {
         match category {
             SettingsCategory::Credentials => self.settings_credentials_groups(cx),
             SettingsCategory::Proxy => self.settings_proxy_groups(window, cx),
-            SettingsCategory::Ai => self.settings_ai_groups(window, cx),
+            SettingsCategory::Ai => {
+                let view = cx.entity();
+                vec![SettingGroup::new().p_0().border_0().rounded(px(0.0))
+                    .bg(rgb(ui_theme::WB_PANEL))
+                    .item(SettingItem::render(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.render_ai_settings_page(window, cx).into_any_element()
+                        })
+                    }).keywords(["AI 设置", "连接配置", "接口地址", "API Key", "模型", "Skill", "MCP", "运行环境", "Node"]))]
+            },
             SettingsCategory::ExternalMerge => self.settings_external_merge_groups(window, cx),
             SettingsCategory::CodeIndex => self.settings_code_index_groups(window, cx),
             SettingsCategory::Theme => self.settings_theme_groups(window, cx),

@@ -99,6 +99,18 @@ impl RepositoryView {
                 .render_confirm_delete_credential_dialog(record_id, label, cx)
                 .into_any_element(),
             DialogState::StashForm => self.render_stash_form_dialog(window, cx).into_any_element(),
+            DialogState::AiSkillImport => self.render_ai_skill_import_dialog(cx).into_any_element(),
+            DialogState::AiSkillDetails { name } => self.render_ai_skill_details_dialog(&name, cx).into_any_element(),
+            DialogState::AiSkillRemove { name } => self.render_ai_skill_remove_dialog(&name, cx).into_any_element(),
+            DialogState::AiMcpForm => self.render_ai_mcp_form_dialog(window, cx).into_any_element(),
+            DialogState::AiMcpBuiltinDetails => self.render_ai_mcp_builtin_details_dialog(cx).into_any_element(),
+            DialogState::AiMcpRemove { name } => self.render_ai_mcp_remove_dialog(&name, cx).into_any_element(),
+            DialogState::RemoteWorkflowTemplates => self
+                .render_remote_workflow_template_dialog(window, cx)
+                .into_any_element(),
+            DialogState::ConfirmWorkflowExternal { tab_id, definition_generation, permissions } => self
+                .render_workflow_external_confirm_dialog(tab_id, definition_generation, &permissions, cx)
+                .into_any_element(),
             DialogState::WorkflowEditor => self
                 .render_workflow_editor_dialog(window, cx)
                 .into_any_element(),

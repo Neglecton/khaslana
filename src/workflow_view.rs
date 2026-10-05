@@ -4,6 +4,7 @@ use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::SystemTime;
 
 use crate::ui::theme::rgb;
@@ -14,22 +15,33 @@ use gpui::{
     ClickEvent, Context, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent, Window, div,
     prelude::*, px, uniform_list,
 };
+use gpui_kit::base::Button as BaseButton;
 use khaslana::{
-    WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
-    WorkflowProgressEvent, WorkflowRunOptions, parse_workflow_json5,
+    BranchKind, WorkflowDefinition, WorkflowExecutor, WorkflowInputDefinition, WorkflowPreview,
+    WorkflowProgressEvent, WorkflowRunControl, WorkflowRunOptions, WorkflowSourceBranch,
+    GitError, parse_workflow_json5,
 };
+use khaslana::workflow::remote_templates::{
+    MANAGED_TEMPLATE_DIR, RemoteTemplateEntry, download_cnb_template, list_cnb_templates,
+};
+use khaslana::workflow::extensions::{
+    WorkflowExternalGrant, load_mcp_config, register_external_actions_with_ai,
+};
+use khaslana::workflow::browser_runtime;
 
 use crate::{
     DialogState, FieldId, MainMode, OperationBlocker, RepositoryLoading, RepositorySnapshot,
     RepositoryView, ResizeTarget, ScrollbarMode, TextFieldState, UiEvent,
+    WorkflowActiveRun, WorkflowRunIdentity, WorkflowPendingExternal,
     WORKFLOW_TEMPLATE_MENU_HEIGHT, WORKFLOW_TEMPLATE_MENU_WIDTH, WorkflowTemplateContextMenu,
     clamped_menu_position, dialog_actions, scrollable_frame_when, scrollable_uniform_frame,
     send_ui_event,
     system::open_directory,
-    tasks::TaskKind,
+    tasks::{TaskKind, panic_message},
     ui::{
         components::{
-            command_group, floating_panel, list_row_surface, page_header, panel_section_header,
+            command_group, dialog_panel_size, floating_panel, list_row_surface, page_header,
+            panel_section_header,
         },
         theme as ui_theme,
     },
@@ -73,10 +85,10 @@ impl From<&str> for WorkflowLogEntry {
 #[derive(Clone, Debug)]
 pub(crate) struct WorkflowTemplateItem {
     pub(crate) path: PathBuf,
-    display_name: String,
+    pub(crate) display_name: String,
     file_name: String,
     modified_label: String,
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// 模板导航的轻量模型：只保存快照下标，不预先创建任何 GPUI 元素。
@@ -300,21 +312,124 @@ impl RepositoryView {
     /// 结果经 `UiEvent::WorkflowTemplatesLoaded` 回到 UI 线程应用——
     /// 切换到工作流页与手动刷新都不在 UI 线程做文件系统操作。
     pub(crate) fn refresh_workflow_templates(&mut self) {
+        self.workflow_templates_request_id = self.workflow_templates_request_id.wrapping_add(1);
+        let request_id = self.workflow_templates_request_id;
         self.workflow_template_dir = workflow_templates_dir();
         self.status = "正在刷新工作流模板".to_string();
         let tx = self.tx.clone();
         self.tasks.spawn(TaskKind::Short, move || {
             let result = load_workflow_templates();
-            send_ui_event(&tx, UiEvent::WorkflowTemplatesLoaded { result });
+            send_ui_event(&tx, UiEvent::WorkflowTemplatesLoaded { request_id, result });
         });
+    }
+
+    pub(crate) fn open_remote_workflow_templates(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = Some(DialogState::RemoteWorkflowTemplates);
+        self.load_remote_workflow_catalog(cx);
+    }
+
+    pub(crate) fn load_remote_workflow_catalog(&mut self, _cx: &mut Context<Self>) {
+        if self.remote_workflow_loading {
+            return;
+        }
+        let Some(tab_id) = self.active_tab_id() else {
+            self.remote_workflow_error = Some("请先打开一个仓库".into());
+            return;
+        };
+        let Some(dir) = workflow_templates_dir() else {
+            self.remote_workflow_error = Some("无法定位工作流模板目录".into());
+            return;
+        };
+        self.remote_workflow_catalog_request_id = self.remote_workflow_catalog_request_id.wrapping_add(1);
+        let request_id = self.remote_workflow_catalog_request_id;
+        self.remote_workflow_loading = true;
+        self.remote_workflow_error = None;
+        self.remote_workflow_catalog.clear();
+        self.status = "正在读取远端工作流模板目录".into();
+        let service = self.service_for_tab(tab_id);
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Long, move || {
+            let result = list_cnb_templates(&service, &dir).map_err(|err| err.to_string());
+            send_ui_event(&tx, UiEvent::WorkflowRemoteCatalogLoaded { request_id, result });
+        });
+    }
+
+    pub(crate) fn apply_remote_workflow_catalog(
+        &mut self,
+        request_id: u64,
+        result: Result<Vec<RemoteTemplateEntry>, String>,
+        _cx: &mut Context<Self>,
+    ) {
+        if request_id != self.remote_workflow_catalog_request_id {
+            return;
+        }
+        self.remote_workflow_loading = false;
+        match result {
+            Ok(catalog) => {
+                self.status = format!("远端共有 {} 个工作流模板", catalog.len());
+                self.remote_workflow_catalog = catalog;
+                self.remote_workflow_error = None;
+            }
+            Err(err) => {
+                self.status = format!("远端模板目录读取失败：{err}");
+                self.remote_workflow_error = Some(err);
+            }
+        }
+    }
+
+    pub(crate) fn download_remote_workflow_template(&mut self, file_name: String) {
+        if self.remote_workflow_downloading.is_some() {
+            return;
+        }
+        let Some(template) = self.remote_workflow_catalog.iter()
+            .find(|template| template.file_name == file_name).cloned() else {
+            return;
+        };
+        let Some(dir) = workflow_templates_dir() else {
+            self.remote_workflow_error = Some("无法定位工作流模板目录".into());
+            return;
+        };
+        self.remote_workflow_downloading = Some(file_name.clone());
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::Short, move || {
+            let result = download_cnb_template(&dir, &template).map_err(|err| err.to_string());
+            send_ui_event(&tx, UiEvent::WorkflowRemoteTemplateDownloaded { file_name, result });
+        });
+    }
+
+    pub(crate) fn apply_remote_workflow_download(
+        &mut self,
+        file_name: String,
+        result: Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_workflow_downloading.as_deref() != Some(&file_name) {
+            return;
+        }
+        self.remote_workflow_downloading = None;
+        match result {
+            Ok(_) => {
+                self.remote_workflow_error = None;
+                self.refresh_workflow_templates();
+                self.notify_success(format!("工作流模板已下载：{file_name}"), cx);
+            }
+            Err(err) => {
+                self.remote_workflow_error = Some(err.clone());
+                self.notify_error(format!("工作流模板下载失败：{err}"), cx);
+            }
+        }
     }
 
     /// 后台模板加载结果的应用端（由事件泵调用）。
     pub(crate) fn apply_workflow_templates(
         &mut self,
+        request_id: u64,
         result: Result<Vec<WorkflowTemplateItem>, String>,
         cx: &mut Context<Self>,
     ) {
+        if request_id != self.workflow_templates_request_id {
+            return;
+        }
         match result {
             Ok(templates) => {
                 let count = templates.len();
@@ -347,11 +462,26 @@ impl RepositoryView {
             .iter()
             .map(|template| template.file_name.clone())
             .collect();
+        let prefix = format!("{MANAGED_TEMPLATE_DIR}/");
+        let old_files = self.workflow_shortcut_bindings.bindings.keys()
+            .filter(|file| file.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut migrated = false;
+        for old_file in old_files {
+            let file = old_file.strip_prefix(&prefix).unwrap_or_default();
+            if template_files.iter().any(|name| name == file) {
+                if let Some(binding) = self.workflow_shortcut_bindings.bindings.remove(&old_file) {
+                    self.workflow_shortcut_bindings.bindings.entry(file.to_string()).or_insert(binding);
+                    migrated = true;
+                }
+            }
+        }
         let before = self.workflow_shortcut_bindings.bindings.len();
         self.workflow_shortcut_bindings
             .bindings
             .retain(|file, _| template_files.iter().any(|name| name == file));
-        if self.workflow_shortcut_bindings.bindings.len() != before {
+        if migrated || self.workflow_shortcut_bindings.bindings.len() != before {
             tracing::warn!("workflow shortcut bindings pruned against template list");
             self.persist_workflow_shortcut_bindings(cx);
         }
@@ -361,11 +491,20 @@ impl RepositoryView {
     /// 合并自 dev_lcc：删除模板时若删的是当前加载的工作流，用它避免
     /// 详情区残留失效引用；新版 UI 重构时该方法曾被移除导致合并冲突遗漏。
     pub(crate) fn clear_workflow_file(&mut self) {
+        self.workflow_state.definition_generation = self.workflow_state.definition_generation.wrapping_add(1);
         self.workflow_state.definition = None;
         self.workflow_state.preview = None;
         self.workflow_state.file_path = None;
         self.workflow_state.inputs.clear();
+        self.workflow_state.source_branch = None;
         self.workflow_state.log.clear();
+        self.workflow_state.pending_external = None;
+        self.workflow_state.approved_external = None;
+        if self.browser_runtime_origin == self.active_tab_id() {
+            self.browser_runtime_notice = None;
+            self.browser_runtime_origin = None;
+            self.browser_runtime_resume = None;
+        }
         self.last_error = None;
     }
 
@@ -387,6 +526,15 @@ impl RepositoryView {
     }
 
     pub(crate) fn load_workflow_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.load_workflow_file_with_source(path, None, cx);
+    }
+
+    fn load_workflow_file_with_source(
+        &mut self,
+        path: PathBuf,
+        source_branch: Option<WorkflowSourceBranch>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(repo_path) = self.repo_path.clone() else {
             self.last_error = Some("请先打开一个仓库".into());
             return;
@@ -405,7 +553,7 @@ impl RepositoryView {
                 return;
             }
         };
-        let inputs = match self.build_workflow_inputs(&definition, &repo_path, cx) {
+        let inputs = match self.build_workflow_inputs(&definition, &repo_path, source_branch.as_ref(), cx) {
             Ok(inputs) => inputs,
             Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -417,15 +565,44 @@ impl RepositoryView {
             .iter()
             .find(|template| template.path == path)
             .map(|template| template.path.clone());
+        self.workflow_state.definition_generation = self.workflow_state.definition_generation.wrapping_add(1);
+        self.workflow_state.pending_external = None;
+        self.workflow_state.approved_external = None;
+        if self.browser_runtime_origin == self.active_tab_id() {
+            self.browser_runtime_notice = None;
+            self.browser_runtime_origin = None;
+            self.browser_runtime_resume = None;
+        }
         self.workflow_state.definition = Some(definition);
         self.workflow_state.file_path = Some(path);
         // 外部选择的文件不借用旧模板选中态，模板列表中的文件则与已加载路径保持一致。
         self.workflow_state.selected_template_path = template_match;
         self.workflow_state.inputs = inputs;
+        self.workflow_state.source_branch = source_branch;
         self.workflow_state.log.clear();
         self.status = "工作流已加载".to_string();
         self.last_error = None;
         self.refresh_workflow_preview();
+    }
+
+    pub(crate) fn open_workflow_from_branch(
+        &mut self,
+        path: PathBuf,
+        branch: String,
+        kind: BranchKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        self.branch_context_menu = None;
+        self.clear_workflow_file();
+        self.load_workflow_file_with_source(
+            path,
+            Some(WorkflowSourceBranch { name: branch, kind }),
+            cx,
+        );
+        self.set_main_mode(MainMode::Workflow);
     }
 
     pub(crate) fn run_workflow(&mut self) {
@@ -448,13 +625,80 @@ impl RepositoryView {
             self.last_error = Some("已有操作正在运行".into());
             return;
         }
+        let external_grant = match WorkflowExternalGrant::for_definition(&definition) {
+            Ok(grant) => grant,
+            Err(err) => { self.last_error = Some(err.to_string()); return; }
+        };
+        let external = if let Some(mut grant) = external_grant {
+            match self.workflow_state.approved_external.take() {
+                Some(approved) if approved.tab_id == tab_id
+                    && approved.definition_generation == self.workflow_state.definition_generation => Some(approved),
+                _ => {
+                    let Some(data_dir) = khaslana::storage::active_data_dir() else {
+                        self.last_error = Some("无法定位 MCP 配置目录".into());
+                        return;
+                    };
+                    let mut config = match load_mcp_config(&data_dir) {
+                        Ok(config) => config,
+                        Err(err) => { self.last_error = Some(err.to_string()); return; }
+                    };
+                    let uses_browser = grant.uses_browser_runtime(&config);
+                    if uses_browser && !browser_runtime::ready(&data_dir) {
+                        self.browser_runtime_notice = Some("浏览器 MCP 运行组件尚未就绪，点击下载并启用".into());
+                        self.browser_runtime_origin = Some(tab_id);
+                        self.last_error = None;
+                        return;
+                    }
+                    if uses_browser {
+                        if let Err(err) = config.configure_browser_proxy(&self.proxy_settings) {
+                            self.last_error = Some(err.to_string()); return;
+                        }
+                    }
+                    if self.browser_runtime_origin == Some(tab_id) && !self.browser_runtime_downloading {
+                        self.browser_runtime_notice = None;
+                        self.browser_runtime_origin = None;
+                    }
+                    if let Err(err) = grant.prepare_skills(&data_dir) {
+                        self.last_error = Some(err.to_string()); return;
+                    }
+                    let permissions = match grant.permission_lines(&config) {
+                        Ok(lines) => lines,
+                        Err(err) => { self.last_error = Some(err.to_string()); return; }
+                    };
+                    self.workflow_state.pending_external = Some(WorkflowPendingExternal {
+                        tab_id,
+                        definition_generation: self.workflow_state.definition_generation,
+                        config,
+                        grant,
+                    });
+                    self.active_dialog = Some(DialogState::ConfirmWorkflowExternal {
+                        tab_id,
+                        definition_generation: self.workflow_state.definition_generation,
+                        permissions,
+                    });
+                    self.last_error = None;
+                    return;
+                }
+            }
+        } else { None };
+        let control = WorkflowRunControl::new();
+        let identity = WorkflowRunIdentity {
+            tab_id,
+            run_id: control.id(),
+            repo_path: repo_path.clone(),
+            definition_generation: self.workflow_state.definition_generation,
+        };
+        self.workflow_state.active_run = Some(WorkflowActiveRun {
+            identity: identity.clone(),
+            control: control.clone(),
+        });
         self.workflow_state.log.clear();
         let service = self.service_for_tab(tab_id);
+        let ai_settings = self.ai_settings.clone();
+        let ai_proxy = self.proxy_settings.proxy_url_for_target(&ai_settings.normalized_base_url());
+        let external_data_dir = external.as_ref().and_then(|_| khaslana::storage::active_data_dir());
         let tx = self.tx.clone();
-        let options = WorkflowRunOptions {
-            default_remote: self.current_remote().unwrap_or_else(|| "origin".into()),
-            input_vars: self.workflow_input_values(),
-        };
+        let options = self.workflow_run_options();
         self.apply_status_event(Some(tab_id), |this| {
             this.repository_load_id = this.repository_load_id.wrapping_add(1);
             this.loading = RepositoryLoading::default();
@@ -463,58 +707,141 @@ impl RepositoryView {
             this.status = "正在运行工作流".to_string();
             this.last_error = None;
         });
-        self.tasks.spawn(TaskKind::Long, move || {
-            let result =
-                (|| -> khaslana::Result<(RepositorySnapshot, Vec<WorkflowLogEntry>, String)> {
-                    let mut repo = Repository::open(repo_path)?;
+        self.tasks.spawn(if external.is_some() { TaskKind::External } else { TaskKind::Long }, move || {
+            let result = catch_unwind(AssertUnwindSafe(
+                || -> khaslana::Result<(RepositorySnapshot, Vec<WorkflowLogEntry>, String)> {
+                    let mut repo = Repository::open(&repo_path)?;
                     let mut log: Vec<WorkflowLogEntry> = Vec::new();
-                    let result = WorkflowExecutor::new(&service).run(
-                        &mut repo,
-                        &definition,
-                        options,
+                    let mut registry = khaslana::WorkflowActionRegistry::default();
+                    if let Some(external) = external {
+                        register_external_actions_with_ai(&mut registry, external.config,
+                            Some(external.grant), Some(ai_settings), ai_proxy,
+                            external_data_dir.as_deref())?;
+                    }
+                    let result = WorkflowExecutor::with_actions(&service, &registry).run_with_control(
+                        &mut repo, &definition, options, &control,
                         |event| {
                             let entry = workflow_progress_entry(&event);
                             log.push(entry.clone());
-                            send_ui_event(&tx, UiEvent::WorkflowProgress { tab_id, entry });
+                            send_ui_event(&tx, UiEvent::WorkflowProgress {
+                                identity: identity.clone(), entry,
+                            });
                         },
                     )?;
                     let message =
                         format!("工作流“{}”已完成（{} 步）", result.name, result.steps_run);
                     Ok((result.snapshot, log, message))
-                })();
+                },
+            ));
             match result {
-                Ok((snapshot, log, message)) => {
+                Ok(Ok((snapshot, log, message))) => {
                     send_ui_event(
                         &tx,
                         UiEvent::WorkflowFinished {
-                            tab_id,
+                            identity,
                             message,
                             snapshot,
                             log,
                         },
                     );
                 }
-                Err(err) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::WorkflowProgress {
-                            tab_id,
-                            entry: WorkflowLogEntry {
-                                message: format!("工作流失败：{err}"),
-                                details: Vec::new(),
-                            },
-                        },
-                    );
-                    send_ui_event(
-                        &tx,
-                        UiEvent::OperationFailed {
-                            tab_id: Some(tab_id),
-                            error: err.to_string(),
-                        },
-                    );
+                other => {
+                    let (error, cancelled) = match other {
+                        Ok(Err(GitError::WorkflowCancelled)) => {
+                            ("工作流已取消；当前步骤可能已生效，已完成的步骤不会撤销".to_string(), true)
+                        }
+                        Ok(Err(err)) => (err.to_string(), false),
+                        Err(payload) => {
+                            (format!("工作流异常退出：{}", panic_message(payload)), false)
+                        }
+                        Ok(Ok(_)) => unreachable!(),
+                    };
+                    let snapshot = catch_unwind(AssertUnwindSafe(|| {
+                        Repository::open(&repo_path).ok()
+                            .and_then(|mut repo| service.snapshot_after_operation(&mut repo).ok())
+                    }))
+                    .ok()
+                    .flatten();
+                    send_ui_event(&tx, UiEvent::WorkflowStopped {
+                        identity,
+                        error,
+                        cancelled,
+                        snapshot,
+                    });
                 }
             }
         });
+    }
+
+    pub(crate) fn cancel_workflow(&mut self) {
+        let Some(run) = self.workflow_state.active_run.as_ref() else {
+            return;
+        };
+        run.control.cancel();
+        self.status = "正在取消工作流，等待当前步骤结束".into();
+    }
+
+    pub(crate) fn start_browser_runtime_download(&mut self) {
+        self.start_browser_runtime_download_inner(true);
+    }
+
+    pub(crate) fn start_browser_runtime_download_for_settings(&mut self) {
+        self.start_browser_runtime_download_inner(false);
+    }
+
+    fn start_browser_runtime_download_inner(&mut self, resume_workflow: bool) {
+        if self.browser_runtime_downloading { return; }
+        let tab_id = if resume_workflow { self.active_tab_id() } else { None };
+        if resume_workflow && tab_id.is_none() { return; }
+        self.browser_runtime_origin = tab_id;
+        let Some(data_dir) = khaslana::storage::active_data_dir() else {
+            self.browser_runtime_notice = Some("无法定位应用数据目录".into());
+            return;
+        };
+        self.browser_runtime_request_id = self.browser_runtime_request_id.wrapping_add(1);
+        let request_id = self.browser_runtime_request_id;
+        self.browser_runtime_downloading = true;
+        self.browser_runtime_resume = tab_id
+            .map(|tab_id| (tab_id, self.workflow_state.definition_generation));
+        self.browser_runtime_notice = Some("正在准备浏览器 MCP 运行组件".into());
+        let proxy = self.proxy_settings.clone();
+        let tx = self.tx.clone();
+        self.tasks.spawn(TaskKind::External, move || {
+            let result = match catch_unwind(AssertUnwindSafe(||
+                browser_runtime::install(&data_dir, &proxy, |message| {
+                    send_ui_event(&tx, UiEvent::WorkflowBrowserRuntimeProgress { request_id, message });
+                }))) {
+                Ok(result) => result.map_err(|err| err.to_string()),
+                Err(payload) => Err(format!("浏览器 MCP 安装异常：{}", panic_message(payload))),
+            };
+            send_ui_event(&tx, UiEvent::WorkflowBrowserRuntimeFinished { request_id, result });
+        });
+    }
+
+    pub(crate) fn apply_browser_runtime_finished(&mut self, request_id: u64,
+        result: Result<(), String>, cx: &mut Context<Self>) {
+        if request_id != self.browser_runtime_request_id { return; }
+        self.browser_runtime_downloading = false;
+        let resume = self.browser_runtime_resume.take();
+        match result {
+            Ok(()) => {
+                self.browser_runtime_notice = None;
+                self.browser_runtime_origin = None;
+                self.notify_success("浏览器 MCP 运行组件已就绪", cx);
+                if resume.is_some_and(|(tab_id, generation)|
+                    self.active_tab_id() == Some(tab_id)
+                        && self.workflow_state.definition_generation == generation) {
+                    self.run_workflow();
+                }
+            }
+            Err(error) => {
+                self.browser_runtime_notice = Some(format!("浏览器 MCP 下载失败：{error}"));
+            }
+        }
+        if self.settings_center == Some(crate::SettingsCategory::Ai) {
+            self.refresh_ai_extensions();
+        }
+        cx.notify();
     }
 
     /// 必填变量缺失检测：必填且当前文本为空（有默认值的必填项在构建输入时已预填）。
@@ -805,6 +1132,220 @@ impl RepositoryView {
             )
     }
 
+    pub(crate) fn render_workflow_external_confirm_dialog(
+        &self,
+        tab_id: crate::RepoTabId,
+        definition_generation: u64,
+        permissions: &[String],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const SCROLL_ID: &str = "workflow-external-permissions";
+        let valid = self.active_tab_id() == Some(tab_id)
+            && self.workflow_state.definition_generation == definition_generation
+            && self.workflow_state.pending_external.as_ref().is_some_and(|pending|
+                pending.tab_id == tab_id && pending.definition_generation == definition_generation);
+        let handle = self.scroll_handle(SCROLL_ID);
+        let content = div()
+            .id(SCROLL_ID)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .children(permissions.iter().map(|permission| {
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .child(permission.clone())
+            }))
+            .into_any_element();
+        self.dialog_panel("确认工作流外部操作", cx)
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child("本次运行将执行以下本地脚本或外部工具。请检查模板及本地 MCP 配置。"),
+            )
+            .child(div().h(px(180.0)).min_h(px(0.0)).child(
+                scrollable_frame_when(SCROLL_ID, ScrollbarMode::Vertical, content, handle, true, cx),
+            ))
+            .child(
+                dialog_actions()
+                    .child(self.button("取消", true, |this, _, _| {
+                        this.workflow_state.pending_external = None;
+                        this.close_dialog();
+                    }, cx))
+                    .child(self.button("授权并运行一次", valid, move |this, _, _| {
+                        let pending = this.workflow_state.pending_external.take();
+                        this.close_dialog();
+                        if let Some(pending) = pending.filter(|pending|
+                            this.active_tab_id() == Some(tab_id)
+                            && pending.definition_generation == definition_generation
+                            && this.workflow_state.definition_generation == definition_generation) {
+                            this.workflow_state.approved_external = Some(pending);
+                            this.run_workflow();
+                        }
+                    }, cx)),
+            )
+    }
+
+    pub(crate) fn render_remote_workflow_template_dialog(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const SCROLL_ID: &str = "remote-workflow-template-list";
+        let (panel_width, panel_height) = dialog_panel_size(window, 680.0, 560.0);
+        let root = workflow_templates_dir();
+        let rows = self.remote_workflow_catalog.iter().map(|template| {
+            let file_name = template.file_name.clone();
+            let exists = root.as_ref().is_some_and(|root| root.join(&file_name).exists());
+            let downloading = self.remote_workflow_downloading.as_deref() == Some(&file_name);
+            let enabled = !exists && self.remote_workflow_downloading.is_none();
+            let label = if exists { "已存在" } else if downloading { "下载中" } else { "下载" };
+            let button_name = file_name.clone();
+            let commit = template.commit.chars().take(8).collect::<String>();
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(rgb(ui_theme::BORDER_MUTED))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .gap_1()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .child(template.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                .child(format!("{file_name} · {commit}")),
+                        ),
+                )
+                .child(
+                    BaseButton::new(format!("remote-workflow-download-{file_name}"))
+                        .disabled(!enabled)
+                        .accessibility_label(format!("下载工作流模板 {file_name}"))
+                        .focus_visible(|this| this.border_1().border_color(rgb(ui_theme::PRIMARY)))
+                        .flex_none()
+                        .min_h(px(28.0))
+                        .px_3()
+                        .rounded(px(ui_theme::RADIUS_XS))
+                        .border_1()
+                        .border_color(rgb(ui_theme::BORDER_MUTED))
+                        .bg(rgb(ui_theme::SURFACE_RAISED))
+                        .text_size(px(12.0))
+                        .when(enabled, |this| this.cursor_pointer())
+                        .when(!enabled, |this| this.opacity(0.6).cursor_not_allowed())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if enabled {
+                                this.download_remote_workflow_template(button_name.clone());
+                                cx.notify();
+                            }
+                        }))
+                        .child(label),
+                )
+                .into_any_element()
+        }).collect::<Vec<_>>();
+        let handle = self.scroll_handle(SCROLL_ID);
+        let content = div()
+            .id(SCROLL_ID)
+            .flex()
+            .flex_col()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .children(rows)
+            .into_any_element();
+
+        div()
+            .id("dialog-远端工作流模板")
+            .w(panel_width)
+            .h(panel_height)
+            .p_4()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(ui_theme::BORDER_MUTED))
+            .bg(rgb(ui_theme::WB_PANEL))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                    .child("下载工作流模板"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                    .child("从 CNB 目录选择模板下载；本地同名文件会保留。"),
+            )
+            .when_some(self.remote_workflow_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(ui_theme::FEEDBACK_ERROR_TEXT))
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .border_1()
+                    .border_color(rgb(ui_theme::BORDER_MUTED))
+                    .rounded_sm()
+                    .when(self.remote_workflow_loading, |this| {
+                        this.child(workflow_empty_line("正在读取远端模板…"))
+                    })
+                    .when(!self.remote_workflow_loading && self.remote_workflow_catalog.is_empty(), |this| {
+                        this.child(workflow_empty_line("暂无可显示的远端模板"))
+                    })
+                    .when(!self.remote_workflow_catalog.is_empty(), |this| {
+                        this.child(scrollable_frame_when(
+                            SCROLL_ID,
+                            ScrollbarMode::Vertical,
+                            content,
+                            handle,
+                            true,
+                            cx,
+                        ))
+                    }),
+            )
+            .child(
+                dialog_actions()
+                    .child(self.button(
+                        "重新加载",
+                        !self.remote_workflow_loading && self.remote_workflow_downloading.is_none(),
+                        |this, _, cx| this.load_remote_workflow_catalog(cx),
+                        cx,
+                    ))
+                    .child(self.button("关闭", true, |this, _, _| this.close_dialog(), cx)),
+            )
+    }
+
     pub(crate) fn render_workflow_view(
         &self,
         window: &Window,
@@ -828,6 +1369,13 @@ impl RepositoryView {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "未选择工作流文件".to_string());
+        let source_label = self.workflow_state.source_branch.as_ref().map(|source| {
+            let kind = match source.kind {
+                BranchKind::Local => "本地",
+                BranchKind::Remote => "远端",
+            };
+            format!("来源分支：{}（{kind}）", source.name)
+        });
         let workflow_name = self
             .workflow_state
             .preview
@@ -903,7 +1451,15 @@ impl RepositoryView {
                                         .truncate()
                                         .text_color(rgb(ui_theme::CONTENT_SECONDARY))
                                         .child(file_label),
-                                ),
+                                )
+                                .when_some(source_label, |this, source| {
+                                    this.child(
+                                        div()
+                                            .truncate()
+                                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
+                                            .child(source),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -929,9 +1485,43 @@ impl RepositoryView {
                             self.workflow_state.definition.is_some() && !self.busy,
                             |this, _, _| this.run_workflow(),
                             cx,
-                        )),
+                        ))
+                        .when(self.workflow_state.active_run.as_ref().is_some_and(|run| !run.control.is_cancelled()), |this| {
+                            this.child(self.secondary_button(
+                                "取消运行".into(),
+                                true,
+                                |this, _, _| this.cancel_workflow(),
+                                cx,
+                            ))
+                        }),
                 ),
             )
+            .when_some(self.browser_runtime_notice.clone().filter(|_|
+                self.browser_runtime_origin == self.active_tab_id()), |this, notice| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(ui_theme::SPACE_2))
+                        .px(px(ui_theme::SPACE_4))
+                        .py(px(ui_theme::SPACE_2))
+                        .bg(rgb(ui_theme::PRIMARY_SUBTLE))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .text_size(px(12.0))
+                                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
+                                .child(notice),
+                        )
+                        .child(self.button(
+                            if self.browser_runtime_downloading { "下载中..." } else { "下载并启用" },
+                            !self.browser_runtime_downloading,
+                            |this, _, _| this.start_browser_runtime_download(),
+                            cx,
+                        )),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1025,6 +1615,15 @@ impl RepositoryView {
                                 this.refresh_workflow_templates();
                                 cx.notify();
                             },
+                            cx,
+                        )
+                        .into_any_element(),
+                    )
+                    .action(
+                        self.button(
+                            "下载模板",
+                            !self.busy,
+                            |this, _, cx| this.open_remote_workflow_templates(cx),
                             cx,
                         )
                         .into_any_element(),
@@ -1325,6 +1924,7 @@ impl RepositoryView {
         &self,
         definition: &WorkflowDefinition,
         repo_path: &std::path::Path,
+        source_branch: Option<&WorkflowSourceBranch>,
         cx: &mut Context<Self>,
     ) -> khaslana::Result<Vec<WorkflowInputFieldState>> {
         let mut fields = Vec::new();
@@ -1336,6 +1936,7 @@ impl RepositoryView {
         let base_options = WorkflowRunOptions {
             default_remote: self.current_remote().unwrap_or_else(|| "origin".into()),
             input_vars: BTreeMap::new(),
+            source_branch: source_branch.cloned(),
         };
         for (key, input) in &definition.inputs {
             let value = match input.default.as_ref() {
@@ -1364,6 +1965,7 @@ impl RepositoryView {
         WorkflowRunOptions {
             default_remote: self.current_remote().unwrap_or_else(|| "origin".into()),
             input_vars: self.workflow_input_values(),
+            source_branch: self.workflow_state.source_branch.clone(),
         }
     }
 
@@ -1402,7 +2004,16 @@ impl RepositoryView {
     ) -> khaslana::Result<WorkflowPreview> {
         let service = self.service_for_tab(tab_id);
         let repo = Repository::open(repo_path)?;
-        WorkflowExecutor::new(&service).preview(&repo, definition, &options)
+        let data_dir = khaslana::storage::active_data_dir();
+        let config = if let Some(data_dir) = &data_dir {
+            load_mcp_config(data_dir)?
+        } else {
+            Default::default()
+        };
+        let mut registry = khaslana::WorkflowActionRegistry::default();
+        register_external_actions_with_ai(&mut registry, config, None,
+            Some(self.ai_settings.clone()), None, data_dir.as_deref())?;
+        WorkflowExecutor::with_actions(&service, &registry).preview(&repo, definition, &options)
     }
 
     fn render_workflow_inputs(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1759,6 +2370,10 @@ fn workflow_progress_entry(event: &WorkflowProgressEvent) -> WorkflowLogEntry {
             message: format!("步骤 {}/{} 完成：{label}", index + 1, total),
             details: details.clone(),
         },
+        WorkflowProgressEvent::StepDetail { index, total, label, detail } => WorkflowLogEntry {
+            message: format!("步骤 {}/{}：{label}", index + 1, total),
+            details: vec![detail.clone()],
+        },
         WorkflowProgressEvent::Finished { name, total } => WorkflowLogEntry {
             message: format!("工作流“{name}”已完成（{total} 步）"),
             details: Vec::new(),
@@ -1788,10 +2403,39 @@ fn ensure_workflow_templates_dir(dir: &Path) -> std::io::Result<()> {
 
 fn load_workflow_templates() -> Result<Vec<WorkflowTemplateItem>, String> {
     let dir = workflow_templates_dir().ok_or_else(|| "无法定位工作流模板目录".to_string())?;
+    let first_use = !dir.exists();
     ensure_workflow_templates_dir(&dir).map_err(|err| format!("工作流模板目录创建失败：{err}"))?;
-    // 一次性便携迁移：便携目录下没有模板文件、且旧目录存在模板时，把旧模板拷贝过来。
-    migrate_legacy_workflow_templates(&dir);
+    // 只在目录初次创建时迁移旧模板，避免用户删除全部模板后刷新又被拷回来。
+    if first_use {
+        migrate_legacy_workflow_templates(&dir);
+    }
+    import_managed_workflow_templates_once(&dir)
+        .map_err(|err| format!("旧版远端模板导入失败：{err}"))?;
     load_workflow_templates_from_dir(&dir)
+}
+
+/// 把旧版批量同步的模板导入普通目录一次。保留旧文件作为备份，之后删掉
+/// 普通目录里的模板也不会从备份重新出现。
+fn import_managed_workflow_templates_once(dir: &Path) -> std::io::Result<()> {
+    let marker = dir.join(".remote-cnb-imported");
+    if marker.exists() {
+        return Ok(());
+    }
+    let managed = dir.join(MANAGED_TEMPLATE_DIR);
+    if managed.is_dir() {
+        for entry in fs::read_dir(&managed)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !entry.file_type()?.is_file() || !is_workflow_template_path(&path) {
+                continue;
+            }
+            let target = dir.join(entry.file_name());
+            if !target.exists() {
+                fs::copy(path, target)?;
+            }
+        }
+    }
+    fs::write(marker, [])
 }
 
 /// 若便携工作流目录为空且旧目录存在模板文件，递归拷贝一次。
@@ -1841,18 +2485,16 @@ fn copy_workflow_templates(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 fn load_workflow_templates_from_dir(dir: &Path) -> Result<Vec<WorkflowTemplateItem>, String> {
-    let entries = fs::read_dir(dir).map_err(|err| format!("工作流模板目录读取失败：{err}"))?;
     let mut templates = Vec::new();
-
+    let entries = fs::read_dir(dir)
+        .map_err(|err| format!("工作流模板目录读取失败：{err}"))?;
     for entry in entries {
         let entry = entry.map_err(|err| format!("工作流模板目录读取失败：{err}"))?;
         let path = entry.path();
         if !is_workflow_template_path(&path) {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
+        let Ok(metadata) = entry.metadata() else { continue };
         if !metadata.is_file() {
             continue;
         }
@@ -1904,6 +2546,13 @@ fn workflow_template_item(path: PathBuf, modified: Option<SystemTime>) -> Workfl
             error: Some(format!("读取失败：{err}")),
         },
     }
+}
+
+pub(crate) fn is_managed_workflow_template_path(path: &Path) -> bool {
+    workflow_templates_dir()
+        .map(|root| root.join(MANAGED_TEMPLATE_DIR))
+        .as_deref()
+        == path.parent()
 }
 
 fn is_workflow_template_path(path: &Path) -> bool {

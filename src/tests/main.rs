@@ -1,6 +1,34 @@
 use super::*;
 use khaslana::MemoryCredentialStore;
 
+#[test]
+fn workflow_event_identity_rejects_previous_run_or_repository() {
+    let repo_path = PathBuf::from("C:/work/repo");
+    let mut tab = RepoTabState::new(RepoTabId(7), Some(repo_path.clone()));
+    let control = khaslana::WorkflowRunControl::new();
+    let identity = WorkflowRunIdentity {
+        tab_id: tab.id,
+        run_id: control.id(),
+        repo_path: repo_path.clone(),
+        definition_generation: 3,
+    };
+    tab.workflow_state.definition_generation = 3;
+    tab.workflow_state.active_run = Some(WorkflowActiveRun {
+        identity: identity.clone(), control,
+    });
+    assert!(identity.matches_tab(&tab));
+    assert!(identity.definition_is_current(&tab.workflow_state));
+    tab.workflow_state.definition_generation += 1;
+    assert!(identity.matches_tab(&tab));
+    assert!(!identity.definition_is_current(&tab.workflow_state));
+    let mut older = identity.clone();
+    older.run_id += 1;
+    assert!(!older.matches_tab(&tab));
+    let mut other_repo = identity.clone();
+    other_repo.repo_path = PathBuf::from("C:/work/other");
+    assert!(!other_repo.matches_tab(&tab));
+}
+
 fn credential_request(operation_id: Option<u64>) -> CredentialRequest {
     CredentialRequest {
         url: "https://gitee.com/team/repo.git".into(),

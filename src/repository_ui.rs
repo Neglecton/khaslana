@@ -119,7 +119,7 @@ impl RepositoryView {
         };
         let blocked = self.active_operation_blocker_message().is_some()
             && !self.operation_blocker_allows_text_field(id);
-        field.render(compact, blocked)
+        field.render(compact, blocked, id == FieldId::AiApiKey)
     }
 
     pub(crate) fn is_multiline_field(id: FieldId) -> bool {
@@ -127,6 +127,7 @@ impl RepositoryView {
             id,
             FieldId::CommitMessage
                 | FieldId::TagMessage
+                | FieldId::AiMcpArgs
                 // 工作流模板 AI 功能需求描述（编辑器弹窗内多行输入）。
                 | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::AiDescription)
         )
@@ -562,10 +563,7 @@ impl RepositoryView {
             })
     }
 
-    /// 设置中心 overlay：Kit `Settings` 组件族（可拖拽侧栏 + 搜索 + 分组内容）。
-    ///
-    /// 侧栏与搜索由 Kit 渲染，活动页渲染时同步到 `settings_center`；
-    /// 页头、分组和重置按钮仍由 Kit 负责（见 `settings_center::render_settings_kit`）。
+    /// 设置中心所有分类共用 Kit Settings 的侧栏、搜索与页面状态。
     pub(crate) fn render_settings_center_overlay(
         &self,
         window: &Window,
@@ -578,7 +576,7 @@ impl RepositoryView {
         let settings = self.render_settings_kit(category, window, cx);
         // 面板尺寸按视口钳制：最小窗（860×520，高 DPI 下逻辑视口更小）里
         // 900×640 的固定尺寸会被根圆角裁掉，标题/关闭与底部内容点不到
-        // （审查 R3）。
+        // （审查 R3）。AI 页沿用同一尺寸，避免两套壳层。
         let (panel_width, panel_height) = dialog_panel_size(window, 900.0, 640.0);
 
         // 遮罩不承载关闭：点击遮罩背景、遮罩上方的通知气泡（含其关闭按钮）
@@ -592,8 +590,7 @@ impl RepositoryView {
                 div()
                     .id("settings-center-panel")
                     .w(panel_width)
-                    // 高度按视口钳制，弹窗大小不随分类内容多少变化；
-                    // 内容超出由 Kit SettingPage 的虚拟列表滚动。
+                    // 高度按视口钳制；各页面在自己的内容区域滚动。
                     .h(panel_height)
                     .min_w(px(0.0))
                     .rounded(px(ui_theme::RADIUS_PANEL))
@@ -647,7 +644,7 @@ impl RepositoryView {
                                     .child("✕"),
                             ),
                     )
-                    // 主体：Kit Settings（左：搜索 + 单层分类导航；右：SettingPage）。
+                    // 所有分类由同一个 Kit Settings 管理，AI 只定制组内内容。
                     // 底部内距 12px：滚动视口底缘不贴面板底缘，内容溢出时在
                     // 面板内侧裁切（设计稿 2026-09-23 二次调整）；侧栏底色随之
                     // 停在底缘上方，露出的面板底色即这条内距。
@@ -768,6 +765,7 @@ impl RepositoryView {
         let Some(menu) = self.workflow_template_context_menu.clone() else {
             return div().into_any_element();
         };
+        let managed = crate::workflow_view::is_managed_workflow_template_path(&menu.path);
         let edit_path = menu.path.clone();
         let copy_path = menu.path.clone();
         let bind_path = menu.path.clone();
@@ -790,7 +788,7 @@ impl RepositoryView {
             .left(px(menu.x))
             .top(px(menu.y))
             .w(px(WORKFLOW_TEMPLATE_MENU_WIDTH))
-            .child(context_menu_item_with_context(
+            .when(!managed, |this| this.child(context_menu_item_with_context(
                 self,
                 "workflow-template-menu",
                 "edit-template",
@@ -802,7 +800,7 @@ impl RepositoryView {
                     this.open_workflow_editor_for_path(path, false, cx);
                 },
                 cx,
-            ))
+            )))
             .child(context_menu_item_with_context(
                 self,
                 "workflow-template-menu",
@@ -829,8 +827,8 @@ impl RepositoryView {
                 },
                 cx,
             ))
-            .child(menu_separator())
-            .child(context_menu_item_with_context(
+            .when(!managed, |this| this.child(menu_separator()))
+            .when(!managed, |this| this.child(context_menu_item_with_context(
                 self,
                 "workflow-template-menu",
                 "delete-template",
@@ -843,7 +841,7 @@ impl RepositoryView {
                     this.open_delete_workflow_template_confirm(path, name);
                 },
                 cx,
-            ))
+            )))
             .into_any_element()
     }
 
@@ -861,6 +859,10 @@ impl RepositoryView {
     /// 删除工作流模板文件（纯本地 IO，小文件同步执行）；若它是当前加载的
     /// 工作流则同时清空详情区，避免残留失效引用。
     pub(crate) fn delete_workflow_template(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if crate::workflow_view::is_managed_workflow_template_path(&path) {
+            self.notify_error("远端模板不可直接删除，请在模板目录管理本地副本", cx);
+            return;
+        }
         match fs::remove_file(&path) {
             Ok(()) => {
                 let file_name = path

@@ -34,7 +34,18 @@ impl RepositoryView {
             remote_credential_bindings,
             credential_records: Vec::new(),
             workflow_templates: Vec::new(),
+            workflow_templates_request_id: 0,
             workflow_template_dir: workflow_templates_dir(),
+            remote_workflow_loading: false,
+            remote_workflow_catalog_request_id: 0,
+            remote_workflow_catalog: Vec::new(),
+            remote_workflow_error: None,
+            remote_workflow_downloading: None,
+            browser_runtime_request_id: 0,
+            browser_runtime_downloading: false,
+            browser_runtime_notice: None,
+            browser_runtime_origin: None,
+            browser_runtime_resume: None,
             workflow_editor: None,
             pending_workflow_edit: None,
             workflow_template_context_menu: None,
@@ -221,6 +232,7 @@ impl RepositoryView {
             external_merge_auto_open_form: external_merge_settings.auto_open_intellij,
             external_merge_settings: external_merge_settings.clone(),
             ai_enabled_form: ai_settings.enabled,
+            ai_extensions: ai_extensions_view::AiExtensionsUiState::new(cx),
             ai_settings,
             ai_base_url: TextFieldState::new(cx, "Base URL，例如 https://api.openai.com/v1"),
             ai_api_key: TextFieldState::new(cx, "API Key").secret(),
@@ -254,6 +266,7 @@ impl RepositoryView {
             code_index_task: None,
             code_index_stats: HashMap::new(),
             code_index_filter: TextFieldState::new(cx, "按名称或路径过滤"),
+            ai_settings_category_search: TextFieldState::new(cx, "搜索设置分类"),
             code_index_list_entries: Vec::new(),
             code_index_progress_done: 0,
             code_index_progress_total: 0,
@@ -309,6 +322,8 @@ impl RepositoryView {
     pub(crate) fn new_with_session(cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.restore_session();
+        // 分支右键菜单需要在首次进入工作流页之前就能列出模板。
+        view.refresh_workflow_templates();
         // 启动时自动检查更新（Startup：结果不弹气泡，仅状态栏；
         // 发现新版本仍会弹窗——既有行为不变）
         if view.update_preferences.auto_check {
@@ -603,6 +618,9 @@ impl RepositoryView {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        if let Some(run) = self.tabs[index].workflow_state.active_run.as_ref() {
+            run.control.cancel();
+        }
         if self.active_tab == Some(tab_id)
             && self.active_dialog == Some(DialogState::SubmoduleManager)
         {
@@ -847,12 +865,6 @@ impl RepositoryView {
         };
         if let Err(err) = self.storage.save_remote_credential_bindings(&bindings) {
             tracing::warn!("remote credential bindings write skipped: {err}");
-        }
-    }
-
-    pub(crate) fn save_ai_provider_settings(&self) {
-        if let Err(err) = self.storage.save_ai_provider_settings(&self.ai_settings) {
-            tracing::warn!("ai provider settings write skipped: {err}");
         }
     }
 
@@ -1557,6 +1569,10 @@ impl RepositoryView {
             if self.settings_center == Some(SettingsCategory::Ai) {
                 self.save_ai_provider_settings_from_form();
             }
+        } else if matches!(field, FieldId::AiMcpServerId | FieldId::AiMcpCommand | FieldId::AiMcpArgs) {
+            if self.active_dialog == Some(DialogState::AiMcpForm) {
+                self.save_ai_mcp_form();
+            }
         } else if matches!(field, FieldId::CredentialTestUrl) {
             if matches!(self.active_dialog, Some(DialogState::TestCredential { .. })) {
                 self.confirm_test_credential();
@@ -1727,6 +1743,7 @@ impl RepositoryView {
             FieldId::RemoteBranchSearch => &mut self.remote_branch_search,
             FieldId::RepoSwitcherSearch => &mut self.repo_switcher_search,
             FieldId::CodeIndexFilter => &mut self.code_index_filter,
+            FieldId::AiSettingsCategorySearch => &mut self.ai_settings_category_search,
             FieldId::CodePaletteSearch => &mut self.code_palette_search,
             FieldId::CommitGraphSearch => &mut self.commit_graph_search,
             FieldId::CommitGraphBranchSearch => &mut self.commit_graph_branch_search,
@@ -1738,6 +1755,9 @@ impl RepositoryView {
             FieldId::AiBaseUrl => &mut self.ai_base_url,
             FieldId::AiApiKey => &mut self.ai_api_key,
             FieldId::AiModel => &mut self.ai_model,
+            FieldId::AiMcpServerId => &mut self.ai_extensions.mcp_id,
+            FieldId::AiMcpCommand => &mut self.ai_extensions.mcp_command,
+            FieldId::AiMcpArgs => &mut self.ai_extensions.mcp_args,
             FieldId::ExternalMergeIntellijPath => &mut self.external_merge_intellij_path,
             FieldId::WorkflowInput(index) => self.workflow_input_field_mut(index),
             // 编辑器字段惰性初始化需要 Context（focus_handle）；
@@ -2454,6 +2474,8 @@ impl RepositoryView {
             }
             SettingsCategory::Ai => {
                 self.reset_ai_form_from_settings();
+                self.ai_extensions.tab = ai_extensions_view::AiSettingsTab::Connection;
+                self.refresh_ai_extensions();
             }
             SettingsCategory::ExternalMerge => {
                 self.reset_external_merge_form_from_settings();
@@ -2824,6 +2846,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn reset_ai_form_from_settings(&mut self) {
+        self.ai_extensions.save_error = None;
         self.ai_enabled_form = self.ai_settings.enabled;
         self.ai_base_url
             .set_value(self.ai_settings.base_url.clone());
@@ -2842,19 +2865,30 @@ impl RepositoryView {
 
     pub(crate) fn set_ai_enabled_form(&mut self, enabled: bool) {
         self.ai_enabled_form = enabled;
+        self.ai_extensions.save_error = None;
         self.last_error = None;
     }
 
-    pub(crate) fn save_ai_provider_settings_from_form(&mut self) {
+    pub(crate) fn save_ai_provider_settings_from_form(&mut self) -> bool {
         let settings = self.ai_form_settings();
-        if let Err(err) = settings.validate() {
-            self.last_error = Some(err.to_string());
-            return;
+        // 允许先启用 AI，再进入扩展页配置。模型调用仍由 is_usable 校验完整连接参数。
+        if !settings.base_url.is_empty() || !settings.model.is_empty() {
+            if let Err(err) = settings.validate() {
+                self.ai_extensions.save_error = Some(err.to_string());
+                self.last_error = Some(err.to_string());
+                return false;
+            }
+        }
+        if let Err(err) = self.storage.save_ai_provider_settings(&settings) {
+            self.ai_extensions.save_error = Some(format!("保存 AI 设置失败：{err}"));
+            self.last_error = Some(format!("保存 AI 设置失败：{err}"));
+            return false;
         }
         self.ai_settings = settings;
-        self.save_ai_provider_settings();
         self.status = "AI 设置已保存".into();
         self.last_error = None;
+        self.ai_extensions.save_error = None;
+        true
     }
 
     pub(crate) fn test_network_proxy_settings(&mut self) {

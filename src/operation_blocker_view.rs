@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use gpui::{CursorStyle, Div, IntoElement, MouseButton, div, prelude::*, px};
+use gpui::{AnyElement, Context, CursorStyle, Div, IntoElement, MouseButton, div, prelude::*, px};
 
 use crate::ui::theme::{rgb, rgba};
 use crate::{RepositoryView, ui::theme as ui_theme};
@@ -64,7 +64,11 @@ pub(crate) fn wrap_operation_message(message: &str) -> String {
     message.replace(" 到 ", " 到\n")
 }
 
-pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) -> Div {
+fn operation_blocker_overlay(
+    message: impl Into<String>,
+    phase: u64,
+    action: Option<AnyElement>,
+) -> Div {
     let visual = operation_blocker_overlay_visual();
     let message = wrap_operation_message(&message.into());
     let offset = ((phase % 7) as f32 - 2.0) * 42.0;
@@ -149,7 +153,8 @@ pub(crate) fn operation_blocker_overlay(message: impl Into<String>, phase: u64) 
                                 .rounded_full()
                                 .bg(rgb(ui_theme::PROGRESS_FILL)),
                         ),
-                ),
+                )
+                .when_some(action, |this, action| this.child(action)),
         )
 }
 
@@ -165,10 +170,19 @@ impl RepositoryView {
         .then(|| tab.status.clone())
     }
 
-    pub(crate) fn render_operation_blocker(&self) -> impl IntoElement {
+    pub(crate) fn render_operation_blocker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.active_operation_blocker_message()
             .map(|message| {
-                operation_blocker_overlay(message, self.progress_phase).into_any_element()
+                let action = self.workflow_state.active_run.as_ref()
+                    .filter(|run| !run.control.is_cancelled())
+                    .map(|_| self.secondary_button(
+                        "停止后续步骤".into(),
+                        true,
+                        |this, _, _| this.cancel_workflow(),
+                        cx,
+                    ).into_any_element());
+                operation_blocker_overlay(message, self.progress_phase, action)
+                    .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element())
     }

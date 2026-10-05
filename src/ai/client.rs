@@ -314,6 +314,21 @@ impl ChatClient {
         max_tokens: u32,
         on_delta: &mut impl FnMut(StreamDelta),
     ) -> Result<AgentTurn, AgentStreamError> {
+        self.request_agent_stream_until(messages, tools, max_tokens, on_delta, &|| false)
+    }
+
+    /// 在每个 SSE 数据行边界检查中止条件；网络读空闲仍受供应商超时约束。
+    pub fn request_agent_stream_until(
+        &self,
+        messages: &[AgentChatMessage],
+        tools: &[ToolSchema],
+        max_tokens: u32,
+        on_delta: &mut impl FnMut(StreamDelta),
+        should_stop: &impl Fn() -> bool,
+    ) -> Result<AgentTurn, AgentStreamError> {
+        if should_stop() {
+            return Err(AgentStreamError::fatal("AI 请求已中止".into()));
+        }
         let url = format!(
             "{}{}",
             self.settings.normalized_base_url(),
@@ -370,8 +385,14 @@ impl ChatClient {
         let mut finish_reason: Option<String> = None;
         let mut stream_error: Option<String> = None;
         for line in reader.lines() {
+            if should_stop() {
+                return Err(AgentStreamError::fatal("AI 请求已中止".into()));
+            }
             let line =
                 line.map_err(|err| AgentStreamError::transient(format!("AI 流读取失败：{err}")))?;
+            if should_stop() {
+                return Err(AgentStreamError::fatal("AI 请求已中止".into()));
+            }
             match parse_sse_line(&line) {
                 Some(SseLineResult::Chunk(chunk)) => {
                     valid_chunks += 1;

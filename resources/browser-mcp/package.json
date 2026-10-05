@@ -1,0 +1,8 @@
+{
+  "name": "khaslana-browser-mcp-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@playwright/mcp": "0.0.82"
+  }
+}

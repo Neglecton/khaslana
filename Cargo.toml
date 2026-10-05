@@ -23,6 +23,10 @@ git2 = { version = "0.21", features = ["https", "ssh"] }
 gpui = { package = "gpui-pre", version = "=0.3.5" }
 gpui-kit = "=0.6.4"
 json5 = "1"
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"
+jsonschema = { version = "=0.33.0", default-features = false }
 keyring = "4"
 keyring-core = "1"
 bstr = "1"
@@ -32,6 +36,8 @@ lru = "0.18"
 pulldown-cmark = { version = "0.13", default-features = false }
 rayon = "1"
 regex = "1"
+rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process"] }
+rquickjs = "=0.14.0"
 semver = "1"
 sha2 = "0.11"
 zip = "8"
@@ -45,6 +51,7 @@ smallvec = "1"
 # 用于追溯/浏览内容/冲突工作台/diff 全文视图的只读代码着色。
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "time", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # AI 功能用的轻量同步 HTTP 客户端；后台线程阻塞调用，避免引入 async runtime。

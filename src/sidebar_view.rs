@@ -13,7 +13,8 @@ use crate::{
     REMOTE_MENU_WIDTH, RemoteContextMenu, RepositoryView, STASH_MENU_HEIGHT, STASH_MENU_WIDTH,
     ScrollbarMode, SidebarSection, SidebarSectionState, StashContextMenu, TAG_MENU_HEIGHT,
     TAG_MENU_WIDTH, TagContextMenu, clamped_menu_position, context_menu_item,
-    context_menu_item_with_context, menu_separator, placeholder_row, scrollable_uniform_frame,
+    context_menu_item_with_context, menu_separator, placeholder_row, scrollable_frame_when,
+    scrollable_uniform_frame,
     ui::{
         components::{glass_menu, sync_badge, tooltip_text},
         icons::{ToolbarIcon, toolbar_icon, toolbar_icon_rotated},
@@ -38,6 +39,10 @@ pub(crate) fn branch_context_menu_height(kind: &BranchKind, is_head: bool, has_u
         3
     };
     10.0 + rows as f32 * 28.0 + separators as f32 * 9.0
+}
+
+fn branch_workflow_menu_height(template_count: usize) -> f32 {
+    (47.0 + template_count as f32 * 28.0).min(300.0)
 }
 
 #[cfg(test)]
@@ -1192,8 +1197,11 @@ impl RepositoryView {
                     &right_click_kind,
                     right_click_is_head,
                     right_click_has_upstream,
-                );
-                let (x, y) = clamped_menu_position(event, window, BRANCH_MENU_WIDTH, height);
+                ) + 37.0;
+                let placement_height =
+                    height.max(branch_workflow_menu_height(this.workflow_templates.len()));
+                let (x, y) =
+                    clamped_menu_position(event, window, BRANCH_MENU_WIDTH, placement_height);
                 this.reset_context_menu_selection();
                 this.branch_context_menu = Some(BranchContextMenu {
                     branch: right_click_name.clone(),
@@ -1201,6 +1209,7 @@ impl RepositoryView {
                     is_head: right_click_is_head,
                     has_upstream: right_click_has_upstream,
                     height,
+                    workflows_open: false,
                     x,
                     y,
                 });
@@ -1218,6 +1227,9 @@ impl RepositoryView {
         let Some(menu) = self.branch_context_menu.clone() else {
             return div().into_any_element();
         };
+        if menu.workflows_open {
+            return self.render_branch_workflow_menu(&menu, cx).into_any_element();
+        }
         let is_local = menu.kind == BranchKind::Local;
         let merge_in_progress = self.merge_in_progress();
         let can_pull_local = is_local && menu.has_upstream;
@@ -1229,6 +1241,29 @@ impl RepositoryView {
             .left(px(menu.x))
             .top(px(menu.y))
             .w(px(BRANCH_MENU_WIDTH))
+            .child(context_menu_item_with_context(
+                self,
+                "branch-menu",
+                "workflows",
+                "运行工作流…",
+                !self.busy
+                    && self.workflow_templates.iter().any(|template| template.error.is_none()),
+                |this, cx| {
+                    let height = branch_workflow_menu_height(this
+                        .workflow_templates
+                        .iter()
+                        .filter(|template| template.error.is_none())
+                        .count());
+                    if let Some(menu) = this.branch_context_menu.as_mut() {
+                        menu.workflows_open = true;
+                        menu.height = height;
+                    }
+                    this.reset_context_menu_selection();
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(menu_separator())
             .when(!is_local, |this| {
                 let branch = menu.branch.clone();
                 this.child(context_menu_item_with_context(
@@ -1393,6 +1428,93 @@ impl RepositoryView {
                 },
                 cx,
             )))
+            .into_any_element()
+    }
+
+    fn render_branch_workflow_menu(
+        &self,
+        menu: &BranchContextMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const SCROLL_ID: &str = "branch-workflow-menu-scroll";
+        let handle = self.scroll_handle(SCROLL_ID);
+        let rows = self
+            .workflow_templates
+            .iter()
+            .filter(|template| template.error.is_none())
+            .enumerate()
+            .map(|(index, template)| {
+                let path = template.path.clone();
+                let branch = menu.branch.clone();
+                let kind = menu.kind.clone();
+                let origin = if crate::workflow_view::is_managed_workflow_template_path(&path) {
+                    "远端"
+                } else {
+                    "本地"
+                };
+                context_menu_item_with_context(
+                    self,
+                    "branch-workflow-menu",
+                    &format!("workflow-{index}"),
+                    format!("{origin} · {}", template.display_name),
+                    !self.busy,
+                    move |this, cx| {
+                        this.open_workflow_from_branch(
+                            path.clone(),
+                            branch.clone(),
+                            kind.clone(),
+                            cx,
+                        )
+                    },
+                    cx,
+                )
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let height = branch_workflow_menu_height(rows.len());
+        let content = div()
+            .id(SCROLL_ID)
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&handle)
+            .children(rows)
+            .into_any_element();
+
+        glass_menu()
+            .id("branch-workflow-menu")
+            .focus_trap("branch-menu-focus-trap", &self.context_menu_focus)
+            .absolute()
+            .left(px(menu.x))
+            .top(px(menu.y))
+            .w(px(BRANCH_MENU_WIDTH))
+            .h(px(height))
+            .child(context_menu_item_with_context(
+                self,
+                "branch-workflow-menu",
+                "back",
+                "← 返回分支菜单",
+                true,
+                |this, cx| {
+                    if let Some(menu) = this.branch_context_menu.as_mut() {
+                        menu.workflows_open = false;
+                        menu.height =
+                            branch_context_menu_height(&menu.kind, menu.is_head, menu.has_upstream)
+                                + 37.0;
+                    }
+                    this.reset_context_menu_selection();
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(menu_separator())
+            .child(scrollable_frame_when(
+                SCROLL_ID,
+                ScrollbarMode::Vertical,
+                content,
+                handle,
+                self.workflow_templates.iter().any(|template| template.error.is_none()),
+                cx,
+            ))
             .into_any_element()
     }
 

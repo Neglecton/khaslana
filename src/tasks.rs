@@ -12,6 +12,7 @@ pub(crate) struct TaskExecutor {
     long_pool: Arc<ThreadPool>,
     ai_pool: Arc<ThreadPool>,
     index_pool: Arc<ThreadPool>,
+    external_pool: Arc<ThreadPool>,
     event_tx: async_channel::Sender<UiEvent>,
 }
 
@@ -34,6 +35,7 @@ impl TaskExecutor {
             long_pool: Arc::new(build_pool("khaslana-long", long_threads)),
             ai_pool: Arc::new(build_pool("khaslana-ai", ai_threads)),
             index_pool: Arc::new(build_pool("khaslana-index", 1)),
+            external_pool: Arc::new(build_pool("khaslana-external", 2)),
             event_tx,
         }
     }
@@ -59,6 +61,7 @@ impl TaskExecutor {
             TaskKind::Long => self.long_pool.spawn(wrapped),
             TaskKind::Ai => self.ai_pool.spawn(wrapped),
             TaskKind::Index => self.index_pool.spawn(wrapped),
+            TaskKind::External => self.external_pool.spawn(wrapped),
         }
     }
 }
@@ -84,6 +87,8 @@ pub(crate) enum TaskKind {
     /// 代码索引构建：CPU 密集可达分钟级，独占单线程串行化
     /// （同仓库互斥由 UI 层守卫；提取阶段内部 scoped threads 并行）。
     Index,
+    /// MCP/JS 可能持续几十秒，不占用网络 Git 的 long 池。
+    External,
 }
 
 fn build_pool(name: &'static str, threads: usize) -> ThreadPool {

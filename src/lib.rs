@@ -40,7 +40,9 @@ pub use types::*;
 pub use workflow::{
     RemoteBranchGuardAction, WorkflowDefaults, WorkflowDefinition, WorkflowExecutor,
     WorkflowInputDefinition, WorkflowPreview, WorkflowPreviewStep, WorkflowProgressEvent,
-    WorkflowRunOptions, WorkflowRunResult, WorkflowStep, parse_workflow_json5,
+    WorkflowRunControl, WorkflowRunOptions, WorkflowRunResult, WorkflowSourceBranch, WorkflowStep,
+    WorkflowAction, WorkflowActionPreview, WorkflowActionRegistry, WorkflowActionResult,
+    parse_workflow_json5,
 };
 
 pub use ai::{

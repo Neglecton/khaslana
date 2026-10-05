@@ -1,11 +1,14 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
-use git2::Repository;
+use git2::{BranchType, Repository};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::{
     BranchInfo, BranchKind, BranchName, CheckoutAttempt, GitError, GitService, RemoteName,
@@ -13,11 +16,18 @@ use crate::{
 };
 
 mod expressions;
+pub mod browser_runtime;
+pub mod extensions;
+mod mcp_process;
+pub mod remote_templates;
 mod remote_branch_guard;
+mod v2;
 
 use expressions::WorkflowExpressionValue;
 use expressions::evaluate_workflow_expression;
 pub use remote_branch_guard::RemoteBranchGuardAction;
+pub use v2::{WorkflowAction, WorkflowActionPreview, WorkflowActionRegistry, WorkflowActionResult};
+use v2::{builtin_step, empty_json_object};
 use remote_branch_guard::{
     default_guard_fetch, default_on_exists, default_on_missing, guard_remote_branch, guard_summary,
     validate_remote_branch_name,
@@ -82,6 +92,15 @@ impl Default for WorkflowDefaults {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum WorkflowStep {
+    /// v2 的可扩展动作。内置 git.* 动作仍复用同一套 Git 业务守卫。
+    Invoke {
+        id: String,
+        uses: String,
+        #[serde(default = "empty_json_object", rename = "with")]
+        arguments: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "saveAs")]
+        save_as: Option<String>,
+    },
     Checkout {
         branch: String,
     },
@@ -164,6 +183,14 @@ pub enum WorkflowStep {
 pub struct WorkflowRunOptions {
     pub default_remote: String,
     pub input_vars: BTreeMap<String, String>,
+    /// 从分支菜单进入时固定的来源引用；普通入口仍以启动时 HEAD 为来源。
+    pub source_branch: Option<WorkflowSourceBranch>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowSourceBranch {
+    pub name: String,
+    pub kind: BranchKind,
 }
 
 impl Default for WorkflowRunOptions {
@@ -171,6 +198,7 @@ impl Default for WorkflowRunOptions {
         Self {
             default_remote: "origin".to_string(),
             input_vars: BTreeMap::new(),
+            source_branch: None,
         }
     }
 }
@@ -215,6 +243,12 @@ pub enum WorkflowProgressEvent {
         label: String,
         details: Vec<String>,
     },
+    StepDetail {
+        index: usize,
+        total: usize,
+        label: String,
+        detail: String,
+    },
     Finished {
         name: String,
         total: usize,
@@ -223,11 +257,65 @@ pub enum WorkflowProgressEvent {
 
 pub struct WorkflowExecutor<'a> {
     service: &'a GitService,
+    actions: Option<&'a WorkflowActionRegistry>,
+}
+
+/// 每次运行独立的取消令牌。取消在步骤边界生效；外部动作可在执行期间主动检查。
+#[derive(Clone, Debug)]
+pub struct WorkflowRunControl {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Default for WorkflowRunControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkflowRunControl {
+    pub fn new() -> Self {
+        static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn check_cancelled(&self) -> Result<()> {
+        if self.is_cancelled() {
+            Err(GitError::WorkflowCancelled)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<'a> WorkflowExecutor<'a> {
     pub fn new(service: &'a GitService) -> Self {
-        Self { service }
+        Self {
+            service,
+            actions: None,
+        }
+    }
+
+    pub fn with_actions(service: &'a GitService, actions: &'a WorkflowActionRegistry) -> Self {
+        Self {
+            service,
+            actions: Some(actions),
+        }
     }
 
     pub fn preview(
@@ -237,8 +325,9 @@ impl<'a> WorkflowExecutor<'a> {
         options: &WorkflowRunOptions,
     ) -> Result<WorkflowPreview> {
         validate_definition(definition)?;
+        self.preflight_actions(definition)?;
         validate_input_values(definition, options)?;
-        let context = WorkflowEvalContext::new(self.service, repo);
+        let context = WorkflowEvalContext::new(self.service, repo, options)?;
         let mut resolver = WorkflowResolver::new(self.service, repo, definition, options, &context);
         let mut preview_state = WorkflowPreviewState::default();
         let steps = definition
@@ -247,10 +336,32 @@ impl<'a> WorkflowExecutor<'a> {
             .enumerate()
             .map(|(index, step)| {
                 let resolved_step = step.resolve(&mut resolver)?;
-                let summary = resolved_step.summary();
+                let mut summary = resolved_step.summary();
                 // 对只读步骤（如 FilterBranches）在预览阶段即可计算明细并写入步骤输出，
                 // 让后续步骤在预览时也能引用筛选结果；明细与输出一次计算共用。
-                let details = record_preview_output(&resolved_step, self.service, repo, &context)?;
+                let details = if let ResolvedWorkflowStep::Invoke {
+                    uses,
+                    arguments,
+                    save_as,
+                } = &resolved_step
+                {
+                    let action = self
+                        .actions
+                        .ok_or_else(|| GitError::Message(format!("未注册工作流动作：{uses}")))?
+                        .get(uses)?;
+                    let preview = action.preview(self.service, repo, arguments)?;
+                    summary = preview.summary;
+                    if let Some(name) = save_as {
+                        if let Some(value) = preview.output {
+                            context.record_output(name.clone(), WorkflowExpressionValue::from_json(value));
+                        } else {
+                            context.defer_output(name.clone());
+                        }
+                    }
+                    preview.details
+                } else {
+                    record_preview_output(&resolved_step, self.service, repo, &context)?
+                };
                 preview_state.apply(&resolved_step);
                 resolver.set_preview_current_branch(preview_state.current_branch.clone());
                 Ok(WorkflowPreviewStep {
@@ -275,7 +386,7 @@ impl<'a> WorkflowExecutor<'a> {
         template: &str,
     ) -> Result<String> {
         validate_definition(definition)?;
-        let context = WorkflowEvalContext::new(self.service, repo);
+        let context = WorkflowEvalContext::new(self.service, repo, options)?;
         let mut resolver = WorkflowResolver::new(self.service, repo, definition, options, &context);
         resolver.interpolate(template)
     }
@@ -285,16 +396,34 @@ impl<'a> WorkflowExecutor<'a> {
         repo: &mut Repository,
         definition: &WorkflowDefinition,
         options: WorkflowRunOptions,
+        progress: F,
+    ) -> Result<WorkflowRunResult>
+    where
+        F: FnMut(WorkflowProgressEvent),
+    {
+        self.run_with_control(repo, definition, options, &WorkflowRunControl::new(), progress)
+    }
+
+    pub fn run_with_control<F>(
+        &self,
+        repo: &mut Repository,
+        definition: &WorkflowDefinition,
+        options: WorkflowRunOptions,
+        control: &WorkflowRunControl,
         mut progress: F,
     ) -> Result<WorkflowRunResult>
     where
         F: FnMut(WorkflowProgressEvent),
     {
+        control.check_cancelled()?;
         validate_definition(definition)?;
+        self.preflight_actions(definition)?;
         validate_input_values(definition, &options)?;
+        let context = WorkflowEvalContext::new(self.service, repo, &options)?;
         if definition.defaults.require_clean_worktree {
             ensure_clean_worktree(self.service, repo)?;
         }
+        control.check_cancelled()?;
 
         let name = definition.display_name();
         let total = definition.steps.len();
@@ -303,16 +432,17 @@ impl<'a> WorkflowExecutor<'a> {
             total,
         });
 
-        let context = WorkflowEvalContext::new(self.service, repo);
         let mut steps_run = 0;
         let mut last_snapshot = None;
 
         for (index, step) in definition.steps.iter().enumerate() {
+            control.check_cancelled()?;
             let resolved_step = {
                 let mut resolver =
                     WorkflowResolver::new(self.service, repo, definition, &options, &context);
                 step.resolve(&mut resolver)?
             };
+            control.check_cancelled()?;
             let label = resolved_step.summary();
             progress(WorkflowProgressEvent::StepStarted {
                 index,
@@ -321,7 +451,10 @@ impl<'a> WorkflowExecutor<'a> {
                 details: Vec::new(),
             });
 
-            let outcome = resolved_step.execute(self.service, repo)?;
+            let outcome = resolved_step.execute(self.service, repo, self.actions, control,
+                &mut |detail| progress(WorkflowProgressEvent::StepDetail {
+                    index, total, label: label.clone(), detail,
+                }))?;
             // 把步骤输出（如 FilterBranches 的命中分支）写入 context，供后续步骤消费。
             if let Some((name, value)) = outcome.output {
                 context.record_output(name, value);
@@ -351,10 +484,34 @@ impl<'a> WorkflowExecutor<'a> {
             snapshot,
         })
     }
+
+    fn preflight_actions(&self, definition: &WorkflowDefinition) -> Result<()> {
+        for step in &definition.steps {
+            if let WorkflowStep::Invoke { uses, arguments, save_as, .. } = step {
+                if builtin_step(uses, arguments)?.is_some() {
+                    if save_as.is_some() {
+                        return Err(GitError::Message(format!(
+                            "内置动作 {uses} 不支持 saveAs，请使用动作自身的输出参数"
+                        )));
+                    }
+                } else {
+                    self.actions
+                        .ok_or_else(|| GitError::Message(format!("未注册工作流动作：{uses}")))?
+                        .get(uses)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
 enum ResolvedWorkflowStep {
+    Invoke {
+        uses: String,
+        arguments: Value,
+        save_as: Option<String>,
+    },
     Checkout {
         branch: String,
     },
@@ -428,8 +585,8 @@ impl WorkflowPreviewState {
 struct StepOutcome {
     snapshot: RepositorySnapshot,
     details: Vec<String>,
-    /// 步骤输出：(变量名, 值数组)。目前仅 `FilterBranches` 会产生，供后续步骤消费。
-    output: Option<(String, Vec<String>)>,
+    /// 步骤输出可保存数组或 JSON 值，供后续步骤消费。
+    output: Option<(String, WorkflowExpressionValue)>,
 }
 
 impl StepOutcome {
@@ -453,6 +610,7 @@ impl StepOutcome {
 impl WorkflowStep {
     pub fn op_name(&self) -> &'static str {
         match self {
+            WorkflowStep::Invoke { .. } => "invoke",
             WorkflowStep::Checkout { .. } => "checkout",
             WorkflowStep::Fetch { .. } => "fetch",
             WorkflowStep::Pull { .. } => "pull",
@@ -469,6 +627,28 @@ impl WorkflowStep {
 
     fn resolve(&self, resolver: &mut WorkflowResolver<'_, '_>) -> Result<ResolvedWorkflowStep> {
         match self {
+            WorkflowStep::Invoke { uses, arguments, save_as, .. } => {
+                // JS 源码中的 `${...}` 属于 JavaScript 模板字符串，不按工作流表达式展开。
+                let mut arguments = arguments.clone();
+                let script = if uses == "js.run" {
+                    arguments.as_object_mut().and_then(|object| object.remove("script"))
+                } else {
+                    None
+                };
+                let mut arguments = resolver.interpolate_json(&arguments)?;
+                if let Some(script) = script {
+                    arguments.as_object_mut().expect("invoke 参数已验证为对象")
+                        .insert("script".into(), script);
+                }
+                if let Some(step) = builtin_step(uses, &arguments)? {
+                    return step.resolve(resolver);
+                }
+                Ok(ResolvedWorkflowStep::Invoke {
+                    uses: uses.clone(),
+                    arguments,
+                    save_as: save_as.clone(),
+                })
+            }
             WorkflowStep::Checkout { branch } => Ok(ResolvedWorkflowStep::Checkout {
                 branch: resolver.interpolate(branch)?,
             }),
@@ -590,6 +770,7 @@ impl WorkflowStep {
 impl ResolvedWorkflowStep {
     fn summary(&self) -> String {
         match self {
+            ResolvedWorkflowStep::Invoke { uses, .. } => format!("调用工作流动作 {uses}"),
             ResolvedWorkflowStep::Checkout { branch } => format!("切换到分支 {branch}"),
             ResolvedWorkflowStep::Fetch { remote } => format!("获取远端 {remote}"),
             ResolvedWorkflowStep::Pull { remote } => format!("拉取远端 {remote}"),
@@ -635,8 +816,33 @@ impl ResolvedWorkflowStep {
         }
     }
 
-    fn execute(&self, service: &GitService, repo: &mut Repository) -> Result<StepOutcome> {
+    fn execute(
+        &self,
+        service: &GitService,
+        repo: &mut Repository,
+        actions: Option<&WorkflowActionRegistry>,
+        control: &WorkflowRunControl,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<StepOutcome> {
         match self {
+            ResolvedWorkflowStep::Invoke { uses, arguments, save_as } => {
+                let action = actions
+                    .ok_or_else(|| GitError::Message(format!("未注册工作流动作：{uses}")))?
+                    .get(uses)?;
+                let result = action.execute_with_control_and_progress(
+                    service, repo, arguments, control, progress)?;
+                let output = match (save_as, result.output) {
+                    (Some(name), Some(value)) => {
+                        Some((name.clone(), WorkflowExpressionValue::from_json(value)))
+                    }
+                    _ => None,
+                };
+                Ok(StepOutcome {
+                    snapshot: service.snapshot_after_operation(repo)?,
+                    details: result.details,
+                    output,
+                })
+            }
             ResolvedWorkflowStep::Checkout { branch } => {
                 let branch = BranchName::new(branch.clone());
                 // 工作流无人值守，不能弹窗确认：被未提交修改阻止时直接按
@@ -747,7 +953,7 @@ impl ResolvedWorkflowStep {
                     snapshot: service.snapshot_after_operation(repo)?,
                     details,
                     // 把命中分支作为数组变量输出，供后续步骤通过 ${output} 消费。
-                    output: Some((output.clone(), plan.matched)),
+                    output: Some((output.clone(), WorkflowExpressionValue::Array(plan.matched))),
                 })
             }
             ResolvedWorkflowStep::DeleteBranches {
@@ -815,7 +1021,7 @@ pub fn parse_workflow_json5(content: &str) -> Result<WorkflowDefinition> {
 }
 
 fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
-    if definition.version != 1 {
+    if definition.version != 1 && definition.version != 2 {
         return Err(GitError::Message(format!(
             "不支持的工作流版本：{}",
             definition.version
@@ -827,6 +1033,23 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
     for key in definition.inputs.keys() {
         validate_input_name(key)?;
     }
+    let mut ids = BTreeSet::new();
+    for step in &definition.steps {
+        if let WorkflowStep::Invoke { id, uses, arguments, save_as } = step {
+            if definition.version == 1 {
+                return Err(GitError::Message("v1 工作流不能使用 invoke 步骤".into()));
+            }
+            if id.trim().is_empty() || !ids.insert(id) {
+                return Err(GitError::Message(format!("工作流步骤 id 为空或重复：{id}")));
+            }
+            if uses.trim().is_empty() || !arguments.is_object() {
+                return Err(GitError::Message(format!("工作流步骤 {id} 的 uses 或 with 无效")));
+            }
+            if let Some(name) = save_as {
+                validate_input_name(name)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -836,6 +1059,8 @@ fn validate_input_name(name: &str) -> Result<()> {
         return Err(GitError::Message("工作流输入变量名不能为空".into()));
     }
     if name == "run.id"
+        || name == "run.sourceBranch"
+        || name == "run.sourceKind"
         || name == "git.initialBranch"
         || name == "git.currentBranch"
         || name == "git.head"
@@ -902,29 +1127,48 @@ struct WorkflowEvalContext {
     started_at: DateTime<Local>,
     run_id: String,
     initial_branch: Option<String>,
+    source_kind: BranchKind,
     repo_name: String,
-    /// 步骤间传递的输出变量：变量名 → 值（字符串或字符串数组）。
+    /// 步骤间传递的输出变量：变量名 → 值。
     /// 用 RefCell 是因为 resolver 以 `&context` 共享借用 context，需内部可变性。
     step_outputs: RefCell<BTreeMap<String, WorkflowExpressionValue>>,
+    deferred_outputs: RefCell<BTreeSet<String>>,
 }
 
 impl WorkflowEvalContext {
-    fn new(service: &GitService, repo: &Repository) -> Self {
+    fn new(service: &GitService, repo: &Repository, options: &WorkflowRunOptions) -> Result<Self> {
         let started_at = Local::now();
-        Self {
+        let initial_branch = match &options.source_branch {
+            Some(source) => {
+                let kind = match &source.kind {
+                    BranchKind::Local => BranchType::Local,
+                    BranchKind::Remote => BranchType::Remote,
+                };
+                repo.find_branch(&source.name, kind).map_err(|_| {
+                    GitError::Message(format!("工作流来源分支已不存在：{}", source.name))
+                })?;
+                Some(source.name.clone())
+            }
+            None => service.current_branch(repo),
+        };
+        Ok(Self {
             run_id: format!("{}", started_at.timestamp_millis()),
-            initial_branch: service.current_branch(repo),
+            initial_branch,
+            source_kind: options.source_branch.as_ref().map_or(BranchKind::Local, |source| source.kind.clone()),
             repo_name: repo_display_name(repo),
             started_at,
             step_outputs: RefCell::new(BTreeMap::new()),
-        }
+            deferred_outputs: RefCell::new(BTreeSet::new()),
+        })
     }
 
     /// 把一个步骤输出写回 context（供后续步骤通过 ${output} 消费）。
-    fn record_output(&self, name: String, value: Vec<String>) {
-        self.step_outputs
-            .borrow_mut()
-            .insert(name, WorkflowExpressionValue::Array(value));
+    fn record_output(&self, name: String, value: WorkflowExpressionValue) {
+        self.step_outputs.borrow_mut().insert(name, value);
+    }
+
+    fn defer_output(&self, name: String) {
+        self.deferred_outputs.borrow_mut().insert(name);
     }
 }
 
@@ -1038,6 +1282,29 @@ impl<'a, 'repo> WorkflowResolver<'a, 'repo> {
             .map(WorkflowExpressionValue::String)
     }
 
+    fn interpolate_json(&mut self, value: &Value) -> Result<Value> {
+        match value {
+            Value::String(text) => match self.interpolate_value(text)? {
+                WorkflowExpressionValue::String(value) => Ok(Value::String(value)),
+                WorkflowExpressionValue::Array(items) => Ok(Value::Array(
+                    items.into_iter().map(Value::String).collect(),
+                )),
+                WorkflowExpressionValue::Json(value) => Ok(value),
+            },
+            Value::Array(items) => items
+                .iter()
+                .map(|item| self.interpolate_json(item))
+                .collect::<Result<Vec<_>>>()
+                .map(Value::Array),
+            Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), self.interpolate_json(value)?)))
+                .collect::<Result<Map<String, Value>>>()
+                .map(Value::Object),
+            value => Ok(value.clone()),
+        }
+    }
+
     /// 把模板求值为字符串数组：数组值原样返回，字符串值按换行切分并清理空项。
     fn interpolate_array(&mut self, template: &str) -> Result<Vec<String>> {
         let value = self.interpolate_value(template)?;
@@ -1049,6 +1316,9 @@ impl<'a, 'repo> WorkflowResolver<'a, 'repo> {
                 .filter(|line| !line.is_empty())
                 .map(str::to_string)
                 .collect()),
+            WorkflowExpressionValue::Json(_) => Err(GitError::Message(
+                "工作流参数需要字符串或字符串数组".into(),
+            )),
         }
     }
 
@@ -1057,6 +1327,13 @@ impl<'a, 'repo> WorkflowResolver<'a, 'repo> {
         expression: &str,
         stack: &mut BTreeSet<String>,
     ) -> Result<WorkflowExpressionValue> {
+        // 预览无法执行 MCP/JS 来取得 saveAs 值。保留依赖该输出的表达式，
+        // 让后续步骤仍可展示预览；实际运行时会正常解析或明确报错。
+        let primary = expression.split('|').next().unwrap_or(expression).trim();
+        let root = primary.split('.').next().unwrap_or(primary);
+        if self.context.deferred_outputs.borrow().contains(root) {
+            return Ok(WorkflowExpressionValue::String(format!("${{{expression}}}")));
+        }
         evaluate_workflow_expression(expression, |primary| {
             self.resolve_primary_expression(primary, stack)
         })
@@ -1080,6 +1357,20 @@ impl<'a, 'repo> WorkflowResolver<'a, 'repo> {
 
         match expression {
             "run.id" => return Ok(WorkflowExpressionValue::String(self.context.run_id.clone())),
+            "run.sourceBranch" => {
+                return Ok(WorkflowExpressionValue::String(
+                    self.context.initial_branch.clone().ok_or_else(|| {
+                        GitError::Message("工作流没有可用的来源分支".into())
+                    })?,
+                ));
+            }
+            "run.sourceKind" => {
+                let kind = match self.context.source_kind {
+                    BranchKind::Local => "local",
+                    BranchKind::Remote => "remote",
+                };
+                return Ok(WorkflowExpressionValue::String(kind.into()));
+            }
             "git.initialBranch" => {
                 return Ok(WorkflowExpressionValue::String(
                     self.context.initial_branch.clone().ok_or_else(|| {
@@ -1104,6 +1395,18 @@ impl<'a, 'repo> WorkflowResolver<'a, 'repo> {
         // 步骤输出（如 filterBranches 的命中分支）优先于 vars/inputs。
         if let Some(value) = self.context.step_outputs.borrow().get(expression).cloned() {
             return Ok(value);
+        }
+
+        if let Some((root, path)) = expression.split_once('.') {
+            let value = self.context.step_outputs.borrow().get(root).cloned();
+            if let Some(WorkflowExpressionValue::Json(mut value)) = value {
+                for key in path.split('.') {
+                    value = value.get(key).cloned().ok_or_else(|| {
+                        GitError::Message(format!("工作流输出字段不存在：{expression}"))
+                    })?;
+                }
+                return Ok(WorkflowExpressionValue::from_json(value));
+            }
         }
 
         if let Some(value) = self.definition.vars.get(expression) {
@@ -1307,7 +1610,7 @@ fn record_preview_output(
             *skip_current,
         )?;
         let details = deletion_plan_details(&plan, "命中");
-        context.record_output(output.clone(), plan.matched);
+        context.record_output(output.clone(), WorkflowExpressionValue::Array(plan.matched));
         return Ok(details);
     }
     Ok(Vec::new())
@@ -1316,3 +1619,7 @@ fn record_preview_output(
 #[cfg(test)]
 #[path = "tests/workflow.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/workflow_extensions.rs"]
+mod extension_tests;

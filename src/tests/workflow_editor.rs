@@ -473,7 +473,7 @@ fn definition_to_editor_data_round_trip_all_variants() {
         ],
     };
 
-    let data = workflow_editor_data_from_definition(&original, "round-trip");
+    let data = workflow_editor_data_from_definition(&original, "round-trip").unwrap();
     assert_eq!(data.file_name, "round-trip");
     assert_eq!(data.inputs.len(), 1);
     assert_eq!(data.inputs[0].description, "要创建的分支名");
@@ -486,7 +486,7 @@ fn editor_data_from_definition_sets_file_name_only() {
     // 反映射不设置 editing_path（由 open_workflow_editor_for_path 按模式补）。
     let definition = minimal_data();
     let built = build_workflow_definition(&definition).unwrap();
-    let data = workflow_editor_data_from_definition(&built, "some-name");
+    let data = workflow_editor_data_from_definition(&built, "some-name").unwrap();
     assert!(data.editing_path.is_none());
     assert_eq!(data.name, "测试模板");
 }
@@ -498,7 +498,7 @@ fn editor_data_from_definition_empty_name_round_trips() {
     definition.name = "   ".to_string();
     let built = build_workflow_definition(&definition).unwrap();
     assert_eq!(built.name, None);
-    let data = workflow_editor_data_from_definition(&built, "n");
+    let data = workflow_editor_data_from_definition(&built, "n").unwrap();
     assert_eq!(data.name, "");
 }
 

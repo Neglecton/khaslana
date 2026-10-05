@@ -1,6 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 
-use git2::RepositoryInitOptions;
+use git2::{BranchType, RepositoryInitOptions};
 use tempfile::TempDir;
 
 use super::*;
@@ -89,6 +90,277 @@ fn create_remote_branch(remote_dir: &Path, branch: &str) {
             true,
         )
         .unwrap();
+}
+
+#[test]
+fn v2_builtin_uses_selected_source_branch_in_preview_and_run() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 2,
+            steps: [{
+                op: "invoke", id: "create", uses: "git.createBranch",
+                with: { name: "from-selected", from: "${run.sourceBranch}", checkout: false }
+            }]
+        }"#,
+    )
+    .unwrap();
+    let options = WorkflowRunOptions {
+        source_branch: Some(WorkflowSourceBranch {
+            name: "origin/existing".into(),
+            kind: BranchKind::Remote,
+        }),
+        ..WorkflowRunOptions::default()
+    };
+    let executor = WorkflowExecutor::new(&service);
+    let preview = executor.preview(&repo, &definition, &options).unwrap();
+    assert!(preview.steps[0].summary.contains("基于 origin/existing"));
+    executor.run(&mut repo, &definition, options, |_| {}).unwrap();
+    assert!(repo.find_branch("from-selected", BranchType::Local).is_ok());
+}
+
+#[test]
+fn v1_initial_branch_uses_selected_remote_branch_and_keeps_default_head() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 1,
+            steps: [{ op: "createBranch", name: "from-v1-source", from: "${git.initialBranch}", checkout: false }]
+        }"#,
+    )
+    .unwrap();
+    let executor = WorkflowExecutor::new(&service);
+    let default_preview = executor
+        .preview(&repo, &definition, &WorkflowRunOptions::default())
+        .unwrap();
+    assert!(default_preview.steps[0].summary.contains("基于 main"));
+
+    let options = WorkflowRunOptions {
+        source_branch: Some(WorkflowSourceBranch {
+            name: "origin/existing".into(),
+            kind: BranchKind::Remote,
+        }),
+        ..WorkflowRunOptions::default()
+    };
+    let selected_preview = executor.preview(&repo, &definition, &options).unwrap();
+    assert!(selected_preview.steps[0].summary.contains("基于 origin/existing"));
+    executor.run(&mut repo, &definition, options, |_| {}).unwrap();
+    assert!(repo.find_branch("from-v1-source", BranchType::Local).is_ok());
+}
+
+#[test]
+fn v2_rejects_duplicate_step_ids_and_v1_invoke() {
+    let duplicate = r#"{
+        version: 2,
+        steps: [
+            { op: "invoke", id: "same", uses: "git.fetch", with: {} },
+            { op: "invoke", id: "same", uses: "git.fetch", with: {} }
+        ]
+    }"#;
+    assert!(parse_workflow_json5(duplicate).is_err());
+    assert!(parse_workflow_json5(&duplicate.replace("version: 2", "version: 1")).is_err());
+}
+
+#[test]
+fn v2_rejects_source_branch_removed_before_run() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{ version: 2, steps: [{ op: "invoke", id: "clean", uses: "git.ensureClean" }] }"#,
+    )
+    .unwrap();
+    let options = WorkflowRunOptions {
+        source_branch: Some(WorkflowSourceBranch {
+            name: "missing".into(),
+            kind: BranchKind::Local,
+        }),
+        ..WorkflowRunOptions::default()
+    };
+    assert!(WorkflowExecutor::new(&service)
+        .run(&mut repo, &definition, options, |_| {})
+        .is_err());
+}
+
+#[test]
+fn v2_preflight_rejects_unknown_action_before_mutating_git() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 2,
+            steps: [
+                { op: "invoke", id: "create", uses: "git.createBranch",
+                  with: { name: "must-not-exist", checkout: false } },
+                { op: "invoke", id: "missing", uses: "mcp.missing" }
+            ]
+        }"#,
+    )
+    .unwrap();
+    let error = WorkflowExecutor::new(&service)
+        .run(&mut repo, &definition, WorkflowRunOptions::default(), |_| {})
+        .unwrap_err();
+    assert!(error.to_string().contains("未注册工作流动作"));
+    assert!(repo.find_branch("must-not-exist", BranchType::Local).is_err());
+}
+
+struct BranchNameAction;
+
+impl WorkflowAction for BranchNameAction {
+    fn preview(
+        &self,
+        _service: &GitService,
+        _repo: &Repository,
+        _arguments: &serde_json::Value,
+    ) -> Result<WorkflowActionPreview> {
+        Ok(WorkflowActionPreview {
+            summary: "生成分支名".into(),
+            details: Vec::new(),
+            output: Some(serde_json::json!({"branch": "from-action"})),
+        })
+    }
+
+    fn execute(
+        &self,
+        _service: &GitService,
+        _repo: &mut Repository,
+        _arguments: &serde_json::Value,
+    ) -> Result<WorkflowActionResult> {
+        Ok(WorkflowActionResult {
+            details: Vec::new(),
+            output: Some(serde_json::json!({"branch": "from-action"})),
+        })
+    }
+}
+
+#[test]
+fn v2_action_output_is_available_to_following_builtin_step() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 2,
+            steps: [
+                { op: "invoke", id: "name", uses: "test.name", saveAs: "result" },
+                { op: "invoke", id: "create", uses: "git.createBranch",
+                  with: { name: "${result.branch}", checkout: false } }
+            ]
+        }"#,
+    )
+    .unwrap();
+    let mut actions = WorkflowActionRegistry::default();
+    actions.register("test.name", Arc::new(BranchNameAction)).unwrap();
+    let executor = WorkflowExecutor::with_actions(&service, &actions);
+    let preview = executor.preview(&repo, &definition, &WorkflowRunOptions::default()).unwrap();
+    assert!(preview.steps[1].summary.contains("from-action"));
+    executor
+        .run(&mut repo, &definition, WorkflowRunOptions::default(), |_| {})
+        .unwrap();
+    assert!(repo.find_branch("from-action", BranchType::Local).is_ok());
+}
+
+#[test]
+fn workflow_cancel_before_start_does_not_emit_progress_or_mutate_repo() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{ version: 1, steps: [{ op: "createBranch", name: "cancelled-before-start", checkout: false }] }"#,
+    ).unwrap();
+    let control = WorkflowRunControl::new();
+    control.cancel();
+    let mut progress_count = 0;
+    let error = WorkflowExecutor::new(&service).run_with_control(
+        &mut repo, &definition, WorkflowRunOptions::default(), &control,
+        |_| progress_count += 1,
+    ).unwrap_err();
+    assert!(matches!(error, GitError::WorkflowCancelled));
+    assert_eq!(progress_count, 0);
+    assert!(repo.find_branch("cancelled-before-start", BranchType::Local).is_err());
+}
+
+#[test]
+fn workflow_cancel_after_step_prevents_following_step() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 1,
+            steps: [
+                { op: "ensureClean" },
+                { op: "createBranch", name: "cancelled-after-first", checkout: false }
+            ]
+        }"#,
+    ).unwrap();
+    let control = WorkflowRunControl::new();
+    let cancel_from_progress = control.clone();
+    let mut finished_steps = 0;
+    let error = WorkflowExecutor::new(&service).run_with_control(
+        &mut repo, &definition, WorkflowRunOptions::default(), &control,
+        |event| {
+            if matches!(event, WorkflowProgressEvent::StepFinished { index: 0, .. }) {
+                finished_steps += 1;
+                cancel_from_progress.cancel();
+            }
+        },
+    ).unwrap_err();
+    assert!(matches!(error, GitError::WorkflowCancelled));
+    assert_eq!(finished_steps, 1);
+    assert!(repo.find_branch("cancelled-after-first", BranchType::Local).is_err());
+}
+
+struct CancelAwareAction;
+
+impl WorkflowAction for CancelAwareAction {
+    fn preview(
+        &self,
+        _service: &GitService,
+        _repo: &Repository,
+        _arguments: &serde_json::Value,
+    ) -> Result<WorkflowActionPreview> {
+        Ok(WorkflowActionPreview {
+            summary: "等待取消".into(),
+            details: Vec::new(),
+            output: None,
+        })
+    }
+
+    fn execute(
+        &self,
+        _service: &GitService,
+        _repo: &mut Repository,
+        _arguments: &serde_json::Value,
+    ) -> Result<WorkflowActionResult> {
+        panic!("扩展动作必须调用支持取消的执行入口")
+    }
+
+    fn execute_with_control(
+        &self,
+        _service: &GitService,
+        _repo: &mut Repository,
+        _arguments: &serde_json::Value,
+        control: &WorkflowRunControl,
+    ) -> Result<WorkflowActionResult> {
+        control.cancel();
+        control.check_cancelled()?;
+        unreachable!()
+    }
+}
+
+#[test]
+fn v2_action_can_cancel_during_execution() {
+    let (_remote_dir, _clone_dir, mut repo, service) = init_remote_workflow_repo();
+    let definition = parse_workflow_json5(
+        r#"{
+            version: 2,
+            steps: [
+                { op: "invoke", id: "wait", uses: "test.cancel" },
+                { op: "invoke", id: "create", uses: "git.createBranch",
+                  with: { name: "must-not-run", checkout: false } }
+            ]
+        }"#,
+    ).unwrap();
+    let mut actions = WorkflowActionRegistry::default();
+    actions.register("test.cancel", Arc::new(CancelAwareAction)).unwrap();
+    let control = WorkflowRunControl::new();
+    let error = WorkflowExecutor::with_actions(&service, &actions).run_with_control(
+        &mut repo, &definition, WorkflowRunOptions::default(), &control, |_| {},
+    ).unwrap_err();
+    assert!(matches!(error, GitError::WorkflowCancelled));
+    assert!(repo.find_branch("must-not-run", BranchType::Local).is_err());
 }
 
 #[test]
@@ -1188,6 +1460,7 @@ fn reproduce_user_scenario_uat_branch_with_alt_and_inputs() {
             m.insert("months".to_string(), "2".to_string());
             m
         },
+        source_branch: None,
     };
     let preview = executor.preview(&repo, &definition, &options).unwrap();
 

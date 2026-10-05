@@ -967,7 +967,7 @@ pub(crate) fn change_state_badge(state: Option<&ChangeState>) -> impl IntoElemen
 /// 元素 id 用稳定业务 id（`context-menu-{id}`），不用中文 label。
 pub(crate) fn context_menu_row(
     id: &str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     enabled: bool,
     selected: bool,
 ) -> Stateful<Div> {
@@ -1001,7 +1001,7 @@ pub(crate) fn context_menu_row(
                         .text_color(rgb(ui_theme::PRIMARY))
                 })
         })
-        .child(label)
+        .child(label.into())
 }
 
 /// 右键菜单条目（无 Context 版）：登记键盘动作 + 鼠标点击。
@@ -1012,7 +1012,7 @@ pub(crate) fn context_menu_item(
     view: &RepositoryView,
     menu_id: &str,
     id: &str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     enabled: bool,
     on_click: impl Fn(&mut RepositoryView) + 'static,
     cx: &mut Context<RepositoryView>,
@@ -1047,7 +1047,7 @@ pub(crate) fn context_menu_item_with_context(
     view: &RepositoryView,
     menu_id: &str,
     id: &str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     enabled: bool,
     on_click: impl Fn(&mut RepositoryView, &mut Context<RepositoryView>) + 'static,
     cx: &mut Context<RepositoryView>,

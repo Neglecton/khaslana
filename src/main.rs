@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod ai_view;
+mod ai_extensions_view;
+mod ai_settings_page;
 mod assets;
 mod blame_view;
 mod browse_compare_view;
@@ -81,7 +83,7 @@ use khaslana::{
     ProgressEmitter, RemoteCredentialBinding, RemoteCredentialBindings, RemoteCredentialPolicy,
     RemoteInfo, RemoteName, RepoPath, RepositorySnapshot, ResetMode, SelectedDiffLine,
     SelectionSide, SessionState, ShortcutBindings, SubmoduleInfo, SubmoduleRemoteSyncStatus,
-    TagName, ThemeMode, UpdatePreferences, credential_display_target, credential_key_filename,
+    TagName, ThemeMode, UpdatePreferences, WorkflowSourceBranch, credential_display_target, credential_key_filename,
     credential_kind_label, credential_record_is_compatible_with_url, credential_record_label,
     credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
     syntax::SyntaxSpans as SharedSyntaxSpans,
@@ -498,9 +500,14 @@ enum FieldId {
     AiBaseUrl,
     AiApiKey,
     AiModel,
+    AiMcpServerId,
+    AiMcpCommand,
+    AiMcpArgs,
     ExternalMergeIntellijPath,
     /// 设置中心「代码索引」页的仓库列表过滤框。
     CodeIndexFilter,
+    /// 设置中心「AI 设置」页分类侧栏的搜索框。
+    AiSettingsCategorySearch,
     /// 全局符号搜索面板（Ctrl+P）的输入框。
     CodePaletteSearch,
     StashMessage,
@@ -605,12 +612,18 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     }),
     (FieldId::AiApiKey, |view: &RepositoryView| &view.ai_api_key),
     (FieldId::AiModel, |view: &RepositoryView| &view.ai_model),
+    (FieldId::AiMcpServerId, |view: &RepositoryView| &view.ai_extensions.mcp_id),
+    (FieldId::AiMcpCommand, |view: &RepositoryView| &view.ai_extensions.mcp_command),
+    (FieldId::AiMcpArgs, |view: &RepositoryView| &view.ai_extensions.mcp_args),
     (
         FieldId::ExternalMergeIntellijPath,
         |view: &RepositoryView| &view.external_merge_intellij_path,
     ),
     (FieldId::CodeIndexFilter, |view: &RepositoryView| {
         &view.code_index_filter
+    }),
+    (FieldId::AiSettingsCategorySearch, |view: &RepositoryView| {
+        &view.ai_settings_category_search
     }),
     (FieldId::CodePaletteSearch, |view: &RepositoryView| {
         &view.code_palette_search
@@ -651,8 +664,12 @@ pub(crate) const ALL_FIELD_IDS: &[FieldId] = &[
     FieldId::AiBaseUrl,
     FieldId::AiApiKey,
     FieldId::AiModel,
+    FieldId::AiMcpServerId,
+    FieldId::AiMcpCommand,
+    FieldId::AiMcpArgs,
     FieldId::ExternalMergeIntellijPath,
     FieldId::CodeIndexFilter,
+    FieldId::AiSettingsCategorySearch,
     FieldId::CodePaletteSearch,
     FieldId::StashMessage,
 ];
@@ -817,6 +834,18 @@ pub(crate) enum DialogState {
         label: String,
     },
     StashForm,
+    AiSkillImport,
+    AiSkillDetails { name: String },
+    AiSkillRemove { name: String },
+    AiMcpForm,
+    AiMcpBuiltinDetails,
+    AiMcpRemove { name: String },
+    RemoteWorkflowTemplates,
+    ConfirmWorkflowExternal {
+        tab_id: RepoTabId,
+        definition_generation: u64,
+        permissions: Vec<String>,
+    },
     /// 工作流模板可视化创建器（v1 仅新建）。
     WorkflowEditor,
     /// 编辑带注释的工作流模板前的确认弹窗（保存会丢失注释与排版）。
@@ -884,6 +913,7 @@ pub(crate) struct BranchContextMenu {
     pub(crate) is_head: bool,
     pub(crate) has_upstream: bool,
     pub(crate) height: f32,
+    pub(crate) workflows_open: bool,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
@@ -1427,7 +1457,47 @@ pub(crate) struct WorkflowState {
     pub(crate) file_path: Option<PathBuf>,
     pub(crate) inputs: Vec<WorkflowInputFieldState>,
     pub(crate) selected_template_path: Option<PathBuf>,
+    pub(crate) source_branch: Option<WorkflowSourceBranch>,
     pub(crate) log: Vec<WorkflowLogEntry>,
+    pub(crate) definition_generation: u64,
+    pub(crate) active_run: Option<WorkflowActiveRun>,
+    pub(crate) pending_external: Option<WorkflowPendingExternal>,
+    pub(crate) approved_external: Option<WorkflowPendingExternal>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowPendingExternal {
+    pub(crate) tab_id: RepoTabId,
+    pub(crate) definition_generation: u64,
+    pub(crate) config: khaslana::workflow::extensions::WorkflowMcpConfig,
+    pub(crate) grant: khaslana::workflow::extensions::WorkflowExternalGrant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkflowRunIdentity {
+    pub(crate) tab_id: RepoTabId,
+    pub(crate) run_id: u64,
+    pub(crate) repo_path: PathBuf,
+    pub(crate) definition_generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowActiveRun {
+    pub(crate) identity: WorkflowRunIdentity,
+    pub(crate) control: khaslana::WorkflowRunControl,
+}
+
+impl WorkflowRunIdentity {
+    fn matches_tab(&self, tab: &RepoTabState) -> bool {
+        tab.id == self.tab_id
+            && tab.repo_path.as_ref() == Some(&self.repo_path)
+            && tab.workflow_state.active_run.as_ref()
+                .is_some_and(|run| run.identity == *self)
+    }
+
+    fn definition_is_current(&self, state: &WorkflowState) -> bool {
+        state.definition_generation == self.definition_generation
+    }
 }
 
 fn sync_conflict_state_from_paths(
@@ -2531,18 +2601,61 @@ pub(crate) enum UiEvent {
         message: String,
     },
     WorkflowProgress {
-        tab_id: RepoTabId,
+        identity: WorkflowRunIdentity,
         entry: WorkflowLogEntry,
     },
     WorkflowFinished {
-        tab_id: RepoTabId,
+        identity: WorkflowRunIdentity,
         message: String,
         snapshot: RepositorySnapshot,
         log: Vec<WorkflowLogEntry>,
     },
+    WorkflowStopped {
+        identity: WorkflowRunIdentity,
+        error: String,
+        cancelled: bool,
+        snapshot: Option<RepositorySnapshot>,
+    },
     /// 工作流模板目录后台刷新结果（目录 IO/JSON5 解析不占 UI 线程）。
     WorkflowTemplatesLoaded {
+        request_id: u64,
         result: Result<Vec<WorkflowTemplateItem>, String>,
+    },
+    WorkflowRemoteCatalogLoaded {
+        request_id: u64,
+        result: Result<Vec<khaslana::workflow::remote_templates::RemoteTemplateEntry>, String>,
+    },
+    WorkflowRemoteTemplateDownloaded {
+        file_name: String,
+        result: Result<PathBuf, String>,
+    },
+    AiExtensionsLoaded {
+        request_id: u64,
+        result: Result<(Vec<(String, String)>,
+            khaslana::workflow::extensions::WorkflowMcpConfig,
+            khaslana::workflow::browser_runtime::BrowserRuntimeInfo), String>,
+    },
+    AiSkillPreviewed {
+        request_id: u64,
+        result: Result<Option<khaslana::workflow::extensions::WorkflowSkillPreview>, String>,
+    },
+    AiMcpToolsInspected {
+        request_id: u64,
+        command: String,
+        args: Vec<String>,
+        result: Result<Vec<String>, String>,
+    },
+    AiExtensionChanged {
+        request_id: u64,
+        result: Result<String, String>,
+    },
+    WorkflowBrowserRuntimeProgress {
+        request_id: u64,
+        message: String,
+    },
+    WorkflowBrowserRuntimeFinished {
+        request_id: u64,
+        result: Result<(), String>,
     },
     /// 代码索引构建进度（按 repo_path 键控：索引中关闭仓库标签任务照常完成）。
     CodeIndexProgress {
@@ -2658,11 +2771,13 @@ pub(crate) enum UiEvent {
         task_id: u64,
         error: String,
     },
-    /// AI 供应商连接测试失败（不属于一次性生成任务，无任务身份）。
+    /// 供应商连接测试按请求代际收尾，不能清除其他请求的运行态。
     AiConnectionTestFailed {
+        request_id: u64,
         error: String,
     },
     AiConnectionTested {
+        request_id: u64,
         message: String,
     },
     // ── 更新事件 ──
@@ -3357,7 +3472,18 @@ pub(crate) struct RepositoryView {
     remote_credential_bindings: Arc<Mutex<RemoteCredentialBindings>>,
     credential_records: Vec<CredentialRecord>,
     pub(crate) workflow_templates: Vec<WorkflowTemplateItem>,
+    pub(crate) workflow_templates_request_id: u64,
     pub(crate) workflow_template_dir: Option<PathBuf>,
+    pub(crate) remote_workflow_loading: bool,
+    pub(crate) remote_workflow_catalog_request_id: u64,
+    pub(crate) remote_workflow_catalog: Vec<khaslana::workflow::remote_templates::RemoteTemplateEntry>,
+    pub(crate) remote_workflow_error: Option<String>,
+    pub(crate) remote_workflow_downloading: Option<String>,
+    pub(crate) browser_runtime_request_id: u64,
+    pub(crate) browser_runtime_downloading: bool,
+    pub(crate) browser_runtime_notice: Option<String>,
+    pub(crate) browser_runtime_origin: Option<RepoTabId>,
+    pub(crate) browser_runtime_resume: Option<(RepoTabId, u64)>,
     /// 工作流模板创建器状态（仅弹窗打开期间存在）。
     pub(crate) workflow_editor: Option<WorkflowEditorState>,
     /// 注释丢失确认前的暂存（编辑带注释模板时，确认后据此进入编辑器）。
@@ -3555,6 +3681,7 @@ pub(crate) struct RepositoryView {
     external_merge_intellij_path: TextFieldState,
     external_merge_detection: Option<(ExternalMergeSettings, bool)>,
     pub(crate) ai_enabled_form: bool,
+    pub(crate) ai_extensions: ai_extensions_view::AiExtensionsUiState,
     ai_base_url: TextFieldState,
     ai_api_key: TextFieldState,
     ai_model: TextFieldState,
@@ -3615,6 +3742,8 @@ pub(crate) struct RepositoryView {
     pub(crate) code_index_stats: HashMap<String, khaslana::code_index::IndexStats>,
     /// 设置页仓库列表过滤框（按仓库名称或路径过滤）。
     pub(crate) code_index_filter: TextFieldState,
+    /// AI 设置页分类侧栏的搜索框（按分类标题过滤分类项）。
+    pub(crate) ai_settings_category_search: TextFieldState,
     /// 设置页仓库列表（打开设置页时构建：已打开 tabs + 最近仓库 + 索引偏好记录）。
     pub(crate) code_index_list_entries: Vec<CodeIndexListEntry>,
     /// 在途索引任务的进度计数（进度条渲染；无任务时无意义）。
@@ -3999,7 +4128,7 @@ impl Render for RepositoryView {
             .child(self.render_code_search_palette(window, cx))
             .child(self.render_ai_thinking_overlay(window, cx))
             .child(self.render_credential_context_menu(cx))
-            .child(self.render_operation_blocker())
+            .child(self.render_operation_blocker(cx))
             .child(self.render_credentials(window, cx))
             .child(self.render_feedback_layer(cx))
     }

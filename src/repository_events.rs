@@ -1219,10 +1219,15 @@ impl RepositoryView {
                 self.last_error = None;
                 self.notify_success(toast_message, cx);
             }
-            UiEvent::WorkflowProgress { tab_id, entry } => {
-                self.with_tab_context(tab_id, |this| {
-                    this.status = entry.message.clone();
-                    this.workflow_state.log.push(entry);
+            UiEvent::WorkflowProgress { identity, entry } => {
+                if !self.tab(identity.tab_id).is_some_and(|tab| identity.matches_tab(tab)) {
+                    return;
+                }
+                self.with_tab_context(identity.tab_id, |this| {
+                    if identity.definition_is_current(&this.workflow_state) {
+                        this.status = entry.message.clone();
+                        this.workflow_state.log.push(entry);
+                    }
                 });
             }
             UiEvent::CodeIndexProgress {
@@ -1250,27 +1255,65 @@ impl RepositoryView {
             UiEvent::CodePaletteDetailFinished { seq, detail } => {
                 self.handle_code_palette_detail_finished(seq, detail);
             }
-            UiEvent::WorkflowTemplatesLoaded { result } => {
-                self.apply_workflow_templates(result, cx);
+            UiEvent::WorkflowTemplatesLoaded { request_id, result } => {
+                self.apply_workflow_templates(request_id, result, cx);
+            }
+            UiEvent::WorkflowRemoteCatalogLoaded { request_id, result } => {
+                self.apply_remote_workflow_catalog(request_id, result, cx);
+            }
+            UiEvent::WorkflowRemoteTemplateDownloaded { file_name, result } => {
+                self.apply_remote_workflow_download(file_name, result, cx);
+            }
+            UiEvent::AiExtensionsLoaded { request_id, result } => {
+                self.apply_ai_extensions_loaded(request_id, result);
+                cx.notify();
+            }
+            UiEvent::AiSkillPreviewed { request_id, result } => {
+                self.apply_ai_skill_preview(request_id, result);
+                cx.notify();
+            }
+            UiEvent::AiMcpToolsInspected { request_id, command, args, result } => {
+                self.apply_ai_mcp_tools(request_id, command, args, result);
+                cx.notify();
+            }
+            UiEvent::AiExtensionChanged { request_id, result } => {
+                self.apply_ai_extension_change(request_id, result, cx);
+            }
+            UiEvent::WorkflowBrowserRuntimeProgress { request_id, message } => {
+                if self.browser_runtime_request_id == request_id && self.browser_runtime_downloading {
+                    self.browser_runtime_notice = Some(message);
+                    cx.notify();
+                }
+            }
+            UiEvent::WorkflowBrowserRuntimeFinished { request_id, result } => {
+                self.apply_browser_runtime_finished(request_id, result, cx);
             }
             UiEvent::WorkflowFinished {
-                tab_id,
+                identity,
                 message,
                 snapshot,
                 log,
             } => {
+                if !self.tab(identity.tab_id).is_some_and(|tab| identity.matches_tab(tab)) {
+                    return;
+                }
+                let tab_id = identity.tab_id;
                 let toast_message = message.clone();
                 let mut full_status_request = None;
                 let mut sync_request = None;
                 self.with_tab_context(tab_id, |this| {
+                    let current_definition = identity.definition_is_current(&this.workflow_state);
+                    this.workflow_state.active_run = None;
                     this.busy = false;
                     this.operation_blocker = OperationBlocker::None;
                     this.operation_blocker_started = None;
                     this.operation_kind = OperationKind::Local;
                     this.loading = RepositoryLoading::default();
-                    this.status = message;
+                    this.status = if current_definition { message } else { "此前加载的工作流已完成".into() };
                     this.last_error = None;
-                    this.workflow_state.log = log;
+                    if current_definition {
+                        this.workflow_state.log = log;
+                    }
                     this.repo_path = Some(snapshot.path.clone());
                     this.sync_selected_remote(&snapshot);
                     this.change_indexes = ChangeListIndexes::rebuild(&snapshot.changes);
@@ -1299,6 +1342,58 @@ impl RepositoryView {
                     self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
                 }
                 self.notify_completion(&toast_message, cx);
+            }
+            UiEvent::WorkflowStopped { identity, error, cancelled, snapshot } => {
+                if !self.tab(identity.tab_id).is_some_and(|tab| identity.matches_tab(tab)) {
+                    return;
+                }
+                let tab_id = identity.tab_id;
+                let mut full_status_request = None;
+                let mut sync_request = None;
+                self.with_tab_context(tab_id, |this| {
+                    let current_definition = identity.definition_is_current(&this.workflow_state);
+                    this.workflow_state.active_run = None;
+                    this.busy = false;
+                    this.operation_blocker = OperationBlocker::None;
+                    this.operation_blocker_started = None;
+                    this.operation_kind = OperationKind::Local;
+                    this.loading = RepositoryLoading::default();
+                    if current_definition {
+                        this.workflow_state.log.push(WorkflowLogEntry::from(error.clone()));
+                        this.status = if cancelled { "工作流已取消".into() } else { "工作流失败".into() };
+                        this.last_error = if cancelled { None } else { Some(error.clone()) };
+                    }
+                    if let Some(snapshot) = snapshot {
+                        this.repo_path = Some(snapshot.path.clone());
+                        this.sync_selected_remote(&snapshot);
+                        this.change_indexes = ChangeListIndexes::rebuild(&snapshot.changes);
+                        this.snapshot = Some(snapshot);
+                        this.prune_stash_preview();
+                        this.sync_conflict_mode_with_snapshot();
+                        this.prune_change_selection();
+                        this.diff = None;
+                        this.diff_headers_expanded = false;
+                        this.reset_uniform_scroll("diff-scroll");
+                        this.refresh_history();
+                        this.scroll_local_branch_to_current();
+                        this.reload_history_after_change();
+                        full_status_request = this.repo_path.clone()
+                            .map(|path| (tab_id, path, this.repository_load_id));
+                        this.loading.status_full = true;
+                        sync_request = this.prepare_branch_sync_status_request();
+                    }
+                });
+                if let Some((tab_id, path, load_id)) = full_status_request {
+                    self.load_full_status_for_tab(tab_id, path, load_id, "变更已补全".to_string());
+                }
+                if let Some((tab_id, path, remote, load_id, request_id)) = sync_request {
+                    self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
+                }
+                if cancelled {
+                    self.notify_warning(error, cx);
+                } else {
+                    self.notify_error(error, cx);
+                }
             }
             UiEvent::OpenRepositoryFolderSelected { path } => {
                 if let Some(path) = path {
@@ -1564,13 +1659,19 @@ impl RepositoryView {
                 // 会恒落后一帧；改由弹窗内容末位 canvas 的 prepaint 按内容
                 // 长度键门控执行（见 render_ai_thinking_overlay）。
             }
-            UiEvent::AiConnectionTested { message } => {
+            UiEvent::AiConnectionTested { request_id, message } => {
+                if !self.ai_extensions.connection_test.finish(request_id, Ok(message.clone())) {
+                    return;
+                }
                 self.end_global_test_busy();
                 self.status = message.clone();
                 self.last_error = None;
                 self.notify_completion(&message, cx);
             }
-            UiEvent::AiConnectionTestFailed { error } => {
+            UiEvent::AiConnectionTestFailed { request_id, error } => {
+                if !self.ai_extensions.connection_test.finish(request_id, Err(error.clone())) {
+                    return;
+                }
                 // 连接测试失败（不属于一次性生成任务）：只解锁借用的 busy
                 // 并提示，不碰任何思考弹窗/加载标志。
                 self.end_global_test_busy();
@@ -1663,6 +1764,9 @@ impl RepositoryView {
                 // 无法定位具体是哪个任务 panic：保守复位所有 tab 的 busy/加载
                 // 标志与仓库加载槽位（序号守卫会丢弃迟到的旧结果，复位是安全的）。
                 for tab in self.tabs.iter_mut() {
+                    if let Some(run) = tab.workflow_state.active_run.take() {
+                        run.control.cancel();
+                    }
                     tab.busy = false;
                     tab.loading = RepositoryLoading::default();
                     tab.history_loading = HistoryLoading::default();
@@ -1680,7 +1784,10 @@ impl RepositoryView {
                 self.ai_thinking_task = None;
                 self.close_ai_thinking_overlay();
                 self.global_busy_tab = None;
+                self.ai_extensions.connection_test.interrupt("后台任务异常，请重新测试连接".into());
                 self.update_downloading = false;
+                self.remote_workflow_loading = false;
+                self.remote_workflow_downloading = None;
                 // 代码索引任务无法区分是否 panic 来源：置空全局单任务守卫，
                 // 否则卡死的守卫会永久挡掉手动/自动索引入口与设置页状态卡。
                 self.code_index_task = None;

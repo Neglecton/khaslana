@@ -426,6 +426,8 @@ pub enum GitError {
     NoRepository,
     #[error("操作产生冲突：{0:?}")]
     Conflicts(Vec<String>),
+    #[error("工作流已取消")]
+    WorkflowCancelled,
     #[error("{0}")]
     Message(String),
 }
