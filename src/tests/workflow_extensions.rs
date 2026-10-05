@@ -14,6 +14,9 @@ use super::extensions::{preview_skill_folder, install_skill_folder, remove_skill
     inspect_mcp_server_tools};
 use crate::git::test_support::git_test_support as git_support;
 
+#[path = "workflow_branch_browser.rs"]
+mod branch_browser;
+
 fn test_config(marker: &Path) -> WorkflowMcpConfig {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/tests/fixtures/workflow_mcp_server.ps1");

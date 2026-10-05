@@ -92,10 +92,11 @@ git diff --check
 ```
 
 - 代码实现完成需 release 构建零错误零警告；发现既有无关问题时报告，不擅自扩大修改范围。新增二进制或 feature 补对应检查。
+- 本地构建与打包统一使用 `cargo build --release` 和默认 `target/release`，不得通过 `--target-dir`、`CARGO_TARGET_DIR` 或其他 profile 创建额外的 release 测试、验证或打包目录。若构建因程序进程占用产物而失败，核实进程的可执行文件路径后终止占用本项目产物的 Khaslana 进程，再重试默认 release 构建；用户已授权此处理，无需再次确认。
 - 纯文档修改检查内容、路径与 diff 即可，无需编译。不要把 `cargo fmt` 当默认收尾步骤；必要格式调整限定本次修改范围。
 - 测试放 `src/tests/` 对应模块，经 `#[path]` 挂载；Git 测试复用 `src/git/test_support.rs` 与临时仓库。优先覆盖业务行为与回归场景。
 - UI 修改按重构计划验收矩阵验证键盘、焦点、IME、深浅主题、窄窗和 DPI；未做实机验证就明确标注未验证。Windows 注入 `WM_KEYDOWN` 使用 `PostMessage`，避免同步重入丢键。
-- 本地运行使用 `cargo run --bin khaslana`；正式打包 profile 为 `release-perf`，`cargo setup` 构建安装器（需 Inno Setup）。构建验证不意味着自动提交、打 tag 或发布。
+- 本地运行使用 `cargo run --bin khaslana`；本地打包采用上述默认 release 规则，安装器需要 Inno Setup。构建验证不意味着自动提交、打 tag 或发布。
 
 ## 9. 按需阅读与维护
 

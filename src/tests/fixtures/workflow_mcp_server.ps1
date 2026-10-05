@@ -35,7 +35,10 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                     @{ name = 'stall'; inputSchema = @{ type = 'object' } },
                     @{ name = 'browser_navigate'; inputSchema = @{ type = 'object'; properties = @{ url = @{ type = 'string' } }; required = @('url') } },
                     @{ name = 'browser_snapshot'; inputSchema = @{ type = 'object' } },
-                    @{ name = 'browser_type'; inputSchema = @{ type = 'object'; properties = @{ target = @{ type = 'string' }; text = @{ type = 'string' } }; required = @('target', 'text') } }
+                    @{ name = 'browser_type'; inputSchema = @{ type = 'object'; properties = @{ target = @{ type = 'string' }; text = @{ type = 'string' } }; required = @('target', 'text') } },
+                    @{ name = 'new_page'; inputSchema = @{ type = 'object'; properties = @{ url = @{ type = 'string' } }; required = @('url') } },
+                    @{ name = 'take_snapshot'; inputSchema = @{ type = 'object'; properties = @{ pageId = @{ type = 'integer' } }; required = @('pageId') } },
+                    @{ name = 'fill'; inputSchema = @{ type = 'object'; properties = @{ pageId = @{ type = 'integer' }; uid = @{ type = 'string' }; value = @{ type = 'string' } }; required = @('pageId', 'uid', 'value') } }
                 ) }
             }
             'tools/call' {
@@ -72,6 +75,19 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                     'browser_type' {
                         [System.IO.File]::WriteAllText($marker, [string]$request.params.arguments.text)
                         $result = @{ content = @(@{ type = 'text'; text = 'filled' }) }
+                    }
+                    'new_page' {
+                        $sessionValue = [string]$request.params.arguments.url
+                        $result = @{ content = @(@{ type = 'text'; text = "Pages: 1: $sessionValue [selected]" }) }
+                    }
+                    'take_snapshot' {
+                        $value = if (Test-Path -LiteralPath $marker) { [System.IO.File]::ReadAllText($marker) } else { '' }
+                        $result = @{ content = @(@{ type = 'text'; text = "uid=1_0 RootWebArea Web form url=$sessionValue`nuid=1_1 textbox Text input value=$value" }) }
+                    }
+                    'fill' {
+                        if ($request.params.arguments.pageId -ne 1 -or $request.params.arguments.uid -ne '1_1') { throw 'wrong target' }
+                        [System.IO.File]::WriteAllText($marker, [string]$request.params.arguments.value)
+                        $result = @{ content = @(@{ type = 'text'; text = 'filled Text input' }) }
                     }
                     default { throw 'unknown tool' }
                 }

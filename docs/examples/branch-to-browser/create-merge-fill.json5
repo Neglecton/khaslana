@@ -1,0 +1,28 @@
+{
+  version: 2,
+  name: "新建分支、合并并填写浏览器",
+  defaults: { requireCleanWorktree: true },
+  inputs: {
+    base: { label: "创建分支的起点", default: "${git.initialBranch}", required: true },
+    target: { label: "新分支名称", default: "demo/browser-${date:%Y%m%d-%H%M%S}", required: true },
+    source: { label: "要合并进来的分支", required: true },
+  },
+  steps: [
+    { op: "invoke", id: "create", uses: "git.createBranch",
+      with: { name: "${target}", from: "${base}", checkout: true } },
+    { op: "invoke", id: "merge", uses: "git.merge", with: { branch: "${source}" } },
+    { op: "invoke", id: "check", uses: "git.assertBranch", with: { branch: "${target}" } },
+    { op: "invoke", id: "fill", uses: "skill.run", saveAs: "browserResult",
+      with: {
+        skill: "branch-to-browser",
+        task: "新分支已创建并完成合并。将完整分支名「${target}」填入 https://www.selenium.dev/selenium/web/web-form.html 的 Text input 输入框。不要改变分支名，不要提交表单；填写后读取页面快照确认输入值，并用中文说明结果。",
+        // 服务 ID 必须与设置中的名称一致；如名称不同，请替换下面三处。
+        tools: [
+          { server: "chrome-devtools", tool: "new_page" },
+          { server: "chrome-devtools", tool: "take_snapshot" },
+          { server: "chrome-devtools", tool: "fill" },
+        ],
+      },
+    },
+  ],
+}
