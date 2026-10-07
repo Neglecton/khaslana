@@ -2,7 +2,21 @@
 use super::*;
 use super::document::{card, column, hint, text, edit_tool_selection};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{Icon, Sizable, Disableable, button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
+use gpui_kit::base::ElementExt;
+use gpui_kit::component::{Icon, Sizable, Disableable, button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenu, PopupMenuItem}};
+
+type MenuWidth = std::rc::Rc<std::cell::Cell<Option<gpui::Pixels>>>;
+
+pub(super) fn measure_menu_field(field: gpui::Div, width: MenuWidth) -> gpui::Div {
+    field.on_prepaint(move |bounds, _, _| width.set(Some(bounds.size.width)))
+}
+
+pub(super) fn fit_menu(menu: PopupMenu, width: &MenuWidth, window: &Window) -> PopupMenu {
+    // Kit 的 min_w / max_w 都作用于菜单内容盒；同时设置才能覆盖默认最大宽度。
+    let available = (window.viewport_size().width - px(16.0)).max(px(1.0));
+    let width = width.get().unwrap_or(px(200.0)).min(available).max(px(1.0));
+    menu.min_w(width).max_w(width)
+}
 
 pub(super) fn icon(name: IconName, color: u32) -> Icon {
     Icon::new(name).with_size(px(16.0)).text_color(rgb(color))
@@ -57,6 +71,12 @@ fn status(label: &str, available: bool) -> gpui::Div {
 }
 
 impl RepositoryView {
+    pub(super) fn document_menu_width(&self, key: String) -> MenuWidth {
+        // 打开菜单会重新渲染，测量值需跨帧保留，不能在 builder 内重建为零宽。
+        self.workflow_editor.as_ref().expect("编辑器状态缺失").document_menu_widths
+            .borrow_mut().entry(key).or_default().clone()
+    }
+
     pub(super) fn document_input(&self, id: WorkflowEditorFieldId, _window: &Window, _cx: &mut Context<Self>) -> gpui::AnyElement {
         let field_id = FieldId::WorkflowEditor(id);
         let blocked = self.active_operation_blocker_message().is_some() && !self.operation_blocker_allows_text_field(field_id);
@@ -65,14 +85,14 @@ impl RepositoryView {
             .unwrap_or_else(|| div().into_any_element())
     }
 
-    pub(super) fn document_options(&self, index: usize, slot: WorkflowStepSlot, options: Vec<String>, cx: &Context<Self>) -> gpui::AnyElement {
+    pub(super) fn document_options(&self, index: usize, slot: WorkflowStepSlot, options: Vec<String>, width: MenuWidth, cx: &Context<Self>) -> gpui::AnyElement {
         let entity = cx.entity();
         let current = self.workflow_editor.as_ref().and_then(|editor| editor.data.steps.get(index))
             .map(|step| step.invoke.value(slot).to_string()).unwrap_or_default();
         div().w(px(28.0)).h(px(36.0)).flex_none().child(
             icon_button(format!("workflow-v2-options-{index}-{slot:?}"), if options.is_empty() { "没有可选项目，请先在设置中配置" } else { "选择已配置的项目" }, IconName::ChevronDown, !options.is_empty())
-            .dropdown_menu(move |mut menu, window, _| {
-                menu = menu.scrollable(true).max_h(px(240.0)).min_w(px(200.0));
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |mut menu, window, _| {
+                menu = fit_menu(menu, &width, window).scrollable(true).max_h(px(240.0));
                 for value in &options {
                     let value = value.clone();
                     menu = menu.item(PopupMenuItem::new(value.clone()).checked(value == current).on_click(window.listener_for(&entity, move |this, _, _, cx| {
@@ -96,13 +116,15 @@ impl RepositoryView {
         let selector = matches!(slot, WorkflowStepSlot::Skill | WorkflowStepSlot::Server | WorkflowStepSlot::Tool);
         let roomy = f32::from(window.viewport_size().width) >= 1380.0;
         let label = match slot { WorkflowStepSlot::Skill => "选择 Skill", WorkflowStepSlot::Task => "任务描述", WorkflowStepSlot::SaveAs => "输出变量", _ => slot.label() };
+        let width = self.document_menu_width(format!("options-{index}-{slot:?}"));
         let mut field = div().flex().min_w_0().flex_1().gap_1().items_center()
             .child(div().flex_1().min_w_0().when(slot == WorkflowStepSlot::Task, |input| input.w_full())
                 .child(self.document_input(WorkflowEditorFieldId::StepParam { step: index, slot }, window, cx)))
-            .when(selector, |row| row.child(self.document_options(index, slot, options, cx)));
+            .when(selector, |row| row.child(self.document_options(index, slot, options, width.clone(), cx)));
         if roomy && (selector || slot == WorkflowStepSlot::SaveAs) {
             field = field.flex_none().w(px(if slot == WorkflowStepSlot::SaveAs { 400.0 } else { 308.0 }));
         }
+        if selector { field = measure_menu_field(field, width); }
         if slot == WorkflowStepSlot::Task { field = field.flex_col().items_start().w_full().child(hint("描述要完成的任务，支持使用输入变量")); }
         let available = match slot {
             WorkflowStepSlot::Skill => self.ai_extensions.skills.iter().any(|(name, _)| name == value),
@@ -152,10 +174,12 @@ impl RepositoryView {
         let entity = cx.entity();
         let configured = server == "browser.edge" || self.ai_extensions.mcp.servers.contains_key(&server);
         let current_server = server.clone();
-        let server_select = div().flex_1().min_w_0().h(px(36.0)).child(
+        let server_width = self.document_menu_width(format!("permission-server-{index}"));
+        let server_measure = server_width.clone();
+        let server_select = measure_menu_field(div().flex_1().min_w_0().h(px(36.0)).child(
             menu_button(format!("workflow-v2-permission-server-{index}"), server.clone(), !editor.ai_loading)
             .dropdown_menu(move |mut menu, window, _| {
-                menu = menu.scrollable(true).max_h(px(240.0)).min_w(px(200.0));
+                menu = fit_menu(menu, &server_width, window).scrollable(true).max_h(px(240.0));
                 for value in &servers {
                     let value = value.clone(); let key = key.clone();
                     menu = menu.item(PopupMenuItem::new(value.clone()).checked(value == current_server).on_click(window.listener_for(&entity, move |this, _, _, cx| {
@@ -163,7 +187,7 @@ impl RepositoryView {
                         if let Some(editor) = this.workflow_editor.as_mut() { editor.document_tool_servers.insert(key.clone(), value.clone()); } cx.notify();
                     })));
                 } menu
-            }));
+            })), server_measure);
         let mut chips = div().flex().flex_wrap().items_center().min_w_0().flex_1().gap_1();
         for (position, item) in selected.iter().enumerate() {
             let Some(tool) = item["tool"].as_str() else { continue; };
@@ -176,9 +200,12 @@ impl RepositoryView {
         if selected.is_empty() { chips = chips.child(hint("选择可调用的工具")); }
         let tools = self.document_server_tools(&server);
         let entity = cx.entity();
+        let tool_width = self.document_menu_width(format!("tools-{index}"));
+        let tool_measure = tool_width.clone();
         let menu_button = icon_button(format!("workflow-v2-tool-picker-{index}"), "选择允许的工具", IconName::ChevronDown, !tools.is_empty())
-            .dropdown_menu(move |mut menu, window, _| {
-                menu = menu.scrollable(true).max_h(px(260.0)).min_w(px(220.0));
+            .w(px(36.0)).h(px(36.0))
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |mut menu, window, _| {
+                menu = fit_menu(menu, &tool_width, window).scrollable(true).max_h(px(260.0));
                 for tool in &tools {
                     let checked = selected.iter().any(|item| item["server"] == server && item["tool"] == *tool);
                     let tool = tool.clone(); let server = server.clone();
@@ -191,8 +218,10 @@ impl RepositoryView {
             .child(div().flex().items_center().gap_3().child(text("MCP 服务").w(px(108.0)).flex_none())
                 .child(server_select).child(status(if configured { "已配置" } else { "未找到" }, configured)))
             .child(div().flex().items_start().gap_3().child(text("可用工具").w(px(108.0)).pt_2().flex_none())
-                .child(div().flex().flex_1().min_w_0().items_center().p_1().gap_1().border_1().border_color(rgb(ui_theme::WORKFLOW_OUTLINE)).rounded(px(ui_theme::RADIUS_XS)).child(chips)
-                    .child(div().w(px(28.0)).h(px(28.0)).flex_none().child(menu_button))))
+                .child(measure_menu_field(div().relative().flex().flex_1().min_w_0().items_center().gap_1().rounded(px(ui_theme::RADIUS_XS))
+                    // 边框独立绘制，箭头触发器的右边界与整个字段相同。
+                    .child(div().absolute().inset_0().border_1().border_color(rgb(ui_theme::WORKFLOW_OUTLINE)).rounded(px(ui_theme::RADIUS_XS)))
+                    .child(chips.pl_1().py_1()).child(div().w(px(36.0)).h(px(36.0)).flex_none().child(menu_button)), tool_measure)))
     }
 
     pub(super) fn document_git_parameters(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
@@ -220,16 +249,19 @@ impl RepositoryView {
         if step.kind == WorkflowStepKind::GuardRemoteBranch {
             for (exists, current) in [(true, step.on_exists), (false, step.on_missing)] {
                 let entity = cx.entity();
+                let width = self.document_menu_width(format!("guard-{index}-{exists}"));
+                let measured = width.clone();
                 body = body.child(div().flex().items_center().gap_3().child(text(if exists { "远端分支存在" } else { "远端分支不存在" }).w(px(108.0)))
-                    .child(div().flex_1().min_w_0().h(px(36.0)).child(
+                    .child(measure_menu_field(div().flex_1().min_w_0().h(px(36.0)).child(
                         menu_button(format!("workflow-v2-guard-{index}-{exists}"), if current == RemoteBranchGuardAction::Fail { "停止工作流" } else { "继续执行" }, true)
                         .dropdown_menu(move |mut menu, window, _| {
+                            menu = fit_menu(menu, &width, window);
                             for (value, label) in [(RemoteBranchGuardAction::Fail, "停止工作流"), (RemoteBranchGuardAction::Continue, "继续执行")] {
                                 menu = menu.item(PopupMenuItem::new(label).checked(value == current).on_click(window.listener_for(&entity, move |this, _, _, cx| {
                                     this.workflow_editor_set_guard_action(index, exists.then_some(value), (!exists).then_some(value)); cx.notify();
                                 })));
                             } menu
-                        }))));
+                        })), measured)));
             }
         }
         if step.kind == WorkflowStepKind::EnsureClean { body = body.child(hint(step.kind.description())); }

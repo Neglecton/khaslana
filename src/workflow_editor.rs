@@ -1258,6 +1258,7 @@ pub(crate) struct WorkflowEditorState {
     document_preview_open: bool,
     document_advanced_step: Option<usize>,
     document_tool_servers: std::collections::HashMap<String, String>,
+    document_menu_widths: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<std::cell::Cell<Option<gpui::Pixels>>>>>,
     document_picker_focus: gpui::FocusHandle,
     data: WorkflowEditorData,
     name_field: TextFieldState,
@@ -1318,6 +1319,7 @@ impl WorkflowEditorState {
             document_preview_open: false,
             document_advanced_step: None,
             document_tool_servers: Default::default(),
+            document_menu_widths: Default::default(),
             document_picker_focus: cx.focus_handle(),
             data,
             name_field,
@@ -1442,14 +1444,25 @@ fn workflow_step_menu_scroll_id(index: usize) -> &'static str {
 }
 
 impl RepositoryView {
-    /// 打开「新建工作流模板」编辑器。
-    pub(crate) fn open_workflow_editor(&mut self, cx: &mut Context<Self>) {
-        self.close_popups();
-        self.set_main_mode(crate::MainMode::Workflow);
+    fn show_workflow_editor(&mut self, editor: WorkflowEditorState, cx: &mut Context<Self>) {
+        // 切页会关闭弹层，必须先完成切页再挂载编辑器；同页打开不刷新模板。
+        if self.main_mode != crate::MainMode::Workflow {
+            self.set_main_mode(crate::MainMode::Workflow);
+        } else {
+            self.close_popups();
+        }
         self.refresh_ai_extensions();
-        self.workflow_editor = Some(WorkflowEditorState::new(cx));
+        self.pending_workflow_edit = None;
+        self.workflow_editor = Some(editor);
         self.active_dialog = Some(crate::DialogState::WorkflowEditor);
         self.last_error = None;
+        cx.notify();
+    }
+
+    /// 打开「新建工作流模板」编辑器。
+    pub(crate) fn open_workflow_editor(&mut self, cx: &mut Context<Self>) {
+        let editor = WorkflowEditorState::new(cx);
+        self.show_workflow_editor(editor, cx);
     }
 
     /// 打开「编辑已有模板」：读文件 → 解析 → 反映射为编辑数据。
@@ -1507,10 +1520,8 @@ impl RepositoryView {
         } else {
             data.editing_path = Some(path);
         }
-        self.workflow_editor = Some(WorkflowEditorState::from_data(data, cx));
-        self.active_dialog = Some(crate::DialogState::WorkflowEditor);
-        self.set_main_mode(crate::MainMode::Workflow);
-        self.refresh_ai_extensions();
+        let editor = WorkflowEditorState::from_data(data, cx);
+        self.show_workflow_editor(editor, cx);
     }
 
     /// 注释丢失确认后真正进入编辑模式。
@@ -1521,10 +1532,8 @@ impl RepositoryView {
         };
         let mut data = pending.data;
         data.editing_path = Some(pending.path);
-        self.workflow_editor = Some(WorkflowEditorState::from_data(data, cx));
-        self.active_dialog = Some(crate::DialogState::WorkflowEditor);
-        self.set_main_mode(crate::MainMode::Workflow);
-        self.refresh_ai_extensions();
+        let editor = WorkflowEditorState::from_data(data, cx);
+        self.show_workflow_editor(editor, cx);
     }
 
     /// 关闭编辑器（放弃未保存内容）。

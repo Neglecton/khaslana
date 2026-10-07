@@ -2,7 +2,7 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement;
 use crate::ui::components::{floating_panel, settings_command_button, SettingsButtonTone};
-use super::visual::{badge, icon, icon_button, menu_button, step_icon};
+use super::visual::{badge, icon, icon_button, menu_button, step_icon, measure_menu_field, fit_menu};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
 
@@ -88,10 +88,8 @@ impl RepositoryView {
         if editor.ai_loading { return; }
         editor.sync_from_fields();
         let data = v2_copy_data(&editor.data);
-        self.workflow_editor = Some(WorkflowEditorState::from_data(data, cx));
-        self.set_main_mode(crate::MainMode::Workflow);
-        self.refresh_ai_extensions();
-        cx.notify();
+        let editor = WorkflowEditorState::from_data(data, cx);
+        self.show_workflow_editor(editor, cx);
     }
 
     pub(crate) fn workflow_document_editor_visible(&self) -> bool {
@@ -367,14 +365,16 @@ impl RepositoryView {
             body = body.child(self.document_git_parameters(index, window, cx));
             let entity = cx.entity();
             let current_kind = step.kind;
+            let width = self.document_menu_width(format!("kind-{index}"));
+            let measured = width.clone();
             body = body.child(div().flex().items_center().gap_3()
                 .child(text("操作类型").w(px(108.0)).flex_none())
-                .child(div().flex_1().min_w_0().h(px(36.0)).child(
+                .child(measure_menu_field(div().flex_1().min_w_0().h(px(36.0)).child(
                     menu_button(format!("workflow-v2-kind-{index}"), step.kind.display_name(), enabled).accessibility_label("更改 Git 操作类型")
                 .dropdown_menu(move |mut menu, window, _| {
-                    menu = menu.scrollable(true).max_h(px(240.0)).min_w(px(220.0));
+                    menu = fit_menu(menu, &width, window).scrollable(true).max_h(px(240.0));
                     for kind in WorkflowStepKind::all() { menu = menu.item(PopupMenuItem::new(kind.display_name()).checked(kind == current_kind).on_click(window.listener_for(&entity, move |this, _, _, cx| { this.workflow_editor_set_step_kind(index, kind); cx.notify(); }))); } menu
-                }))));
+                })), measured)));
             return panel.child(body).into_any_element();
         }
         for (slot, _, _) in step.invoke.parameters() {
