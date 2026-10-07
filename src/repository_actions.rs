@@ -564,6 +564,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn set_main_mode(&mut self, mode: MainMode) {
+        self.pending_search_branch = None;
         self.main_mode = mode;
         // Navigator 偏好由 tab 内的各模式独立保存，切换模式不重置用户选择。
         self.close_popups();

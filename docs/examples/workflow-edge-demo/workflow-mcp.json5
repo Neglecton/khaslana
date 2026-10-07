@@ -1,0 +1,13 @@
+{
+  servers: {
+    edgeDemo: {
+      command: "npx.cmd",
+      args: ["-y", "@playwright/mcp@0.0.82", "--browser", "msedge", "--isolated", "--timeout-navigation", "25000"],
+      tools: {
+        browser_navigate: { access: "write" },
+        browser_snapshot: { access: "read" },
+        browser_type: { access: "write" },
+      },
+    },
+  },
+}

@@ -130,6 +130,15 @@ impl RepositoryView {
                 | FieldId::AiMcpArgs
                 // 工作流模板 AI 功能需求描述（编辑器弹窗内多行输入）。
                 | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::AiDescription)
+                | FieldId::WorkflowEditor(workflow_editor::WorkflowEditorFieldId::StepParam {
+                    slot: workflow_editor::WorkflowStepSlot::Arguments
+                        | workflow_editor::WorkflowStepSlot::ToolArguments
+                        | workflow_editor::WorkflowStepSlot::Script
+                        | workflow_editor::WorkflowStepSlot::JsInput
+                        | workflow_editor::WorkflowStepSlot::Task
+                        | workflow_editor::WorkflowStepSlot::Tools,
+                    ..
+                })
         )
     }
 

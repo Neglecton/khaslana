@@ -51,6 +51,7 @@ use gpui_kit::component::input::{
 };
 
 use crate::{FieldId, RepositoryView, ui::theme as ui_theme, workflow_editor::WorkflowEditorFieldId};
+use crate::ui::theme::rgb;
 
 /// 单行输入框高度（与设置页其余控件同一档）。
 const KIT_INPUT_HEIGHT: f32 = 34.0;
@@ -219,6 +220,22 @@ impl KitField {
         self.input.is_focused(window, cx)
     }
 
+    /// 工作流文档只定制表面和尺寸，继续复用同一 Kit 编辑实体、订阅与 IME 真值。
+    pub(crate) fn render_workflow_document(&self, multiline_height: f32, blocked: bool) -> AnyElement {
+        match &self.input {
+            KitFieldInput::Single(state) => Input::new(state)
+                .h(px(36.0)).text_size(px(14.0))
+                .bg(rgb(ui_theme::WORKFLOW_SURFACE))
+                .border_color(rgb(ui_theme::WORKFLOW_OUTLINE))
+                .rounded(px(ui_theme::RADIUS_XS)).disabled(blocked).into_any_element(),
+            KitFieldInput::Multi(state) => Textarea::new(state)
+                .h(px(multiline_height)).text_size(px(14.0))
+                .bg(rgb(ui_theme::WORKFLOW_SURFACE))
+                .border_color(rgb(ui_theme::WORKFLOW_OUTLINE))
+                .rounded(px(ui_theme::RADIUS_XS)).disabled(blocked).into_any_element(),
+        }
+    }
+
     /// 渲染成 Kit 输入元素。`blocked` 来自操作遮罩（高风险操作期间禁止输入）。
     ///
     /// 字号显式压到 `TYPE_BODY`：Kit 的 `Input`/`Textarea` 默认 `Size::Medium`，
@@ -248,6 +265,11 @@ impl KitField {
 }
 
 impl RepositoryView {
+    /// 搜索面板捕获导航键前检查组合输入，避免 Enter/Esc 打断中文候选。
+    pub(crate) fn kit_field_has_ime_composition(&self, id: FieldId, window: &mut Window, cx: &mut App) -> bool {
+        self.kit_field(id).is_some_and(|field| field.input.is_focused(window, cx) && field.input.has_ime_composition(window, cx))
+    }
+
     /// 取得字段的 Kit 宿主；未迁移或尚未创建时为 `None`。
     pub(crate) fn kit_field(&self, id: FieldId) -> Option<&KitField> {
         self.kit_fields
@@ -590,7 +612,9 @@ where
             {
                 return;
             }
-            this.submit_focused_field(id);
+            if !this.submit_workflow_document_field(id, cx) {
+                this.submit_focused_field(id);
+            }
             cx.notify();
         },
     );

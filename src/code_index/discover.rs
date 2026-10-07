@@ -6,7 +6,7 @@
 //! （未提交的构建产物等）也必须剪枝。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::UNIX_EPOCH;
 
@@ -31,6 +31,7 @@ pub struct DiscoverOutcome {
     pub files: Vec<DiscoveredFile>,
     /// 被排除的文件总数（目录剪枝 + 后缀黑名单合计，仅统计口径展示）。
     pub excluded_count: usize,
+    pub issues: Vec<super::coverage::FileCoverage>,
 }
 
 /// 永远跳过的目录名（basename 匹配，任意深度，大小写不敏感）。取参考项目
@@ -154,6 +155,8 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
     let root = repo_root.to_path_buf();
     let pruned_dirs = Arc::new(AtomicUsize::new(0));
     let pruned_dirs_in_filter = Arc::clone(&pruned_dirs);
+    let issues = Arc::new(Mutex::new(Vec::new()));
+    let directory_issues = Arc::clone(&issues);
 
     let walker = WalkBuilder::new(repo_root)
         .hidden(true) // 跳过隐藏项；.github 等隐藏目录损失可接受，换来 .git 等零成本剪枝
@@ -176,13 +179,19 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
                 || path.join(".git").is_file();
             if prune {
                 pruned_dirs_in_filter.fetch_add(1, Ordering::Relaxed);
+                let rel = path.strip_prefix(&root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+                directory_issues.lock().unwrap_or_else(|e| e.into_inner()).push(super::coverage::FileCoverage::new(
+                    &rel, "excluded", "目录剪枝或独立子仓库"));
             }
             !prune
         })
         .build();
 
     for entry in walker {
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(".", "read_failed", error.to_string())); continue; }
+        };
         let Some(file_type) = entry.file_type() else {
             continue;
         };
@@ -209,11 +218,13 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
 
         if is_ignored_suffix(name) || is_ignored_filename(name) || name.starts_with(".git") {
             outcome.excluded_count += 1;
+            outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "excluded", "文件名或生成产物过滤"));
             continue;
         }
 
-        let Ok(meta) = std::fs::metadata(&abs_path) else {
-            continue;
+        let meta = match std::fs::metadata(&abs_path) {
+            Ok(meta) => meta,
+            Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "read_failed", error.to_string())); continue; }
         };
 
         outcome.files.push(DiscoveredFile {
@@ -232,6 +243,13 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
     }
 
     outcome.excluded_count += pruned_dirs.load(Ordering::Relaxed);
+    outcome.issues.extend(issues.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
+    outcome.issues.sort_by(|a, b| a.path.cmp(&b.path));
     outcome.files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(outcome)
+}
+
+pub(super) fn excluded_name(name: &str, directory: bool) -> bool {
+    if directory { ALWAYS_SKIP_DIRS.iter().any(|skip| name.eq_ignore_ascii_case(skip)) || name.starts_with('.') }
+    else { is_ignored_suffix(name) || is_ignored_filename(name) || name.starts_with(".git") }
 }

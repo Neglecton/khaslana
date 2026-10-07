@@ -1,0 +1,22 @@
+{
+  version: 2,
+  name: "Edge 公开表单读取与填写",
+  defaults: { requireCleanWorktree: false },
+  inputs: {
+    demoText: { label: "演示填写内容", default: "Khaslana Edge demo", required: true },
+  },
+  steps: [
+    {
+      op: "invoke", id: "read-and-fill", uses: "js.run", saveAs: "result",
+      with: {
+        input: { value: "${demoText}" },
+        tools: [
+          { server: "browser.edge", tool: "browser_navigate" },
+          { server: "browser.edge", tool: "browser_snapshot" },
+          { server: "browser.edge", tool: "browser_type" },
+        ],
+        script: "const url = 'https://www.selenium.dev/selenium/web/web-form.html'; const opened = mcp.call('browser.edge', 'browser_navigate', {url}); const before = JSON.stringify(mcp.call('browser.edge', 'browser_snapshot', {})); if (!JSON.stringify(opened).includes(url) || !before.includes('Web form') || !before.includes('Text input')) throw Error('页面不匹配，停止填写'); mcp.call('browser.edge', 'browser_type', {element:'Text input',target:'input[name=\"my-text\"]',text:input.value,submit:false}); const after = JSON.stringify(mcp.call('browser.edge', 'browser_snapshot', {})); if (!after.includes(input.value)) throw Error('填写结果未出现在页面快照中'); return {page:url,filled:input.value};",
+      },
+    },
+  ],
+}

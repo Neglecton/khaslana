@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::queries::{self, DetailOutcome, TraceDirection, TraceOutcome};
-use super::store::{IndexStats, read_index_stats, search_symbols_filtered};
+use super::store::{IndexStats, read_index_stats};
+use super::search::{SearchOptions, search_symbols_with_options};
 use crate::types::Result;
 
 /// 服务器支持的 MCP 协议版本（协商：客户端声明版本在列表内则回显，否则回最新）。
@@ -49,13 +50,17 @@ struct RepoContext {
 pub struct McpServer {
     fixed: Option<RepoContext>,
     data_dir: PathBuf,
-    /// 已做过启动索引保障的仓库键（每仓库每服务器生命周期一次，防每次工具
-    /// 调用重复派后台线程）。
-    ensured: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// 正在后台建索引/刷新的仓库键（None=空闲）。既互斥后台任务与
-    /// refresh_index，也让查询错误能精确提示「该仓库正在建索引」（多仓库
-    /// 模式下不误伤其他仓库的报错）。
-    indexing_repo: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    coordinator: super::jobs::IndexCoordinator,
+    auto_refresh: bool,
+
+}
+
+#[cfg(test)]
+#[path = "../tests/code_index_mcp_jobs.rs"]
+mod jobs_tests;
+
+impl Drop for McpServer {
+    fn drop(&mut self) { self.coordinator.stop(); }
 }
 
 impl McpServer {
@@ -69,8 +74,8 @@ impl McpServer {
         let mut server = Self {
             fixed: None,
             data_dir,
-            ensured: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            indexing_repo: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            coordinator: super::jobs::IndexCoordinator::default(),
+            auto_refresh: true,
         };
         if let Some(repo_path) = repo_path {
             let ctx = Self::context_from_root(&server.data_dir, repo_path)?;
@@ -90,8 +95,8 @@ impl McpServer {
                 repo_key: String::new(),
             }),
             data_dir: std::env::temp_dir(),
-            ensured: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            indexing_repo: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            coordinator: super::jobs::IndexCoordinator::default(),
+            auto_refresh: false,
         }
     }
 
@@ -101,8 +106,8 @@ impl McpServer {
         Self {
             fixed: None,
             data_dir,
-            ensured: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            indexing_repo: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            coordinator: super::jobs::IndexCoordinator::default(),
+            auto_refresh: false,
         }
     }
 
@@ -220,59 +225,38 @@ impl McpServer {
             };
         };
         let ctx = self.context_from_spec(spec)?;
-        self.ensure_index_background(&ctx);
         Ok(ctx)
     }
 
-    /// 首次触达仓库的后台索引保障（对齐参考项目 maybe_auto_index）：每仓库
-    /// 每服务器生命周期只跑一次；无库自动全量建、有库增量检查。大仓库全量
-    /// 建索引可达分钟级，走后台线程防 MCP 客户端 initialize/工具超时；建立
+    /// 查询触发后台索引检查：按仓库排队、成功检查节流、失败指数退避。
+    /// 无库自动全量建、有库增量检查。大仓库全量
+    /// 建索引可达分钟级，走专用任务池防 MCP 客户端 initialize/工具超时；建立
     /// 期间查询得到「索引尚未建立」错误 + hint，属预期行为。
     fn ensure_index_background(&self, ctx: &RepoContext) {
-        {
-            let mut ensured = self.ensured.lock().unwrap_or_else(|e| e.into_inner());
-            if !ensured.insert(ctx.repo_key.clone()) {
-                return;
-            }
-        }
-        let Some(repo_root) = ctx.repo_root.clone() else {
-            return;
-        };
-        {
-            let mut slot = self.indexing_repo.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_some() {
-                return;
-            }
-            *slot = Some(ctx.repo_key.clone());
-        }
+        if !self.auto_refresh { return; }
+        let Some(repo_root) = ctx.repo_root.clone() else { return; };
         let db_path = ctx.db_path.clone();
         let repo_key = ctx.repo_key.clone();
-        let indexing_repo = std::sync::Arc::clone(&self.indexing_repo);
-        std::thread::spawn(move || {
-            let result = Self::run_index_inner(&repo_root, &db_path, false, |message| {
+        self.coordinator.schedule(repo_key.clone(), false, move |cancel| {
+            let result = Self::run_index_inner(&repo_root, &db_path, false, cancel, |message| {
                 eprintln!("[khaslana-mcp] {message}");
             });
-            *indexing_repo.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            if let Err(error) = result {
-                eprintln!("[khaslana-mcp] 后台索引失败（{repo_key}）：{error}");
-            }
+            if let Err(error) = &result { eprintln!("[khaslana-mcp] 后台索引失败（{repo_key}）：{error}"); }
+            result.map_err(|error| error.to_string())
         });
     }
 
-    fn indexing_repo_key(&self) -> Option<String> {
-        self.indexing_repo
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    fn indexing(&self, key: &str) -> bool {
+        self.coordinator.status(key)["active"].as_bool().unwrap_or(false)
     }
 
     fn run_index_inner(
         repo_root: &Path,
         db_path: &Path,
         force_full: bool,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
         progress: fn(String),
     ) -> Result<()> {
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut options = super::PipelineOptions::new(
             cancel,
             Box::new(move |p| progress(format!("{} {}/{}", p.phase.display(), p.done, p.total))),
@@ -283,7 +267,7 @@ impl McpServer {
                 stats.files, stats.symbols, stats.edges
             )),
             super::RunOutcome::Unchanged => progress("索引无变化".to_string()),
-            super::RunOutcome::Cancelled => progress("索引已取消".to_string()),
+            super::RunOutcome::Cancelled => return Err(super::err("索引已取消，保留原有索引")),
         }
         Ok(())
     }
@@ -295,6 +279,9 @@ impl McpServer {
     /// tools/call 分发：返回 MCP content 信封（业务错误 isError:true）。
     /// list_projects 不依赖仓库；其余工具先按 repo 参数解析目标仓库。
     fn call_tool(&self, name: &str, arguments: &Value) -> Value {
+        if !matches!(name, "list_projects" | "search_symbols" | "search_graph" | "get_symbol_detail" | "get_code_snippet" | "trace_path" | "get_architecture" | "detect_changes" | "index_status" | "check_index_coverage" | "refresh_index") {
+            return text_result(&json!({ "error": format!("未知工具 {name}"), "hint": "可用工具见 tools/list" }), true);
+        }
         if name == "list_projects" {
             return match self.tool_list_projects() {
                 Ok(value) => text_result(&value, false),
@@ -306,13 +293,21 @@ impl McpServer {
             Ok(ctx) => ctx,
             Err(value) => return text_result(&value, true),
         };
+        if name != "refresh_index" { self.ensure_index_background(&ctx); }
+        let guarded = matches!(name, "search_symbols" | "search_graph" | "get_symbol_detail" | "get_code_snippet" | "trace_path" | "get_architecture" | "check_index_coverage");
+        let generation = if guarded { super::store::index_generation(&ctx.db_path).ok().flatten() } else { None };
+        if guarded && Self::arg_str(arguments, "generation").is_some_and(|expected| generation.as_deref() != Some(expected)) {
+            return text_result(&json!({ "error": "索引已刷新，旧分页代际失效", "hint": "移除 generation 并从 offset=0 重新查询" }), true);
+        }
         let result = match name {
-            "search_symbols" => self.tool_search_symbols(&ctx, arguments),
+            "search_symbols" | "search_graph" => self.tool_search_symbols(&ctx, arguments, name == "search_graph"),
             "get_symbol_detail" => self.tool_symbol_detail(&ctx, arguments),
+            "get_code_snippet" => self.tool_code_snippet(&ctx, arguments),
             "trace_path" => self.tool_trace_path(&ctx, arguments),
             "get_architecture" => self.tool_architecture(&ctx),
             "detect_changes" => self.tool_detect_changes(&ctx, arguments),
             "index_status" => self.tool_index_status(&ctx),
+            "check_index_coverage" => self.tool_coverage(&ctx, arguments),
             "refresh_index" => self.tool_refresh_index(&ctx, arguments),
             other => {
                 return text_result(
@@ -325,11 +320,19 @@ impl McpServer {
             }
         };
         match result {
-            Ok(value) => text_result(&value, false),
+            Ok(mut value) => {
+                if guarded {
+                    if generation != super::store::index_generation(&ctx.db_path).ok().flatten() {
+                        return text_result(&json!({ "error": "查询期间索引已更新", "hint": "从 offset=0 重新查询" }), true);
+                    }
+                    value["generation"] = json!(generation);
+                }
+                text_result(&value, false)
+            },
             Err(mut value) => {
                 // 后台索引建立期间查询会命中「索引尚未建立」——补自纠错 hint
                 // （仅当正在建的就是当前仓库，多仓库模式不误伤其他仓库报错）。
-                if self.indexing_repo_key().as_deref() == Some(ctx.repo_key.as_str()) {
+                if self.indexing(&ctx.repo_key) {
                     value["hint"] =
                         json!("索引正在后台建立/刷新，稍候重试；可用 index_status 观察");
                 }
@@ -357,32 +360,50 @@ impl McpServer {
         &self,
         ctx: &RepoContext,
         args: &Value,
+        structural: bool,
     ) -> std::result::Result<Value, Value> {
-        let Some(query) = Self::arg_str(args, "query") else {
-            return Err(Self::missing_arg_error("query"));
-        };
-        let label = Self::arg_str(args, "label");
+        let query = Self::arg_str(args, "query");
+        if query.is_none() && (!structural || ["name_pattern", "qn_pattern", "file_pattern", "label"]
+            .iter().all(|key| Self::arg_str(args, key).is_none())) {
+            return Err(Self::missing_arg_error("query 或 name_pattern / qn_pattern / file_pattern / label"));
+        }
         let limit = Self::arg_usize(args, "limit").unwrap_or(20).clamp(1, 200);
-        let (all, total) = search_symbols_filtered(&ctx.db_path, query, label, limit)
+        let offset = Self::arg_usize(args, "offset").unwrap_or(0);
+        let options = SearchOptions {
+            query, label: Self::arg_str(args, "label"),
+            file_pattern: Self::arg_str(args, "file_pattern"),
+            name_pattern: Self::arg_str(args, "name_pattern"),
+            qn_pattern: Self::arg_str(args, "qn_pattern"), limit, offset,
+        };
+        let (all, total) = search_symbols_with_options(&ctx.db_path, &options)
             .map_err(|e| json!({ "error": e.to_string() }))?;
-        let hits: Vec<Value> = all
-            .into_iter()
-            .map(|hit| {
-                json!({
-                    "name": hit.name,
-                    "label": hit.label,
-                    "qualified_name": hit.qualified_name,
-                    "file_path": hit.file_path,
-                    "start_line": hit.start_line,
-                })
-            })
-            .collect();
-        let count = hits.len();
-        let mut result = json!({ "total": total, "results": hits, "has_more": total > count });
+        let count = all.len();
+        let next_offset = offset.saturating_add(count);
+        let has_more = next_offset < total;
+        let mut result = json!({ "repo": ctx.repo_key, "total": total, "results": all,
+            "offset": offset, "returned": count, "has_more": has_more });
+        if has_more { result["next_offset"] = json!(next_offset); }
         if count == 0 {
-            result["hint"] = json!(
-                "无命中。改用更短的词（如 push 代替 pushBranch）；FTS5 按 camelCase 拆分匹配。"
-            );
+            result["hint"] = if total > 0 {
+                json!("offset 已超过结果总数，从 offset=0 重新查询")
+            } else {
+                json!("无命中。缩短 query 或用 search_graph 的 name_pattern 正则、file_pattern 路径 glob 定位；怀疑过期时调用 refresh_index。索引是尽力解析，查不到不能证明代码不存在。")
+            };
+        }
+        Ok(result)
+    }
+
+    fn tool_code_snippet(&self, ctx: &RepoContext, args: &Value) -> std::result::Result<Value, Value> {
+        let Some(name) = Self::arg_str(args, "qualified_name") else {
+            return Err(Self::missing_arg_error("qualified_name"));
+        };
+        let mut result = self.tool_symbol_detail(ctx, &json!({ "name": name }))?;
+        if let Some(object) = result.as_object_mut() {
+            object.remove("callers");
+            object.remove("callees");
+            if !object.contains_key("source") && !object.contains_key("suggestions") {
+                object.insert("source_note".to_string(), json!("当前无法读取源码文件。确认 repo 为存在的仓库绝对路径；文件已移动或索引过期时先刷新。"));
+            }
         }
         Ok(result)
     }
@@ -423,16 +444,19 @@ impl McpServer {
         };
         let direction = TraceDirection::parse(Self::arg_str(args, "direction").unwrap_or("both"));
         let depth = Self::arg_usize(args, "depth").unwrap_or(3).clamp(1, 8) as u32;
+        let limit = Self::arg_usize(args, "limit").unwrap_or(DEFAULT_MAX_NODES).clamp(1, 200);
+        let offset = Self::arg_usize(args, "offset").unwrap_or(0);
         let risk_labels = args
             .get("risk_labels")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let outcome = queries::trace_calls(
+        let outcome = queries::trace_calls_page(
             &ctx.db_path,
             function_name,
             direction,
             depth,
-            DEFAULT_MAX_NODES,
+            limit,
+            offset,
         )
         .map_err(|e| json!({ "error": e.to_string() }))?;
         match outcome {
@@ -442,8 +466,11 @@ impl McpServer {
                         hop.risk = "";
                     }
                 }
-                Ok(serde_json::to_value(&result)
-                    .map_err(|e| json!({ "error": format!("序列化结果失败：{e}") }))?)
+                let mut value = serde_json::to_value(&result)
+                    .map_err(|e| json!({ "error": format!("序列化结果失败：{e}") }))?;
+                if result.has_more { value["next_offset"] = json!(offset.saturating_add(limit)); }
+                value["coverage_note"] = json!("调用边来自 tree-sitter 与启发式解析，可能缺少动态调用或类型信息；total 只统计当前索引中指定深度内的可达节点。");
+                Ok(value)
             }
             TraceOutcome::Ambiguous(candidates) => Ok(json!({
                 "status": "ambiguous",
@@ -499,17 +526,25 @@ impl McpServer {
     }
 
     fn tool_index_status(&self, ctx: &RepoContext) -> std::result::Result<Value, Value> {
+        let indexing = self.indexing(&ctx.repo_key);
         let stats =
-            read_index_stats(&ctx.db_path).map_err(|e| json!({ "error": e.to_string() }))?;
+            read_index_stats(&ctx.db_path).map_err(|e| json!({ "error": e.to_string(), "status": "error",
+                "repo": ctx.repo_key, "indexing": indexing, "refresh": self.coordinator.status(&ctx.repo_key) }))?;
         match stats {
             Some(stats) => {
                 let mut value = stats_to_json(&stats);
                 value["repo"] = json!(ctx.repo_key);
+                value["indexing"] = json!(indexing);
+                value["refresh"] = self.coordinator.status(&ctx.repo_key);
+                if indexing { value["status"] = json!("indexing"); }
+                value["coverage_note"] = json!("索引基于 tree-sitter 和启发式调用解析；统计正常不等于所有定义和关系均已覆盖。");
                 Ok(value)
             }
             None => Ok(json!({
-                "status": "empty",
+                "status": if indexing { "indexing" } else { "empty" },
+                "indexing": indexing,
                 "repo": ctx.repo_key,
+                "refresh": self.coordinator.status(&ctx.repo_key),
                 "hint": "索引为空。调用 refresh_index 建立全量索引（多仓库模式需传 repo 参数）",
             })),
         }
@@ -535,6 +570,18 @@ impl McpServer {
         Ok(result)
     }
 
+    fn tool_coverage(&self, ctx: &RepoContext, args: &Value) -> std::result::Result<Value, Value> {
+        let strings = |key: &str| -> std::result::Result<Vec<String>, Value> {
+            let Some(value) = args.get(key) else { return Ok(Vec::new()); };
+            let Some(items) = value.as_array() else { return Err(json!({ "error": format!("{key} 必须是字符串数组") })); };
+            items.iter().map(|value| value.as_str().map(str::to_string)
+                .ok_or_else(|| json!({ "error": format!("{key} 必须是字符串数组") }))).collect()
+        };
+        super::coverage::check_coverage(&ctx.db_path, ctx.repo_root.as_deref(), &strings("paths")?, &strings("scopes")?,
+            Self::arg_usize(args, "offset").unwrap_or(0), Self::arg_usize(args, "limit").unwrap_or(50).clamp(1, 200))
+            .map_err(|error| json!({ "error": error.to_string() }))
+    }
+
     fn tool_refresh_index(
         &self,
         ctx: &RepoContext,
@@ -556,21 +603,20 @@ impl McpServer {
                 "hint": "改传 repo 参数为仓库绝对路径再刷新",
             }));
         };
-        {
-            let mut slot = self.indexing_repo.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.is_some() {
-                return Err(json!({
-                    "error": "后台索引正在进行中",
-                    "hint": "稍候重试；可用 index_status 观察进度",
-                }));
-            }
-            *slot = Some(ctx.repo_key.clone());
+        self.coordinator.wait(&ctx.repo_key);
+        let db_path = ctx.db_path.clone();
+        if !self.coordinator.schedule(ctx.repo_key.clone(), true, move |cancel| {
+            Self::run_index_inner(&repo_root, &db_path, force_full, cancel, |message| {
+                eprintln!("[khaslana-mcp] {message}");
+            }).map_err(|error| error.to_string())
+        }) {
+            return Err(json!({ "error": "同仓库索引任务仍在运行或调度器已关闭" }));
         }
-        let result = Self::run_index_inner(&repo_root, &ctx.db_path, force_full, |message| {
-            eprintln!("[khaslana-mcp] {message}");
-        });
-        *self.indexing_repo.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        result.map_err(|e| json!({ "error": e.to_string() }))?;
+        self.coordinator.wait(&ctx.repo_key);
+        if let Some(error) = self.coordinator.status(&ctx.repo_key)["last_error"].as_str() {
+            return Err(json!({ "error": error }));
+        }
+
         let stats = read_index_stats(&ctx.db_path)
             .map_err(|e| json!({ "error": e.to_string() }))?
             .ok_or_else(|| json!({ "error": "索引完成后统计仍为空" }))?;
@@ -621,6 +667,7 @@ impl McpServer {
                         "protocolVersion": negotiated,
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
+                        "instructions": "先用 list_projects 选择 repo，再用 search_graph/search_symbols 找定义；query 支持名称、签名和文档关键词，name_pattern 是正则，file_pattern 是仓库相对路径 glob。has_more=true 时带 next_offset 和 generation 继续翻页，保留其他参数；代际失效从 offset=0 重查。取得 qualified_name 后用 get_code_snippet 读源码、trace_path 查调用关系；同名歧义按 suggestions 重查。对证据文件调用 check_index_coverage，部分解析、过期或未索引时回读源码。查询按需触发后台增量检查，可用 index_status.refresh 查看排队/失败/退避状态；refresh_index 可立即刷新。tree-sitter 和启发式调用解析不能证明代码不存在。",
                     }),
                 ))
             }
@@ -647,6 +694,8 @@ impl McpServer {
 fn stats_to_json(stats: &IndexStats) -> Value {
     json!({
         "status": "ready",
+        "generation": stats.generation,
+        "coverage": stats.coverage,
         "nodes": stats.nodes,
         "edges": stats.edges,
         "files": stats.files,
@@ -704,7 +753,7 @@ fn tool_definitions() -> Vec<Value> {
         schema["properties"]["repo"] = repo_prop.clone();
         schema
     };
-    vec![
+    let mut definitions = vec![
         json!({
             "name": "list_projects",
             "title": "项目清单",
@@ -715,13 +764,17 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "search_symbols",
             "title": "符号搜索",
-            "description": "查找函数/类型/方法的定义位置时的首选工具，优先于 grep/glob——索引基于 tree-sitter 解析的符号表，按名直查且自带 file:line。FTS5 全文，camelCase/snake_case 拆分感知（'push branch' 可命中 pushBranch），支持多词。返回 name/label/qualified_name/file_path/start_line 与 total/has_more；拿到 qualified_name 后可传给 get_symbol_detail / trace_path 精确追查。",
+            "description": "查找函数/类型/方法定义的首选工具。搜索名称、路径、声明签名和文档注释，支持 camelCase/snake_case 拆词；精确名称优先，多词完全无命中时自动放宽。默认只返回定义符号，可按标签、路径 glob、名称正则过滤。返回位置、签名、文档摘要与 total/has_more/next_offset；has_more 时保持参数并带 offset=next_offset 翻页。拿到 qualified_name 后可用 get_code_snippet / trace_path。索引是尽力解析，空结果不能证明代码不存在。",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "搜索词，支持多词与驼峰拆分" },
                     "label": { "type": "string", "description": "可选：按节点标签过滤（Function/Method/Class/Struct/Interface/Enum/Trait/Type/Field）" },
-                    "limit": { "type": "integer", "description": "返回条数上限，默认 20" }
+                    "file_pattern": { "type": "string", "description": "仓库相对路径 glob，如 src/git/*；支持 *、?、[...]，不是正则" },
+                    "name_pattern": { "type": "string", "description": "名称正则，如 ^(push|pull).*；与其他条件同时过滤" },
+                    "qn_pattern": { "type": "string", "description": "qualified_name 正则，用于限定模块或类型作用域" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "跳过的结果数，默认 0；翻页传上次 next_offset" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "返回条数上限，默认 20，最大 200" }
                 },
                 "required": ["query"]
             })),
@@ -743,13 +796,15 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "trace_path",
             "title": "调用链追踪",
-            "description": "回答『谁调用了 X』『X 调用了谁』『改 X 会影响哪些函数』这类调用关系问题时必用，优先于 grep——沿 CALLS 边做 BFS 追踪调用链，每跳带 risk 风险分级（hop 1=CRITICAL，随距离衰减），可直接按风险排序审查优先级。direction 默认 both（inbound=上游调用方 / outbound=下游被调）；depth 默认 3、最大 8；单次最多 100 个节点。",
+            "description": "沿 CALLS 边追踪调用方和被调用方，每跳带风险分级。function_name 优先传搜索所得 qualified_name；direction 默认 both，depth 默认 3、最大 8。callers_total/callees_total 是当前索引中该深度内的可达总数，两个方向分别分页（limit 默认 100，最大 200）；has_more 时保持参数并传 offset=next_offset。启发式解析可能漏掉动态调用，结果不是完整语义分析。",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
                     "function_name": { "type": "string", "description": "函数/方法名" },
                     "direction": { "type": "string", "enum": ["inbound", "outbound", "both"], "description": "默认 both" },
                     "depth": { "type": "integer", "description": "BFS 层数，默认 3，最大 8" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "每个方向的返回条数，默认 100" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "每个方向跳过的节点数，默认 0" },
                     "risk_labels": { "type": "boolean", "description": "是否附带风险分级，默认 true" }
                 },
                 "required": ["function_name"]
@@ -795,7 +850,45 @@ fn tool_definitions() -> Vec<Value> {
             })),
             "outputSchema": output_schema,
         }),
-    ]
+    ];
+    let mut search_graph = definitions[1].clone();
+    search_graph["name"] = json!("search_graph");
+    search_graph["title"] = json!("结构与关键词搜索");
+    search_graph["description"] = json!("定位代码结构的首选工具。query 按名称、签名和文档关键词检索；也可省略 query，仅用 name_pattern/qn_pattern 正则、file_pattern 路径 glob 或 label 浏览定义。条件同时生效，返回位置、签名和摘要。total 是过滤后的真实总数；has_more=true 时保持条件并传 offset=next_offset 继续翻页。精确源码用 get_code_snippet，调用关系用 trace_path。空结果不是代码不存在的证明。");
+    search_graph["inputSchema"].as_object_mut().unwrap().remove("required");
+    search_graph["inputSchema"]["anyOf"] = json!([
+        { "required": ["query"] }, { "required": ["name_pattern"] },
+        { "required": ["qn_pattern"] }, { "required": ["file_pattern"] }, { "required": ["label"] }
+    ]);
+    let mut snippet = definitions[2].clone();
+    snippet["name"] = json!("get_code_snippet");
+    snippet["title"] = json!("定义源码");
+    snippet["description"] = json!("先从 search_graph/search_symbols 取得 qualified_name，再精确读取该定义的源码（最多 200 行，truncated 表示截断）、签名和文档。返回的 source.lines 是源码行数组，source.start_line 是首行行号。该工具不搜索名称；同名歧义时按 suggestions 中的 qualified_name 重查。调用关系另用 trace_path。");
+    let name_schema = snippet["inputSchema"]["properties"]["name"].clone();
+    snippet["inputSchema"]["properties"].as_object_mut().unwrap().remove("name");
+    snippet["inputSchema"]["properties"]["qualified_name"] = name_schema;
+    snippet["inputSchema"]["required"] = json!(["qualified_name"]);
+    definitions.extend([search_graph, snippet]);
+    definitions.push(json!({
+        "name": "check_index_coverage", "title": "索引覆盖检查",
+        "description": "确认搜索或调用结果之前，检查已涉及文件的覆盖与新鲜度。paths 是精确相对路径数组；scopes 是目录前缀数组（. 表示仓库），至少传一个。返回 indexed/partial/read_failed/parse_failed/excluded/unsupported/not_indexed/unknown、语法错误范围、未解析调用数及 metadata_matches/metadata_changed。失败或部分覆盖需直接回读源码；状态正常也不证明语义完整。按 offset/next_offset 翻页。",
+        "inputSchema": with_repo(json!({ "type": "object", "properties": {
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "scopes": { "type": "array", "items": { "type": "string" } },
+            "offset": { "type": "integer", "minimum": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+        }, "anyOf": [{ "required": ["paths"] }, { "required": ["scopes"] }] })),
+        "outputSchema": output_schema
+    }));
+    for definition in &mut definitions {
+        let read_only = definition["name"] != "refresh_index";
+        definition["annotations"] = json!({ "readOnlyHint": read_only, "destructiveHint": false,
+            "idempotentHint": true, "openWorldHint": false });
+        if matches!(definition["name"].as_str(), Some("search_symbols" | "search_graph" | "trace_path" | "get_code_snippet" | "get_symbol_detail" | "get_architecture" | "check_index_coverage")) {
+            definition["inputSchema"]["properties"]["generation"] = json!({ "type": "string", "description": "可选：沿用上一页返回的 generation，刷新后会明确报代际失效，需从 offset=0 重查" });
+        }
+    }
+    definitions
 }
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,10 @@ impl RepositoryView {
         let Some(dialog) = self.active_dialog.clone() else {
             return div().into_any_element();
         };
+        // V2 编辑器在工作流页面内展示；焦点陷阱由文档视图承接。
+        if matches!(dialog, DialogState::WorkflowEditor) && self.workflow_document_editor_visible() {
+            return div().into_any_element();
+        }
 
         let content = match dialog {
             DialogState::CloneRepo => self.render_clone_dialog(window, cx).into_any_element(),

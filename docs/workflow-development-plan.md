@@ -1,6 +1,6 @@
 # 工作流升级开发计划
 
-状态：P4a 执行内核、P1 固定 CNB 来源逐个下载、P2 分支入口已实现；P1/P2 已由用户实机验收。P4b 运行生命周期已实现，仍需真实窗口验收。P5 已接入本地 stdio MCP 和受限 JS，配有单次运行授权；本地端到端测试已覆盖只读、写入、JS 桥接与取消，真实窗口交互仍需验收。P6 已接入本地 Skill 与 AI 工具循环，并提供公开 Edge 表单读取、填写样板；确定性 JS 样板已在本机实际 Edge 运行通过，AI 样板及真实窗口交互仍需验收。对应 [架构设计](workflow-architecture-redesign.md)与 [P5 技术验证](workflow-execution-extension-spike.md)。每阶段只修改相关模块，不做全库格式化或顺手重构。
+状态：P4a 执行内核、P1 固定 CNB 来源逐个下载、P2 分支入口已实现；P1/P2 已由用户实机验收。P4b 运行生命周期已实现，仍需真实窗口验收。P5 已接入本地 stdio MCP 和受限 JS，配有单次运行授权；本地端到端测试已覆盖只读、写入、JS 桥接与取消，真实窗口交互仍需验收。P6 已接入本地 Skill 与 AI 工具循环，并提供公开 Edge 表单读取、填写样板；2026-10-06 确定性 JS 与真实 AI 供应商驱动的 Skill 均通过本机 Edge 端到端测试，客户端窗口交互仍需验收。设置中心已提供 Skill、MCP 与运行环境管理。对应 [架构设计](workflow-architecture-redesign.md)与 [P5 技术验证](workflow-execution-extension-spike.md)。每阶段只修改相关模块，不做全库格式化或顺手重构。
 
 ## 1. 实施原则与依赖
 
@@ -73,4 +73,11 @@ P5 采用 `rmcp` 本地 stdio 客户端与 `rquickjs` 后台运行时。服务�
 - P1 完成后用户已能逐个下载并手动运行远端模板；P2 完成后用户已能从指定分支右键进入运行页。两阶段已由用户实机验收。
 - P4 合并前冻结 v2 schema 与 v1 兼容策略，并在文档中列出可迁移和不能自动迁移的字段。
 - P5 合并前拿到 Windows release 的 JS 引擎验证结果、MCP 服务进程/网络生命周期策略和权限交互实机结果。
-- P6 的 Edge 场景已按用户决定采用公开 Selenium 演示页，只读取与填写，不提交。确定性 JS 样板已在本机 Edge 运行；AI 样板仍需使用用户配置的供应商做真实窗口验收。第三方 JS/Skill 来源开放范围和更新提醒方式仍需产品确认。
+- P6 的 Edge 场景已按用户决定采用公开 Selenium 演示页，只读取与填写，不提交。确定性 JS 与用户已有供应商配置驱动的 AI 样板均已在本机 Edge 运行通过；客户端授权、日志与取消交互仍需真实窗口验收。第三方 JS/Skill 来源开放范围和更新提醒方式仍需产品确认。
+
+## 6. 2026-10-06 执行扩展收尾
+
+- 补回遗漏的 [Edge 样板目录](examples/workflow-edge-demo/README.md)，包括 JS 与 Skill 两个工作流、Skill 包和旧版 MCP 配置兼容样本。新模板直接使用内置 `browser.edge`，无需配置自定义服务；旧配置只作为迁移回归样本。
+- 修复样板缺失引起的 3 项回归失败，常规库测试 575 项、客户端测试 335 项通过。新增真实 AI/Edge 专项默认忽略，只有显式提供测试进程的 AI 与代理配置才会运行，不把密钥写进样板或输出。
+- 实际执行 `edge_demo_reads_and_fills_real_public_page` 与 `edge_skill_reads_and_fills_real_public_page` 均通过；后者使用本地已配置供应商及代理。填写后由宿主页面守卫复核，不授权点击或提交工具。
+- `cargo check --all-targets`、默认 `cargo build --release` 与 `git diff --check` 通过。窗口已通过 `cargo run --bin khaslana` 启动，但 Computer Use 两次捕获分别返回 `FrameArrived timed out` 与 `window capture timed out`；没有据此标记授权弹窗、键盘、焦点、主题、窄窗或 DPI 验收通过。

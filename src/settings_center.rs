@@ -290,7 +290,7 @@ pub(crate) fn settings_pane_meta(category: SettingsCategory) -> SettingsPaneMeta
         },
         SettingsCategory::CodeIndex => SettingsPaneMeta {
             title: "代码索引",
-            description: "为每个仓库建立本机代码知识图谱，供全局符号搜索与 MCP 工具使用。",
+            description: "为每个仓库建立本机代码知识图谱，供 AI 与 MCP 工具使用。",
         },
         SettingsCategory::Theme => SettingsPaneMeta {
             title: "外观",

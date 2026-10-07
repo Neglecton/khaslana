@@ -1,7 +1,6 @@
 //! 索引查询 API 层（参照 codebase-memory-mcp 的工具面语义）。
 //!
-//! 全部函数走只读连接 + `store.load_graph()` 内存图遍历（Phase 1 规模毫秒级；
-//! 超大仓库的优化点是改走 SQL 邻接查询，此处先保持简单）。消费方：
+//! 只读查询按索引代际复用有界图缓存和调用邻接表。消费方：
 //! 内嵌 MCP 服务器（`mcp.rs`）、全局符号搜索面板（bin crate）、以及后续
 //! Phase 2 AI 代码搜索的 agent 工具层。
 //!
@@ -15,7 +14,7 @@ use serde::Serialize;
 
 use super::err;
 use super::graph::{EdgeType, GraphBuffer, NodeId, NodeLabel};
-use super::store::{CodeIndexStore, open_read_only_if_exists};
+use super::store::open_read_only_if_exists;
 use crate::types::Result;
 
 /// 单条符号候选（精确名查找结果）。
@@ -60,7 +59,12 @@ impl TraceDirection {
 #[derive(Debug, Serialize)]
 pub struct TraceResult {
     pub function: String,
+    pub qualified_name: String,
     pub direction: TraceDirection,
+    pub callers_total: usize,
+    pub callees_total: usize,
+    pub offset: usize,
+    pub has_more: bool,
     /// direction 为 Outbound/Both 时存在。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callees: Vec<TraceHop>,
@@ -85,6 +89,9 @@ pub struct SymbolDetail {
     pub file_path: String,
     pub start_line: u32,
     pub end_line: u32,
+    pub signature: String,
+    pub docstring: String,
+    pub source_freshness: String,
     pub callers: Vec<TraceHop>,
     pub callees: Vec<TraceHop>,
     /// 定义处源码片段（repo_root 可用时读取；超长截断）。
@@ -190,16 +197,8 @@ pub fn find_symbol_candidates(db_path: &Path, name: &str) -> Result<Vec<SymbolCa
         .collect())
 }
 
-/// 内部便捷：只读打开已存在的索引库并载入全图。未索引（文件不存在 /
-/// 非本引擎库 / schema 版本不符）时返回中文错误——绝不创建幽灵空库。
-fn open_query_store(db_path: &Path) -> Result<CodeIndexStore> {
-    open_read_only_if_exists(db_path)?.ok_or_else(|| {
-        err("代码索引不存在或尚未建立，请先在 Khaslana 设置中心启用代码索引或调用 refresh_index")
-    })
-}
-
-fn load_graph(db_path: &Path) -> Result<GraphBuffer> {
-    open_query_store(db_path)?.load_graph()
+fn load_graph(db_path: &Path) -> Result<std::sync::Arc<super::cache::CachedIndex>> {
+    super::cache::load_index(db_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,13 +215,13 @@ fn risk_for_hop(hop: u32) -> &'static str {
 }
 
 /// CALLS 邻接表（outbound / inbound 两份）。
-struct CallAdjacency {
+pub(super) struct CallAdjacency {
     outbound: HashMap<NodeId, Vec<NodeId>>,
     inbound: HashMap<NodeId, Vec<NodeId>>,
 }
 
 impl CallAdjacency {
-    fn build(graph: &GraphBuffer) -> Self {
+    pub(super) fn build(graph: &GraphBuffer) -> Self {
         let mut adjacency = Self {
             outbound: HashMap::new(),
             inbound: HashMap::new(),
@@ -308,13 +307,13 @@ enum GraphResolution<'a> {
 }
 
 fn resolve_in_graph<'a>(
-    graph: &'a GraphBuffer,
+    graph: &'a super::cache::CachedIndex,
     name: &str,
     callable_only: bool,
 ) -> GraphResolution<'a> {
-    let candidates: Vec<&super::graph::GraphNode> = graph
-        .nodes
-        .iter()
+    let candidates: Vec<&super::graph::GraphNode> = graph.find_by_qn(name).map(|id| vec![id])
+        .unwrap_or_else(|| graph.names.get(name).cloned().unwrap_or_default())
+        .into_iter().map(|id| graph.get(id))
         .filter(|n| {
             (n.name == name || n.qualified_name == name)
                 && (!callable_only || matches!(n.label, NodeLabel::Function | NodeLabel::Method))
@@ -349,6 +348,18 @@ pub fn trace_calls(
     depth: u32,
     max_nodes: usize,
 ) -> Result<TraceOutcome> {
+    trace_calls_page(db_path, function_name, direction, depth, max_nodes, 0)
+}
+
+/// 每个方向独立分页；先统计深度范围内的可达节点，避免静默截断调用关系。
+pub fn trace_calls_page(
+    db_path: &Path,
+    function_name: &str,
+    direction: TraceDirection,
+    depth: u32,
+    limit: usize,
+    offset: usize,
+) -> Result<TraceOutcome> {
     let graph = load_graph(db_path)?;
     let resolved = match resolve_in_graph(&graph, function_name, true) {
         GraphResolution::One(node) => node,
@@ -356,22 +367,24 @@ pub fn trace_calls(
         GraphResolution::NotFound => return Ok(TraceOutcome::NotFound),
     };
 
-    let adjacency = CallAdjacency::build(&graph);
+    let adjacency = &graph.adjacency;
     let start = resolved.id;
     let starts = vec![start];
+    let callees = if matches!(direction, TraceDirection::Outbound | TraceDirection::Both) {
+        bfs_hops(&graph, &adjacency, &starts, false, depth, graph.nodes.len())
+    } else { Vec::new() };
+    let callers = if matches!(direction, TraceDirection::Inbound | TraceDirection::Both) {
+        bfs_hops(&graph, &adjacency, &starts, true, depth, graph.nodes.len())
+    } else { Vec::new() };
+    let callers_total = callers.len();
+    let callees_total = callees.len();
     let result = TraceResult {
         function: resolved.name.clone(),
-        direction,
-        callees: if matches!(direction, TraceDirection::Outbound | TraceDirection::Both) {
-            bfs_hops(&graph, &adjacency, &starts, false, depth, max_nodes)
-        } else {
-            Vec::new()
-        },
-        callers: if matches!(direction, TraceDirection::Inbound | TraceDirection::Both) {
-            bfs_hops(&graph, &adjacency, &starts, true, depth, max_nodes)
-        } else {
-            Vec::new()
-        },
+        qualified_name: resolved.qualified_name.clone(),
+        direction, callers_total, callees_total, offset,
+        has_more: offset.saturating_add(limit) < callers_total.max(callees_total),
+        callees: callees.into_iter().skip(offset).take(limit).collect(),
+        callers: callers.into_iter().skip(offset).take(limit).collect(),
     };
     Ok(TraceOutcome::Found(result))
 }
@@ -393,10 +406,19 @@ pub fn symbol_detail(
         GraphResolution::NotFound => return Ok(DetailOutcome::NotFound),
     };
 
-    let adjacency = CallAdjacency::build(&graph);
+    let adjacency = &graph.adjacency;
     let starts = vec![resolved.id];
     let candidate = candidate_of(resolved);
-    let source = repo_root.and_then(|root| read_source_snippet(root, &candidate));
+    let freshness = repo_root.map(|root| super::coverage::source_freshness(graph.file_hashes.get(&candidate.file_path), root, &candidate.file_path)).unwrap_or("snapshot_or_unknown");
+    let source = if freshness == "metadata_matches" {
+        repo_root.and_then(|root| {
+            let snippet = read_source_snippet(root, &candidate);
+            // 读取期间也可能发生编辑；再次核对同一图代际的文件元数据。
+            (super::coverage::source_freshness(graph.file_hashes.get(&candidate.file_path), root, &candidate.file_path) == "metadata_matches")
+                .then_some(snippet).flatten()
+        })
+    } else { None };
+    let properties: serde_json::Value = serde_json::from_str(&resolved.properties).unwrap_or_default();
     Ok(DetailOutcome::Found(Box::new(SymbolDetail {
         name: resolved.name.clone(),
         label: resolved.label.as_str().to_string(),
@@ -404,6 +426,9 @@ pub fn symbol_detail(
         file_path: resolved.file_path.clone(),
         start_line: resolved.start_line,
         end_line: resolved.end_line,
+        signature: properties["signature"].as_str().unwrap_or("").to_string(),
+        docstring: properties["docstring"].as_str().unwrap_or("").to_string(),
+        source_freshness: freshness.into(),
         callers: bfs_hops(&graph, &adjacency, &starts, true, 1, 100),
         callees: bfs_hops(&graph, &adjacency, &starts, false, 1, 100),
         source,
@@ -453,8 +478,8 @@ fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<
 
 /// 索引总览统计（label/边类型分布、语言、目录密度、调用热点）。
 pub fn index_overview(db_path: &Path) -> Result<IndexOverview> {
-    let store = CodeIndexStore::open(db_path)?;
-    let graph = store.load_graph()?;
+    let store = open_read_only_if_exists(db_path)?.ok_or_else(|| err("代码索引不存在或尚未建立"))?;
+    let graph = load_graph(db_path)?;
     let stats = store.read_stats()?.unwrap_or_default();
 
     let mut label_counts: HashMap<String, usize> = HashMap::new();
@@ -650,7 +675,7 @@ pub fn impacted_symbols_for_files(
         .iter()
         .filter_map(|c| graph.find_by_qn(&c.qualified_name))
         .collect();
-    let adjacency = CallAdjacency::build(&graph);
+    let adjacency = &graph.adjacency;
     let callers = if impacted_ids.is_empty() || expand_depth == 0 {
         Vec::new()
     } else {

@@ -1352,6 +1352,9 @@ impl RepositoryView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // 模板列表与 Runbook Studio 各是一张悬浮面板，页面根不铺底色。
+        if self.workflow_document_editor_visible() {
+            return self.render_workflow_document_editor(window, cx);
+        }
         div()
             .flex()
             .flex_1()
@@ -1360,6 +1363,7 @@ impl RepositoryView {
             .child(self.render_workflow_template_column(cx))
             .child(self.render_column_splitter(ResizeTarget::WorkflowTemplates, cx))
             .child(self.render_workflow_detail(window, cx))
+            .into_any_element()
     }
 
     fn render_workflow_detail(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1430,8 +1434,13 @@ impl RepositoryView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .child(
-                page_header("Runbook Studio", None).child(
+                page_header("运行工作流", None).child(
                     command_group()
+                        .when_some(self.workflow_state.file_path.clone().filter(|_| !self.busy), |group, path| {
+                            group.child(self.button("编辑", true, move |this, _, cx| {
+                                this.open_workflow_editor_for_path(path.clone(), false, cx);
+                            }, cx))
+                        })
                         .child(
                             div()
                                 .flex()

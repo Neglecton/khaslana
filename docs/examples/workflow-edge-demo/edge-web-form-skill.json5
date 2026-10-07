@@ -1,0 +1,27 @@
+{
+  version: 2,
+  name: "AI Skill：Edge 公开表单",
+  defaults: { requireCleanWorktree: false },
+  inputs: {
+    demoText: { label: "演示填写内容", default: "Khaslana AI Skill demo", required: true },
+  },
+  steps: [
+    {
+      op: "invoke", id: "skill", uses: "skill.run", saveAs: "result",
+      with: {
+        skill: "edge-web-form",
+        task: "请读取指定公开演示页，在 Text input 填写以下内容：${demoText}。不要提交。",
+        browserGuard: {
+          url: "https://www.selenium.dev/selenium/web/web-form.html",
+          contains: ["Web form", "Text input"],
+          target: "input[name=\"my-text\"]",
+        },
+        tools: [
+          { server: "browser.edge", tool: "browser_navigate" },
+          { server: "browser.edge", tool: "browser_snapshot" },
+          { server: "browser.edge", tool: "browser_type" },
+        ],
+      },
+    },
+  ],
+}

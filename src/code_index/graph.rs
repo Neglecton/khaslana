@@ -260,6 +260,11 @@ impl GraphBuffer {
         before - self.nodes.len()
     }
 
+    pub(super) fn remove_call_edges(&mut self) {
+        self.edges.retain(|edge| edge.etype != EdgeType::Calls);
+        self.edge_keys.retain(|(_, _, kind)| *kind != EdgeType::Calls);
+    }
+
     /// 清扫孤儿 Module 节点：没有任何 IMPORTS 入边的 Module（删除导入语句后
     /// 残留的幽灵模块；Module 的 file_path 为空串，purge_files 清不到它们）。
     /// 返回被删节点数。
@@ -284,6 +289,7 @@ impl GraphBuffer {
             // 无删除发生，id 未变（purge_files 的快路径）。
             return;
         }
+        let old_to_new: HashMap<_, _> = self.nodes.iter().enumerate().map(|(index, node)| (node.id, index as NodeId)).collect();
         for (index, node) in self.nodes.iter_mut().enumerate() {
             node.id = index as NodeId;
         }
@@ -292,9 +298,12 @@ impl GraphBuffer {
             .iter()
             .map(|n| (n.qualified_name.clone(), n.id))
             .collect();
-        let alive: HashSet<NodeId> = self.qn_index.values().copied().collect();
-        self.edges
-            .retain(|e| alive.contains(&e.source) && alive.contains(&e.target));
+        self.edges.retain_mut(|edge| {
+            let (Some(source), Some(target)) = (old_to_new.get(&edge.source), old_to_new.get(&edge.target)) else { return false; };
+            edge.source = *source;
+            edge.target = *target;
+            true
+        });
         self.edge_keys = self
             .edges
             .iter()
@@ -319,11 +328,6 @@ pub fn folder_qualified_name(project: &str, rel_dir: &str) -> String {
     } else {
         format!("{project}.{}", rel_dir.replace('/', "."))
     }
-}
-
-/// 构造 File 节点属性 JSON。
-pub fn file_properties(line_count: usize) -> String {
-    json!({ "line_count": line_count }).to_string()
 }
 
 /// 构造 CALLS 边属性 JSON（对齐参考项目 {callee, confidence, strategy}）。

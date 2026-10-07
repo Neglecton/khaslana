@@ -20,6 +20,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod v2;
+mod document;
+mod visual;
+
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use khaslana::{
     RemoteBranchGuardAction, WorkflowDefinition, WorkflowInputDefinition, WorkflowStep,
@@ -78,6 +82,18 @@ pub(crate) enum WorkflowInputPart {
 /// 步骤文本参数槽。槽跨步骤类型复用：切换步骤类型时同槽位值保留。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum WorkflowStepSlot {
+    StepId,
+    Uses,
+    Arguments,
+    SaveAs,
+    Server,
+    Tool,
+    ToolArguments,
+    Script,
+    JsInput,
+    Skill,
+    Task,
+    Tools,
     /// checkout / merge / assertBranch / push 的目标分支。
     Branch,
     /// fetch / pull / push / guardRemoteBranch 的远端名。
@@ -104,6 +120,18 @@ impl WorkflowStepSlot {
     /// 槽的中文显示名（表单 label）。
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::StepId => "步骤标识",
+            Self::Uses => "动作名称",
+            Self::Arguments => "高级参数（JSON5 对象）",
+            Self::SaveAs => "输出变量（可选）",
+            Self::Server => "MCP 服务",
+            Self::Tool => "工具名称",
+            Self::ToolArguments => "工具参数（JSON5 对象）",
+            Self::Script => "JavaScript 脚本",
+            Self::JsInput => "脚本输入（JSON5）",
+            Self::Skill => "Skill 名称",
+            Self::Task => "任务描述",
+            Self::Tools => "允许的工具（JSON5 数组）",
             Self::Branch => "分支",
             Self::Remote => "远端（留空用默认远端）",
             Self::Name => "新分支名",
@@ -120,6 +148,18 @@ impl WorkflowStepSlot {
     /// 槽的 placeholder 示例。
     pub(crate) fn placeholder(self) -> &'static str {
         match self {
+            Self::StepId => "如 browser-step",
+            Self::Uses => "如 mcp.call / js.run / skill.run",
+            Self::Arguments => "{}",
+            Self::SaveAs => "如 browserResult",
+            Self::Server => "如 browser.edge",
+            Self::Tool => "如 browser_type",
+            Self::ToolArguments => "{}",
+            Self::Script => "return input;",
+            Self::JsInput => "{}",
+            Self::Skill => "已安装的 Skill 名称",
+            Self::Task => "描述任务目标，可引用 ${变量}",
+            Self::Tools => "如 [{server:'browser.edge', tool:'browser_type'}]",
             Self::Branch => "如 master",
             Self::Remote => "如 origin",
             Self::Name => "如 feature-login",
@@ -138,6 +178,7 @@ impl WorkflowStepSlot {
 /// `all()` 的顺序即下拉展示顺序（常用 6 种在前、高级 5 种在后）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkflowStepKind {
+    Invoke,
     Checkout,
     Fetch,
     Pull,
@@ -155,6 +196,7 @@ impl WorkflowStepKind {
     /// 步骤类型的 serde tag（与 `WorkflowStep` 的 op 值一致）。
     pub(crate) fn op_name(self) -> &'static str {
         match self {
+            Self::Invoke => "invoke",
             Self::Checkout => "checkout",
             Self::Fetch => "fetch",
             Self::Pull => "pull",
@@ -171,12 +213,14 @@ impl WorkflowStepKind {
 
     /// 由 op 名反查步骤类型。
     pub(crate) fn from_op_name(op: &str) -> Option<Self> {
+        if op == "invoke" { return Some(Self::Invoke); }
         Self::all().into_iter().find(|kind| kind.op_name() == op)
     }
 
     /// 步骤类型的中文显示名。
     pub(crate) fn display_name(self) -> &'static str {
         match self {
+            Self::Invoke => "扩展动作",
             Self::Checkout => "切换分支",
             Self::Fetch => "获取",
             Self::Pull => "拉取",
@@ -194,6 +238,7 @@ impl WorkflowStepKind {
     /// 简短说明（类型下拉/参数区的辅助文案）。
     pub(crate) fn description(self) -> &'static str {
         match self {
+            Self::Invoke => "调用 MCP、JavaScript、Skill 或已注册动作",
             Self::Checkout => "切换到指定本地分支",
             Self::Fetch => "从远端获取最新引用，不合并",
             Self::Pull => "拉取并合并当前分支的远端更新",
@@ -214,6 +259,7 @@ impl WorkflowStepKind {
     /// 该步骤类型在表单中出现的文本槽（顺序即渲染顺序）。
     pub(crate) fn slots(self) -> &'static [WorkflowStepSlot] {
         match self {
+            Self::Invoke => v2::INVOKE_SLOTS,
             Self::Checkout => &[WorkflowStepSlot::Branch],
             Self::Fetch => &[WorkflowStepSlot::Remote],
             Self::Pull => &[WorkflowStepSlot::Remote],
@@ -254,6 +300,7 @@ impl WorkflowStepKind {
     /// 某槽在该步骤类型下是否必填（保存校验与红点标记共用）。
     pub(crate) fn slot_required(self, slot: WorkflowStepSlot) -> bool {
         match self {
+            Self::Invoke => matches!(slot, WorkflowStepSlot::StepId | WorkflowStepSlot::Uses),
             Self::Checkout => slot == WorkflowStepSlot::Branch,
             Self::Fetch => false,
             Self::Pull => false,
@@ -288,6 +335,7 @@ pub(crate) enum WorkflowStepFlag {
 /// 单个步骤的编辑数据：类型 + 文本槽值 + 布尔/枚举参数。
 #[derive(Clone, Debug)]
 pub(crate) struct WorkflowEditorStepData {
+    pub(crate) invoke: v2::InvokeEditorData,
     pub(crate) kind: WorkflowStepKind,
     pub(crate) branch: String,
     pub(crate) remote: String,
@@ -321,6 +369,7 @@ impl WorkflowEditorStepData {
     /// 按类型创建默认步骤，高级步骤的字段给出贴近直觉的初值。
     pub(crate) fn new(kind: WorkflowStepKind) -> Self {
         Self {
+            invoke: v2::InvokeEditorData::default(),
             kind,
             branch: String::new(),
             remote: String::new(),
@@ -346,6 +395,10 @@ impl WorkflowEditorStepData {
     /// 读取文本槽的当前值。
     pub(crate) fn slot_value(&self, slot: WorkflowStepSlot) -> &str {
         match slot {
+            WorkflowStepSlot::StepId | WorkflowStepSlot::Uses | WorkflowStepSlot::Arguments
+            | WorkflowStepSlot::SaveAs | WorkflowStepSlot::Server | WorkflowStepSlot::Tool
+            | WorkflowStepSlot::ToolArguments | WorkflowStepSlot::Script | WorkflowStepSlot::JsInput | WorkflowStepSlot::Skill
+            | WorkflowStepSlot::Task | WorkflowStepSlot::Tools => self.invoke.value(slot),
             WorkflowStepSlot::Branch => &self.branch,
             WorkflowStepSlot::Remote => &self.remote,
             WorkflowStepSlot::Name => &self.name,
@@ -362,6 +415,10 @@ impl WorkflowEditorStepData {
     /// 写入文本槽。
     pub(crate) fn set_slot_value(&mut self, slot: WorkflowStepSlot, value: String) {
         match slot {
+            WorkflowStepSlot::StepId | WorkflowStepSlot::Uses | WorkflowStepSlot::Arguments
+            | WorkflowStepSlot::SaveAs | WorkflowStepSlot::Server | WorkflowStepSlot::Tool
+            | WorkflowStepSlot::ToolArguments | WorkflowStepSlot::Script | WorkflowStepSlot::JsInput | WorkflowStepSlot::Skill
+            | WorkflowStepSlot::Task | WorkflowStepSlot::Tools => self.invoke.set(slot, value),
             WorkflowStepSlot::Branch => self.branch = value,
             WorkflowStepSlot::Remote => self.remote = value,
             WorkflowStepSlot::Name => self.name = value,
@@ -383,6 +440,7 @@ impl WorkflowEditorStepData {
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         };
         match self.kind {
+            WorkflowStepKind::Invoke => unreachable!("扩展动作由 V2 构建器校验"),
             WorkflowStepKind::Checkout => WorkflowStep::Checkout {
                 branch: self.branch.trim().to_string(),
             },
@@ -454,6 +512,7 @@ pub(crate) struct WorkflowEditorVarRowData {
 /// 编辑器纯数据层（可单测）：所有编辑值以字符串/布尔形态持有。
 #[derive(Clone, Debug)]
 pub(crate) struct WorkflowEditorData {
+    pub(crate) version: u32,
     pub(crate) name: String,
     pub(crate) file_name: String,
     pub(crate) require_clean_worktree: bool,
@@ -473,6 +532,7 @@ pub(crate) struct WorkflowEditorData {
 impl Default for WorkflowEditorData {
     fn default() -> Self {
         Self {
+            version: 1,
             name: String::new(),
             file_name: String::new(),
             require_clean_worktree: true,
@@ -534,8 +594,8 @@ pub(crate) fn workflow_editor_data_from_definition(
     definition: &WorkflowDefinition,
     file_stem: &str,
 ) -> Result<WorkflowEditorData, String> {
-    if definition.version != 1 {
-        return Err("当前可视化编辑器只支持 v1 模板，请使用文本编辑器修改 v2 模板".into());
+    if !matches!(definition.version, 1 | 2) {
+        return Err("可视化编辑器仅支持 V1、V2 模板".into());
     }
     let optional = |value: &Option<String>| value.clone().unwrap_or_default();
     let steps = definition
@@ -547,8 +607,9 @@ pub(crate) fn workflow_editor_data_from_definition(
                     .unwrap_or(WorkflowStepKind::Checkout),
             );
             match step {
-                WorkflowStep::Invoke { .. } => {
-                    return Err("当前可视化编辑器无法编辑 invoke 步骤".to_string());
+                WorkflowStep::Invoke { id, uses, arguments, save_as } => {
+                    editor.kind = WorkflowStepKind::Invoke;
+                    editor.invoke = v2::InvokeEditorData::from_step(id, uses, arguments, save_as);
                 }
                 WorkflowStep::Checkout { branch } => editor.branch = branch.clone(),
                 WorkflowStep::Fetch { remote } => editor.remote = optional(remote),
@@ -638,6 +699,7 @@ pub(crate) fn workflow_editor_data_from_definition(
         .collect();
 
     Ok(WorkflowEditorData {
+        version: definition.version,
         name: definition.name.clone().unwrap_or_default(),
         file_name: file_stem.to_string(),
         require_clean_worktree: definition.defaults.require_clean_worktree,
@@ -666,7 +728,7 @@ pub(crate) fn apply_ai_generated_to_editor_data(
     let definition = parse_workflow_json5(&cleaned)
         .map_err(|err| format!("AI 生成的内容不是有效的工作流模板：{err}。请重试或调整需求描述"));
 
-    let generated = match definition {
+    let mut generated = match definition {
         Ok(definition) => {
             // file_name 已填则以它为准；为空时用 AI 给的显示名推导主干。
             let stem_hint = if data.file_name.trim().is_empty() {
@@ -679,6 +741,10 @@ pub(crate) fn apply_ai_generated_to_editor_data(
         Err(err) => return Err(err),
     };
 
+    if data.version == 1 && generated.version == 2 {
+        return Err("当前模板为 V1，请新建 V2 模板后再生成扩展动作".into());
+    }
+    generated.version = data.version;
     let file_name_empty = data.file_name.trim().is_empty();
     let editing_path = data.editing_path.clone();
     let error = data.error.take();
@@ -761,7 +827,14 @@ pub(crate) fn build_workflow_definition(
                     ));
                 }
             }
-            Ok(step.build_step())
+            if step.kind == WorkflowStepKind::Invoke {
+                if data.version != 2 {
+                    return Err("扩展动作需要 V2 模板".into());
+                }
+                step.invoke.build().map_err(|error| format!("第 {} 个步骤：{error}", index + 1))
+            } else {
+                Ok(step.build_step())
+            }
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -811,8 +884,8 @@ pub(crate) fn build_workflow_definition(
     }
 
     let name = data.name.trim();
-    Ok(WorkflowDefinition {
-        version: 1,
+    let definition = WorkflowDefinition {
+        version: data.version,
         name: (!name.is_empty()).then(|| name.to_string()),
         defaults: khaslana::WorkflowDefaults {
             require_clean_worktree: data.require_clean_worktree,
@@ -820,7 +893,14 @@ pub(crate) fn build_workflow_definition(
         inputs,
         vars,
         steps,
-    })
+    };
+    if data.version == 2 {
+        let serialized = json5::to_string(&definition).map_err(|error| error.to_string())?;
+        parse_workflow_json5(&serialized).map_err(|error| error.to_string())?;
+        khaslana::workflow::extensions::WorkflowExternalGrant::for_definition(&definition)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(definition)
 }
 
 /// 校验并规范化保存文件名：非空、无非法字符、与现有模板不重名。
@@ -1051,6 +1131,10 @@ pub(crate) fn workflow_step_binding(
     // 更早 filterBranches 步骤的输出集合（out.{output}）。
     let mut earlier_outputs: Vec<String> = Vec::new();
     for earlier in steps.iter().take(step_index) {
+        if earlier.kind == WorkflowStepKind::Invoke {
+            let output = earlier.invoke.value(WorkflowStepSlot::SaveAs).trim();
+            if !output.is_empty() { earlier_outputs.push(format!("out.{output}")); }
+        }
         if earlier.kind == WorkflowStepKind::FilterBranches {
             let output = earlier.output.trim();
             if !output.is_empty() {
@@ -1065,7 +1149,7 @@ pub(crate) fn workflow_step_binding(
         for name in extract_template_var_refs(step.slot_value(*slot)) {
             let declared = declared_inputs.contains(&name)
                 || declared_vars.contains(&name)
-                || earlier_outputs.contains(&name);
+                || earlier_outputs.iter().any(|output| name == *output || name.starts_with(&format!("{output}.")));
             if !used.contains(&name) {
                 used.push(name.clone());
             }
@@ -1075,9 +1159,12 @@ pub(crate) fn workflow_step_binding(
         }
     }
 
-    let produces = (step.kind == WorkflowStepKind::FilterBranches)
+    let produces = if step.kind == WorkflowStepKind::Invoke {
+        let output = step.invoke.value(WorkflowStepSlot::SaveAs).trim();
+        (!output.is_empty()).then(|| format!("out.{output}"))
+    } else { (step.kind == WorkflowStepKind::FilterBranches)
         .then(|| format!("out.{}", step.output.trim()))
-        .filter(|out| out != "out.");
+        .filter(|out| out != "out.") };
 
     WorkflowStepBinding {
         used,
@@ -1164,6 +1251,14 @@ pub(crate) struct WorkflowEditorStepState {
 
 /// 编辑器整体 UI 状态：包住纯数据层并持有全部文本框。
 pub(crate) struct WorkflowEditorState {
+    document_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    document_details_open: bool,
+    document_metadata_open: bool,
+    document_ai_open: bool,
+    document_preview_open: bool,
+    document_advanced_step: Option<usize>,
+    document_tool_servers: std::collections::HashMap<String, String>,
+    document_picker_focus: gpui::FocusHandle,
     data: WorkflowEditorData,
     name_field: TextFieldState,
     file_name_field: TextFieldState,
@@ -1206,7 +1301,7 @@ pub(crate) struct WorkflowEditorVarRowState {
 impl WorkflowEditorState {
     /// 新建空白编辑器状态。
     fn new(cx: &mut Context<RepositoryView>) -> Self {
-        Self::from_data(WorkflowEditorData::default(), cx)
+        Self::from_data(WorkflowEditorData { version: 2, ..Default::default() }, cx)
     }
 
     /// 由纯数据（预设或既有草稿）构建 UI 状态，文本框按需初始化并预填。
@@ -1216,6 +1311,14 @@ impl WorkflowEditorState {
         let file_name_field =
             TextFieldState::new(cx, "如 my-workflow").with_value(data.file_name.clone());
         let mut state = Self {
+            document_bounds: Default::default(),
+            document_details_open: false,
+            document_metadata_open: data.file_name.trim().is_empty(),
+            document_ai_open: false,
+            document_preview_open: false,
+            document_advanced_step: None,
+            document_tool_servers: Default::default(),
+            document_picker_focus: cx.focus_handle(),
             data,
             name_field,
             file_name_field,
@@ -1342,6 +1445,8 @@ impl RepositoryView {
     /// 打开「新建工作流模板」编辑器。
     pub(crate) fn open_workflow_editor(&mut self, cx: &mut Context<Self>) {
         self.close_popups();
+        self.set_main_mode(crate::MainMode::Workflow);
+        self.refresh_ai_extensions();
         self.workflow_editor = Some(WorkflowEditorState::new(cx));
         self.active_dialog = Some(crate::DialogState::WorkflowEditor);
         self.last_error = None;
@@ -1404,6 +1509,8 @@ impl RepositoryView {
         }
         self.workflow_editor = Some(WorkflowEditorState::from_data(data, cx));
         self.active_dialog = Some(crate::DialogState::WorkflowEditor);
+        self.set_main_mode(crate::MainMode::Workflow);
+        self.refresh_ai_extensions();
     }
 
     /// 注释丢失确认后真正进入编辑模式。
@@ -1416,6 +1523,8 @@ impl RepositoryView {
         data.editing_path = Some(pending.path);
         self.workflow_editor = Some(WorkflowEditorState::from_data(data, cx));
         self.active_dialog = Some(crate::DialogState::WorkflowEditor);
+        self.set_main_mode(crate::MainMode::Workflow);
+        self.refresh_ai_extensions();
     }
 
     /// 关闭编辑器（放弃未保存内容）。
@@ -1436,7 +1545,9 @@ impl RepositoryView {
     ) {
         if let Some(state) = self.workflow_editor.as_mut() {
             if state.data.steps.is_empty() {
-                *state = WorkflowEditorState::from_data(preset.build_data(), cx);
+                let mut data = preset.build_data();
+                data.version = state.data.version;
+                *state = WorkflowEditorState::from_data(data, cx);
                 // 预设的主体是步骤序列，载入后直接进入「操作步骤」步。
                 state.wizard_step = 1;
             }
@@ -1596,9 +1707,11 @@ impl RepositoryView {
     /// 任一编辑器下拉（类型/守卫）是否打开（main.rs 的 any_popup_menu_open
     /// 引用，弹层打开期间分割线等交互门控与其它菜单一致）。
     pub(crate) fn workflow_editor_menu_open(&self) -> bool {
+        if self.ai_thinking_overlay.is_some() { return false; }
         self.workflow_editor
             .as_ref()
-            .is_some_and(|state| state.kind_menu_open.is_some() || state.guard_menu_open.is_some())
+            .is_some_and(|state| state.kind_menu_open.is_some() || state.guard_menu_open.is_some()
+                || (state.data.version == 2 && state.step_picker_open))
     }
 
     /// 关闭编辑器的全部下拉菜单；返回是否有菜单被关闭（决定是否 notify）。
@@ -1606,9 +1719,11 @@ impl RepositoryView {
         let Some(state) = self.workflow_editor.as_mut() else {
             return false;
         };
-        let had_open = state.kind_menu_open.is_some() || state.guard_menu_open.is_some();
+        let had_open = state.kind_menu_open.is_some() || state.guard_menu_open.is_some()
+            || (state.data.version == 2 && state.step_picker_open);
         state.kind_menu_open = None;
         state.guard_menu_open = None;
+        if state.data.version == 2 { state.step_picker_open = false; }
         had_open
     }
 
@@ -1747,7 +1862,7 @@ impl RepositoryView {
             }
         }
         // 变量设置步初始化所有变量行文本框
-        if state.wizard_step == WIZARD_STEP_VARS {
+        if state.data.version == 2 || state.wizard_step == WIZARD_STEP_VARS {
             let inputs = state.data.inputs.clone();
             for (index, row) in inputs.iter().enumerate() {
                 let Some(row_state) = state.input_fields.get_mut(index) else {
@@ -2016,11 +2131,15 @@ impl RepositoryView {
             return;
         }
         state.sync_from_fields();
-        let request = state.ai_description_field.value.trim().to_string();
+        let mut request = state.ai_description_field.value.trim().to_string();
         if request.is_empty() {
             state.data.error = Some("请先在输入框中描述你想要的模板功能，再点击 AI 生成".into());
             cx.notify();
             return;
+        }
+        let version = state.data.version;
+        if version == 2 {
+            request.push_str(&format!("\n当前编辑器为 V2。已安装 Skill：{:?}；已配置 MCP 服务：{:?}，另有内置 browser.edge。只使用实际存在的 Skill、服务与工具。", self.ai_extensions.skills, self.ai_extensions.mcp.servers.keys().collect::<Vec<_>>()));
         }
         // 编辑模式携带当前模板内容作为上下文；序列化失败按无上下文降级
         // （新建语义从零生成），不阻断生成。
@@ -2040,8 +2159,12 @@ impl RepositoryView {
             crate::AiThinkingTaskKind::WorkflowTemplate { session_id },
             |task_id, content| crate::UiEvent::AiWorkflowTemplateGenerated { task_id, content },
             move |client, _proxy_url, _tx, on_delta| {
-                let (system, user) =
+                let (mut system, user) =
                     khaslana::workflow_template_prompts(&request, current_json5.as_deref());
+                if version == 2 {
+                    system.content = system.content.replace("version 字段恒为 1", "version 字段恒为 2")
+                        .replace("op 只能使用文档「支持的步骤」章节列出的类型", "op 使用文档支持的 Git 步骤或 invoke；invoke 必须有唯一 id、uses 与对象 with，可选 saveAs；uses 可为 git.*、mcp.call、js.run、skill.run");
+                }
                 let result =
                     client.request_stream(&[system, user], &mut |delta| on_delta(delta))?;
                 khaslana::ai::validate_generated_content(
@@ -2538,6 +2661,10 @@ impl RepositoryView {
                                     .child("按引导分步完成，变量随步骤绑定，不会遗漏"),
                             ),
                     )
+                    .when(editor.data.version == 1, |header| header.child(self.button(
+                        "以 V2 编辑副本", !editor.ai_loading,
+                        |this, _, cx| this.workflow_editor_copy_as_v2(cx), cx,
+                    )))
                     .child(self.primary_button(
                         "关闭",
                         true,
@@ -4090,6 +4217,7 @@ fn workflow_editor_card_remove_button(
 /// 步骤类型在选择器/图标位使用的简短符号。
 fn workflow_step_kind_glyph(kind: WorkflowStepKind) -> &'static str {
     match kind {
+        WorkflowStepKind::Invoke => "◇",
         WorkflowStepKind::Checkout => "⇄",
         WorkflowStepKind::Fetch => "↙",
         WorkflowStepKind::Pull => "↓",

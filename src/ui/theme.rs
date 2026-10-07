@@ -228,6 +228,13 @@ theme_tokens! {
     120: WB_DIFF_SURFACE => 0xFFFFFF, 0x16191F;
     // 提交区：面板内独立抬起的一条工作条（与上方变更/差异区拉开层次）。
     121: WB_COMMIT_BAR => 0xFFFFFF, 0x1D222C;
+    // 工作流文档：浅蓝轮廓、轻表面与展开态轮廓对应 V2 Pencil 稿。
+    122: WORKFLOW_OUTLINE => 0xDEE7F7, 0x334158;
+    123: WORKFLOW_OUTLINE_ACTIVE => 0xABCDFC, 0x345B88;
+    124: WORKFLOW_SURFACE => 0xF9FBFF, 0x1B2230;
+    125: WORKFLOW_META => 0x7888A6, 0xA0ADC5;
+    126: WORKFLOW_SUCCESS_BG => 0xE5F8EC, 0x173D25;
+    127: WORKFLOW_SUCCESS_TEXT => 0x2F9471, 0xA7F3B5;
 }
 
 // ── 主色族 token（受 accent 预设动态控制）─────────────────

@@ -62,6 +62,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_channel::{Receiver, Sender};
+use code_palette_view::{CodeSearchPaletteState, PendingSearchBranch};
 use git2::Repository;
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, FocusHandle, Focusable,
@@ -145,7 +146,7 @@ actions!(
         ShortcutSwitchToWorkflow,    // 工作流
         ShortcutOpenInExplorer,      // 资源管理器打开仓库
         ShortcutOpenRemoteInBrowser, // 浏览器打开远端
-        ShortcutOpenCodeSearch,      // 符号搜索面板
+        ShortcutOpenCodeSearch,      // 程序内全局搜索
     ]
 );
 
@@ -253,7 +254,7 @@ impl ShortcutAction {
             ShortcutAction::SwitchToWorkflow => "工作流",
             ShortcutAction::OpenInExplorer => "在资源管理器中打开仓库",
             ShortcutAction::OpenRemoteInBrowser => "以浏览器打开当前远端",
-            ShortcutAction::OpenCodeSearch => "符号搜索",
+            ShortcutAction::OpenCodeSearch => "全局搜索",
         }
     }
 
@@ -508,7 +509,7 @@ enum FieldId {
     CodeIndexFilter,
     /// 设置中心「AI 设置」页分类侧栏的搜索框。
     AiSettingsCategorySearch,
-    /// 全局符号搜索面板（Ctrl+P）的输入框。
+    /// 程序内全局搜索面板（Ctrl+P）的输入框。
     CodePaletteSearch,
     StashMessage,
     WorkflowInput(usize),
@@ -1658,18 +1659,6 @@ pub(crate) struct CodeIndexListEntry {
     pub path: String,
 }
 
-/// 全局符号搜索面板（Ctrl+P）的会话状态；None = 关闭。
-#[derive(Default)]
-pub(crate) struct CodeSearchPaletteState {
-    pub selected_index: usize,
-    pub results: Vec<khaslana::code_index::SearchHit>,
-    /// 选中符号的详情（直接调用关系 + 源码片段），随选中变化异步刷新。
-    pub detail: Option<khaslana::code_index::SymbolDetail>,
-    pub searching: bool,
-    /// 详情请求在途（右栏展示「详情加载中」而非回落到提示文案）。
-    pub detail_loading: bool,
-}
-
 /// AI 思考弹窗状态：一次性 AI 请求（commit message / 冲突合并建议 /
 /// 工作流模板生成）进行中的流式展示。思维链与正文增量实时追加，
 /// 任务完成或失败后由对应事件处理关闭弹窗。
@@ -1736,7 +1725,7 @@ pub(crate) enum TopOverlayKind {
     PopupMenu,
     /// AI 思考弹窗（Esc = 后台运行语义，不终止任务）。
     AiThinking,
-    /// 全局符号搜索面板（Ctrl+P）。
+    /// 程序内全局搜索面板（Ctrl+P）。
     CodePalette,
     /// AI 评审历史弹窗。
     ReviewHistory,
@@ -1970,6 +1959,8 @@ struct RepoTabState {
     operation_kind: OperationKind,
     pub(crate) loading: RepositoryLoading,
     pub(crate) repository_load_id: u64,
+    /// 搜索未打开仓库后的分支定位，等同代际元数据加载成功才执行。
+    pub(crate) pending_search_branch: Option<PendingSearchBranch>,
     pub(crate) status: String,
     pub(crate) last_error: Option<String>,
     /// 最后活动/打开时间（Unix 秒），用于仓库切换下拉排序。
@@ -2025,6 +2016,7 @@ impl RepoTabState {
             operation_kind: OperationKind::Local,
             loading: RepositoryLoading::default(),
             repository_load_id: 0,
+            pending_search_branch: None,
             status: "就绪".to_string(),
             last_error: None,
             last_active_at: now_epoch_secs(),
@@ -2673,15 +2665,11 @@ pub(crate) enum UiEvent {
         repo_path: String,
         error: String,
     },
-    /// 全局符号搜索面板：查询结果（seq 守卫防乱序）。
-    CodePaletteSearchFinished {
-        seq: u64,
-        hits: Vec<khaslana::code_index::SearchHit>,
-    },
-    /// 全局符号搜索面板：选中符号详情。
-    CodePaletteDetailFinished {
-        seq: u64,
-        detail: Option<Box<khaslana::code_index::SymbolDetail>>,
+    /// 全局搜索会话后台读取未打开仓库的分支，按会话与路径回填。
+    AppSearchRepositoryLoaded {
+        request_id: u64,
+        path: PathBuf,
+        result: Result<Vec<khaslana::BranchInfo>, String>,
     },
     /// 设置页打开/刷新时后台读库回填的索引统计。
     CodeIndexStatsLoaded {
@@ -3563,7 +3551,7 @@ pub(crate) struct RepositoryView {
     ai_thinking_focus: FocusHandle,
     /// 「需要凭据」提示面板的焦点圈句柄（同 dialog_focus 用途）。
     credential_prompt_focus: FocusHandle,
-    /// 全局符号搜索面板的焦点圈句柄（同 dialog_focus 用途）。
+    /// 全局搜索面板的焦点圈句柄（同 dialog_focus 用途）。
     code_palette_focus: FocusHandle,
     review_history_focus: FocusHandle,
     /// 右键菜单容器的共享焦点圈句柄：菜单打开时焦点移入其中
@@ -3753,14 +3741,12 @@ pub(crate) struct RepositoryView {
     pub(crate) code_index_progress_message: String,
     /// 已启用索引的仓库键缓存（启动与设置页打开时从主库加载）。
     pub(crate) code_index_enabled_cache: std::collections::HashSet<String>,
-    /// 全局符号搜索面板（Ctrl+P）；None = 关闭。
+    /// 程序内全局搜索面板（Ctrl+P）；None = 关闭。
     pub(crate) code_search_palette: Option<CodeSearchPaletteState>,
     /// 面板输入框（面板关闭后保留输入内容，重开可续用）。
     pub(crate) code_palette_search: TextFieldState,
-    /// 面板查询请求序号（每按键 +1，事件携带，乱序丢弃）。
-    pub(crate) code_palette_search_seq: u64,
-    /// 面板详情请求序号（随选中变化 +1）。
-    pub(crate) code_palette_detail_seq: u64,
+    /// 每次打开搜索启动独立仓库读取会话，迟到结果不覆盖新弹窗。
+    pub(crate) code_search_request_seq: u64,
     // ── 更新状态 ──
     pub(crate) update_preferences: UpdatePreferences,
     pub(crate) update_checking: bool,
@@ -3839,10 +3825,10 @@ impl Render for RepositoryView {
             .flex()
             .flex_col()
             .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-            // 全局符号搜索面板的入口监听：元素级（区别于其他快捷键的
+            // 全局搜索面板的入口监听：元素级（区别于其他快捷键的
             // App::on_action），回调带 Window 以便聚焦面板输入框。
             .on_action(cx.listener(|this, _: &ShortcutOpenCodeSearch, window, cx| {
-                if this.active_dialog.is_some() || this.settings_center.is_some() {
+                if this.active_dialog.is_some() {
                     return;
                 }
                 this.toggle_code_search_palette(window, cx);
@@ -3907,6 +3893,11 @@ impl Render for RepositoryView {
                 }
             }))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                // 页面内工作流编辑保持模态语义，避免背景仓库/导航操作改变草稿上下文。
+                if this.workflow_document_editor_blocks_mouse(event.position) {
+                    cx.stop_propagation();
+                    return;
+                }
                 this.encoding_menu_closed_by_capture = None;
                 this.commit_graph_branch_menu_closed_by_capture = false;
                 if this.mouse_down_inside_context_menu(event) {

@@ -17,6 +17,7 @@ pub mod merge;
 pub mod prompt;
 pub mod review;
 pub mod review_agent;
+mod review_index;
 pub mod review_store;
 
 pub use client::{

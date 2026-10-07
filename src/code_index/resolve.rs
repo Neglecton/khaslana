@@ -23,6 +23,8 @@ struct SymbolCandidate {
     file_path: String,
     callable: bool,
     container: bool,
+    qualified_name: String,
+    scope: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +53,10 @@ impl Registry {
                 .push(SymbolCandidate {
                     id: node.id,
                     file_path: node.file_path.clone(),
+                    qualified_name: node.qualified_name.clone(),
+                    scope: serde_json::from_str::<serde_json::Value>(&node.properties).ok()
+                        .and_then(|properties| properties["scope"].as_array().cloned())
+                        .unwrap_or_default().iter().filter_map(|part| part.as_str().map(str::to_string)).collect(),
                     callable: matches!(node.label, NodeLabel::Function | NodeLabel::Method),
                     container: matches!(
                         node.label,
@@ -65,8 +71,8 @@ impl Registry {
         Self { name_index }
     }
 
-    /// 解析一个调用点。`qualifier` 是限定表达式的倒数第二段
-    /// （`GitService::open` 的 GitService、`a.b.push` 的 b），可为 None。
+    /// 解析一个调用点。`qualifier` 是限定表达式的完整前缀
+    /// （`GitService::open` 的 GitService、`a.b.push` 的 a.b），可为 None。
     pub fn resolve_call(
         &self,
         name: &str,
@@ -74,10 +80,43 @@ impl Registry {
         imports: &[String],
         qualifier: Option<&str>,
     ) -> Option<ResolvedTarget> {
+        self.resolve_call_in_scope(name, calling_file, imports, qualifier, &[])
+    }
+
+    pub(super) fn resolve_call_in_scope(
+        &self, name: &str, calling_file: &str, imports: &[String], qualifier: Option<&str>, scope: &[String],
+    ) -> Option<ResolvedTarget> {
         let candidates = self.name_index.get(name)?;
-        let callables: Vec<&SymbolCandidate> = candidates.iter().filter(|c| c.callable).collect();
+        // 这些语言调用成员需要显式接收者，裸函数名不能猜成类中的同名方法。
+        let explicit_members = matches!(super::graph::lang_of_rel_path(calling_file),
+            Some(super::LangId::Rust | super::LangId::Python | super::LangId::JavaScript | super::LangId::TypeScript | super::LangId::Tsx | super::LangId::Go));
+        let callables: Vec<&SymbolCandidate> = candidates.iter().filter(|c| c.callable
+            && (qualifier.is_some() || !explicit_members || c.scope.is_empty())).collect();
         if callables.is_empty() {
             return None;
+        }
+
+        // 限定调用必须先证明限定段与模块或容器相符，不能退回全局同名猜测。
+        if let Some(qualifier) = qualifier {
+            let qualifier = match qualifier {
+                "self" | "this" | "Self" => scope.last()?.as_str(),
+                qualifier => qualifier,
+            };
+            let qualified: Vec<_> = callables.iter().copied()
+                .filter(|candidate| qualifier_matches(candidate, qualifier, name)).collect();
+            let local: Vec<_> = qualified.iter().copied().filter(|candidate| candidate.file_path == calling_file).collect();
+            let chosen = if local.len() == 1 { &local } else { &qualified };
+            return (chosen.len() == 1).then(|| ResolvedTarget {
+                id: chosen[0].id, confidence: 0.90, strategy: "suffix",
+            });
+        }
+
+        if !scope.is_empty() {
+            let scoped: Vec<_> = callables.iter().filter(|candidate|
+                candidate.file_path == calling_file && candidate.scope == scope).collect();
+            if scoped.len() == 1 {
+                return Some(ResolvedTarget { id: scoped[0].id, confidence: 0.95, strategy: "scope" });
+            }
         }
 
         // 1. 同文件唯一同名。
@@ -121,36 +160,28 @@ impl Registry {
             });
         }
 
-        // 4. 限定调用且排除本文件后唯一（suffix 策略的省内存退化版：
-        //    name_index 不缓存 QN，精度略降于参考项目 suffix_match）。
-        if qualifier.is_some() {
-            let others: Vec<&SymbolCandidate> = callables
-                .iter()
-                .copied()
-                .filter(|c| c.file_path != calling_file)
-                .collect();
-            if others.len() == 1 {
-                return Some(ResolvedTarget {
-                    id: others[0].id,
-                    confidence: 0.60,
-                    strategy: "suffix",
-                });
-            }
-        }
-
         None
     }
 
-    /// 解析类型引用（INHERITS/IMPLEMENTS 目标）：优先容器类符号，
-    /// 多候选取首个（发现顺序确定性）。
+    /// 解析类型引用（INHERITS/IMPLEMENTS 目标）：只接受唯一容器，歧义时不建边。
     pub fn resolve_type(&self, name: &str) -> Option<NodeId> {
         let candidates = self.name_index.get(name)?;
-        candidates
-            .iter()
-            .find(|c| c.container)
-            .or_else(|| candidates.first())
-            .map(|c| c.id)
+        let containers: Vec<_> = candidates.iter().filter(|candidate| candidate.container).collect();
+        (containers.len() == 1).then(|| containers[0].id)
     }
+}
+
+fn qualifier_matches(candidate: &SymbolCandidate, qualifier: &str, name: &str) -> bool {
+    let qualifier = qualifier.replace("::", ".");
+    let qualifier = qualifier.trim_start_matches("crate.");
+    if qualifier.is_empty() { return false; }
+    let qn = candidate.qualified_name.split('#').next().unwrap_or(&candidate.qualified_name);
+    if qn.ends_with(&format!(".{qualifier}.{name}")) { return true; }
+    let file = candidate.file_path.rsplit_once('.').map_or(candidate.file_path.as_str(), |(stem, _)| stem)
+        .replace(['/', '\\'], ".");
+    let file = file.strip_suffix(".mod").unwrap_or(&file);
+    let container = if candidate.scope.is_empty() { file.to_string() } else { format!("{file}.{}", candidate.scope.join(".")) };
+    container == qualifier || container.ends_with(&format!(".{qualifier}")) || candidate.scope.join(".") == qualifier
 }
 
 /// Rust 路径根段：`use crate::git::service` 的 crate 段在文件路径里对应

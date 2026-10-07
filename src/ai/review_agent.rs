@@ -338,6 +338,7 @@ pub fn run_review_agent(
     ];
     let mut steps: Vec<AiReviewStep> = Vec::new();
     let mut budget = ToolBudget::default();
+    let mut code_index = super::review_index::ReviewIndex::new(input.repo_path.clone(), input.target_commit_oid.clone());
     let tools = tool_schemas();
     // 强制收尾指令只注入一次（触顶后可能连续多轮收尾重试）。
     let mut finish_instruction_injected = false;
@@ -462,6 +463,7 @@ pub fn run_review_agent(
             tool_calls: turn.tool_calls,
         });
         for call in calls {
+            if is_cancelled.load(std::sync::atomic::Ordering::Relaxed) { return Ok(None); }
             // 单轮内额度检查：模型一轮批量发起多个调用时不能整体放行
             //（否则 119 + 一轮 10 个 = 129 次超额）。超限的调用不执行，
             // 但仍回填 tool 消息——OpenAI 协议要求每个 tool_call_id 配对。
@@ -485,7 +487,7 @@ pub fn run_review_agent(
                 continue;
             }
             budget.calls += 1;
-            let (step, tool_message) = execute_tool(service, &repo, input, &call);
+            let (step, tool_message) = execute_tool(service, &repo, input, &call, &mut code_index, is_cancelled);
             budget.note_result(tool_message.chars().count());
             steps.push(step);
             on_event(AgentEvent::Step(steps.last().cloned().unwrap()));
@@ -534,7 +536,11 @@ fn agent_system_prompt() -> &'static str {
      工作方式：\n\
      - 初始输入包含变更文件清单与预算内的差异；被截断的文件可用 read_diff 获取完整差异。\n\
      - 需要理解上下文时用 read_lines 读取目标分支上的文件片段，用 get_file_tree 浏览目录，\
-     用 search_code 定位标识符的定义与引用（可限定目录前缀），get_file_history / get_blame \
+     优先用 search_symbols 找定义、get_symbol_detail 读定义源码、trace_path 查调用方和被调用方，\
+     这些索引工具固定对应目标提交，不使用当前工作区索引。命中后用 check_index_coverage 核对覆盖；\
+     部分解析、未解析调用或空结果需用 read_lines / search_code 回查，不能推断代码不存在。\
+     搜索和调用关系有 has_more 时保持条件并用 offset=next_offset 翻页。\
+     search_code 可按文本或正则定位引用（可限定目录前缀），get_file_history / get_blame \
      了解改动历史与行归属（get_blame 基于当前 HEAD 与工作区，不是目标分支版本）。\n\
      - 相互独立的调查请在同一轮批量发起多个工具调用，减少往返轮次。\n\
      - 小改动若初始差异已足够评审，可以不调用任何工具直接输出结论。\n\
@@ -579,7 +585,7 @@ fn collect_initial_entries(
 
 /// 内置工具定义（名称 / 中文描述 / 手写 JSON Schema）。
 fn tool_schemas() -> Vec<ToolSchema> {
-    vec![
+    let mut tools = vec![
         ToolSchema {
             name: "read_lines",
             description: "读取目标分支上某文件的指定行范围（1 基闭区间），返回带行号的文本。",
@@ -650,7 +656,9 @@ fn tool_schemas() -> Vec<ToolSchema> {
                 "required": ["query"]
             }),
         },
-    ]
+    ];
+    tools.extend(super::review_index::tool_schemas());
+    tools
 }
 
 /// 执行一次工具调用，返回 (UI 步骤, 回填给模型的 tool 消息文本)。
@@ -661,8 +669,10 @@ fn execute_tool(
     repo: &git2::Repository,
     input: &ReviewAgentInput,
     call: &crate::ai::client::AgentToolCall,
+    index: &mut super::review_index::ReviewIndex,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> (AiReviewStep, String) {
-    let outcome = dispatch_tool(service, repo, input, &call.name, &call.arguments);
+    let outcome = dispatch_tool(service, repo, input, &call.name, &call.arguments, index, cancelled);
     let (result_excerpt, error) = match outcome {
         Ok(text) => (text, false),
         Err(err) => (format!("工具执行失败：{err}"), true),
@@ -721,6 +731,10 @@ fn tool_args_summary(name: &str, arguments: &str) -> String {
                 ""
             }
         ),
+        "search_symbols" => format!("search_symbols {}", quote(value["query"].as_str().unwrap_or(""))),
+        "get_symbol_detail" => format!("get_symbol_detail {}", quote(value["name"].as_str().unwrap_or(""))),
+        "trace_path" => format!("trace_path {}", quote(value["function_name"].as_str().unwrap_or(""))),
+        "check_index_coverage" => "check_index_coverage".into(),
         other => other.to_string(),
     }
 }
@@ -732,9 +746,12 @@ fn dispatch_tool(
     input: &ReviewAgentInput,
     name: &str,
     arguments: &str,
+    index: &mut super::review_index::ReviewIndex,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<String> {
     let parse_error = |err: serde_json::Error| GitError::Message(format!("参数解析失败：{err}"));
     match name {
+        "search_symbols" | "get_symbol_detail" | "trace_path" | "check_index_coverage" => index.dispatch(repo, name, arguments, cancelled),
         "read_lines" => {
             let args: ReadLinesArgs = serde_json::from_str(arguments).map_err(parse_error)?;
             tool_read_lines(service, repo, input, &args)

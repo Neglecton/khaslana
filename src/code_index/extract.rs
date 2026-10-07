@@ -21,6 +21,8 @@ pub struct FileExtractResult {
     pub imports: Vec<ImportRef>,
     pub calls: Vec<CallSite>,
     pub type_refs: Vec<TypeRef>,
+    pub error_ranges: Vec<super::coverage::ErrorRange>,
+    pub error_ranges_truncated: bool,
 }
 
 /// 一个定义符号。`scope` 是外层类/命名空间链（不含自身名）。
@@ -31,6 +33,8 @@ pub struct SymbolDef {
     pub scope: Vec<String>,
     pub start_line: u32,
     pub end_line: u32,
+    pub signature: String,
+    pub docstring: String,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +99,25 @@ impl Extractor {
             fn_stack: Vec::new(),
         };
         walk(tree.root_node(), 0, &mut ctx);
+        if tree.root_node().has_error() {
+            let mut pending = vec![tree.root_node()];
+            while let Some(node) = pending.pop() {
+                if node.is_error() || node.is_missing() {
+                    if ctx.result.error_ranges.len() == 100 {
+                        ctx.result.error_ranges_truncated = true;
+                        break;
+                    }
+                    ctx.result.error_ranges.push(super::coverage::ErrorRange {
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                    });
+                } else if node.has_error() {
+                    let mut cursor = node.walk();
+                    pending.extend(node.children(&mut cursor));
+                }
+            }
+            ctx.result.error_ranges.sort_by_key(|range| (range.start_line, range.end_line));
+        }
         Ok(Some(ctx.result))
     }
 
@@ -160,12 +183,15 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
     if ctx.spec.field_types.contains(&kind)
         && let Some(name) = child_name_text(node, ctx.source)
     {
+        let (signature, docstring) = super::metadata::symbol_metadata(node, ctx.source);
         ctx.result.defs.push(SymbolDef {
             label: NodeLabel::Field,
             name,
             scope: ctx.class_stack.clone(),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
+            signature,
+            docstring,
         });
     }
     // 初始化器里的调用点由下方通用递归覆盖，此处不 return。
@@ -177,8 +203,9 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
 
     // 定义节点。
     if let Some(&(node_kind, def_kind)) = ctx.spec.def_types.iter().find(|(t, _)| *t == kind)
-        && let Some(def) = extract_def(node, node_kind, def_kind, ctx)
+        && let Some(mut def) = extract_def(node, node_kind, def_kind, ctx)
     {
+        (def.signature, def.docstring) = super::metadata::symbol_metadata(node, ctx.source);
         ctx.result.defs.push(def.clone());
         let container = is_container_def(def_kind, kind, ctx.spec);
         let is_fn_def = matches!(def.label, NodeLabel::Function | NodeLabel::Method);
@@ -287,6 +314,8 @@ fn extract_def(
             scope: ctx.class_stack.clone(),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
+            signature: String::new(),
+            docstring: String::new(),
         });
     }
 
@@ -304,6 +333,8 @@ fn extract_def(
             scope: ctx.class_stack.clone(),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
+            signature: String::new(),
+            docstring: String::new(),
         });
     }
 
@@ -353,6 +384,8 @@ fn extract_def(
         scope: ctx.class_stack.clone(),
         start_line: node.start_position().row as u32 + 1,
         end_line: node.end_position().row as u32 + 1,
+        signature: String::new(),
+        docstring: String::new(),
     })
 }
 

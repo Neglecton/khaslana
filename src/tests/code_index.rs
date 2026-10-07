@@ -424,7 +424,7 @@ fn resolve_strategy_chain() {
     let remote_work = g.add_symbol(
         NodeLabel::Function,
         "work",
-        "p.b.rs.work".to_string(),
+        "p.b.rs.B.work".to_string(),
         "b.rs",
         5,
         6,
@@ -448,7 +448,7 @@ fn resolve_strategy_chain() {
     assert_eq!(hit.strategy, "unique");
     assert_eq!(hit.id, only_one);
 
-    // 3. 本地重载多候选 + 限定调用 + 排除本文件唯一 -> suffix。
+    // 3. 限定调用必须匹配容器身份，不能只排除本文件后猜唯一候选。
     let hit = registry
         .resolve_call("work", "a.rs", &[], Some("B"))
         .unwrap();
@@ -1151,6 +1151,7 @@ mod mcp_tests {
         let response: Value =
             serde_json::from_str(&server.handle_message(&request.to_string()).unwrap()).unwrap();
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+        assert!(response["result"]["instructions"].as_str().unwrap().contains("next_offset"));
     }
 
     #[test]
@@ -1185,7 +1186,7 @@ mod mcp_tests {
         )
         .unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 11);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in [
             "list_projects",
@@ -1196,6 +1197,9 @@ mod mcp_tests {
             "detect_changes",
             "index_status",
             "refresh_index",
+            "search_graph",
+            "get_code_snippet",
+            "check_index_coverage",
         ] {
             assert!(names.contains(&expected), "{names:?}");
         }
@@ -1236,6 +1240,36 @@ mod mcp_tests {
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("query"));
+    }
+
+    #[test]
+    fn structural_search_pages_and_snippet_reads_discovered_definition() {
+        let (_tmp, server) = server();
+        let first = call_tool(&server, "search_graph", serde_json::json!({
+            "name_pattern": "^(entry_point|worker)$", "file_pattern": "src/*", "limit": 1
+        }));
+        assert_ne!(first["isError"], true, "{first}");
+        let page = &first["structuredContent"];
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["returned"], 1);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["next_offset"], 1);
+        let second = call_tool(&server, "search_graph", serde_json::json!({
+            "name_pattern": "^(entry_point|worker)$", "file_pattern": "src/*", "limit": 1, "offset": 1
+        }));
+        let next = &second["structuredContent"];
+        assert_eq!(next["total"], 2);
+        assert_eq!(next["has_more"], false);
+        assert_ne!(page["results"][0]["qualified_name"], next["results"][0]["qualified_name"]);
+        let snippet = call_tool(&server, "get_code_snippet", serde_json::json!({
+            "qualified_name": next["results"][0]["qualified_name"]
+        }));
+        assert_ne!(snippet["isError"], true, "{snippet}");
+        assert!(snippet["structuredContent"]["source"]["lines"].is_array());
+        assert!(snippet["structuredContent"]["signature"].is_string());
+        assert!(snippet["structuredContent"]["callers"].is_null());
+        let bad = call_tool(&server, "search_graph", serde_json::json!({ "name_pattern": "[" }));
+        assert_eq!(bad["isError"], true);
     }
 
     #[test]

@@ -272,9 +272,8 @@ impl RepositoryView {
             code_index_progress_total: 0,
             code_index_progress_message: String::new(),
             code_search_palette: None,
-            code_palette_search: TextFieldState::new(cx, "搜索符号或类型名…"),
-            code_palette_search_seq: 0,
-            code_palette_detail_seq: 0,
+            code_search_request_seq: 0,
+            code_palette_search: TextFieldState::new(cx, "输入分支、功能或设置名称…"),
             code_index_enabled_cache: {
                 let mut cache = std::collections::HashSet::new();
                 if let Ok(prefs) = storage.load_code_index_preferences() {
@@ -1595,10 +1594,6 @@ impl RepositoryView {
     }
 
     pub(crate) fn notify_text_field_changed(&mut self, field: FieldId) {
-        // 全局符号搜索面板：输入即查（seq 守卫防乱序）。
-        if field == FieldId::CodePaletteSearch {
-            self.on_code_palette_input_changed();
-        }
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
         }
@@ -1647,7 +1642,9 @@ impl RepositoryView {
             .focused_kit_field(window, cx)
             .or_else(|| self.focused_text_field(window, cx))
         {
-            self.submit_focused_field(field);
+            if !self.submit_workflow_document_field(field, cx) {
+                self.submit_focused_field(field);
+            }
             cx.notify();
         }
     }
@@ -1826,7 +1823,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn close_popups(&mut self) {
-        // 全局符号搜索面板与其他弹层互斥：任何新弹层打开前都要关掉它。
+        // 全局搜索面板与其他弹层互斥：任何新弹层打开前都要关掉它。
         self.code_search_palette = None;
         self.active_dialog = None;
         self.ai_review_history = None;
@@ -1944,7 +1941,7 @@ impl RepositoryView {
             TopOverlayKind::AiThinking => Some(self.ai_thinking_focus.clone()),
             TopOverlayKind::CodePalette => Some(self.code_palette_focus.clone()),
             TopOverlayKind::ReviewHistory => Some(self.review_history_focus.clone()),
-            TopOverlayKind::Dialog => Some(self.dialog_focus.clone()),
+            TopOverlayKind::Dialog => self.workflow_document_picker_focus().or_else(|| Some(self.dialog_focus.clone())),
             TopOverlayKind::Settings => Some(self.settings_center_focus.clone()),
             // 只有受键盘模型支持的右键菜单才把焦点收进容器：仓库切换下拉、
             // 编码菜单等没有挂焦点圈的容器，抢焦点会把它们的输入框焦点
@@ -1991,6 +1988,10 @@ impl RepositoryView {
         }
         if let Some(dialog) = self.active_dialog.as_ref() {
             layers.push((TopOverlayKind::Dialog, Some(dialog.clone())));
+        }
+        // V2 添加步骤是编辑页内的子模态，单独记录返回目标，关闭后归还触发器焦点。
+        if self.workflow_document_picker_focus().is_some() {
+            layers.push((TopOverlayKind::Dialog, None));
         }
         for (kind, visible) in [
             (TopOverlayKind::CodePalette, self.code_search_palette.is_some()),
@@ -2050,6 +2051,9 @@ impl RepositoryView {
                 }
                 let preferred = match kind {
                     TopOverlayKind::CodePalette => Some(this.code_palette_search.focus.clone()),
+                    TopOverlayKind::Dialog if this.workflow_document_picker_focus().is_some() => {
+                        this.workflow_document_picker_search_focus()
+                    }
                     TopOverlayKind::Dialog if this.active_dialog == Some(DialogState::CloneRepo) => {
                         Some(this.clone_url.focus.clone())
                     }

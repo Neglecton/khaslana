@@ -1,6 +1,6 @@
 # 工作流架构升级设计（讨论稿）
 
-状态：设计与后续目标；2026-09-27 基于当时源码和远端模板仓库 `4fdce5adced2ee6f92bfb61ce8c7fabf472c13b8` 核对。v2 执行内核、固定来源逐个下载、分支入口以及本地 stdio MCP/JS 已编码；AI Skill 与 Edge 样板仍按本文规划。实际交付边界见 [开发计划](workflow-development-plan.md)，语法以 [工作流使用说明](workflows.md) 为准。
+状态：设计与后续目标；初稿于 2026-09-27 核对远端模板仓库 `4fdce5adced2ee6f92bfb61ce8c7fabf472c13b8`。截至 2026-10-06，v2 执行内核、固定来源逐个下载、分支入口、本地 stdio MCP/JS、AI Skill、内置 Edge 运行组件以及设置中心的 Skill/MCP 管理均已有实现。实际交付与验收边界见 [开发计划](workflow-development-plan.md)，语法以 [工作流使用说明](workflows.md) 为准。下文未交付的来源更新管理等内容仍属于后续设计。
 
 ## 1. 目标与已知事实
 
@@ -10,7 +10,7 @@
 
 | 位置 | 当前行为 | 对设计的影响 |
 | --- | --- | --- |
-| `src/workflow.rs`、`src/workflow/extensions.rs` | 已接受 v1/v2；v2 的 `invoke` 可映射内置 `git.*` 动作，或调用本地 stdio MCP 与受限 JS；v1 原路径保留。 | AI Skill 与浏览器样板仍待实现。 |
+| `src/workflow.rs`、`src/workflow/extensions.rs` | 已接受 v1/v2；v2 的 `invoke` 可映射内置 `git.*` 动作，或调用本地 stdio MCP、受限 JS 与 AI Skill；v1 原路径保留。 | 扩展执行与浏览器样板已有实现，真实窗口验收仍需单独核对。 |
 | `src/workflow_view.rs` | 扫描普通模板目录；固定 CNB 来源在弹框中列出，用户逐个下载，旧版批量同步文件只导入一次。外部步骤运行前逐次授权，使用独立任务池并以 `UiEvent` 回传。 | 后续需要来源版本与更新冲突界面。 |
 | `src/main.rs` | `workflow_state` 属于 `RepoTabState`。 | 分支启动上下文也应随仓库标签页保存，避免切仓库串值。 |
 | `src/sidebar_view.rs` | 本地与远端分支共用右键菜单对象，菜单保存分支名与类型。 | 可以从菜单对象构造精确的来源分支上下文，而不是读取此时的 HEAD 或侧栏选中态。 |

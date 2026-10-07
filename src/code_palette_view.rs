@@ -1,18 +1,32 @@
-// 全局符号搜索面板（Ctrl+P）：输入即查代码索引（FTS5），双栏展示
-// 结果列表与选中符号的调用关系详情，Enter 打开内置追溯视图。
-// 查询与详情均走 Short 任务池 + seq 代际守卫（乱序结果丢弃）。
-//
-// 键盘行为（↑↓ 切换 / Enter 确认 / Esc 关闭）在面板层 capture_key_down
-// 拦截——先于输入框的 TextUp/TextDown/提交处理，保持检索面板的列表导航语义。
+//! 程序内搜索：从仓库切换列表与功能目录定位页面，不依赖代码索引。
+//! 输入复用字段适配，Kit Command 负责虚拟列表、指针选择和滚动。
 
-use gpui::{Context, IntoElement, KeyDownEvent, MouseButton, Window, div, prelude::*, px};
+mod catalog;
+mod repositories;
+pub(crate) use repositories::PendingSearchBranch;
+
+use gpui::{
+    Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton, Window, div, prelude::*,
+    px,
+};
 use gpui_kit::base::FocusTrapElement;
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
+use gpui_kit::component::{Disableable, IndexPath};
 
-use crate::tasks::TaskKind;
-use crate::ui::components::{dialog_overlay, dialog_panel_size};
-use crate::ui::theme::{self as ui_theme, rgb};
-use crate::{FieldId, RepositoryView, UiEvent, send_ui_event};
-use khaslana::code_index::{DetailOutcome, SymbolDetail, TraceHop, search_symbols, symbol_detail};
+use crate::ui::components::{
+    dialog_overlay, dialog_panel_size, floating_panel, icon_button, tooltip_text,
+};
+use crate::ui::icons::ToolbarIcon;
+use crate::ui::theme::{self as theme, rgb};
+use crate::{FieldId, MainMode, RepositoryView, SettingsCategory};
+use catalog::{SearchEntry, SearchTarget, filter_entries, function_entries};
+
+pub(crate) struct CodeSearchPaletteState {
+    command: Entity<CommandState>,
+    query: String,
+    repositories: repositories::RepositorySearchCatalog,
+    catalog_changed: bool,
+}
 
 impl RepositoryView {
     pub(crate) fn toggle_code_search_palette(
@@ -27,11 +41,16 @@ impl RepositoryView {
         }
     }
 
-    pub(crate) fn open_code_search(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_code_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popups();
-        self.code_search_palette = Some(crate::CodeSearchPaletteState::default());
-        // 挂载后由 maintain_overlay_focus 聚焦搜索框；进入前保留触发器焦点。
-        self.on_code_palette_input_changed();
+        let repositories = self.start_saved_repository_search();
+        self.code_search_palette = Some(CodeSearchPaletteState {
+            command: cx.new(|cx| CommandState::new(window, cx)),
+            query: self.code_palette_search.value.clone(),
+            repositories,
+            catalog_changed: false,
+        });
+        // 挂载后由 maintain_overlay_focus 聚焦字段，保留触发器的返回焦点。
         cx.notify();
     }
 
@@ -42,548 +61,442 @@ impl RepositoryView {
         self.code_search_palette = None;
     }
 
-    /// 输入变化：清空旧结果并发起查询（seq 守卫，乱序结果丢弃）。
-    pub(crate) fn on_code_palette_input_changed(&mut self) {
-        self.code_palette_search_seq = self.code_palette_search_seq.wrapping_add(1);
-        let seq = self.code_palette_search_seq;
-        let query = self.code_palette_search.value.trim().to_string();
-        let repo_db = self
-            .active_repo_key()
-            .and_then(|key| Self::index_db_path(&key).map(|db| (key, db)));
-        let Some(palette) = self.code_search_palette.as_mut() else {
-            return;
-        };
-        palette.results.clear();
-        palette.detail = None;
-        let Some((_repo_key, db_path)) = repo_db.filter(|_| !query.is_empty()) else {
-            palette.searching = false;
-            return;
-        };
-        palette.searching = true;
-        let tx = self.tx.clone();
-        self.tasks.spawn(TaskKind::Short, move || {
-            let hits = search_symbols(&db_path, &query, 50).unwrap_or_default();
-            send_ui_event(&tx, UiEvent::CodePaletteSearchFinished { seq, hits });
-        });
-    }
-
-    pub(crate) fn handle_code_palette_search_finished(
-        &mut self,
-        seq: u64,
-        hits: Vec<khaslana::code_index::SearchHit>,
-    ) {
-        let Some(palette) = self.code_search_palette.as_mut() else {
-            return;
-        };
-        if seq != self.code_palette_search_seq {
-            return;
+    fn app_search_entries(&self) -> Vec<SearchEntry> {
+        let mut entries = function_entries(
+            self.active_tab_id(),
+            self.busy,
+            self.snapshot.as_ref(),
+            self.ai_settings.enabled,
+        );
+        for tab in &self.tabs {
+            let Some(path) = tab.repo_path.as_ref() else {
+                continue;
+            };
+            let repo_name = tab.display_name();
+            entries.push(SearchEntry::new(
+                repo_name.clone(),
+                path.to_string_lossy().to_string(),
+                "仓库",
+                "项目 repository repo",
+                SearchTarget::Repository(tab.id),
+            ));
+            // 活动仓库始终读当前真值；其他仓库只使用它们自己的已加载快照。
+            let snapshot = if self.active_tab_id() == Some(tab.id) {
+                self.snapshot.as_ref()
+            } else {
+                tab.snapshot.as_ref()
+            };
+            if let Some(snapshot) = snapshot {
+                catalog::append_repository_entries(&mut entries, tab.id, &repo_name, snapshot);
+            }
         }
-        palette.searching = false;
-        palette.results = hits;
-        palette.selected_index = 0;
-        self.request_code_palette_detail();
-    }
-
-    pub(crate) fn handle_code_palette_detail_finished(
-        &mut self,
-        seq: u64,
-        detail: Option<Box<SymbolDetail>>,
-    ) {
-        let Some(palette) = self.code_search_palette.as_mut() else {
-            return;
-        };
-        if seq != self.code_palette_detail_seq {
-            return;
+        if let Some(tab_id) = self.active_tab_id() {
+            for template in &self.workflow_templates {
+                entries.push(SearchEntry::new(
+                    template.display_name.clone(),
+                    template.path.to_string_lossy().to_string(),
+                    "工作流",
+                    "模板 workflow template",
+                    SearchTarget::Workflow(tab_id, template.path.clone()),
+                ));
+            }
         }
-        palette.detail = detail.map(|boxed| *boxed);
-        palette.detail_loading = false;
-    }
-
-    fn palette_move_selection(&mut self, delta: isize) {
-        let Some(palette) = self.code_search_palette.as_mut() else {
-            return;
-        };
-        if palette.results.is_empty() {
-            return;
+        if let Some(palette) = &self.code_search_palette {
+            for repo in &palette.repositories.repositories {
+                entries.extend(repositories::saved_repository_entries(repo));
+            }
         }
-        let len = palette.results.len() as isize;
-        let next = (palette.selected_index as isize + delta).clamp(0, len - 1);
-        palette.selected_index = next as usize;
-        self.scroll_selection_into_view();
-        self.request_code_palette_detail();
-    }
-
-    fn palette_select(&mut self, index: usize) {
-        let Some(palette) = self.code_search_palette.as_mut() else {
-            return;
-        };
-        if index >= palette.results.len() {
-            return;
-        }
-        palette.selected_index = index;
-        self.scroll_selection_into_view();
-        self.request_code_palette_detail();
-    }
-
-    /// 把选中行滚入可视窗口（↑↓ 越过可见范围时跟随；行高为固定估算值，
-    /// 与渲染行的 px 尺寸保持一致）。列高按面板 520 - 标题/输入/操作行
-    /// 估算，取保守的 10 行视口。
-    fn scroll_selection_into_view(&mut self) {
-        const ROW_HEIGHT: f32 = 26.0;
-        const VISIBLE_ROWS: f32 = 10.0;
-        let Some(palette) = self.code_search_palette.as_ref() else {
-            return;
-        };
-        let selected = palette.selected_index as f32;
-        let total = palette.results.len() as f32;
-        let handle = self.scroll_handle("code-palette-results");
-        let mut offset = f32::from(handle.offset().y);
-        let sel_top = selected * ROW_HEIGHT;
-        if sel_top < offset {
-            offset = sel_top;
-        } else if sel_top + ROW_HEIGHT > offset + VISIBLE_ROWS * ROW_HEIGHT {
-            offset = sel_top + ROW_HEIGHT - VISIBLE_ROWS * ROW_HEIGHT;
-        }
-        let max_offset = (total * ROW_HEIGHT - VISIBLE_ROWS * ROW_HEIGHT).max(0.0);
-        handle.set_offset(gpui::point(gpui::px(0.0), gpui::px(offset.min(max_offset))));
-    }
-
-    /// 请求选中符号的详情（qualified_name 精确查，无歧义）。
-    fn request_code_palette_detail(&mut self) {
-        self.code_palette_detail_seq = self.code_palette_detail_seq.wrapping_add(1);
-        let seq = self.code_palette_detail_seq;
-        let Some(palette) = self.code_search_palette.as_ref() else {
-            return;
-        };
-        let Some(hit) = palette.results.get(palette.selected_index) else {
-            return;
-        };
-        let Some(repo_key) = self.active_repo_key() else {
-            return;
-        };
-        let Some(db_path) = Self::index_db_path(&repo_key) else {
-            return;
-        };
-        let Some(repo_root) = self.active_tab().and_then(|tab| tab.repo_path.clone()) else {
-            return;
-        };
-        let name = hit.qualified_name.clone();
-        let tx = self.tx.clone();
-        if let Some(palette) = self.code_search_palette.as_mut() {
-            palette.detail_loading = true;
-        }
-        self.tasks.spawn(TaskKind::Short, move || {
-            let detail = match symbol_detail(&db_path, Some(&repo_root), &name) {
-                Ok(DetailOutcome::Found(detail)) => Some(detail),
+        for entry in &mut entries {
+            let target_tab = match &entry.target {
+                SearchTarget::Repository(id)
+                | SearchTarget::Branch(id, ..)
+                | SearchTarget::Tag(id, ..)
+                | SearchTarget::Remote(id, ..)
+                | SearchTarget::Stash(id, ..) => Some(*id),
                 _ => None,
             };
-            send_ui_event(&tx, UiEvent::CodePaletteDetailFinished { seq, detail });
-        });
+            // 搜索可以继续导航当前仓库，但不能绕过仓库切换器的操作中守卫。
+            if self.busy && target_tab.is_some() && target_tab != self.active_tab_id() {
+                entry.disabled_reason = Some("当前操作进行中，暂不可切换仓库");
+            }
+            if self.busy
+                && matches!(
+                    entry.target,
+                    SearchTarget::SavedRepository(_) | SearchTarget::SavedBranch(..)
+                )
+            {
+                entry.disabled_reason = Some("当前操作进行中，暂不可打开其他仓库");
+            }
+        }
+        filter_entries(entries, &self.code_palette_search.value)
     }
 
-    /// Enter 默认动作：关闭面板并打开内置追溯视图（最接近「跳到代码」）。
-    fn palette_confirm(&mut self, cx: &mut Context<Self>) {
-        let Some(hit) = self
-            .code_search_palette
-            .as_ref()
-            .and_then(|palette| palette.results.get(palette.selected_index))
+    /// 用业务身份重新查目录，避免迟到的点击回调操作已关闭仓库或已删除对象。
+    fn confirm_app_search(
+        &mut self,
+        entry: SearchEntry,
+        session: &Entity<CommandState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.code_search_palette.as_ref().is_none_or(|palette| {
+            &palette.command != session
+                || palette.query != self.code_palette_search.value
+                || palette.catalog_changed
+        }) {
+            return;
+        }
+        let Some(current) = self
+            .app_search_entries()
+            .into_iter()
+            .find(|candidate| candidate.target == entry.target && candidate.title == entry.title)
         else {
             return;
         };
-        let path = hit.file_path.clone();
+        if let Some(reason) = current.disabled_reason {
+            self.notify_warning(reason, cx);
+            return;
+        }
         self.close_code_search();
-        self.open_blame_file(path);
+        match current.target {
+            SearchTarget::Settings(category) => {
+                if self.settings_center.is_none() {
+                    self.open_settings_center();
+                }
+                self.select_settings_category(category);
+            }
+            SearchTarget::AiSettings(tab) => {
+                if self.settings_center.is_none() {
+                    self.open_settings_center();
+                }
+                self.select_settings_category(SettingsCategory::Ai);
+                self.select_ai_settings_tab(tab);
+            }
+            target => {
+                self.close_settings_center();
+                match target {
+                    SearchTarget::Mode(tab_id, mode) | SearchTarget::Feature(tab_id, _, mode) => {
+                        self.activate_tab(tab_id);
+                        if mode == MainMode::Browse && self.browse.target.is_none() {
+                            if let Some(branch) = self
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| {
+                                    snapshot.branches.iter().find(|branch| branch.is_head)
+                                })
+                                .cloned()
+                            {
+                                self.open_browse_branch(branch.name, branch.kind);
+                            } else {
+                                self.set_main_mode(mode);
+                            }
+                        } else {
+                            self.set_main_mode(mode);
+                        }
+                    }
+                    SearchTarget::Branch(tab_id, name, _kind) => {
+                        self.activate_tab(tab_id);
+                        self.locate_search_branch(name);
+                    }
+                    SearchTarget::SavedRepository(path) => self.open_repo(path),
+                    SearchTarget::SavedBranch(path, name, kind) => {
+                        self.open_saved_search_branch(path, name, kind)
+                    }
+                    SearchTarget::Tag(tab_id, name) => {
+                        self.activate_tab(tab_id);
+                        self.open_browse_tag(name);
+                    }
+                    SearchTarget::Remote(tab_id, name) => {
+                        self.activate_tab(tab_id);
+                        self.selected_remote = Some(name);
+                        self.open_remote_manager();
+                    }
+                    SearchTarget::Stash(tab_id, oid) => {
+                        self.activate_tab(tab_id);
+                        if let Some(index) = self
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| {
+                                snapshot.stashes.iter().find(|stash| stash.oid == oid)
+                            })
+                            .map(|stash| stash.index)
+                        {
+                            self.view_stash(index);
+                        }
+                    }
+                    SearchTarget::Repository(tab_id) => self.activate_tab(tab_id),
+                    SearchTarget::Workflow(tab_id, path) => {
+                        self.activate_tab(tab_id);
+                        self.set_main_mode(MainMode::Workflow);
+                        self.load_workflow_file(path, cx);
+                    }
+                    SearchTarget::OpenRepository => self.browse_open(),
+                    SearchTarget::CloneRepository => self.open_clone_dialog(window, cx),
+                    SearchTarget::CreateBranch(_) => self.open_create_branch_dialog(),
+                    SearchTarget::CreateTag(_) => {
+                        self.open_tag_form_dialog(None, "当前 HEAD".into())
+                    }
+                    SearchTarget::CreateStash(_) => self.open_stash_dialog(),
+                    SearchTarget::Submodules(_) => self.open_submodule_manager(),
+                    SearchTarget::Remotes(_) => self.open_remote_manager(),
+                    SearchTarget::Pull(_) => {
+                        self.open_remote_branch_operation(crate::RemoteBranchOperationKind::Pull)
+                    }
+                    SearchTarget::Push(_) => {
+                        self.open_remote_branch_operation(crate::RemoteBranchOperationKind::Push)
+                    }
+                    SearchTarget::WorkflowEditor(_) => self.open_workflow_editor(cx),
+                    SearchTarget::ReviewHistory(_) => self.open_ai_review_history(),
+                    SearchTarget::Settings(_) | SearchTarget::AiSettings(_) => unreachable!(),
+                }
+            }
+        }
         cx.notify();
     }
 
     pub(crate) fn render_code_search_palette(
-        &self,
-        window: &Window,
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(palette) = self.code_search_palette.as_ref() else {
+        if self.code_search_palette.is_none() {
             return div().into_any_element();
-        };
-        let selected = palette.selected_index;
-        let searching = palette.searching;
-        let has_repo = self.active_repo_key().is_some();
-
-        let has_results = !palette.results.is_empty();
-
-        // 结果列表行。
-        let rows: Vec<gpui::AnyElement> = palette
-            .results
+        }
+        let query = self.code_palette_search.value.clone();
+        let palette = self.code_search_palette.as_mut().unwrap();
+        if palette.query != query || palette.catalog_changed {
+            // 查询变更后从新结果第一项开始，不能继承旧列表位置误选其他对象。
+            palette.command = cx.new(|cx| CommandState::new(window, cx));
+            palette.query = query;
+            palette.catalog_changed = false;
+        }
+        let command_state = palette.command.clone();
+        let entries = self.app_search_entries();
+        let count = entries.len();
+        let progress_label = self
+            .code_search_palette
+            .as_ref()
+            .unwrap()
+            .repositories
+            .progress_label(count);
+        let items: Vec<_> = entries
             .iter()
-            .enumerate()
-            .map(|(index, hit)| {
-                let is_selected = index == selected;
-                div()
-                    .id(format!("code-palette-row-{index}"))
-                    .when(is_selected, |this| this.bg(rgb(ui_theme::STATE_SELECTION)))
-                    .when(!is_selected, |this| {
-                        this.hover(|style| style.bg(rgb(ui_theme::WB_ROW_HOVER)))
-                    })
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(ui_theme::RADIUS_XS))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.palette_select(index);
-                            cx.notify();
-                        }),
-                    )
-                    .child(
+            .map(|entry| {
+                let entry = entry.clone();
+                CommandItem::new()
+                    .label(entry.title.clone())
+                    .disabled(entry.disabled_reason.is_some())
+                    .child(move |_, _| {
+                        let subtitle = entry
+                            .disabled_reason
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| entry.subtitle.clone());
+                        let tooltip = format!("{}\n{}", entry.title, subtitle);
                         div()
-                            .flex_none()
-                            .px_1()
-                            .rounded(px(ui_theme::RADIUS_XS))
-                            .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::PRIMARY))
-                            .child(hit.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(150.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(12.0))
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child(hit.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(format!("{}:{}", hit.file_path, hit.start_line)),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
-        // 详情栏。
-        let detail_pane: gpui::AnyElement = match palette.detail.as_ref() {
-            Some(detail) => {
-                let callers: Vec<gpui::AnyElement> =
-                    detail.callers.iter().map(render_palette_hop).collect();
-                let callees: Vec<gpui::AnyElement> =
-                    detail.callees.iter().map(render_palette_hop).collect();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .min_w(px(0.0))
-                    .child(
-                        div()
+                            .id(format!(
+                                "app-search-item-{:?}-{}",
+                                entry.target, entry.title
+                            ))
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .gap_3()
+                            .tooltip(move |_, cx| tooltip_text(tooltip.clone(), cx))
                             .child(
                                 div()
-                                    .px_1()
-                                    .rounded(px(ui_theme::RADIUS_XS))
-                                    .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::PRIMARY))
-                                    .child(detail.label.clone()),
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .truncate()
+                                            .child(entry.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::TYPE_META))
+                                            .text_color(rgb(theme::CONTENT_SECONDARY))
+                                            .truncate()
+                                            .child(subtitle),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                    .child(detail.name.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                            .child(format!(
-                                "{} · 第 {}-{} 行",
-                                detail.file_path, detail.start_line, detail.end_line
-                            )),
-                    )
-                    .when(!detail.callers.is_empty(), |this| {
-                        this.child(palette_section_title("被调用（上游）"))
-                            .children(callers)
-                    })
-                    .when(!detail.callees.is_empty(), |this| {
-                        this.child(palette_section_title("调用（下游）"))
-                            .children(callees)
-                    })
-                    .when(
-                        detail.callers.is_empty() && detail.callees.is_empty(),
-                        |this| {
-                            this.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                    .child("索引中没有该符号的调用关系边"),
+                                    .flex_none()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(px(theme::RADIUS_XS))
+                                    .bg(rgb(theme::SURFACE_SUNKEN))
+                                    .text_size(px(theme::TYPE_META))
+                                    .text_color(rgb(theme::CONTENT_SECONDARY))
+                                    .child(entry.group),
                             )
-                        },
-                    )
-                    .into_any_element()
-            }
-            None => div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                .child(if palette.detail_loading {
-                    "详情加载中…".to_string()
-                } else if searching {
-                    "查询中…".to_string()
-                } else if !has_repo {
-                    "当前没有打开的仓库".to_string()
-                } else {
-                    "输入关键词检索符号（支持驼峰拆分，如 push branch 命中 pushBranch）".to_string()
-                })
-                .into_any_element(),
-        };
-
-        // 底部操作行 + 提示。
-        let file_path = palette
-            .results
-            .get(selected)
-            .map(|hit| hit.file_path.clone());
-        let has_selection = file_path.is_some();
-        let actions_row = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .pt_2()
-            .border_t_1()
-            .border_color(rgb(ui_theme::BORDER_MUTED))
-            .child(self.button(
-                "追溯此文件",
-                has_selection,
-                |this, _, cx| {
-                    this.palette_confirm(cx);
-                },
-                cx,
-            ))
-            .child(self.button(
-                "文件历史",
-                has_selection,
-                {
-                    let path = file_path.clone();
-                    move |this, _, _| {
-                        if let Some(path) = path.clone() {
-                            this.close_code_search();
-                            this.view_file_history(path);
-                        }
-                    }
-                },
-                cx,
-            ))
-            .child(self.button(
-                "复制路径",
-                has_selection,
-                {
-                    let path = file_path.clone();
-                    move |this, _, cx| {
-                        if let Some(path) = path.clone() {
-                            this.close_code_search();
-                            this.copy_file_absolute_path(path, cx);
-                        }
-                    }
-                },
-                cx,
-            ))
-            .child(self.button(
-                "打开目录",
-                has_selection,
-                {
-                    let path = file_path.clone();
-                    move |this, _, cx| {
-                        if let Some(path) = path.clone() {
-                            this.close_code_search();
-                            this.open_file_parent_directory(path, cx);
-                        }
-                    }
-                },
-                cx,
-            ))
-            .child(
+                    })
+            })
+            .collect();
+        let owner = cx.entity().downgrade();
+        let confirm_entries = entries.clone();
+        let confirm_session = command_state.clone();
+        let command = Command::new(&command_state)
+            .searchable(false)
+            .filterable(false)
+            .bordered(false)
+            .items(items)
+            .w_full()
+            .bg(rgb(theme::WB_PANEL))
+            .empty(|_, _, _| {
                 div()
-                    .flex_1()
-                    .text_right()
-                    .text_size(px(11.0))
-                    .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                    .child("↑↓ 切换 · Enter 追溯 · Esc 关闭"),
-            );
-
-        // 焦点圈：面板打开即聚焦搜索框（open_code_search），Tab 在面板内
-        // 循环，不会漏到遮罩下层的主界面。
-        // 尺寸按视口钳制（审查 R3）：760×520 在最小窗/高 DPI 下越界。
-        let (panel_width, panel_height) = dialog_panel_size(window, 760.0, 520.0);
+                    .py_6()
+                    .px_4()
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme::CONTENT_SECONDARY))
+                    .child("没有匹配结果，请尝试分支名称、功能名称或其他关键词。")
+            })
+            .on_confirm(move |index, window, cx| {
+                if let Some(entry) = confirm_entries.get(index.row).cloned() {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.confirm_app_search(entry, &confirm_session, window, cx)
+                    });
+                }
+            });
+        let (width, height) = dialog_panel_size(window, 680.0, 500.0);
+        let command = command.max_h(px(f32::from(height) - 160.0));
         dialog_overlay()
             .id("code-palette-overlay")
             .focus_trap("code-palette-overlay-trap", &self.code_palette_focus)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    // 点击遮罩关闭（面板自身 stop_propagation 挡住内部点击）。
                     this.close_code_search();
                     cx.notify();
                 }),
             )
             .child(
-                div()
+                floating_panel()
                     .id("code-search-palette")
-                    .w(panel_width)
-                    .h(panel_height)
-                    .p_4()
-                    .rounded(px(ui_theme::RADIUS_XS))
+                    .w(width)
+                    .h(height)
                     .border_1()
-                    .border_color(rgb(ui_theme::BORDER_MUTED))
-                    .bg(rgb(ui_theme::WB_PANEL))
-                    .shadow_lg()
+                    .border_color(rgb(theme::BORDER_MUTED))
                     .flex()
                     .flex_col()
-                    .gap_3()
                     .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    // 键盘拦截：capture 阶段先于输入框处理 ↑/↓/Enter/Esc。
-                    .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                        match event.keystroke.key.as_str() {
-                            "down" => {
-                                this.palette_move_selection(1);
-                                cx.stop_propagation();
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        // 组合输入的候选导航、确认和取消必须交还 Kit/IME。
+                        if this.kit_field_has_ime_composition(
+                            FieldId::CodePaletteSearch,
+                            window,
+                            cx,
+                        ) {
+                            return;
+                        }
+                        let key = event.keystroke.key.as_str();
+                        if key == "escape" {
+                            this.close_code_search();
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        // 列表自身或关闭按钮取得焦点时使用各自的 Kit 键盘语义。
+                        if !this.code_palette_search.focus.is_focused(window) {
+                            return;
+                        }
+                        if matches!(key, "up" | "down" | "enter")
+                            && !event.keystroke.modifiers.control
+                            && !event.keystroke.modifiers.alt
+                            && !event.keystroke.modifiers.platform
+                        {
+                            let selected = command_state
+                                .read(cx)
+                                .selected_index()
+                                .map(|index| index.row);
+                            if key == "enter" {
+                                if let Some(entry) =
+                                    selected.and_then(|index| entries.get(index)).cloned()
+                                {
+                                    this.confirm_app_search(entry, &command_state, window, cx);
+                                }
+                            } else if let Some(next) =
+                                catalog::next_selection(&entries, selected, key == "down")
+                            {
+                                command_state.update(cx, |state, cx| {
+                                    state.set_selected_index(Some(IndexPath::new(next)), window, cx)
+                                });
                             }
-                            "up" => {
-                                this.palette_move_selection(-1);
-                                cx.stop_propagation();
-                            }
-                            "enter" => {
-                                this.palette_confirm(cx);
-                                cx.stop_propagation();
-                            }
-                            "escape" => {
-                                this.close_code_search();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            _ => {}
+                            cx.stop_propagation();
                         }
                     }))
                     .child(
                         div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                            .child("符号搜索"),
-                    )
-                    .child(self.input(FieldId::CodePaletteSearch, false, window, cx))
-                    .child(
-                        div()
+                            .flex_none()
+                            .px_4()
+                            .pt_3()
+                            .pb_2()
                             .flex()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .gap_3()
+                            .items_center()
+                            .justify_between()
                             .child(
                                 div()
-                                    .id("code-palette-results")
-                                    .w(px(320.0))
-                                    .min_h(px(0.0))
-                                    .overflow_y_scroll()
-                                    .track_scroll(&self.scroll_handle("code-palette-results"))
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .when(has_results, |this| this.children(rows))
-                                    .when(!has_results && !searching, |this| {
-                                        this.child(
-                                            div()
-                                                .pt_2()
-                                                .text_size(px(12.0))
-                                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                                .child(if has_repo {
-                                                    "无匹配符号。改用更短的词（如 push 代替 pushBranch）"
-                                                } else {
-                                                    "当前没有打开的仓库"
-                                                }),
-                                        )
-                                    }),
+                                    .child(
+                                        div()
+                                            .text_size(px(16.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("全局搜索"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::TYPE_META))
+                                            .text_color(rgb(theme::CONTENT_SECONDARY))
+                                            .child("搜索分支、功能、设置、仓库和工作流"),
+                                    ),
                             )
-                            .child(div().w(px(1.0)).h_full().bg(rgb(ui_theme::BORDER_MUTED)))
                             .child(
-                                div()
-                                    .id("code-palette-detail")
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .min_w(px(0.0))
-                                    .overflow_y_scroll()
-                                    .track_scroll(&self.scroll_handle("code-palette-detail"))
-                                    .child(detail_pane),
+                                icon_button(
+                                    "app-search-close".into(),
+                                    ToolbarIcon::Close,
+                                    "关闭全局搜索",
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_code_search();
+                                        cx.notify();
+                                    },
+                                )),
                             ),
                     )
-                    .child(actions_row),
+                    .child(div().flex_none().px_4().pb_3().child(self.input(
+                        FieldId::CodePaletteSearch,
+                        false,
+                        window,
+                        cx,
+                    )))
+                    .child(div().flex_1().min_h(px(0.0)).px_2().child(command))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(rgb(theme::BORDER_MUTED))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(theme::TYPE_META))
+                            .text_color(rgb(theme::CONTENT_SECONDARY))
+                            .child(progress_label)
+                            .child("↑↓ 选择 · Enter 定位 · Esc 关闭"),
+                    ),
             )
             .into_any_element()
     }
-}
-
-fn palette_section_title(text: &str) -> gpui::AnyElement {
-    div()
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-        .child(text.to_string())
-        .into_any_element()
-}
-
-fn render_palette_hop(hop: &TraceHop) -> gpui::AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .py_px()
-        .min_w(px(0.0))
-        .child(
-            div()
-                .flex_none()
-                .px_1()
-                .rounded(px(ui_theme::RADIUS_XS))
-                .bg(rgb(ui_theme::SURFACE_SUNKEN))
-                .text_size(px(10.0))
-                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                .child(format!("H{} {}", hop.hop, hop.risk)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .max_w(px(170.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(12.0))
-                .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                .child(hop.name.clone()),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(11.0))
-                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                .child(hop.file_path.clone()),
-        )
-        .into_any_element()
 }

@@ -19,17 +19,24 @@
 //! git 耦合边（FILE_CHANGES_WITH）、相似度边、USAGE 引用边（schema 已支持该
 //! type 字符串）、路由/基建节点。
 
+mod cache;
+mod coverage;
 mod discover;
 mod extract;
 mod graph;
+mod jobs;
 mod lang_spec;
+mod metadata;
 pub mod mcp;
 mod pipeline;
 mod queries;
 mod resolve;
+mod search;
+mod snapshot;
 mod store;
 
 pub use discover::{DiscoverOutcome, DiscoveredFile, discover_files};
+pub use coverage::{ErrorRange, FileCoverage, check_coverage};
 pub use extract::{
     CallSite, Extractor, FileExtractResult, ImportRef, OwnerFunction, SymbolDef, TypeRef,
 };
@@ -45,12 +52,15 @@ pub use queries::{
     DetailOutcome, Hotspot, ImpactReport, IndexOverview, SourceSnippet, SymbolCandidate,
     SymbolDetail, TraceDirection, TraceHop, TraceOutcome, TraceResult, changed_files_via_git,
     find_symbol_candidates, impacted_symbols, impacted_symbols_for_files, index_overview,
-    symbol_detail, trace_calls,
+    symbol_detail, trace_calls, trace_calls_page,
 };
 pub use resolve::Registry;
+pub use jobs::index_task_pool;
+pub use search::{SearchOptions, search_symbols_with_options};
+pub use snapshot::{commit_index_path, ensure_commit_index};
 pub use store::{
     CODE_INDEX_SCHEMA_VERSION, CodeIndexMeta, CodeIndexStore, FileHashRow, IndexStats, SearchHit,
-    camel_split, open_index_db_path, read_index_stats, search_symbols,
+    camel_split, index_generation, open_index_db_path, read_index_stats, search_symbols,
 };
 
 /// 索引阶段（进度事件文案用）。
@@ -141,3 +151,11 @@ pub(crate) fn err(message: impl Into<String>) -> GitError {
 #[cfg(test)]
 #[path = "../tests/code_index.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/code_index_search.rs"]
+mod search_tests;
+
+#[cfg(test)]
+#[path = "../tests/code_index_engine.rs"]
+mod engine_tests;

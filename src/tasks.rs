@@ -34,7 +34,7 @@ impl TaskExecutor {
             short_pool: Arc::new(build_pool("khaslana-short", short_threads)),
             long_pool: Arc::new(build_pool("khaslana-long", long_threads)),
             ai_pool: Arc::new(build_pool("khaslana-ai", ai_threads)),
-            index_pool: Arc::new(build_pool("khaslana-index", 1)),
+            index_pool: khaslana::code_index::index_task_pool(),
             external_pool: Arc::new(build_pool("khaslana-external", 2)),
             event_tx,
         }

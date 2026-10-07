@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use super::discover::{DiscoveredFile, discover_files};
 use super::extract::{Extractor, FileExtractResult};
 use super::graph::{
-    EdgeType, GraphBuffer, NodeId, NodeLabel, calls_edge_properties, file_properties,
+    EdgeType, GraphBuffer, NodeId, NodeLabel, calls_edge_properties,
     file_qualified_name, folder_qualified_name, lang_of_rel_path,
 };
 use super::resolve::Registry;
@@ -40,11 +40,12 @@ pub struct PipelineOptions {
     pub cancel: Arc<AtomicBool>,
     /// 进度回调（节流由管线内部保证：阶段切换或每 50 文件）。
     pub progress: Box<dyn FnMut(IndexProgress) + Send>,
+    pub(super) discovery_issues: Vec<super::coverage::FileCoverage>,
 }
 
 impl PipelineOptions {
     pub fn new(cancel: Arc<AtomicBool>, progress: Box<dyn FnMut(IndexProgress) + Send>) -> Self {
-        Self { cancel, progress }
+        Self { cancel, progress, discovery_issues: Vec::new() }
     }
 
     fn report(&mut self, phase: IndexPhase, done: usize, total: usize) {
@@ -98,6 +99,7 @@ pub fn run_index(
 
     options.report(IndexPhase::Discover, 0, 0);
     let outcome = discover_files(repo_root)?;
+    options.discovery_issues = outcome.issues;
     let files = outcome.files;
     let total_files = files.len();
     if options.cancelled() {
@@ -109,6 +111,8 @@ pub fn run_index(
     // 增量路由（参考项目 try_incremental_or_delete_db 的判定式）。
     let existing_hashes = store.load_file_hashes()?;
     let incremental_eligible = !force_full
+        && store.has_search_metadata()
+        && store.discovery_issues()? == options.discovery_issues
         && !existing_hashes.is_empty()
         && total_files as f64 <= existing_hashes.len() as f64 * 1.5;
     let refs: Vec<&DiscoveredFile> = files.iter().collect();
@@ -209,7 +213,8 @@ fn run_full_inner(
     options.report(IndexPhase::Write, 0, 0);
     // 全量图为全新构建，Module 恒有 IMPORTS 入边；清扫仅作防御（零成本）。
     graph.prune_orphan_modules();
-    write_store(
+    super::coverage::attach_discovery_issues(&mut graph, &options.discovery_issues);
+    if !write_store(
         store,
         repo_root,
         repo_name,
@@ -217,7 +222,8 @@ fn run_full_inner(
         "full",
         &graph,
         files_hash_rows(files),
-    )?;
+        &options.cancel,
+    )? { return Ok(InnerOutcome::Cancelled); }
     Ok(InnerOutcome::Done)
 }
 
@@ -240,7 +246,8 @@ fn write_store(
     mode: &str,
     graph: &GraphBuffer,
     hashes: Vec<FileHashRow>,
-) -> Result<()> {
+    cancel: &AtomicBool,
+) -> Result<bool> {
     let meta = CodeIndexMeta {
         repo_name: repo_name.to_string(),
         repo_path: repo_root.to_string_lossy().to_string(),
@@ -249,7 +256,7 @@ fn write_store(
         duration_ms: 0,
         mode: mode.to_string(),
     };
-    store.replace_all(graph, &hashes, &meta)
+    store.replace_all_cancellable(graph, &hashes, &meta, Some(cancel))
 }
 
 fn now_millis() -> u64 {
@@ -278,14 +285,14 @@ fn run_incremental_inner(
         .collect();
     let new_paths: HashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
 
-    // 三分类（对齐参考项目 pipeline_incremental.c）：changed = 新增或
-    // mtime/size 变化；unchanged 原样保留；deleted-vs-mode-skipped 里盘上
-    // 仍在的（权限/过滤规则变化导致本次未发现）保守保留其哈希行。
+    // 当前发现域以外的旧文件必须清除，避免忽略规则变更后仍返回旧符号。
+    // 读取失败由覆盖记录单独披露，下次发现/解析继续重试。
     let mut changed: Vec<&DiscoveredFile> = Vec::new();
+    let retry_files = store.retry_files()?;
     let mut unchanged_hashes: Vec<FileHashRow> = Vec::new();
     for file in files {
         match old_by_path.get(file.rel_path.as_str()) {
-            Some(old) if old.mtime_ns == file.mtime_ns && old.size == file.size => {
+            Some(old) if old.mtime_ns == file.mtime_ns && old.size == file.size && !retry_files.contains(&file.rel_path) => {
                 unchanged_hashes.push((*old).clone());
             }
             _ => changed.push(file),
@@ -294,11 +301,7 @@ fn run_incremental_inner(
     let mut deleted_paths: HashSet<String> = HashSet::new();
     for h in existing_hashes {
         if !new_paths.contains(h.rel_path.as_str()) {
-            if repo_root.join(&h.rel_path).exists() {
-                unchanged_hashes.push(h.clone());
-            } else {
-                deleted_paths.insert(h.rel_path.clone());
-            }
+            deleted_paths.insert(h.rel_path.clone());
         }
     }
 
@@ -326,7 +329,7 @@ fn run_incremental_inner(
         let src_file = &graph.get(edge.source).file_path;
         let tgt_file = &graph.get(edge.target).file_path;
         let src_survives = src_file.is_empty() || !purge_set.contains(src_file);
-        if src_survives && !tgt_file.is_empty() && purge_set.contains(tgt_file) {
+        if src_survives && !tgt_file.is_empty() && purge_set.contains(tgt_file) && edge.etype != EdgeType::Calls {
             inbound_snapshot.push((
                 graph.get(edge.source).qualified_name.clone(),
                 graph.get(edge.target).qualified_name.clone(),
@@ -369,11 +372,12 @@ fn run_incremental_inner(
     graph.prune_orphan_modules();
 
     // 8. 整库重写。
+    super::coverage::attach_discovery_issues(&mut graph, &options.discovery_issues);
     options.report(IndexPhase::Write, 0, 0);
     let mut hashes = unchanged_hashes;
     hashes.extend(files_hash_rows(&changed));
     hashes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    write_store(
+    if !write_store(
         store,
         repo_root,
         repo_name,
@@ -381,7 +385,8 @@ fn run_incremental_inner(
         "incremental",
         &graph,
         hashes,
-    )?;
+        &options.cancel,
+    )? { return Ok(InnerOutcome::Cancelled); }
     Ok(InnerOutcome::Done)
 }
 
@@ -389,7 +394,7 @@ fn run_incremental_inner(
 // 结构 pass（参照 pass_structure.c）
 // ---------------------------------------------------------------------------
 
-fn build_structure_pass(
+pub(super) fn build_structure_pass(
     project: &str,
     branch: &str,
     files: &[&DiscoveredFile],
@@ -462,7 +467,7 @@ fn build_structure_pass(
             f.rel_path.clone(),
             0,
             0,
-            "{}".to_string(),
+            serde_json::json!({ "line_count": 0, "coverage": initial_coverage(f) }).to_string(),
         );
         let dir = parent_dir(&f.rel_path);
         let parent_id = if dir.is_empty() {
@@ -491,10 +496,11 @@ fn is_parseable(file: &DiscoveredFile) -> bool {
 // 提取 pass（并行，参照 pass_parallel.c 阶段 3A）
 // ---------------------------------------------------------------------------
 
-struct ParseOutput {
-    rel_path: String,
-    result: Option<FileExtractResult>,
-    line_count: usize,
+pub(super) struct ParseOutput {
+    pub rel_path: String,
+    pub result: Option<FileExtractResult>,
+    pub line_count: usize,
+    pub coverage: super::coverage::FileCoverage,
 }
 
 /// 并行提取：worker 数 = 可用核数-1 钳到 [1,6]，每个 worker 独立持有
@@ -535,8 +541,9 @@ fn run_extraction_pass(
                 })
             })
             .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
-    });
+        handles.into_iter().map(|handle| handle.join().map_err(|_| super::err("索引解析线程异常，已保留旧索引")))
+            .collect::<Result<Vec<_>>>()
+    })?;
 
     let done: usize = chunks.iter().map(Vec::len).sum();
     let mut outputs: Vec<ParseOutput> = chunks.into_iter().flatten().collect();
@@ -546,25 +553,54 @@ fn run_extraction_pass(
 }
 
 fn parse_one(file: &DiscoveredFile, extractor: &mut Extractor) -> ParseOutput {
+    if !is_parseable(file) {
+        return ParseOutput { rel_path: file.rel_path.clone(), result: None, line_count: 0,
+            coverage: initial_coverage(file) };
+    }
+    match std::fs::read(&file.abs_path) {
+        Ok(bytes) => parse_content(file, &bytes, extractor),
+        Err(error) => ParseOutput { rel_path: file.rel_path.clone(), result: None, line_count: 0,
+            coverage: super::coverage::FileCoverage::new(&file.rel_path, "read_failed", error.to_string()) },
+    }
+}
+
+pub(super) fn parse_content(file: &DiscoveredFile, bytes: &[u8], extractor: &mut Extractor) -> ParseOutput {
     let mut output = ParseOutput {
         rel_path: file.rel_path.clone(),
         result: None,
         line_count: 0,
+        coverage: initial_coverage(file),
     };
     let Some(lang) = lang_of_rel_path(&file.rel_path) else {
-        return output;
-    };
-    let Ok(bytes) = std::fs::read(&file.abs_path) else {
         return output;
     };
     // 二进制嗅探：前 8KB 出现 NUL 视为二进制（与项目内其他嗅探口径一致）。
     let sniff_len = bytes.len().min(8192);
     if bytes[..sniff_len].contains(&0) {
+        output.coverage.status = "excluded".into();
+        output.coverage.reason = "二进制文件".into();
         return output;
     }
     output.line_count = byte_line_count(&bytes);
-    output.result = extractor.extract(lang, &bytes).ok().flatten();
+    match extractor.extract(lang, bytes) {
+        Ok(Some(result)) => {
+            output.coverage.status = if result.error_ranges.is_empty() { "indexed" } else { "partial" }.into();
+            output.coverage.error_ranges = result.error_ranges.clone();
+            output.coverage.error_ranges_truncated = result.error_ranges_truncated;
+            output.coverage.call_sites = result.calls.len();
+            output.result = Some(result);
+        }
+        Ok(None) => { output.coverage.status = "parse_failed".into(); output.coverage.reason = "解析器未返回语法树".into(); }
+        Err(error) => { output.coverage.status = "parse_failed".into(); output.coverage.reason = error.to_string(); }
+    }
     output
+}
+
+fn initial_coverage(file: &DiscoveredFile) -> super::coverage::FileCoverage {
+    let (status, reason) = if file.size > super::PARSE_MAX_BYTES { ("excluded", "超过单文件解析上限") }
+        else if lang_of_rel_path(&file.rel_path).is_none() { ("unsupported", "当前语言不支持符号解析") }
+        else { ("indexed", "") };
+    super::coverage::FileCoverage::new(&file.rel_path, status, reason)
 }
 
 fn byte_line_count(bytes: &[u8]) -> usize {
@@ -586,6 +622,15 @@ struct PendingCall {
     callee_display: String,
     name: String,
     qualifier: Option<String>,
+    scope: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredCall {
+    source_qn: String,
+    callee_display: String,
+    name: String,
+    scope: Vec<String>,
 }
 
 /// 定义键：scope 链 \u{1} 名字。方法归属与调用来源定位共用。
@@ -596,7 +641,7 @@ fn def_key(scope: &[String], name: &str) -> String {
     key
 }
 
-struct GraphMerger {
+pub(super) struct GraphMerger {
     project: String,
     def_index: HashMap<String, NodeId>,
     pending_calls: Vec<PendingCall>,
@@ -604,7 +649,7 @@ struct GraphMerger {
 }
 
 impl GraphMerger {
-    fn new(project: &str) -> Self {
+    pub(super) fn new(project: &str) -> Self {
         Self {
             project: project.to_string(),
             def_index: HashMap::new(),
@@ -613,19 +658,19 @@ impl GraphMerger {
         }
     }
 
-    fn merge_parsed(&mut self, graph: &mut GraphBuffer, parsed: &[ParseOutput]) {
-        let mut line_updates: Vec<(NodeId, usize)> = Vec::new();
+    pub(super) fn merge_parsed(&mut self, graph: &mut GraphBuffer, parsed: &[ParseOutput]) {
 
         for output in parsed {
-            let Some(result) = output.result.as_ref() else {
-                continue;
-            };
+            // 同名函数的归属只在当前文件内查找，不能复用上一文件的定义键。
+            self.def_index.clear();
             let rel_path = output.rel_path.as_str();
             let file_qn = file_qualified_name(&self.project, rel_path);
             let Some(file_id) = graph.find_by_qn(&file_qn) else {
                 continue;
             };
-            line_updates.push((file_id, output.line_count));
+            graph.nodes[file_id as usize].properties = serde_json::json!({
+                "line_count": output.line_count, "coverage": output.coverage }).to_string();
+            let Some(result) = output.result.as_ref() else { continue; };
 
             // 导入 → Module 节点 + IMPORTS 边。
             let import_modules: Vec<String> = result
@@ -666,7 +711,7 @@ impl GraphMerger {
                     rel_path.to_string(),
                     def.start_line,
                     def.end_line,
-                    "{}".to_string(),
+                    serde_json::json!({ "signature": def.signature, "docstring": def.docstring, "scope": def.scope }).to_string(),
                 );
                 self.def_index
                     .insert(def_key(&def.scope, &def.name), node_id);
@@ -703,6 +748,7 @@ impl GraphMerger {
             }
 
             // 调用点：归属函数优先定位，找不到退化为文件级调用。
+            let mut stored_calls = Vec::new();
             for call in &result.calls {
                 let source = call
                     .owner
@@ -710,44 +756,76 @@ impl GraphMerger {
                     .and_then(|o| self.def_index.get(&def_key(&o.class_chain, &o.fn_name)))
                     .copied()
                     .unwrap_or(file_id);
-                self.pending_calls.push(PendingCall {
-                    source,
-                    source_file: rel_path.to_string(),
-                    imports: import_modules.clone(),
+                stored_calls.push(StoredCall {
+                    source_qn: graph.get(source).qualified_name.clone(),
                     callee_display: call.callee_display.clone(),
                     name: call.name.clone(),
-                    qualifier: qualifier_segment(&call.callee_display),
+                    scope: call.owner.as_ref().map(|owner| owner.class_chain.clone()).unwrap_or_default(),
                 });
             }
+            let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
+            properties["call_records"] = serde_json::json!(stored_calls);
+            properties["imports"] = serde_json::json!(import_modules);
+            graph.nodes[file_id as usize].properties = properties.to_string();
         }
 
-        // File 节点行数属性批量回填（id == 下标不变量）。
-        for (id, line_count) in line_updates {
-            graph.nodes[id as usize].properties = file_properties(line_count);
-        }
     }
 
-    fn resolve_pending(
+    pub(super) fn resolve_pending(
         &mut self,
         graph: &mut GraphBuffer,
         options: &mut PipelineOptions,
     ) -> Result<()> {
+        self.resolve_pending_cancellable(graph, options, None)
+    }
+
+    pub(super) fn resolve_pending_cancellable(
+        &mut self, graph: &mut GraphBuffer, options: &mut PipelineOptions, cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
         options.report(IndexPhase::Resolve, 0, 0);
+        // 定义增删会改变未修改文件的唯一性/导入匹配，因此复用调用点重新解析整图。
+        // 不重新解析未改文件 AST，也不能直接恢复可能已变为歧义的旧 CALLS 边。
+        self.pending_calls.clear();
+        for node in &graph.nodes {
+            if node.label != NodeLabel::File { continue; }
+            let properties: serde_json::Value = serde_json::from_str(&node.properties).map_err(|error| super::err(format!("调用点记录损坏：{error}")))?;
+            let imports: Vec<String> = serde_json::from_value(properties.get("imports").cloned().unwrap_or_else(|| serde_json::json!([])))
+                .map_err(|error| super::err(format!("导入记录损坏：{error}")))?;
+            let records: Vec<StoredCall> = serde_json::from_value(properties.get("call_records").cloned().unwrap_or_else(|| serde_json::json!([])))
+                .map_err(|error| super::err(format!("调用点记录损坏：{error}")))?;
+            for record in records {
+                if let Some(source) = graph.find_by_qn(&record.source_qn) {
+                    self.pending_calls.push(PendingCall { source, source_file: node.file_path.clone(), imports: imports.clone(),
+                        qualifier: qualifier_segment(&record.callee_display), callee_display: record.callee_display,
+                        name: record.name, scope: record.scope });
+                }
+            }
+        }
+        graph.remove_call_edges();
+        for node in &mut graph.nodes {
+            if node.label == NodeLabel::File {
+                let mut properties: serde_json::Value = serde_json::from_str(&node.properties).unwrap_or_default();
+                properties["coverage"]["unresolved_calls"] = serde_json::json!(0);
+                node.properties = properties.to_string();
+            }
+        }
         let registry = Registry::build(graph);
         let calls = std::mem::take(&mut self.pending_calls);
         let total = calls.len();
+        let mut unresolved = HashMap::<String, usize>::new();
         for (done, call) in calls.into_iter().enumerate() {
             if done % 2000 == 0 {
                 options.report(IndexPhase::Resolve, done, total);
-                if options.cancelled() {
+                if options.cancelled() || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                     return Ok(());
                 }
             }
-            if let Some(target) = registry.resolve_call(
+            if let Some(target) = registry.resolve_call_in_scope(
                 &call.name,
                 &call.source_file,
                 &call.imports,
                 call.qualifier.as_deref(),
+                &call.scope,
             ) {
                 graph.add_edge(
                     call.source,
@@ -755,6 +833,15 @@ impl GraphMerger {
                     EdgeType::Calls,
                     calls_edge_properties(&call.callee_display, target.confidence, target.strategy),
                 );
+            } else {
+                *unresolved.entry(call.source_file.clone()).or_default() += 1;
+            }
+        }
+        for (path, count) in unresolved {
+            if let Some(file_id) = graph.find_by_qn(&file_qualified_name(&self.project, &path)) {
+                let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
+                properties["coverage"]["unresolved_calls"] = serde_json::json!(count);
+                graph.nodes[file_id as usize].properties = properties.to_string();
             }
         }
         for (host_id, tr) in std::mem::take(&mut self.pending_types) {
@@ -772,7 +859,7 @@ impl GraphMerger {
     }
 }
 
-/// 限定表达式的倒数第二段（`GitService::open` → GitService；
+/// 限定表达式的完整前缀（`crate::git::open` → crate.git；
 /// 单段调用返回 None）。
 fn qualifier_segment(callee_display: &str) -> Option<String> {
     let segs: Vec<&str> = callee_display
@@ -780,7 +867,7 @@ fn qualifier_segment(callee_display: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
         .collect();
     if segs.len() >= 2 {
-        Some(segs[segs.len() - 2].to_string())
+        Some(segs[..segs.len() - 1].join("."))
     } else {
         None
     }

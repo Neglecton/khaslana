@@ -115,6 +115,7 @@ impl RepositoryView {
                 if let Some((tab_id, path, remote, load_id, request_id)) = sync_request {
                     self.load_branch_sync_status_for_tab(tab_id, path, remote, load_id, request_id);
                 }
+                self.finish_pending_search_branch(tab_id, load_id, cx);
             }
             UiEvent::RepositoryStatusFastLoaded {
                 tab_id,
@@ -165,6 +166,10 @@ impl RepositoryView {
                     .is_some_and(|tab| tab.repository_load_id == load_id)
                 {
                     self.apply_status_event(Some(tab_id), |this| {
+                        // 元数据失败或 panic 后，未完成的搜索定位不能遗留到后续重载。
+                        if this.pending_search_branch.as_ref().is_some_and(|pending| pending.load_id == load_id) {
+                            this.pending_search_branch = None;
+                        }
                         this.busy = false;
                         this.operation_blocker = OperationBlocker::None;
                         this.operation_blocker_started = None;
@@ -1245,15 +1250,12 @@ impl RepositoryView {
             UiEvent::CodeIndexFailed { repo_path, error } => {
                 self.handle_code_index_failed(repo_path, error, cx);
             }
+            UiEvent::AppSearchRepositoryLoaded { request_id, path, result } => {
+                self.handle_app_search_repository_loaded(request_id, path, result);
+            }
             UiEvent::CodeIndexStatsLoaded { repo_path, stats } => {
                 self.handle_code_index_stats_loaded(repo_path, stats);
                 cx.notify();
-            }
-            UiEvent::CodePaletteSearchFinished { seq, hits } => {
-                self.handle_code_palette_search_finished(seq, hits);
-            }
-            UiEvent::CodePaletteDetailFinished { seq, detail } => {
-                self.handle_code_palette_detail_finished(seq, detail);
             }
             UiEvent::WorkflowTemplatesLoaded { request_id, result } => {
                 self.apply_workflow_templates(request_id, result, cx);
@@ -1764,6 +1766,7 @@ impl RepositoryView {
                 // 无法定位具体是哪个任务 panic：保守复位所有 tab 的 busy/加载
                 // 标志与仓库加载槽位（序号守卫会丢弃迟到的旧结果，复位是安全的）。
                 for tab in self.tabs.iter_mut() {
+                    tab.pending_search_branch = None;
                     if let Some(run) = tab.workflow_state.active_run.take() {
                         run.control.cancel();
                     }

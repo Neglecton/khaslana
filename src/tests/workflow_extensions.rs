@@ -458,6 +458,51 @@ fn edge_demo_reads_and_fills_real_public_page() {
 }
 
 #[test]
+#[ignore = "需要显式提供 AI 与代理配置、本机 Edge 和网络；会产生模型请求"]
+fn edge_skill_reads_and_fills_real_public_page() {
+    // 配置仅通过当前测试进程环境传入，不能将真实密钥写进样板或测试输出。
+    let mut settings: crate::ai::config::AiProviderSettings = serde_json::from_str(
+        &std::env::var("KHASLANA_WORKFLOW_AI_SETTINGS").expect("请提供验收用 AI 配置")
+    ).expect("验收用 AI 配置格式无效");
+    let defaults = crate::ai::config::AiProviderSettings::default();
+    settings.temperature = defaults.temperature;
+    settings.max_tokens = defaults.max_tokens;
+    settings.request_timeout_secs = defaults.request_timeout_secs;
+    assert!(settings.is_usable(), "验收用 AI 配置未启用或不完整");
+    let proxy: crate::proxy::NetworkProxySettings = serde_json::from_str(
+        &std::env::var("KHASLANA_WORKFLOW_PROXY_SETTINGS").expect("请提供验收用代理配置")
+    ).expect("验收用代理配置格式无效");
+    proxy.validate().unwrap();
+    let proxy_url = proxy.proxy_url_for_target(&settings.base_url);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples/workflow-edge-demo");
+    let definition = parse_workflow_json5(
+        &std::fs::read_to_string(root.join("edge-web-form-skill.json5")).unwrap()
+    ).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    super::browser_runtime::install(runtime.path(), &proxy, |_| {}).unwrap();
+    let mut config = super::extensions::load_mcp_config(runtime.path()).unwrap();
+    config.configure_browser_proxy(&proxy).unwrap();
+    let mut grant = WorkflowExternalGrant::for_definition(&definition).unwrap().unwrap();
+    grant.prepare_skills(&root).unwrap();
+    let mut registry = WorkflowActionRegistry::default();
+    register_external_actions_with_ai(&mut registry, config, Some(grant), Some(settings),
+        proxy_url, Some(runtime.path())).unwrap();
+    let (_repo_dir, mut repo, service) = git_support::init_repo();
+    let mut options = WorkflowRunOptions::default();
+    options.input_vars.insert("demoText".into(), "Khaslana AI Skill acceptance".into());
+    let mut details = Vec::new();
+    let result = WorkflowExecutor::with_actions(&service, &registry).run(&mut repo,
+        &definition, options, |event| {
+            if let WorkflowProgressEvent::StepDetail { detail, .. } = event {
+                details.push(detail);
+            }
+        });
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert!(details.iter().any(|detail| detail.contains("browser_type")));
+    assert!(details.iter().any(|detail| detail.contains("browser_snapshot")));
+}
+
+#[test]
 fn mcp_read_write_schema_and_permission_are_enforced() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("written.txt");

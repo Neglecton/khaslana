@@ -520,60 +520,63 @@ impl RepositoryView {
                         cx,
                     )),
             )
-            .child(self.render_chrome_search_entry(compact, cx))
+            // 中等窗口仍有完整命令文字，搜索入口先缩短文案，保留窗口按钮的空间。
+            .child(self.render_chrome_search_entry(policy.band != LayoutBand::Comfortable, cx))
             .child(self.render_chrome_drag_area())
             .child(self.render_chrome_window_controls(window))
     }
 
-    /// 顶栏全局搜索入口：外观与输入框一致，点击打开 Ctrl+P 符号检索面板
+    /// 顶栏全局搜索入口：外观与输入框一致，点击打开 Ctrl+P 程序内搜索
     /// （真正的输入框在面板里，避免顶栏再造一份文本状态）。
     fn render_chrome_search_entry(
         &self,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let enabled = !self.busy;
         BaseButton::new("chrome-search-entry")
-            .disabled(!enabled)
-            .accessibility_label("搜索文件、符号或命令")
+            .accessibility_label("全局搜索：分支、功能、设置和仓库")
             .focus_visible(|this| this.border_1().border_color(rgb(theme::PRIMARY)))
             .flex_1()
-            .min_w(px(if compact { 96.0 } else { 140.0 }))
+            .min_w(px(if compact { 96.0 } else { 212.0 }))
             .max_w(px(490.0))
             .ml(px(theme::SPACE_4))
             .h(px(theme::CONTROL_HEIGHT_TOOLBAR))
             .px(px(theme::SPACE_3))
             .flex()
             .items_center()
-            .gap(px(theme::SPACE_3))
+            .justify_start()
+            .gap(px(theme::SPACE_2))
             .rounded(px(theme::RADIUS_MD))
+            .border_1()
+            .border_color(rgb(theme::BORDER_MUTED))
             .bg(rgb(theme::WB_INPUT_SURFACE))
-            .when(enabled, |this| this.cursor_pointer())
-            .when(!enabled, |this| this.cursor_not_allowed().opacity(0.6))
-            .child(toolbar_icon(ToolbarIcon::Search, theme::CONTENT_TERTIARY))
+            .cursor_pointer()
+            .hover(|this| this.border_color(rgb(theme::PRIMARY)).bg(rgb(theme::STATE_HOVER)))
+            .tooltip(|_, cx| crate::ui::components::tooltip_text("全局搜索：分支、功能、设置和仓库（Ctrl+P）", cx))
+            .child(div().flex_none().child(toolbar_icon(ToolbarIcon::Search, theme::CONTENT_TERTIARY)))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .overflow_hidden()
                     .whitespace_nowrap()
                     .text_size(px(theme::TYPE_BODY))
                     .text_color(rgb(theme::CONTENT_TERTIARY))
-                    .child("搜索文件、符号或命令"),
+                    .child(if compact { "搜索" } else { "搜索分支或功能" }),
             )
             .when(!compact, |this| {
                 this.child(
                     div()
                         .flex_none()
+                        .px_1()
+                        .py(px(2.0))
+                        .rounded(px(theme::RADIUS_XS))
+                        .bg(rgb(theme::SURFACE_SUNKEN))
                         .text_size(px(theme::TYPE_META))
                         .text_color(rgb(theme::CONTENT_TERTIARY))
                         .child("Ctrl P"),
                 )
             })
             .on_click(cx.listener(move |this, _event, window, cx| {
-                if !enabled {
-                    return;
-                }
                 // 与 Ctrl+P 同一入口：面板打开时再次点击关闭。
                 this.toggle_code_search_palette(window, cx);
             }))

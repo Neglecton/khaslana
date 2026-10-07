@@ -16,8 +16,8 @@ use super::err;
 use super::graph::{EdgeType, GraphBuffer, NodeId};
 use crate::types::Result;
 
-/// 索引库 schema 版本：建库时写入 meta，打开时不匹配则整库删除重建。
-pub const CODE_INDEX_SCHEMA_VERSION: u32 = 2;
+/// 索引库 schema 版本：v2 原位升级全文索引，保留已有图与仓库元数据。
+pub const CODE_INDEX_SCHEMA_VERSION: u32 = 3;
 
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
@@ -50,6 +50,8 @@ pub struct CodeIndexMeta {
 
 #[derive(Clone, Debug, Default)]
 pub struct IndexStats {
+    pub generation: String,
+    pub coverage: serde_json::Value,
     pub files: usize,
     pub symbols: usize,
     pub nodes: usize,
@@ -64,17 +66,22 @@ pub struct IndexStats {
     pub repo_path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SearchHit {
     pub name: String,
     pub label: String,
     pub qualified_name: String,
     pub file_path: String,
     pub start_line: u32,
+    pub end_line: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub signature: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub docstring: String,
 }
 
 pub struct CodeIndexStore {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 const SYMBOL_LABELS: &[&str] = &[
@@ -90,7 +97,7 @@ const SYMBOL_LABELS: &[&str] = &[
 ];
 
 impl CodeIndexStore {
-    /// 打开（必要时创建）索引库。schema 版本不符时删除重建。
+    /// 打开（必要时创建）索引库。已知旧版本原位迁移，其余不兼容版本重建。
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(store) = Self::try_open(path)? {
             return Ok(store);
@@ -117,22 +124,25 @@ impl CodeIndexStore {
         conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
         conn.pragma_update(None, "foreign_keys", "ON").ok();
 
-        let store = Self { conn };
+        let mut store = Self { conn };
         if !exists {
             store.initialize_schema()?;
             return Ok(Some(store));
         }
         // 已存在的库校验 schema 版本；不匹配返回 None 由调用方重建。
-        let version_ok = store
+        let version = store
             .conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
                 [],
                 |row| row.get::<_, String>(0),
             )
-            .ok()
-            .map(|v| v == CODE_INDEX_SCHEMA_VERSION.to_string())
-            .unwrap_or(false);
+            .ok();
+        if version.as_deref() == Some("2") {
+            store.migrate_search_schema()?;
+            return Ok(Some(store));
+        }
+        let version_ok = version.as_deref() == Some(CODE_INDEX_SCHEMA_VERSION.to_string().as_str());
         Ok(if version_ok { Some(store) } else { None })
     }
 
@@ -169,7 +179,7 @@ impl CodeIndexStore {
                   value TEXT NOT NULL
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-                  name, qualified_name, label, file_path,
+                  name, qualified_name, label, file_path, body,
                   content='', tokenize='unicode61 remove_diacritics 2'
                 );
                 "#,
@@ -181,7 +191,7 @@ impl CodeIndexStore {
         )
     }
 
-    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+    pub(super) fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn
             .execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -192,6 +202,49 @@ impl CodeIndexStore {
         Ok(())
     }
 
+    fn migrate_search_schema(&mut self) -> Result<()> {
+        let tx = self.conn.transaction().map_err(|e| err(format!("开启索引迁移失败：{e}")))?;
+        tx.execute_batch("DROP TABLE nodes_fts;
+            CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name, label, file_path, body,
+                content='', tokenize='unicode61 remove_diacritics 2');")
+            .map_err(|e| err(format!("迁移全文索引失败：{e}")))?;
+        super::search::fill_stored_search_index(&tx)?;
+        tx.execute("UPDATE meta SET value = ?1 WHERE key = 'schema_version'", params![CODE_INDEX_SCHEMA_VERSION.to_string()])
+            .map_err(|e| err(format!("更新索引版本失败：{e}")))?;
+        tx.commit().map_err(|e| err(format!("提交索引迁移失败：{e}")))
+    }
+
+    /// 旧图尚未采集签名和文档时，下一次刷新补做一次全量提取。
+    pub(super) fn has_search_metadata(&self) -> bool {
+        self.conn.query_row("SELECT value FROM meta WHERE key = 'search_content_version'", [],
+            |row| row.get::<_, String>(0)).is_ok_and(|version| version == "3")
+    }
+
+    pub(super) fn retry_files(&self) -> Result<std::collections::HashSet<String>> {
+        let mut select = self.conn.prepare("SELECT file_path FROM nodes WHERE label='File' AND json_extract(properties, '$.coverage.status') IN ('read_failed', 'parse_failed')")
+            .map_err(|e| err(format!("读取索引重试信息失败：{e}")))?;
+        let rows = select.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| err(format!("读取索引重试信息失败：{e}")))?;
+        let mut failed = std::collections::HashSet::new();
+        for row in rows {
+            failed.insert(row.map_err(|e| err(format!("读取索引重试信息失败：{e}")))?);
+        }
+        for issue in self.discovery_issues()? {
+            if matches!(issue.status.as_str(), "read_failed" | "parse_failed") { failed.insert(issue.path); }
+        }
+        Ok(failed)
+    }
+
+    pub(super) fn discovery_issues(&self) -> Result<Vec<super::coverage::FileCoverage>> {
+        use rusqlite::OptionalExtension;
+        let properties: Option<String> = self.conn.query_row("SELECT properties FROM nodes WHERE label='Project' LIMIT 1", [], |row| row.get(0))
+            .optional().map_err(|error| err(format!("读取发现覆盖信息失败：{error}")))?;
+        let Some(properties) = properties else { return Ok(Vec::new()); };
+        let properties: serde_json::Value = serde_json::from_str(&properties).map_err(|error| err(format!("发现覆盖信息损坏：{error}")))?;
+        properties.get("discovery_issues").cloned().map(serde_json::from_value).transpose()
+            .map_err(|error| err(format!("发现覆盖信息损坏：{error}"))).map(|issues| issues.unwrap_or_default())
+    }
+
     /// 全量替换图内容 + 文件哈希表 + 元信息（整库重写语义，全量与增量共用；
     /// 对齐参考项目「增量也整体重写 DB」的做法，保证坏库可自愈）。
     pub fn replace_all(
@@ -200,6 +253,15 @@ impl CodeIndexStore {
         hashes: &[FileHashRow],
         meta: &CodeIndexMeta,
     ) -> Result<()> {
+        self.replace_all_cancellable(graph, hashes, meta, None).map(|_| ())
+    }
+
+    pub(super) fn replace_all_cancellable(
+        &mut self, graph: &GraphBuffer, hashes: &[FileHashRow], meta: &CodeIndexMeta,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<bool> {
+        let cancelled = || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        if cancelled() { return Ok(false); }
         let tx = self
             .conn
             .transaction()
@@ -231,6 +293,7 @@ impl CodeIndexStore {
                 )
                 .map_err(|e| err(format!("准备节点写入失败：{e}")))?;
             for node in &graph.nodes {
+                if node.id % 512 == 0 && cancelled() { return Ok(false); }
                 stmt.execute(params![
                     node.id as i64 + 1,
                     node.label.as_str(),
@@ -270,23 +333,7 @@ impl CodeIndexStore {
         )
         .map_err(|e| err(format!("重建辅助索引失败：{e}")))?;
 
-        {
-            let mut stmt = tx
-                .prepare("INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path) VALUES (?1, ?2, ?3, ?4, ?5)")
-                .map_err(|e| err(format!("准备全文索引失败：{e}")))?;
-            for node in &graph.nodes {
-                // 参考项目同款技巧：入库前做 camelCase/snake_case 拆分，
-                // unicode61 tokenizer 即可获得驼峰感知检索。
-                stmt.execute(params![
-                    node.id as i64 + 1,
-                    camel_split(&node.name),
-                    camel_split(&node.qualified_name),
-                    node.label.as_str(),
-                    camel_split(&node.file_path),
-                ])
-                .map_err(|e| err(format!("写入全文索引失败：{e}")))?;
-            }
-        }
+        super::search::fill_search_index(&tx, graph)?;
         {
             let mut stmt = tx
                 .prepare("INSERT INTO file_hashes (rel_path, mtime_ns, size) VALUES (?1, ?2, ?3)")
@@ -299,6 +346,10 @@ impl CodeIndexStore {
 
         tx.execute("DELETE FROM meta WHERE key != 'schema_version'", [])
             .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
+        let mut generation_bytes = [0u8; 16];
+        getrandom::fill(&mut generation_bytes).map_err(|e| err(format!("生成索引代际失败：{e}")))?;
+        let generation: String = generation_bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let coverage = super::coverage::summarize(graph).to_string();
         for (key, value) in [
             ("repo_name", meta.repo_name.as_str()),
             ("repo_path", meta.repo_path.as_str()),
@@ -306,6 +357,9 @@ impl CodeIndexStore {
             ("indexed_at", &meta.indexed_at.to_string()),
             ("duration_ms", &meta.duration_ms.to_string()),
             ("mode", meta.mode.as_str()),
+            ("search_content_version", "3"),
+            ("generation", generation.as_str()),
+            ("coverage_summary", coverage.as_str()),
         ] {
             tx.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -315,9 +369,10 @@ impl CodeIndexStore {
             .map_err(|e| err(format!("写入索引元信息失败：{e}")))?;
         }
 
+        if cancelled() { return Ok(false); }
         tx.commit()
             .map_err(|e| err(format!("提交索引事务失败：{e}")))?;
-        Ok(())
+        Ok(true)
     }
 
     /// 从库载入完整图（增量路径）。数据库行 id 映射回紧凑下标。
@@ -343,7 +398,7 @@ impl CodeIndexStore {
                 ))
             })
             .map_err(|e| err(format!("查询节点失败：{e}")))?;
-        let raw_nodes: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        let raw_nodes = rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|error| err(format!("读取节点失败：{error}")))?;
         for (old_id, label, name, qn, file_path, sl, el, props) in raw_nodes.into_iter() {
             let new_id = graph.upsert_node(
                 parse_label(&label),
@@ -371,7 +426,8 @@ impl CodeIndexStore {
                 ))
             })
             .map_err(|e| err(format!("查询边失败：{e}")))?;
-        for (src, tgt, etype, props) in rows.filter_map(|r| r.ok()) {
+        for row in rows {
+            let (src, tgt, etype, props) = row.map_err(|error| err(format!("读取边失败：{error}")))?;
             let (Some(src), Some(tgt)) = (id_map.get(&src), id_map.get(&tgt)) else {
                 continue;
             };
@@ -397,7 +453,7 @@ impl CodeIndexStore {
                 })
             })
             .map_err(|e| err(format!("查询文件哈希失败：{e}")))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|error| err(format!("读取文件哈希失败：{error}")))
     }
 
     /// 读统计信息。空库返回 None（从未索引过）。
@@ -446,6 +502,8 @@ impl CodeIndexStore {
                 .unwrap_or_default()
         };
         Ok(Some(IndexStats {
+            generation: meta_of("generation"),
+            coverage: serde_json::from_str(&meta_of("coverage_summary")).unwrap_or_default(),
             files: files as usize,
             symbols: symbols as usize,
             nodes: has_nodes as usize,
@@ -475,68 +533,9 @@ impl CodeIndexStore {
         label: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<SearchHit>, usize)> {
-        let tokens: Vec<String> = camel_split(query)
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .map(|t| format!("\"{}\"*", t.replace('"', "")))
-            .collect();
-        if tokens.is_empty() {
-            return Ok((Vec::new(), 0));
-        }
-        let match_expr = tokens.join(" ");
-        let join = "FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.rowid WHERE nodes_fts MATCH ?1";
-        let (count_sql, rows_sql) = if label.is_some() {
-            (
-                format!("SELECT count(*) {join} AND n.label = ?2"),
-                format!(
-                    "SELECT n.name, n.label, n.qualified_name, n.file_path, n.start_line {join} AND n.label = ?2 ORDER BY bm25(nodes_fts) LIMIT ?3"
-                ),
-            )
-        } else {
-            (
-                format!("SELECT count(*) {join}"),
-                format!(
-                    "SELECT n.name, n.label, n.qualified_name, n.file_path, n.start_line {join} ORDER BY bm25(nodes_fts) LIMIT ?2"
-                ),
-            )
-        };
-
-        let total: usize = if let Some(label) = label {
-            self.conn
-                .query_row(&count_sql, params![match_expr, label], |r| {
-                    r.get::<_, i64>(0)
-                })
-                .map_err(|e| err(format!("全文检索失败：{e}")))? as usize
-        } else {
-            self.conn
-                .query_row(&count_sql, params![match_expr], |r| r.get::<_, i64>(0))
-                .map_err(|e| err(format!("全文检索失败：{e}")))? as usize
-        };
-        if total == 0 {
-            return Ok((Vec::new(), 0));
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare(&rows_sql)
-            .map_err(|e| err(format!("全文检索失败：{e}")))?;
-        let map_row = |row: &rusqlite::Row| {
-            Ok(SearchHit {
-                name: row.get(0)?,
-                label: row.get(1)?,
-                qualified_name: row.get(2)?,
-                file_path: row.get(3)?,
-                start_line: row.get::<_, i64>(4)?.max(0) as u32,
-            })
-        };
-        let rows = if let Some(label) = label {
-            stmt.query_map(params![match_expr, label, limit as i64], map_row)
-        } else {
-            stmt.query_map(params![match_expr, limit as i64], map_row)
-        }
-        .map_err(|e| err(format!("全文检索失败：{e}")))?;
-        let hits: Vec<SearchHit> = rows.filter_map(|r| r.ok()).collect();
-        Ok((hits, total))
+        self.search_with_options(&super::search::SearchOptions {
+            query: Some(query), label, limit, ..Default::default()
+        })
     }
 }
 
@@ -553,6 +552,13 @@ pub fn read_index_stats(db_path: &Path) -> Result<Option<IndexStats>> {
         s.db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     }
     Ok(stats)
+}
+
+pub fn index_generation(db_path: &Path) -> Result<Option<String>> {
+    let Some(store) = open_read_only_if_exists(db_path)? else { return Ok(None); };
+    use rusqlite::OptionalExtension;
+    store.conn.query_row("SELECT value FROM meta WHERE key='generation'", [], |row| row.get(0))
+        .optional().map_err(|error| err(format!("读取索引代际失败：{error}")))
 }
 
 /// 只读符号搜索入口（设置页验证卡与全局面板共用；无标签过滤）。
@@ -590,7 +596,7 @@ pub fn open_read_only_if_exists(db_path: &Path) -> Result<Option<CodeIndexStore>
             [],
             |row| row.get::<_, String>(0),
         )
-        .map(|v| v == CODE_INDEX_SCHEMA_VERSION.to_string())
+        .map(|v| v == "2" || v == CODE_INDEX_SCHEMA_VERSION.to_string())
         .unwrap_or(false);
     Ok(version_ok.then_some(store))
 }
