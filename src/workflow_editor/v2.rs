@@ -10,6 +10,14 @@ pub(super) const INVOKE_SLOTS: &[WorkflowStepSlot] = &[
     WorkflowStepSlot::Skill, WorkflowStepSlot::Task, WorkflowStepSlot::Tools,
 ];
 
+pub(super) fn configured_server_tools(server: &khaslana::workflow::extensions::WorkflowMcpServer) -> Vec<String> {
+    if !server.enabled { return Vec::new(); }
+    // 缓存只提供选择名称；白名单模式不能因缓存扩大可选范围，执行时仍由宿主校验。
+    server.tools.keys().cloned()
+        .chain(server.cached_tools.iter().filter(|_| server.auto_discover).cloned())
+        .collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct InvokeEditorData {
     fields: HashMap<WorkflowStepSlot, String>,

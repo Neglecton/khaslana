@@ -410,6 +410,20 @@ fn mcp_read_write_schema_and_permission_are_enforced() {
 }
 
 #[test]
+fn js_transforms_input_without_any_mcp_server() {
+    let script = "return {upper: input.value.toUpperCase()};";
+    let grant = grant_for(&format!(r#"{{op:'invoke',id:'js',uses:'js.run',with:{{script:{}}}}}"#,
+        serde_json::to_string(script).unwrap()));
+    let registry = make_registry(WorkflowMcpConfig::default(), Some(grant));
+    let (_repo_dir, mut repo, service) = git_support::init_repo();
+    let result = registry.get("js.run").unwrap().execute_with_control(
+        &service, &mut repo, &json!({"script":script,"input":{"value":"hello"}}),
+        &WorkflowRunControl::new(),
+    ).unwrap();
+    assert_eq!(result.output, Some(json!({"upper":"HELLO"})));
+}
+
+#[test]
 fn js_transforms_data_and_calls_only_declared_tools() {
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(&dir.path().join("untouched.txt"));

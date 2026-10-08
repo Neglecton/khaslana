@@ -167,3 +167,40 @@ fn duplication_preserves_parameters_but_allocates_new_identity_and_output() {
     assert_eq!(editor.steps[0].invoke.value(WorkflowStepSlot::SaveAs), "original");
     assert!(super::super::document::duplicate_step_data(&editor.steps, 10).is_none());
 }
+
+#[test]
+fn step_picker_search_offers_skill_and_js_without_standalone_mcp() {
+    use super::super::document::filter_document_actions;
+    let choices = filter_document_actions("");
+    assert_eq!(choices.iter().map(|(uses, _, _)| *uses).collect::<Vec<_>>(), vec!["skill.run", "js.run"]);
+    assert_eq!(filter_document_actions("  JAVASCRIPT  ")[0].0, "js.run");
+    assert_eq!(filter_document_actions("本地安装")[0].0, "skill.run");
+    assert_eq!(filter_document_actions("组合变量")[0].0, "js.run");
+    assert!(filter_document_actions("mcp.call").is_empty());
+}
+
+#[test]
+fn js_step_can_be_saved_without_server_or_tools() {
+    let mut step = WorkflowEditorStepData::new(WorkflowStepKind::Invoke);
+    step.invoke = InvokeEditorData::new_action("js.run", "transform");
+    step.invoke.set(WorkflowStepSlot::Script, "return {branch: input.branch};".into());
+    step.invoke.set(WorkflowStepSlot::JsInput, "{branch:'${run.sourceBranch}'}".into());
+    let editor = WorkflowEditorData { version: 2, steps: vec![step], ..Default::default() };
+    let definition = build_workflow_definition(&editor).unwrap();
+    let WorkflowStep::Invoke { arguments, .. } = &definition.steps[0] else { panic!("应为 invoke"); };
+    assert!(arguments.get("server").is_none());
+    assert!(arguments.get("tools").is_none());
+    assert_eq!(arguments["input"]["branch"], "${run.sourceBranch}");
+}
+
+#[test]
+fn tool_picker_uses_discovery_cache_but_respects_whitelist_and_disabled_servers() {
+    let mut server: khaslana::workflow::extensions::WorkflowMcpServer = json5::from_str(
+        "{command:'fixture',autoDiscover:true,tools:{read:{access:'read'}},cachedTools:['write','read']}"
+    ).unwrap();
+    assert_eq!(configured_server_tools(&server), vec!["read", "write"]);
+    server.auto_discover = false;
+    assert_eq!(configured_server_tools(&server), vec!["read"]);
+    server.enabled = false;
+    assert!(configured_server_tools(&server).is_empty());
+}

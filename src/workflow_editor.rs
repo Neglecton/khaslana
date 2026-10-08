@@ -149,7 +149,7 @@ impl WorkflowStepSlot {
     pub(crate) fn placeholder(self) -> &'static str {
         match self {
             Self::StepId => "如 browser-step",
-            Self::Uses => "如 mcp.call / js.run / skill.run",
+            Self::Uses => "如 js.run / skill.run",
             Self::Arguments => "{}",
             Self::SaveAs => "如 browserResult",
             Self::Server => "如 browser.edge",
@@ -1257,7 +1257,7 @@ pub(crate) struct WorkflowEditorState {
     document_ai_open: bool,
     document_preview_open: bool,
     document_advanced_step: Option<usize>,
-    document_tool_servers: std::collections::HashMap<String, String>,
+    document_tools_open: std::collections::HashMap<String, bool>,
     document_menu_widths: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<std::cell::Cell<Option<gpui::Pixels>>>>>,
     document_picker_focus: gpui::FocusHandle,
     data: WorkflowEditorData,
@@ -1318,7 +1318,7 @@ impl WorkflowEditorState {
             document_ai_open: false,
             document_preview_open: false,
             document_advanced_step: None,
-            document_tool_servers: Default::default(),
+            document_tools_open: Default::default(),
             document_menu_widths: Default::default(),
             document_picker_focus: cx.focus_handle(),
             data,
@@ -2172,7 +2172,7 @@ impl RepositoryView {
                     khaslana::workflow_template_prompts(&request, current_json5.as_deref());
                 if version == 2 {
                     system.content = system.content.replace("version 字段恒为 1", "version 字段恒为 2")
-                        .replace("op 只能使用文档「支持的步骤」章节列出的类型", "op 使用文档支持的 Git 步骤或 invoke；invoke 必须有唯一 id、uses 与对象 with，可选 saveAs；uses 可为 git.*、mcp.call、js.run、skill.run");
+                        .replace("op 只能使用文档「支持的步骤」章节列出的类型", "op 使用文档支持的 Git 步骤或 invoke；invoke 必须有唯一 id、uses 与对象 with，可选 saveAs；uses 可为 git.*、js.run、skill.run；MCP 是 Skill 或 JS 调用的工具，不新增独立 mcp.call 步骤；仅保留当前模板已有的 mcp.call 兼容步骤；纯 JS 无需 MCP，只有任务或脚本确实需要时才声明 tools，不自动添加工具");
                 }
                 let result =
                     client.request_stream(&[system, user], &mut |delta| on_delta(delta))?;

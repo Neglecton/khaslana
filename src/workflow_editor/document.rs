@@ -25,6 +25,14 @@ pub(super) fn hint(value: impl Into<gpui::SharedString>) -> gpui::Div {
 
 pub(super) fn variable_rail_visible(width: f32) -> bool { width >= 1100.0 }
 
+pub(super) fn filter_document_actions(query: &str) -> Vec<(&'static str, &'static str, &'static str)> {
+    let query = query.trim().to_lowercase();
+    [("skill.run", "AI Skill", "使用本地安装的 Skill 执行任务"),
+        ("js.run", "JavaScript", "转换输入、组合变量，按需调用工具")]
+        .into_iter().filter(|(uses, label, description)| query.is_empty()
+            || format!("{uses} {label} {description}").to_lowercase().contains(&query)).collect()
+}
+
 pub(super) fn next_step_id(steps: &[WorkflowEditorStepData]) -> String {
     (1..).map(|index| format!("step-{index}"))
         .find(|id| steps.iter().all(|step| step.invoke.value(WorkflowStepSlot::StepId) != id))
@@ -70,8 +78,7 @@ impl RepositoryView {
             WorkflowEditorFieldId::AiDescription => self.generate_workflow_template_with_ai(cx),
             WorkflowEditorFieldId::PickerSearch => {
                 let query = self.workflow_editor.as_ref().map(|editor| editor.picker_search_field.value.to_lowercase()).unwrap_or_default();
-                if let Some((uses, _)) = [("mcp.call", "MCP 工具"), ("js.run", "JavaScript 转换输入组合变量"), ("skill.run", "AI Skill 本地安装任务")]
-                    .into_iter().find(|(uses, label)| query.trim().is_empty() || format!("{uses} {label}").to_lowercase().contains(query.trim())) {
+                if let Some((uses, _, _)) = filter_document_actions(&query).first() {
                     self.workflow_document_add_action(uses);
                 } else if let Some(kind) = filter_workflow_step_kinds(&query).first() {
                     self.workflow_editor_add_step_of_kind(*kind);
@@ -231,7 +238,7 @@ impl RepositoryView {
             for index in 0..editor.data.steps.len() { document = document.child(self.render_document_step(index, window, cx)); }
             if editor.data.steps.is_empty() {
                 document = document.child(card().child(text("从一个步骤开始"))
-                    .child(hint("按顺序组合 Git 操作、MCP 工具、JavaScript 与 Skill。"))
+                    .child(hint("按顺序组合 Git 操作、Skill 与 JavaScript；需要时由步骤调用工具。"))
                     .children(WORKFLOW_EDITOR_PRESETS.iter().map(|preset| {
                         let preset = *preset;
                         self.document_command(format!("workflow-v2-preset-{}", preset.title()), preset.title(), false, true, cx)
@@ -378,11 +385,16 @@ impl RepositoryView {
             return panel.child(body).into_any_element();
         }
         for (slot, _, _) in step.invoke.parameters() {
-            body = if slot == WorkflowStepSlot::Tools { body.child(self.document_tools(index, cx)) }
-                else { body.child(self.document_parameter(index, slot, window, cx)) };
+            if slot != WorkflowStepSlot::Tools { body = body.child(self.document_parameter(index, slot, window, cx)); }
         }
         body = body.child(self.document_parameter(index, WorkflowStepSlot::SaveAs, window, cx))
             .when_some(self.ai_extensions.error.clone(), |body, error| body.child(hint(error)));
+        if step.invoke.parameters().iter().any(|(slot, _, _)| *slot == WorkflowStepSlot::Tools) {
+            body = body.child(self.document_tools(index, cx));
+        }
+        if step.invoke.value(WorkflowStepSlot::Uses) == "mcp.call" {
+            body = body.child(hint("这是旧模板的兼容步骤。新建流程请使用 Skill 或 JavaScript，在步骤内按需调用 MCP 工具。"));
+        }
         if editor.document_advanced_step == Some(index) || step.invoke.parameters().is_empty() {
             for slot in [WorkflowStepSlot::StepId, WorkflowStepSlot::Uses, WorkflowStepSlot::Arguments] { body = body.child(self.document_field(WorkflowEditorFieldId::StepParam { step: index, slot }, slot.label(), window, cx)); }
             if step.invoke.parameters().iter().any(|(slot, _, _)| *slot == WorkflowStepSlot::Tools) {
@@ -403,15 +415,13 @@ impl RepositoryView {
         let query = editor.picker_search_field.value.trim().to_lowercase();
         let mut picker = card().child(div().flex().justify_between().child(text("添加步骤").font_weight(gpui::FontWeight::SEMIBOLD))
             .child(icon_button("workflow-v2-picker-close", "返回步骤", IconName::X, true).on_click(cx.listener(|this, _, _, cx| { this.workflow_editor_close_step_picker(); cx.notify(); }))))
-            .child(hint("选择下一步要做的操作，按顺序组合工作流"))
+            .child(hint("选择下一步要做的操作；MCP 工具由 Skill 或 JavaScript 按需调用"))
             .child(self.document_input(WorkflowEditorFieldId::PickerSearch, window, cx));
-        for (uses, label, description) in [("mcp.call", "MCP 工具", "调用已配置的服务与工具"), ("js.run", "JavaScript", "转换输入、组合变量或调用工具"), ("skill.run", "AI Skill", "使用本地安装的 Skill 执行任务")] {
-            if query.is_empty() || format!("{uses} {label} {description}").to_lowercase().contains(&query) {
-                picker = picker.child(self.document_command(format!("workflow-v2-picker-{uses}"), label, false, true, cx)
-                    .h_auto().py_3().justify_start().icon(icon(match uses { "mcp.call" => IconName::Plug, "js.run" => IconName::Braces, _ => IconName::Sparkles }, ui_theme::PRIMARY))
-                    .child(hint(description))
-                    .on_click(cx.listener(move |this, _, _, cx| { this.workflow_document_add_action(uses); cx.notify(); })));
-            }
+        for (uses, label, description) in filter_document_actions(&query) {
+            picker = picker.child(self.document_command(format!("workflow-v2-picker-{uses}"), label, false, true, cx)
+                .h_auto().py_3().justify_start().icon(icon(if uses == "js.run" { IconName::Braces } else { IconName::Sparkles }, ui_theme::PRIMARY))
+                .child(hint(description))
+                .on_click(cx.listener(move |this, _, _, cx| { this.workflow_document_add_action(uses); cx.notify(); })));
         }
         picker = picker.child(text("Git 操作"));
         for kind in filter_workflow_step_kinds(&query) {

@@ -192,22 +192,38 @@ impl RepositoryView {
                 })
             }));
         let view = cx.entity();
-        let mcp_group = mcp_group.item(crate::settings_center::settings_item_row(
-            "启动命令",
-            None,
-            move |_options, _window, cx| {
+        // 长配置独占一行并自然换行，复制按钮不参与配置文本的宽度分配。
+        let mcp_group = mcp_group.item(
+            SettingItem::render(move |_options, _window, cx| {
                 // 闭包是 Fn：每次渲染克隆两份配置，分别供只读值与复制按钮消费。
                 let display_config = mcp_config_value.clone();
                 let copy_config = mcp_config_copy.clone();
                 view.update(cx, |this, cx| {
                     div()
                         .flex()
+                        .flex_col()
                         .w_full()
-                        .items_center()
+                        .min_w(px(0.0))
                         .gap_2()
+                        .child(crate::settings_center::settings_item_body(
+                            "启动命令",
+                            None,
+                            div().flex_shrink_0().child(this.button(
+                                "复制 MCP 配置",
+                                true,
+                                move |this, _, cx| {
+                                    // on_click 是 Fn：闭包体内克隆写入，不能直接消费捕获的配置。
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        copy_config.clone(),
+                                    ));
+                                    this.notify_success("已复制 MCP 配置", cx);
+                                },
+                                cx,
+                            )),
+                        ))
                         .child(
                             div()
-                                .flex_1()
+                                .w_full()
                                 .min_w(px(0.0))
                                 .px_2()
                                 .py_1()
@@ -218,25 +234,13 @@ impl RepositoryView {
                                 .font_family("Consolas")
                                 .line_height(px(16.0))
                                 .text_color(rgb(ui_theme::CONTENT_PRIMARY))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
+                                .whitespace_normal()
                                 .child(display_config),
                         )
-                        .child(this.button(
-                            "复制 MCP 配置",
-                            true,
-                            move |this, _, cx| {
-                                // on_click 是 Fn：闭包体内克隆写入，不能直接消费捕获的配置。
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copy_config.clone(),
-                                ));
-                                this.notify_success("已复制 MCP 配置", cx);
-                            },
-                            cx,
-                        ))
                 })
-            },
-        ));
+            })
+            .keywords(["启动命令", "复制 MCP 配置"]),
+        );
 
         // 仓库组：过滤输入 + 仓库卡片 + 空列表提示 + 索引说明。
         let view = cx.entity();

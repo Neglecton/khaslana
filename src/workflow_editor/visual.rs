@@ -3,7 +3,7 @@ use super::*;
 use super::document::{card, column, hint, text, edit_tool_selection};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt;
-use gpui_kit::component::{Icon, Sizable, Disableable, button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenu, PopupMenuItem}};
+use gpui_kit::component::{Icon, Sizable, Disableable, button::{Button, ButtonVariants}, collapsible::Collapsible, menu::{DropdownMenu, PopupMenu, PopupMenuItem}};
 
 type MenuWidth = std::rc::Rc<std::cell::Cell<Option<gpui::Pixels>>>;
 
@@ -150,7 +150,7 @@ impl RepositoryView {
     fn document_server_tools(&self, name: &str) -> Vec<String> {
         if name == khaslana::workflow::browser_runtime::SERVER_ID {
             khaslana::workflow::extensions::builtin_browser_server().tools.keys().cloned().collect()
-        } else { self.ai_extensions.mcp.servers.get(name).map(|server| server.tools.keys().cloned().collect()).unwrap_or_default() }
+        } else { self.ai_extensions.mcp.servers.get(name).map(v2::configured_server_tools).unwrap_or_default() }
     }
 
     fn document_select_tool(&mut self, index: usize, server: &str, tool: &str, selected: bool) {
@@ -168,60 +168,57 @@ impl RepositoryView {
         let selected: serde_json::Value = json5::from_str(step.invoke.value(WorkflowStepSlot::Tools)).unwrap_or_default();
         let selected = selected.as_array().cloned().unwrap_or_default();
         let key = step.invoke.value(WorkflowStepSlot::StepId).to_string();
-        let server = editor.document_tool_servers.get(&key).cloned().or_else(|| selected.first()?.get("server")?.as_str().map(str::to_string))
-            .unwrap_or_else(|| "browser.edge".into());
-        let servers = std::iter::once("browser.edge".to_string()).chain(self.ai_extensions.mcp.servers.keys().cloned()).collect::<Vec<_>>();
-        let entity = cx.entity();
-        let configured = server == "browser.edge" || self.ai_extensions.mcp.servers.contains_key(&server);
-        let current_server = server.clone();
-        let server_width = self.document_menu_width(format!("permission-server-{index}"));
-        let server_measure = server_width.clone();
-        let server_select = measure_menu_field(div().flex_1().min_w_0().h(px(36.0)).child(
-            menu_button(format!("workflow-v2-permission-server-{index}"), server.clone(), !editor.ai_loading)
-            .dropdown_menu(move |mut menu, window, _| {
-                menu = fit_menu(menu, &server_width, window).scrollable(true).max_h(px(240.0));
-                for value in &servers {
-                    let value = value.clone(); let key = key.clone();
-                    menu = menu.item(PopupMenuItem::new(value.clone()).checked(value == current_server).on_click(window.listener_for(&entity, move |this, _, _, cx| {
-                        // 此选择只筛选工具菜单，不改写已有权限，也不写入动作参数。
-                        if let Some(editor) = this.workflow_editor.as_mut() { editor.document_tool_servers.insert(key.clone(), value.clone()); } cx.notify();
-                    })));
-                } menu
-            })), server_measure);
+        let expanded = editor.document_tools_open.get(&key).copied().unwrap_or(!selected.is_empty());
+        let enabled = !editor.ai_loading;
+        let label = if selected.is_empty() { "调用工具（可选）".to_string() }
+            else { format!("调用工具（已选 {} 个）", selected.len()) };
+        let toggle = Button::new(format!("workflow-v2-tools-toggle-{key}")).ghost().small().label(label)
+            .icon(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }, ui_theme::WORKFLOW_META))
+            .disabled(!enabled).accessibility_label(if expanded { "收起调用工具" } else { "展开调用工具（可选）" })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(editor) = this.workflow_editor.as_mut() { editor.document_tools_open.insert(key.clone(), !expanded); }
+                cx.notify();
+            }));
+        let servers = std::iter::once("browser.edge".to_string())
+            .chain(self.ai_extensions.mcp.servers.keys().filter(|name| name.as_str() != "browser.edge").cloned())
+            .map(|name| { let tools = self.document_server_tools(&name); (name, tools) })
+            .filter(|(_, tools)| !tools.is_empty()).collect::<Vec<_>>();
         let mut chips = div().flex().flex_wrap().items_center().min_w_0().flex_1().gap_1();
         for (position, item) in selected.iter().enumerate() {
             let Some(tool) = item["tool"].as_str() else { continue; };
             let Some(server) = item["server"].as_str() else { continue; };
             let tool = tool.to_string(); let server = server.to_string();
-            chips = chips.child(badge(tool.clone()).py(px(2.0)).gap_1()
-                .child(icon_button(format!("workflow-v2-tool-remove-{index}-{position}"), &format!("移除 {server} / {tool}"), IconName::X, true)
+            chips = chips.child(badge(format!("{server} / {tool}")).py(px(2.0)).gap_1()
+                .child(icon_button(format!("workflow-v2-tool-remove-{index}-{position}"), &format!("移除 {server} / {tool}"), IconName::X, enabled)
                     .w(px(18.0)).h(px(18.0)).on_click(cx.listener(move |this, _, _, cx| { this.document_select_tool(index, &server, &tool, false); cx.notify(); }))));
         }
-        if selected.is_empty() { chips = chips.child(hint("选择可调用的工具")); }
-        let tools = self.document_server_tools(&server);
+        if selected.is_empty() { chips = chips.child(hint("未添加工具，可直接执行此步骤")); }
         let entity = cx.entity();
         let tool_width = self.document_menu_width(format!("tools-{index}"));
         let tool_measure = tool_width.clone();
-        let menu_button = icon_button(format!("workflow-v2-tool-picker-{index}"), "选择允许的工具", IconName::ChevronDown, !tools.is_empty())
+        let menu_button = icon_button(format!("workflow-v2-tool-picker-{index}"), if servers.is_empty() { "没有可选工具，请先在 AI 设置中配置" } else { "添加可调用的工具" }, IconName::Plus, enabled && !servers.is_empty())
             .w(px(36.0)).h(px(36.0))
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |mut menu, window, _| {
                 menu = fit_menu(menu, &tool_width, window).scrollable(true).max_h(px(260.0));
-                for tool in &tools {
-                    let checked = selected.iter().any(|item| item["server"] == server && item["tool"] == *tool);
-                    let tool = tool.clone(); let server = server.clone();
-                    menu = menu.item(PopupMenuItem::new(tool.clone()).checked(checked).on_click(window.listener_for(&entity, move |this, _, _, cx| {
-                        this.document_select_tool(index, &server, &tool, !checked); cx.notify();
-                    })));
+                for (server, tools) in &servers {
+                    menu = menu.label(server.clone());
+                    for tool in tools {
+                        let checked = selected.iter().any(|item| item["server"] == *server && item["tool"] == *tool);
+                        let tool = tool.clone(); let server = server.clone();
+                        menu = menu.item(PopupMenuItem::new(tool.clone()).checked(checked).on_click(window.listener_for(&entity, move |this, _, _, cx| {
+                            this.document_select_tool(index, &server, &tool, !checked); cx.notify();
+                        })));
+                    }
                 } menu
             });
-        column().gap_3()
-            .child(div().flex().items_center().gap_3().child(text("MCP 服务").w(px(108.0)).flex_none())
-                .child(server_select).child(status(if configured { "已配置" } else { "未找到" }, configured)))
-            .child(div().flex().items_start().gap_3().child(text("可用工具").w(px(108.0)).pt_2().flex_none())
+        let content = column().gap_2()
+            .child(hint("仅在步骤需要外部能力时添加。Skill 由 AI 按任务调用；JavaScript 在脚本中通过 mcp.call(...) 调用。"))
+            .child(div().flex().items_start().gap_3().child(text("允许调用").w(px(108.0)).pt_2().flex_none())
                 .child(measure_menu_field(div().relative().flex().flex_1().min_w_0().items_center().gap_1().rounded(px(ui_theme::RADIUS_XS))
                     // 边框独立绘制，箭头触发器的右边界与整个字段相同。
                     .child(div().absolute().inset_0().border_1().border_color(rgb(ui_theme::WORKFLOW_OUTLINE)).rounded(px(ui_theme::RADIUS_XS)))
-                    .child(chips.pl_1().py_1()).child(div().w(px(36.0)).h(px(36.0)).flex_none().child(menu_button)), tool_measure)))
+                    .child(chips.pl_1().py_1()).child(div().w(px(36.0)).h(px(36.0)).flex_none().child(menu_button)), tool_measure)));
+        column().child(Collapsible::new().open(expanded).gap_2().child(toggle).content(content))
     }
 
     pub(super) fn document_git_parameters(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
