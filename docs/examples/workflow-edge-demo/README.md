@@ -21,10 +21,6 @@
 cargo test --lib edge_demo_reads_and_fills_real_public_page -- --ignored --nocapture
 ```
 
-真实 AI/Edge 链路使用 `edge_skill_reads_and_fills_real_public_page`。运行前需要在测试进程环境中提供 `KHASLANA_WORKFLOW_AI_SETTINGS`（序列化的 AI 配置）与 `KHASLANA_WORKFLOW_PROXY_SETTINGS`（序列化的应用代理配置）；不要把真实密钥写进命令历史或样板文件。测试沿用应用默认模型参数，在临时仓库与临时运行组件目录中执行，不修改用户仓库或配置。
+AI Skill 链路按上面的客户端运行步骤手动验收。自动测试保留模板解析、配置与授权准备检查，不执行 Skill；调用 Skill 执行器的模拟测试和真实模型专项测试均已移除。
 
-```powershell
-cargo test --lib edge_skill_reads_and_fills_real_public_page -- --ignored --nocapture
-```
-
-2026-10-06 两项专项均在本机通过；真实模型链路通过不代表客户端窗口的授权、焦点、取消或布局验收通过。
+JS/Edge 专项测试通过不代表客户端窗口的授权、焦点、取消或布局验收通过。

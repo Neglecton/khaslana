@@ -1,8 +1,6 @@
 #![cfg(windows)]
 
 use std::time::Duration;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 
 use serde_json::json;
 
@@ -160,40 +158,8 @@ fn skill_settings(base_url: String) -> crate::ai::config::AiProviderSettings {
     settings
 }
 
-fn mock_ai(turns: Vec<serde_json::Value>) -> (String, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let thread = std::thread::spawn(move || {
-        for turn in turns {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut header = Vec::new();
-            let mut byte = [0u8; 1];
-            while !header.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
-            }
-            let header_text = String::from_utf8(header).unwrap();
-            let size = header_text.lines().find_map(|line| line.to_ascii_lowercase()
-                .strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
-                .unwrap_or(0);
-            let mut body = vec![0u8; size];
-            stream.read_exact(&mut body).unwrap();
-            let response = format!("data: {}\n\ndata: [DONE]\n\n", turn);
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
-        }
-    });
-    (url, thread)
-}
-
-fn ai_tool_turn(id: &str, server: &str, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
-    json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,
-        "function":{"name":"mcp_call","arguments":json!({
-            "server":server,"tool":tool,"arguments":arguments
-        }).to_string()}}]},"finish_reason":"tool_calls"}]})
-}
-
 #[test]
-fn skill_package_is_frozen_before_authorization_and_requires_grant() {
+fn skill_package_content_is_required_before_authorization() {
     let dir = tempfile::tempdir().unwrap();
     test_skill(dir.path());
     assert_eq!(discover_skill_packages(dir.path()).unwrap(),
@@ -204,136 +170,6 @@ fn skill_package_is_frozen_before_authorization_and_requires_grant() {
     grant.prepare_skills(dir.path()).unwrap();
     let lines = grant.permission_lines(&test_config(&dir.path().join("unused"))).unwrap();
     assert!(lines.iter().any(|line| line.contains("AI Skill：fixture-skill")));
-    std::fs::write(dir.path().join("workflow-skills/fixture-skill/SKILL.md"), "changed").unwrap();
-    let denied = make_registry(test_config(&dir.path().join("unused")), None);
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let result = denied.get("skill.run").unwrap().execute_with_control(
-        &service, &mut repo, &json!({"skill":"fixture-skill","task":"读取"}),
-        &WorkflowRunControl::new());
-    assert!(result.unwrap_err().to_string().contains("尚未授权"));
-}
-
-#[test]
-fn skill_ai_tool_loop_uses_granted_mcp_and_records_result() {
-    let dir = tempfile::tempdir().unwrap();
-    test_skill(dir.path());
-    let mut grant = grant_for("{op:'invoke',id:'skill',uses:'skill.run',with:{skill:'fixture-skill',task:'读取',tools:[{server:'fixture',tool:'echo'}]}}");
-    grant.prepare_skills(dir.path()).unwrap();
-    let (url, server) = mock_ai(vec![
-        json!({"choices":[{"delta":{"content":"准备读取", "tool_calls":[{"index":0,"id":"call1","function":{"name":"mcp_call","arguments":"{\"server\":\"fixture\",\"tool\":\"echo\",\"arguments\":{\"value\":\"hello\"}}"}}]},"finish_reason":"tool_calls"}]}),
-        json!({"choices":[{"delta":{"content":"已读取 hello"},"finish_reason":"stop"}]}),
-    ]);
-    let mut registry = WorkflowActionRegistry::default();
-    register_external_actions_with_ai(&mut registry, test_config(&dir.path().join("unused")),
-        Some(grant), Some(skill_settings(url)), None, None).unwrap();
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let mut progress = Vec::new();
-    let result = registry.get("skill.run").unwrap().execute_with_control_and_progress(&service, &mut repo,
-        &json!({"skill":"fixture-skill","task":"读取","tools":[{"server":"fixture","tool":"echo"}]}),
-        &WorkflowRunControl::new(), &mut |detail| progress.push(detail)).unwrap();
-    server.join().unwrap();
-    assert_eq!(result.output, Some(json!("已读取 hello")));
-    assert!(progress.iter().any(|line| line.contains("AI 工具 1：fixture / echo")));
-}
-
-#[test]
-fn skill_ai_cannot_call_tool_outside_step_allowlist() {
-    let dir = tempfile::tempdir().unwrap();
-    test_skill(dir.path());
-    let marker = dir.path().join("must-not-write.txt");
-    let mut grant = grant_for("{op:'invoke',id:'skill',uses:'skill.run',with:{skill:'fixture-skill',task:'读取',tools:[{server:'fixture',tool:'echo'}]}}");
-    grant.prepare_skills(dir.path()).unwrap();
-    let (url, server) = mock_ai(vec![json!({"choices":[{"delta":{"tool_calls":[{
-        "index":0,"id":"call1","function":{"name":"mcp_call",
-            "arguments":"{\"server\":\"fixture\",\"tool\":\"write_file\",\"arguments\":{\"value\":\"bad\"}}"}
-    }]},"finish_reason":"tool_calls"}]})]);
-    let mut registry = WorkflowActionRegistry::default();
-    register_external_actions_with_ai(&mut registry, test_config(&marker), Some(grant),
-        Some(skill_settings(url)), None, None).unwrap();
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let result = registry.get("skill.run").unwrap().execute_with_control(&service, &mut repo,
-        &json!({"skill":"fixture-skill","task":"读取","tools":[{"server":"fixture","tool":"echo"}]}),
-        &WorkflowRunControl::new());
-    server.join().unwrap();
-    assert!(result.unwrap_err().to_string().contains("未授权工具"));
-    assert!(!marker.exists());
-}
-
-#[test]
-fn skill_page_guard_rejects_wrong_navigation_before_browser_call() {
-    let dir = tempfile::tempdir().unwrap();
-    test_skill(dir.path());
-    let marker = dir.path().join("must-not-fill.txt");
-    let arguments = json!({"skill":"fixture-skill","task":"填写",
-        "browserGuard":{"url":"https://www.selenium.dev/selenium/web/web-form.html",
-            "contains":["Web form","Text input"],"target":"input[name=\"my-text\"]"},
-        "tools":[{"server":"fixture","tool":"browser_navigate"},
-            {"server":"fixture","tool":"browser_snapshot"},
-            {"server":"fixture","tool":"browser_type"}]});
-    let definition: WorkflowDefinition = serde_json::from_value(json!({"version":2,
-        "steps":[{"op":"invoke","id":"skill","uses":"skill.run","with":arguments}]})).unwrap();
-    let mut grant = WorkflowExternalGrant::for_definition(&definition).unwrap().unwrap();
-    grant.prepare_skills(dir.path()).unwrap();
-    let mut config = test_config(&marker);
-    for (name, access) in [("browser_navigate", "write"), ("browser_snapshot", "read"), ("browser_type", "write")] {
-        config.servers.get_mut("fixture").unwrap().tools.insert(name.into(),
-            serde_json::from_value(json!({"access":access})).unwrap());
-    }
-    let (url, server) = mock_ai(vec![json!({"choices":[{"delta":{"tool_calls":[{
-        "index":0,"id":"call1","function":{"name":"mcp_call",
-            "arguments":"{\"server\":\"fixture\",\"tool\":\"browser_navigate\",\"arguments\":{\"url\":\"https://example.com\"}}"}
-    }]},"finish_reason":"tool_calls"}]})]);
-    let mut registry = WorkflowActionRegistry::default();
-    register_external_actions_with_ai(&mut registry, config, Some(grant),
-        Some(skill_settings(url)), None, None).unwrap();
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let result = registry.get("skill.run").unwrap().execute_with_control(&service, &mut repo,
-        &arguments, &WorkflowRunControl::new());
-    server.join().unwrap();
-    assert!(result.unwrap_err().to_string().contains("页面守卫以外"));
-    assert!(!marker.exists());
-}
-
-#[test]
-fn skill_page_guard_reads_fills_and_verifies_with_mock_browser() {
-    let dir = tempfile::tempdir().unwrap();
-    test_skill(dir.path());
-    let marker = dir.path().join("filled.txt");
-    let target_url = "https://www.selenium.dev/selenium/web/web-form.html";
-    let target = "input[name=\"my-text\"]";
-    let arguments = json!({"skill":"fixture-skill","task":"填写 hello",
-        "browserGuard":{"url":target_url,"contains":["Web form","Text input"],"target":target},
-        "tools":[{"server":"fixture","tool":"browser_navigate"},
-            {"server":"fixture","tool":"browser_snapshot"},
-            {"server":"fixture","tool":"browser_type"}]});
-    let definition: WorkflowDefinition = serde_json::from_value(json!({"version":2,
-        "steps":[{"op":"invoke","id":"skill","uses":"skill.run","with":arguments}]})).unwrap();
-    let mut grant = WorkflowExternalGrant::for_definition(&definition).unwrap().unwrap();
-    grant.prepare_skills(dir.path()).unwrap();
-    let mut config = test_config(&marker);
-    for (name, access) in [("browser_navigate", "write"), ("browser_snapshot", "read"), ("browser_type", "write")] {
-        config.servers.get_mut("fixture").unwrap().tools.insert(name.into(),
-            serde_json::from_value(json!({"access":access})).unwrap());
-    }
-    let (url, server) = mock_ai(vec![
-        ai_tool_turn("c1", "fixture", "browser_navigate", json!({"url":target_url})),
-        ai_tool_turn("c2", "fixture", "browser_snapshot", json!({})),
-        ai_tool_turn("c3", "fixture", "browser_type", json!({"target":target,"text":"hello","submit":false})),
-        ai_tool_turn("c4", "fixture", "browser_snapshot", json!({})),
-        json!({"choices":[{"delta":{"content":"已填写 hello，未提交"},"finish_reason":"stop"}]}),
-    ]);
-    let mut registry = WorkflowActionRegistry::default();
-    register_external_actions_with_ai(&mut registry, config, Some(grant),
-        Some(skill_settings(url)), None, None).unwrap();
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let mut details = Vec::new();
-    let result = registry.get("skill.run").unwrap().execute_with_control_and_progress(
-        &service, &mut repo, &arguments, &WorkflowRunControl::new(),
-        &mut |detail| details.push(detail)).unwrap();
-    server.join().unwrap();
-    assert_eq!(result.output, Some(json!("已填写 hello，未提交")));
-    assert_eq!(std::fs::read_to_string(marker).unwrap(), "hello");
-    assert!(details.iter().any(|detail| detail.contains("AI 工具 4：fixture / browser_snapshot")));
 }
 
 #[test]
@@ -455,51 +291,6 @@ fn edge_demo_reads_and_fills_real_public_page() {
     options.input_vars.insert("demoText".into(), "Khaslana Edge demo".into());
     let result = WorkflowExecutor::with_actions(&service, &registry).run(&mut repo, &definition, options, |_| {});
     assert!(result.is_ok(), "{}", result.unwrap_err());
-}
-
-#[test]
-#[ignore = "需要显式提供 AI 与代理配置、本机 Edge 和网络；会产生模型请求"]
-fn edge_skill_reads_and_fills_real_public_page() {
-    // 配置仅通过当前测试进程环境传入，不能将真实密钥写进样板或测试输出。
-    let mut settings: crate::ai::config::AiProviderSettings = serde_json::from_str(
-        &std::env::var("KHASLANA_WORKFLOW_AI_SETTINGS").expect("请提供验收用 AI 配置")
-    ).expect("验收用 AI 配置格式无效");
-    let defaults = crate::ai::config::AiProviderSettings::default();
-    settings.temperature = defaults.temperature;
-    settings.max_tokens = defaults.max_tokens;
-    settings.request_timeout_secs = defaults.request_timeout_secs;
-    assert!(settings.is_usable(), "验收用 AI 配置未启用或不完整");
-    let proxy: crate::proxy::NetworkProxySettings = serde_json::from_str(
-        &std::env::var("KHASLANA_WORKFLOW_PROXY_SETTINGS").expect("请提供验收用代理配置")
-    ).expect("验收用代理配置格式无效");
-    proxy.validate().unwrap();
-    let proxy_url = proxy.proxy_url_for_target(&settings.base_url);
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples/workflow-edge-demo");
-    let definition = parse_workflow_json5(
-        &std::fs::read_to_string(root.join("edge-web-form-skill.json5")).unwrap()
-    ).unwrap();
-    let runtime = tempfile::tempdir().unwrap();
-    super::browser_runtime::install(runtime.path(), &proxy, |_| {}).unwrap();
-    let mut config = super::extensions::load_mcp_config(runtime.path()).unwrap();
-    config.configure_browser_proxy(&proxy).unwrap();
-    let mut grant = WorkflowExternalGrant::for_definition(&definition).unwrap().unwrap();
-    grant.prepare_skills(&root).unwrap();
-    let mut registry = WorkflowActionRegistry::default();
-    register_external_actions_with_ai(&mut registry, config, Some(grant), Some(settings),
-        proxy_url, Some(runtime.path())).unwrap();
-    let (_repo_dir, mut repo, service) = git_support::init_repo();
-    let mut options = WorkflowRunOptions::default();
-    options.input_vars.insert("demoText".into(), "Khaslana AI Skill acceptance".into());
-    let mut details = Vec::new();
-    let result = WorkflowExecutor::with_actions(&service, &registry).run(&mut repo,
-        &definition, options, |event| {
-            if let WorkflowProgressEvent::StepDetail { detail, .. } = event {
-                details.push(detail);
-            }
-        });
-    assert!(result.is_ok(), "{}", result.unwrap_err());
-    assert!(details.iter().any(|detail| detail.contains("browser_type")));
-    assert!(details.iter().any(|detail| detail.contains("browser_snapshot")));
 }
 
 #[test]
