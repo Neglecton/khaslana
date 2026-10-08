@@ -1,20 +1,19 @@
 //! 索引查询 API 层（参照 codebase-memory-mcp 的工具面语义）。
 //!
-//! 只读查询按索引代际复用有界图缓存和调用邻接表。消费方：
+//! 只读查询在同一 SQLite 快照内按需读取节点和调用邻接关系。消费方：
 //! 内嵌 MCP 服务器（`mcp.rs`）、全局符号搜索面板（bin crate）、以及后续
 //! Phase 2 AI 代码搜索的 agent 工具层。
 //!
 //! 风险标签移植参考项目 `cbm_hop_to_risk`：hop 1→CRITICAL / 2→HIGH /
 //! 3→MEDIUM / ≥4→LOW——离改动越近的调用方越需要优先审查。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::Serialize;
 
 use super::err;
-use super::graph::{EdgeType, GraphBuffer, NodeId, NodeLabel};
-use super::store::open_read_only_if_exists;
+use super::graph::NodeLabel;
 use crate::types::Result;
 
 /// 单条符号候选（精确名查找结果）。
@@ -161,7 +160,7 @@ const SOURCE_MAX_BYTES: u64 = 1024 * 1024;
 
 /// 标签解析优先级（参照参考项目 node_resolution_score 的层级思想）：
 /// Function/Method > 其他定义符号 > 文件级节点。
-fn label_priority(label: NodeLabel) -> u8 {
+pub(super) fn label_priority(label: NodeLabel) -> u8 {
     match label {
         NodeLabel::Function | NodeLabel::Method => 2,
         NodeLabel::Class
@@ -175,168 +174,21 @@ fn label_priority(label: NodeLabel) -> u8 {
     }
 }
 
-fn candidate_of(node: &super::graph::GraphNode) -> SymbolCandidate {
-    SymbolCandidate {
-        name: node.name.clone(),
-        label: node.label.as_str().to_string(),
-        qualified_name: node.qualified_name.clone(),
-        file_path: node.file_path.clone(),
-        start_line: node.start_line,
-        end_line: node.end_line,
-    }
-}
-
-/// 精确名（name 或 qualified_name）查找，返回全部候选。
+/// 精确名查询通过数据库索引定位候选，不载入整图。
 pub fn find_symbol_candidates(db_path: &Path, name: &str) -> Result<Vec<SymbolCandidate>> {
-    let graph = load_graph(db_path)?;
-    Ok(graph
-        .nodes
-        .iter()
-        .filter(|n| n.name == name || n.qualified_name == name)
-        .map(candidate_of)
-        .collect())
-}
-
-fn load_graph(db_path: &Path) -> Result<std::sync::Arc<super::cache::CachedIndex>> {
-    super::cache::load_index(db_path)
+    super::sql_queries::find_symbol_candidates(db_path, name)
 }
 
 // ---------------------------------------------------------------------------
 // 调用链 BFS
 // ---------------------------------------------------------------------------
 
-fn risk_for_hop(hop: u32) -> &'static str {
+pub(super) fn risk_for_hop(hop: u32) -> &'static str {
     match hop {
         1 => "CRITICAL",
         2 => "HIGH",
         3 => "MEDIUM",
         _ => "LOW",
-    }
-}
-
-/// CALLS 邻接表（outbound / inbound 两份）。
-pub(super) struct CallAdjacency {
-    outbound: HashMap<NodeId, Vec<NodeId>>,
-    inbound: HashMap<NodeId, Vec<NodeId>>,
-}
-
-impl CallAdjacency {
-    pub(super) fn build(graph: &GraphBuffer) -> Self {
-        let mut adjacency = Self {
-            outbound: HashMap::new(),
-            inbound: HashMap::new(),
-        };
-        for edge in &graph.edges {
-            if edge.etype != EdgeType::Calls {
-                continue;
-            }
-            adjacency
-                .outbound
-                .entry(edge.source)
-                .or_default()
-                .push(edge.target);
-            adjacency
-                .inbound
-                .entry(edge.target)
-                .or_default()
-                .push(edge.source);
-        }
-        adjacency
-    }
-
-    fn step(&self, node: NodeId, inbound: bool) -> Vec<NodeId> {
-        let map = if inbound {
-            &self.inbound
-        } else {
-            &self.outbound
-        };
-        map.get(&node).cloned().unwrap_or_default()
-    }
-}
-
-/// 从一组起点做 BFS，收集 hop 1..=depth 的节点（排除起点自身）。
-/// visited 全局去重（多起点联合遍历，参照参考项目 bfs_union_same_name）。
-fn bfs_hops(
-    graph: &GraphBuffer,
-    adjacency: &CallAdjacency,
-    starts: &[NodeId],
-    inbound: bool,
-    depth: u32,
-    max_nodes: usize,
-) -> Vec<TraceHop> {
-    let mut visited: HashSet<NodeId> = starts.iter().copied().collect();
-    let mut queue: VecDeque<(NodeId, u32)> = starts.iter().map(|id| (*id, 0)).collect();
-    let mut hops: Vec<TraceHop> = Vec::new();
-    while let Some((node, hop)) = queue.pop_front() {
-        if hop >= depth {
-            continue;
-        }
-        for next in adjacency.step(node, inbound) {
-            if !visited.insert(next) {
-                continue;
-            }
-            if hops.len() >= max_nodes {
-                return hops;
-            }
-            let info = graph.get(next);
-            hops.push(TraceHop {
-                name: info.name.clone(),
-                qualified_name: info.qualified_name.clone(),
-                file_path: info.file_path.clone(),
-                hop: hop + 1,
-                risk: risk_for_hop(hop + 1),
-            });
-            queue.push_back((next, hop + 1));
-        }
-    }
-    hops.sort_by(|a, b| {
-        a.hop
-            .cmp(&b.hop)
-            .then(a.qualified_name.cmp(&b.qualified_name))
-    });
-    hops
-}
-
-/// 在已载入的图内做精确名解析（避免调用方二次开库载图）。
-/// `callable_only` 限定 Function/Method（trace 语义）；歧义取最高
-/// label 优先级层级，同层多个 → Ambiguous。
-enum GraphResolution<'a> {
-    One(&'a super::graph::GraphNode),
-    Ambiguous(Vec<SymbolCandidate>),
-    NotFound,
-}
-
-fn resolve_in_graph<'a>(
-    graph: &'a super::cache::CachedIndex,
-    name: &str,
-    callable_only: bool,
-) -> GraphResolution<'a> {
-    let candidates: Vec<&super::graph::GraphNode> = graph.find_by_qn(name).map(|id| vec![id])
-        .unwrap_or_else(|| graph.names.get(name).cloned().unwrap_or_default())
-        .into_iter().map(|id| graph.get(id))
-        .filter(|n| {
-            (n.name == name || n.qualified_name == name)
-                && (!callable_only || matches!(n.label, NodeLabel::Function | NodeLabel::Method))
-        })
-        .collect();
-    if candidates.is_empty() {
-        return GraphResolution::NotFound;
-    }
-    let top_priority = candidates
-        .iter()
-        .map(|n| label_priority(n.label))
-        .max()
-        .expect("候选非空");
-    let group: Vec<&super::graph::GraphNode> = candidates
-        .into_iter()
-        .filter(|n| label_priority(n.label) == top_priority)
-        .collect();
-    if group.len() == 1 {
-        GraphResolution::One(group[0])
-    } else {
-        let mut candidates: Vec<SymbolCandidate> = group.iter().map(|n| candidate_of(n)).collect();
-        candidates.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
-        GraphResolution::Ambiguous(candidates)
     }
 }
 
@@ -360,33 +212,7 @@ pub fn trace_calls_page(
     limit: usize,
     offset: usize,
 ) -> Result<TraceOutcome> {
-    let graph = load_graph(db_path)?;
-    let resolved = match resolve_in_graph(&graph, function_name, true) {
-        GraphResolution::One(node) => node,
-        GraphResolution::Ambiguous(c) => return Ok(TraceOutcome::Ambiguous(c)),
-        GraphResolution::NotFound => return Ok(TraceOutcome::NotFound),
-    };
-
-    let adjacency = &graph.adjacency;
-    let start = resolved.id;
-    let starts = vec![start];
-    let callees = if matches!(direction, TraceDirection::Outbound | TraceDirection::Both) {
-        bfs_hops(&graph, &adjacency, &starts, false, depth, graph.nodes.len())
-    } else { Vec::new() };
-    let callers = if matches!(direction, TraceDirection::Inbound | TraceDirection::Both) {
-        bfs_hops(&graph, &adjacency, &starts, true, depth, graph.nodes.len())
-    } else { Vec::new() };
-    let callers_total = callers.len();
-    let callees_total = callees.len();
-    let result = TraceResult {
-        function: resolved.name.clone(),
-        qualified_name: resolved.qualified_name.clone(),
-        direction, callers_total, callees_total, offset,
-        has_more: offset.saturating_add(limit) < callers_total.max(callees_total),
-        callees: callees.into_iter().skip(offset).take(limit).collect(),
-        callers: callers.into_iter().skip(offset).take(limit).collect(),
-    };
-    Ok(TraceOutcome::Found(result))
+    super::sql_queries::trace_calls_page(db_path, function_name, direction, depth, limit, offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,45 +225,12 @@ pub fn symbol_detail(
     repo_root: Option<&Path>,
     name: &str,
 ) -> Result<DetailOutcome> {
-    let graph = load_graph(db_path)?;
-    let resolved = match resolve_in_graph(&graph, name, false) {
-        GraphResolution::One(node) => node,
-        GraphResolution::Ambiguous(c) => return Ok(DetailOutcome::Ambiguous(c)),
-        GraphResolution::NotFound => return Ok(DetailOutcome::NotFound),
-    };
-
-    let adjacency = &graph.adjacency;
-    let starts = vec![resolved.id];
-    let candidate = candidate_of(resolved);
-    let freshness = repo_root.map(|root| super::coverage::source_freshness(graph.file_hashes.get(&candidate.file_path), root, &candidate.file_path)).unwrap_or("snapshot_or_unknown");
-    let source = if freshness == "metadata_matches" {
-        repo_root.and_then(|root| {
-            let snippet = read_source_snippet(root, &candidate);
-            // 读取期间也可能发生编辑；再次核对同一图代际的文件元数据。
-            (super::coverage::source_freshness(graph.file_hashes.get(&candidate.file_path), root, &candidate.file_path) == "metadata_matches")
-                .then_some(snippet).flatten()
-        })
-    } else { None };
-    let properties: serde_json::Value = serde_json::from_str(&resolved.properties).unwrap_or_default();
-    Ok(DetailOutcome::Found(Box::new(SymbolDetail {
-        name: resolved.name.clone(),
-        label: resolved.label.as_str().to_string(),
-        qualified_name: resolved.qualified_name.clone(),
-        file_path: resolved.file_path.clone(),
-        start_line: resolved.start_line,
-        end_line: resolved.end_line,
-        signature: properties["signature"].as_str().unwrap_or("").to_string(),
-        docstring: properties["docstring"].as_str().unwrap_or("").to_string(),
-        source_freshness: freshness.into(),
-        callers: bfs_hops(&graph, &adjacency, &starts, true, 1, 100),
-        callees: bfs_hops(&graph, &adjacency, &starts, false, 1, 100),
-        source,
-    })))
+    super::sql_queries::symbol_detail(db_path, repo_root, name)
 }
 
 /// 读取定义处源码片段（行区间 1-based，钳 200 行）。行号对文件实际行数
 /// 双向钳制——索引过期（文件被改短而增量未跑）时不 panic，直接返回 None。
-fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<SourceSnippet> {
+pub(super) fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<SourceSnippet> {
     if candidate.file_path.is_empty() || candidate.start_line == 0 {
         return None;
     }
@@ -478,104 +271,7 @@ fn read_source_snippet(repo_root: &Path, candidate: &SymbolCandidate) -> Option<
 
 /// 索引总览统计（label/边类型分布、语言、目录密度、调用热点）。
 pub fn index_overview(db_path: &Path) -> Result<IndexOverview> {
-    let store = open_read_only_if_exists(db_path)?.ok_or_else(|| err("代码索引不存在或尚未建立"))?;
-    let graph = load_graph(db_path)?;
-    let stats = store.read_stats()?.unwrap_or_default();
-
-    let mut label_counts: HashMap<String, usize> = HashMap::new();
-    for node in &graph.nodes {
-        *label_counts
-            .entry(node.label.as_str().to_string())
-            .or_default() += 1;
-    }
-    let mut label_counts: Vec<(String, usize)> = label_counts.into_iter().collect();
-    label_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-    let mut edge_counts: HashMap<String, usize> = HashMap::new();
-    for edge in &graph.edges {
-        *edge_counts
-            .entry(edge.etype.as_str().to_string())
-            .or_default() += 1;
-    }
-    let mut edge_counts: Vec<(String, usize)> = edge_counts.into_iter().collect();
-    edge_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-    // 语言分布：File 节点按扩展名聚合。
-    let mut languages: HashMap<String, usize> = HashMap::new();
-    let mut top_dirs: HashMap<String, usize> = HashMap::new();
-    for node in &graph.nodes {
-        if node.label != NodeLabel::File {
-            continue;
-        }
-        let ext = std::path::Path::new(&node.name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .unwrap_or_else(|| "other".to_string());
-        *languages.entry(ext).or_default() += 1;
-        let dir = match node.file_path.split_once('/') {
-            Some((top, _)) => top.to_string(),
-            None => "(根目录)".to_string(),
-        };
-        // 目录密度按符号数而非文件数（口径：该目录下定义的符号总量）。
-        top_dirs.insert(dir, 0);
-    }
-    for node in &graph.nodes {
-        if !node.label.is_symbol() || node.file_path.is_empty() {
-            continue;
-        }
-        let dir = match node.file_path.split_once('/') {
-            Some((top, _)) => top.to_string(),
-            None => "(根目录)".to_string(),
-        };
-        if let Some(count) = top_dirs.get_mut(&dir) {
-            *count += 1;
-        }
-    }
-    let mut languages: Vec<(String, usize)> = languages.into_iter().collect();
-    languages.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut top_dirs: Vec<(String, usize)> = top_dirs.into_iter().collect();
-    top_dirs.sort_by(|a, b| b.1.cmp(&a.1));
-    top_dirs.truncate(10);
-
-    // 热点：CALLS 入边 Top 10。
-    let mut fan_in: HashMap<NodeId, usize> = HashMap::new();
-    for edge in &graph.edges {
-        if edge.etype == EdgeType::Calls {
-            *fan_in.entry(edge.target).or_default() += 1;
-        }
-    }
-    let mut hotspots: Vec<Hotspot> = fan_in
-        .into_iter()
-        .map(|(id, fan_in)| {
-            let node = graph.get(id);
-            Hotspot {
-                name: node.name.clone(),
-                qualified_name: node.qualified_name.clone(),
-                file_path: node.file_path.clone(),
-                fan_in,
-            }
-        })
-        .collect();
-    hotspots.sort_by(|a, b| {
-        b.fan_in
-            .cmp(&a.fan_in)
-            .then(a.qualified_name.cmp(&b.qualified_name))
-    });
-    hotspots.truncate(10);
-
-    Ok(IndexOverview {
-        total_nodes: graph.node_count(),
-        total_edges: graph.edges.len(),
-        files: stats.files,
-        symbols: stats.symbols,
-        calls: stats.calls,
-        label_counts,
-        edge_counts,
-        languages,
-        top_dirs,
-        hotspots,
-    })
+    super::sql_queries::index_overview(db_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -659,33 +355,5 @@ pub fn impacted_symbols_for_files(
     changed_files: &[String],
     expand_depth: u32,
 ) -> Result<ImpactReport> {
-    let graph = load_graph(db_path)?;
-    let changed: HashSet<&str> = changed_files.iter().map(|s| s.as_str()).collect();
-
-    let impacted: Vec<SymbolCandidate> = graph
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.label.is_symbol() && !n.file_path.is_empty() && changed.contains(n.file_path.as_str())
-        })
-        .map(candidate_of)
-        .collect();
-
-    let impacted_ids: Vec<NodeId> = impacted
-        .iter()
-        .filter_map(|c| graph.find_by_qn(&c.qualified_name))
-        .collect();
-    let adjacency = &graph.adjacency;
-    let callers = if impacted_ids.is_empty() || expand_depth == 0 {
-        Vec::new()
-    } else {
-        bfs_hops(&graph, &adjacency, &impacted_ids, true, expand_depth, 200)
-    };
-
-    Ok(ImpactReport {
-        changed_count: changed_files.len(),
-        changed_files: changed_files.to_vec(),
-        impacted_symbols: impacted,
-        callers,
-    })
+    super::sql_queries::impacted_symbols_for_files(db_path, changed_files, expand_depth)
 }

@@ -14,12 +14,45 @@ pub fn index_task_pool() -> Arc<ThreadPool> {
     Arc::clone(POOL.get_or_init(|| {
         Arc::new(
             ThreadPoolBuilder::new()
-                .num_threads(1)
+                .num_threads(2)
                 .thread_name(|index| format!("khaslana-index-{index}"))
                 .build()
                 .expect("无法创建索引任务池"),
         )
     }))
+}
+
+/// 多仓库共用计算池，避免每个仓库各自创建一组 CPU 工作线程。
+pub(super) fn compute_pool() -> &'static ThreadPool {
+    static POOL: OnceLock<ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| ThreadPoolBuilder::new()
+        .num_threads(worker_count())
+        .thread_name(|index| format!("khaslana-index-compute-{index}"))
+        .build().expect("无法创建索引计算池"))
+}
+
+pub(super) fn worker_count() -> usize {
+    // 每个解析器可能持有语法树和缓冲；按解析内存预算限制高核心机器的并发。
+    std::thread::available_parallelism().map_or(2, |count| count.get())
+        .saturating_sub(1).clamp(1, 32)
+}
+
+/// GUI、MCP 和提交快照按数据库身份互斥，不阻塞其他仓库。
+pub(super) fn database_lock(path: &std::path::Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>> = OnceLock::new();
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let parent = path.parent().and_then(|parent| std::fs::canonicalize(parent).ok());
+        parent.map_or_else(|| path.to_path_buf(), |parent| parent.join(path.file_name().unwrap_or_default()))
+    });
+    let key = absolute.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let key = key.to_lowercase();
+    let mut locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|error| error.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) { return lock; }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 #[derive(Default)]

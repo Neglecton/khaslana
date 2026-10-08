@@ -12,7 +12,8 @@
 //!
 //! 解析失败不建边——宁缺毋滥，边上的 confidence/strategy 忠实记录来源。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::graph::{GraphBuffer, NodeId, NodeLabel};
 
@@ -20,11 +21,12 @@ use super::graph::{GraphBuffer, NodeId, NodeLabel};
 #[derive(Clone, Debug)]
 struct SymbolCandidate {
     id: NodeId,
-    file_path: String,
     callable: bool,
     container: bool,
-    qualified_name: String,
+    qualified_name: Arc<str>,
     scope: Vec<String>,
+    logical_container: String,
+    scope_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -35,40 +37,84 @@ pub struct ResolvedTarget {
 }
 
 #[derive(Debug, Default)]
+struct NameBucket {
+    candidates: Vec<SymbolCandidate>,
+    local: HashMap<Arc<str>, Vec<usize>>,
+    qualified: HashMap<String, Vec<usize>>,
+    bare: Vec<usize>,
+    callable: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
 pub struct Registry {
-    name_index: HashMap<String, Vec<SymbolCandidate>>,
+    name_index: HashMap<String, NameBucket>,
+    import_files: HashMap<String, Vec<(Arc<str>, usize)>>,
+}
+
+fn unique<'a>(mut candidates: impl Iterator<Item = &'a SymbolCandidate>) -> Option<&'a SymbolCandidate> {
+    let first = candidates.next()?;
+    candidates.next().is_none().then_some(first)
 }
 
 impl Registry {
     /// 从图缓冲构建名字索引（只收定义类符号）。
     pub fn build(graph: &GraphBuffer) -> Self {
-        let mut name_index: HashMap<String, Vec<SymbolCandidate>> = HashMap::new();
+        let mut registry = Self::default();
+        let mut files = HashSet::new();
         for node in &graph.nodes {
-            if !node.label.is_symbol() || node.label == NodeLabel::Field {
-                continue;
+            if !node.label.is_symbol() || node.label == NodeLabel::Field { continue; }
+            let scope: Vec<String> = serde_json::from_str::<serde_json::Value>(&node.properties).ok()
+                .and_then(|properties| properties["scope"].as_array().cloned())
+                .unwrap_or_default().iter().filter_map(|part| part.as_str().map(str::to_string)).collect();
+            let scope_name = scope.join(".");
+            let stem = node.file_path.rsplit_once('.').map_or(node.file_path.as_ref(), |(stem, _)| stem)
+                .replace(['/', '\\'], ".");
+            let stem = stem.strip_suffix(".mod").unwrap_or(&stem);
+            let logical_container = if scope.is_empty() { stem.to_string() } else { format!("{stem}.{scope_name}") };
+            let candidate = SymbolCandidate { id: node.id,
+                qualified_name: Arc::clone(&node.qualified_name), scope, scope_name, logical_container,
+                callable: matches!(node.label, NodeLabel::Function | NodeLabel::Method),
+                container: matches!(node.label, NodeLabel::Class | NodeLabel::Struct | NodeLabel::Interface | NodeLabel::Trait | NodeLabel::Enum) };
+            if files.insert(Arc::clone(&node.file_path)) {
+                let stem = node.file_path.rsplit_once('.').map_or(node.file_path.as_ref(), |(stem, _)| stem);
+                let segments: Vec<_> = stem.split(['/', '\\']).filter(|part| !part.is_empty()).map(str::to_ascii_lowercase).collect();
+                for start in 0..segments.len() {
+                    registry.import_files.entry(segments[start..].join(".")).or_default().push((Arc::clone(&node.file_path), segments.len()));
+                }
             }
-            name_index
-                .entry(node.name.clone())
-                .or_default()
-                .push(SymbolCandidate {
-                    id: node.id,
-                    file_path: node.file_path.clone(),
-                    qualified_name: node.qualified_name.clone(),
-                    scope: serde_json::from_str::<serde_json::Value>(&node.properties).ok()
-                        .and_then(|properties| properties["scope"].as_array().cloned())
-                        .unwrap_or_default().iter().filter_map(|part| part.as_str().map(str::to_string)).collect(),
-                    callable: matches!(node.label, NodeLabel::Function | NodeLabel::Method),
-                    container: matches!(
-                        node.label,
-                        NodeLabel::Class
-                            | NodeLabel::Struct
-                            | NodeLabel::Interface
-                            | NodeLabel::Trait
-                            | NodeLabel::Enum
-                    ),
-                });
+            let bucket = registry.name_index.entry(node.name.clone()).or_default();
+            let id = bucket.candidates.len();
+            if candidate.callable {
+                bucket.callable.push(id);
+                bucket.local.entry(Arc::clone(&node.file_path)).or_default().push(id);
+                if candidate.scope.is_empty() { bucket.bare.push(id); }
+                let parent = candidate.qualified_name.split('#').next().unwrap_or(&candidate.qualified_name)
+                    .rsplit_once('.').map_or("", |(parent, _)| parent);
+                let aliases: HashSet<_> = [parent.rsplit('.').next().unwrap_or(""),
+                    candidate.logical_container.rsplit('.').next().unwrap_or(""), candidate.scope_name.rsplit('.').next().unwrap_or("")]
+                    .into_iter().filter(|alias| !alias.is_empty()).collect();
+                for alias in aliases { bucket.qualified.entry(alias.to_string()).or_default().push(id); }
+            }
+            bucket.candidates.push(candidate);
         }
-        Self { name_index }
+        registry
+    }
+
+    /// 导入可达文件只算一次，调用点复用；保留旧策略的路径深度约束。
+    pub(super) fn imported_files(&self, imports: &[String]) -> HashSet<Arc<str>> {
+        let mut files = HashSet::new();
+        for import in imports {
+            let parts: Vec<_> = import.split('.').filter(|part| !part.is_empty()).map(str::to_ascii_lowercase).collect();
+            let start = parts.iter().take_while(|part| RUST_PATH_ROOTS.contains(&part.as_str())).count();
+            let parts = &parts[start..];
+            if parts.is_empty() { continue; }
+            for suffix in [Some(parts), (parts.len() > 1).then(|| &parts[..parts.len() - 1])].into_iter().flatten() {
+                if let Some(candidates) = self.import_files.get(&suffix.join(".")) {
+                    files.extend(candidates.iter().filter(|(_, depth)| *depth >= parts.len()).map(|(file, _)| Arc::clone(file)));
+                }
+            }
+        }
+        files
     }
 
     /// 解析一个调用点。`qualifier` 是限定表达式的完整前缀
@@ -86,152 +132,59 @@ impl Registry {
     pub(super) fn resolve_call_in_scope(
         &self, name: &str, calling_file: &str, imports: &[String], qualifier: Option<&str>, scope: &[String],
     ) -> Option<ResolvedTarget> {
-        let candidates = self.name_index.get(name)?;
-        // 这些语言调用成员需要显式接收者，裸函数名不能猜成类中的同名方法。
+        self.resolve_prepared(name, calling_file, &self.imported_files(imports), qualifier, scope)
+    }
+
+    pub(super) fn resolve_prepared(
+        &self, name: &str, calling_file: &str, imports: &HashSet<Arc<str>>, qualifier: Option<&str>, scope: &[String],
+    ) -> Option<ResolvedTarget> {
+        let bucket = self.name_index.get(name)?;
         let explicit_members = matches!(super::graph::lang_of_rel_path(calling_file),
             Some(super::LangId::Rust | super::LangId::Python | super::LangId::JavaScript | super::LangId::TypeScript | super::LangId::Tsx | super::LangId::Go));
-        let callables: Vec<&SymbolCandidate> = candidates.iter().filter(|c| c.callable
-            && (qualifier.is_some() || !explicit_members || c.scope.is_empty())).collect();
-        if callables.is_empty() {
-            return None;
-        }
-
-        // 限定调用必须先证明限定段与模块或容器相符，不能退回全局同名猜测。
+        let eligible = |candidate: &&SymbolCandidate| !explicit_members || qualifier.is_some() || candidate.scope.is_empty();
+        let local = bucket.local.get(calling_file).map(Vec::as_slice).unwrap_or_default();
+        let target = |candidate: &SymbolCandidate, confidence, strategy| ResolvedTarget { id: candidate.id, confidence, strategy };
         if let Some(qualifier) = qualifier {
-            let qualifier = match qualifier {
-                "self" | "this" | "Self" => scope.last()?.as_str(),
-                qualifier => qualifier,
-            };
-            let qualified: Vec<_> = callables.iter().copied()
-                .filter(|candidate| qualifier_matches(candidate, qualifier, name)).collect();
-            let local: Vec<_> = qualified.iter().copied().filter(|candidate| candidate.file_path == calling_file).collect();
-            let chosen = if local.len() == 1 { &local } else { &qualified };
-            return (chosen.len() == 1).then(|| ResolvedTarget {
-                id: chosen[0].id, confidence: 0.90, strategy: "suffix",
-            });
+            let qualifier = match qualifier { "self" | "this" | "Self" => scope.last()?.as_str(), value => value };
+            let normalized = qualifier.replace("::", ".");
+            let qualifier = normalized.trim_start_matches("crate.");
+            let ids = bucket.qualified.get(qualifier.rsplit('.').next()?)?;
+            if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(|candidate| qualifier_matches(candidate, qualifier))) {
+                return Some(target(candidate, 0.90, "suffix"));
+            }
+            return unique(ids.iter().map(|id| &bucket.candidates[*id]).filter(|candidate| qualifier_matches(candidate, qualifier)))
+                .map(|candidate| target(candidate, 0.90, "suffix"));
         }
-
         if !scope.is_empty() {
-            let scoped: Vec<_> = callables.iter().filter(|candidate|
-                candidate.file_path == calling_file && candidate.scope == scope).collect();
-            if scoped.len() == 1 {
-                return Some(ResolvedTarget { id: scoped[0].id, confidence: 0.95, strategy: "scope" });
+            if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(eligible).filter(|candidate| candidate.scope == scope)) {
+                return Some(target(candidate, 0.95, "scope"));
             }
         }
-
-        // 1. 同文件唯一同名。
-        let locals: Vec<&&SymbolCandidate> = callables
-            .iter()
-            .filter(|c| c.file_path == calling_file)
-            .collect();
-        if locals.len() == 1 {
-            return Some(ResolvedTarget {
-                id: locals[0].id,
-                confidence: 0.95,
-                strategy: "local",
-            });
+        if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(eligible)) {
+            return Some(target(candidate, 0.95, "local"));
         }
-
-        // 2. 导入尾段匹配且唯一。
-        if !imports.is_empty() {
-            let via_imports: Vec<&&SymbolCandidate> = callables
-                .iter()
-                .filter(|c| {
-                    imports
-                        .iter()
-                        .any(|imp| import_tail_matches(imp, &c.file_path))
-                })
-                .collect();
-            if via_imports.len() == 1 {
-                return Some(ResolvedTarget {
-                    id: via_imports[0].id,
-                    confidence: 0.90,
-                    strategy: "import_map",
-                });
-            }
+        // 只遍历可达文件中的同名符号，避免常见名字扫全仓库。
+        if let Some(candidate) = unique(imports.iter().filter_map(|file| bucket.local.get(file.as_ref()))
+            .flat_map(|ids| ids.iter().map(|id| &bucket.candidates[*id])).filter(eligible)) {
+            return Some(target(candidate, 0.90, "import_map"));
         }
-
-        // 3. 全仓库唯一。
-        if callables.len() == 1 {
-            return Some(ResolvedTarget {
-                id: callables[0].id,
-                confidence: 0.80,
-                strategy: "unique",
-            });
-        }
-
-        None
+        let ids = if explicit_members { &bucket.bare } else { &bucket.callable };
+        (ids.len() == 1).then(|| target(&bucket.candidates[ids[0]], 0.80, "unique"))
     }
 
     /// 解析类型引用（INHERITS/IMPLEMENTS 目标）：只接受唯一容器，歧义时不建边。
     pub fn resolve_type(&self, name: &str) -> Option<NodeId> {
-        let candidates = self.name_index.get(name)?;
-        let containers: Vec<_> = candidates.iter().filter(|candidate| candidate.container).collect();
-        (containers.len() == 1).then(|| containers[0].id)
+        let bucket = self.name_index.get(name)?;
+        unique(bucket.candidates.iter().filter(|candidate| candidate.container)).map(|candidate| candidate.id)
     }
 }
 
-fn qualifier_matches(candidate: &SymbolCandidate, qualifier: &str, name: &str) -> bool {
-    let qualifier = qualifier.replace("::", ".");
-    let qualifier = qualifier.trim_start_matches("crate.");
+fn qualifier_matches(candidate: &SymbolCandidate, qualifier: &str) -> bool {
     if qualifier.is_empty() { return false; }
     let qn = candidate.qualified_name.split('#').next().unwrap_or(&candidate.qualified_name);
-    if qn.ends_with(&format!(".{qualifier}.{name}")) { return true; }
-    let file = candidate.file_path.rsplit_once('.').map_or(candidate.file_path.as_str(), |(stem, _)| stem)
-        .replace(['/', '\\'], ".");
-    let file = file.strip_suffix(".mod").unwrap_or(&file);
-    let container = if candidate.scope.is_empty() { file.to_string() } else { format!("{file}.{}", candidate.scope.join(".")) };
-    container == qualifier || container.ends_with(&format!(".{qualifier}")) || candidate.scope.join(".") == qualifier
+    let parent = qn.rsplit_once('.').map_or("", |(parent, _)| parent);
+    let matches = |value: &str| value == qualifier || value.strip_suffix(qualifier).is_some_and(|prefix| prefix.ends_with('.'));
+    matches(parent) || matches(&candidate.logical_container) || candidate.scope_name == qualifier
 }
 
-/// Rust 路径根段：`use crate::git::service` 的 crate 段在文件路径里对应
-/// 仓库名/`src`，永远对不上，剥掉后再比较。
 const RUST_PATH_ROOTS: &[&str] = &["crate", "self", "super"];
-
-/// 导入尾段匹配：导入路径（剥根段后）与定义文件路径（去扩展名、统一分隔符）
-/// 的尾段一致。`use crate::git::service` 剥 crate 后 `git.service` ↔
-/// `src/git/service.rs` 尾两段 ✓；`os.path` ↔ `os/path.py` ✓。
-/// 若整段尾匹配不中，再回退「导入路径去掉末段」与文件尾段比较
-/// （`use crate::git::browse` 指向目录，能命中目录下任意文件，对齐参考
-/// 项目 is_import_reachable 的前缀可达语义：导入是容器路径时可达其成员）。
-fn import_tail_matches(import: &str, file_path: &str) -> bool {
-    let mut import_segs: Vec<String> = import
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
-    while import_segs
-        .first()
-        .is_some_and(|seg| RUST_PATH_ROOTS.contains(&seg.as_str()))
-    {
-        import_segs.remove(0);
-    }
-    if import_segs.is_empty() {
-        return false;
-    }
-    let without_ext = file_path.rsplit_once('.').map_or(file_path, |(b, _)| b);
-    let file_segs: Vec<String> = without_ext
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
-    if !import_segs.is_empty() && import_segs.len() <= file_segs.len() {
-        if file_seg_ends_with(&file_segs, &import_segs) {
-            return true;
-        }
-        // 回退：剥掉导入末段（模块名）后作为容器路径匹配文件路径。
-        // 至少保留一段，避免单段 `crate` 之类剥完匹配整个仓库。
-        if import_segs.len() >= 2 {
-            let container = &import_segs[..import_segs.len() - 1];
-            if file_seg_ends_with(&file_segs, container) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn file_seg_ends_with(file_segs: &[String], import_segs: &[String]) -> bool {
-    let start = file_segs.len() - import_segs.len();
-    file_segs[start..] == *import_segs
-}

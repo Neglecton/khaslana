@@ -106,7 +106,7 @@ pub(super) fn attach_discovery_issues(graph: &mut GraphBuffer, issues: &[FileCov
         let mut properties: Value =
             serde_json::from_str(&project.properties).unwrap_or_else(|_| json!({}));
         properties["discovery_issues"] = json!(issues);
-        project.properties = properties.to_string();
+        project.properties = properties.to_string().into();
     }
 }
 

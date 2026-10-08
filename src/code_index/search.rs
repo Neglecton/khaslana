@@ -235,10 +235,11 @@ impl CodeIndexStore {
 }
 
 /// 沿用 contentless FTS，额外索引声明和文档；原始属性仍存 nodes 表。
-pub(super) fn fill_search_index(conn: &Connection, graph: &GraphBuffer) -> Result<()> {
+pub(super) fn fill_search_index(conn: &Connection, graph: &GraphBuffer, cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
     let mut stmt = conn.prepare("INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
         .map_err(|e| err(format!("准备全文索引失败：{e}")))?;
     for node in &graph.nodes {
+        if node.id % 512 == 0 && cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) { break; }
         let properties: Value = serde_json::from_str(&node.properties).unwrap_or_default();
         let body = format!(
             "{} {}",
@@ -300,5 +301,36 @@ pub(super) fn fill_stored_search_index(conn: &Connection) -> Result<()> {
             ])
             .map_err(|e| err(format!("迁移全文索引失败：{e}")))?;
     }
+    Ok(())
+}
+
+/// 单节点增量更新也使用与全量导入一致的分词和文档字段。
+pub(super) fn insert_search_node(conn: &Connection, node: &super::graph::GraphNode, id: i64) -> Result<()> {
+    let properties: Value = serde_json::from_str(&node.properties).unwrap_or_default();
+    let body = format!("{} {}", properties["signature"].as_str().unwrap_or(""), properties["docstring"].as_str().unwrap_or(""));
+    conn.prepare_cached("INSERT INTO nodes_fts(rowid,name,qualified_name,label,file_path,body) VALUES(?1,?2,?3,?4,?5,?6)")
+        .and_then(|mut stmt| stmt.execute(params![id, index_text(&node.name), index_text(&node.qualified_name), node.label.as_str(), index_text(&node.file_path), index_text(&body)]))
+        .map_err(|error| err(format!("更新全文索引失败：{error}")))?;
+    Ok(())
+}
+
+pub(super) fn delete_file_search_index(conn: &Connection, path: &str) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE file_path=?1").map_err(|error| err(format!("读取旧搜索节点失败：{error}")))?;
+    let ids: Vec<i64> = stmt.query_map(params![path], |row| row.get(0)).map_err(|error| err(format!("读取旧搜索节点失败：{error}")))?
+        .collect::<rusqlite::Result<_>>().map_err(|error| err(format!("读取旧搜索节点失败：{error}")))?;
+    for id in ids { delete_search_node(conn, id)?; }
+    Ok(())
+}
+
+pub(super) fn delete_search_node(conn: &Connection, id: i64) -> Result<()> {
+    let (name, qn, label, path, properties): (String, String, String, String, String) = conn.query_row(
+        "SELECT name,qualified_name,label,file_path,properties FROM nodes WHERE id=?1", params![id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .map_err(|error| err(format!("读取旧搜索内容失败：{error}")))?;
+    let properties: Value = serde_json::from_str(&properties).unwrap_or_default();
+    let body = format!("{} {}", properties["signature"].as_str().unwrap_or(""), properties["docstring"].as_str().unwrap_or(""));
+    conn.prepare_cached("INSERT INTO nodes_fts(nodes_fts,rowid,name,qualified_name,label,file_path,body) VALUES('delete',?1,?2,?3,?4,?5,?6)")
+        .and_then(|mut stmt| stmt.execute(params![id, index_text(&name), index_text(&qn), label, index_text(&path), index_text(&body)]))
+        .map_err(|error| err(format!("删除旧全文索引失败：{error}")))?;
     Ok(())
 }

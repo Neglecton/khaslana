@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::UNIX_EPOCH;
 
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 
 use super::{MAX_INDEX_FILES, err};
 use crate::types::Result;
@@ -151,7 +151,12 @@ fn file_mtime_ns(meta: &std::fs::Metadata) -> u64 {
 /// 目录在遍历时整棵剪枝：跳过表命中，或目录内含 `.git` 文件（子模块 /
 /// linked worktree 标记——子模块有自己的索引域，避免重复索引）。
 pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
-    let mut outcome = DiscoverOutcome::default();
+    discover_files_cancellable(repo_root, None)
+}
+
+pub(super) fn discover_files_cancellable(repo_root: &Path, cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<DiscoverOutcome> {
+    let outcomes = Mutex::new(DiscoverOutcome::default());
+    let count = AtomicUsize::new(0);
     let root = repo_root.to_path_buf();
     let pruned_dirs = Arc::new(AtomicUsize::new(0));
     let pruned_dirs_in_filter = Arc::clone(&pruned_dirs);
@@ -185,66 +190,76 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
             }
             !prune
         })
-        .build();
+        .threads(super::jobs::worker_count().div_ceil(2))
+        .build_parallel();
 
-    for entry in walker {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(".", "read_failed", error.to_string())); continue; }
-        };
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let abs_path = entry.path().to_path_buf();
-        let Some(rel) = abs_path
-            .strip_prefix(repo_root)
-            .ok()
-            .and_then(|p| p.to_str())
-        else {
-            continue;
-        };
-        if rel.is_empty() {
-            continue;
-        }
-        // Windows 下统一正斜杠相对路径，与 diff 视图/file_hashes 口径一致。
-        let rel_path = rel.replace('\\', "/");
-        let name = abs_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
+    walker.run(|| Box::new(|entry| {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) || count.load(Ordering::Relaxed) > MAX_INDEX_FILES { return WalkState::Quit; }
+        let mut outcome = DiscoverOutcome::default();
+        (|| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(".", "read_failed", error.to_string())); return; }
+            };
+            let Some(file_type) = entry.file_type() else {
+                return;
+            };
+            if !file_type.is_file() {
+                return;
+            }
+            let abs_path = entry.path().to_path_buf();
+            let Some(rel) = abs_path
+                .strip_prefix(repo_root)
+                .ok()
+                .and_then(|p| p.to_str())
+            else {
+                return;
+            };
+            if rel.is_empty() {
+                return;
+            }
+            // Windows 下统一正斜杠相对路径，与 diff 视图/file_hashes 口径一致。
+            let rel_path = rel.replace('\\', "/");
+            let name = abs_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
 
-        if is_ignored_suffix(name) || is_ignored_filename(name) || name.starts_with(".git") {
-            outcome.excluded_count += 1;
-            outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "excluded", "文件名或生成产物过滤"));
-            continue;
-        }
+            if is_ignored_suffix(name) || is_ignored_filename(name) || name.starts_with(".git") {
+                outcome.excluded_count += 1;
+                outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "excluded", "文件名或生成产物过滤"));
+                return;
+            }
 
-        let meta = match std::fs::metadata(&abs_path) {
-            Ok(meta) => meta,
-            Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "read_failed", error.to_string())); continue; }
-        };
+            let meta = match std::fs::metadata(&abs_path) {
+                Ok(meta) => meta,
+                Err(error) => { outcome.issues.push(super::coverage::FileCoverage::new(&rel_path, "read_failed", error.to_string())); return; }
+            };
 
-        outcome.files.push(DiscoveredFile {
-            rel_path,
-            abs_path,
-            size: meta.len(),
-            mtime_ns: file_mtime_ns(&meta),
-        });
+            outcome.files.push(DiscoveredFile {
+                rel_path,
+                abs_path,
+                size: meta.len(),
+                mtime_ns: file_mtime_ns(&meta),
+            });
 
-        if outcome.files.len() > MAX_INDEX_FILES {
-            return Err(err(format!(
-                "仓库文件数超过索引上限 {} 个，已终止索引",
-                MAX_INDEX_FILES
-            )));
-        }
+        })();
+        let added = outcome.files.len();
+        count.fetch_add(added, Ordering::Relaxed);
+        let mut collected = outcomes.lock().unwrap_or_else(|error| error.into_inner());
+        collected.files.extend(outcome.files);
+        collected.issues.extend(outcome.issues);
+        collected.excluded_count += outcome.excluded_count;
+        if count.load(Ordering::Relaxed) > MAX_INDEX_FILES { WalkState::Quit } else { WalkState::Continue }
+    }));
+    if count.load(Ordering::Relaxed) > MAX_INDEX_FILES {
+        return Err(err(format!("仓库文件数超过索引上限 {} 个，已终止索引", MAX_INDEX_FILES)));
     }
+    let mut outcome = outcomes.into_inner().unwrap_or_else(|error| error.into_inner());
 
     outcome.excluded_count += pruned_dirs.load(Ordering::Relaxed);
     outcome.issues.extend(issues.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
-    outcome.issues.sort_by(|a, b| a.path.cmp(&b.path));
+    outcome.issues.sort_by(|a, b| a.path.cmp(&b.path).then(a.reason.cmp(&b.reason)));
     outcome.files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(outcome)
 }

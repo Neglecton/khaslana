@@ -3,8 +3,8 @@
 //! 每仓库一个独立 SQLite 文件（`<数据目录>/code-index/<repo哈希8>/index.db`），
 //! 与主库零关联——索引任务在自己的线程打开连接，不与 AppStorage 的单连接互斥锁
 //! 竞争。schema 与参考项目同构（单仓库单库，去掉 project 列）；节点主键不用
-//! AUTOINCREMENT：整库重写后行号自然从 1 复用，增量载入的 id 映射保持紧凑。
-//! 落盘采用「删辅助索引 → 批量插入 → 重建索引」的 bulk 模式（对齐参考项目
+//! AUTOINCREMENT：全量写入使用紧凑编号，增量保持未修改数据库行的主键。
+//! 全量采用「删辅助索引 → 批量插入 → 重建索引」的 bulk 模式（对齐参考项目
 //! `cbm_store_begin_bulk`），FTS5 为 contentless 表、rowid 显式取节点 id。
 
 use std::collections::HashMap;
@@ -16,8 +16,8 @@ use super::err;
 use super::graph::{EdgeType, GraphBuffer, NodeId};
 use crate::types::Result;
 
-/// 索引库 schema 版本：v2 原位升级全文索引，保留已有图与仓库元数据。
-pub const CODE_INDEX_SCHEMA_VERSION: u32 = 3;
+/// v4 增加独立调用记录表；旧库保持可查询，下一次刷新补建调用暂存。
+pub const CODE_INDEX_SCHEMA_VERSION: u32 = 4;
 
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
@@ -121,6 +121,7 @@ impl CodeIndexStore {
         .map_err(|e| err(format!("打开索引库失败：{e}")))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        conn.pragma_update(None, "cache_size", -32768).ok();
         conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
         conn.pragma_update(None, "foreign_keys", "ON").ok();
 
@@ -140,6 +141,14 @@ impl CodeIndexStore {
             .ok();
         if version.as_deref() == Some("2") {
             store.migrate_search_schema()?;
+            return Ok(Some(store));
+        }
+        if version.as_deref() == Some("3") {
+            store.conn.execute_batch("CREATE TABLE IF NOT EXISTS call_records (file_path TEXT PRIMARY KEY, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS call_names (name TEXT NOT NULL, file_path TEXT NOT NULL REFERENCES call_records(file_path) ON DELETE CASCADE, PRIMARY KEY(name,file_path)) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_call_names_file ON call_names(file_path);")
+                .map_err(|error| err(format!("迁移调用记录表失败：{error}")))?;
+            store.set_meta("schema_version", "4")?;
             return Ok(Some(store));
         }
         let version_ok = version.as_deref() == Some(CODE_INDEX_SCHEMA_VERSION.to_string().as_str());
@@ -174,6 +183,9 @@ impl CodeIndexStore {
                   mtime_ns INTEGER NOT NULL DEFAULT 0,
                   size INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS call_records (file_path TEXT PRIMARY KEY, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS call_names (name TEXT NOT NULL, file_path TEXT NOT NULL REFERENCES call_records(file_path) ON DELETE CASCADE, PRIMARY KEY(name,file_path)) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_call_names_file ON call_names(file_path);
                 CREATE TABLE IF NOT EXISTS meta (
                   key TEXT PRIMARY KEY,
                   value TEXT NOT NULL
@@ -206,7 +218,10 @@ impl CodeIndexStore {
         let tx = self.conn.transaction().map_err(|e| err(format!("开启索引迁移失败：{e}")))?;
         tx.execute_batch("DROP TABLE nodes_fts;
             CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name, label, file_path, body,
-                content='', tokenize='unicode61 remove_diacritics 2');")
+                content='', tokenize='unicode61 remove_diacritics 2');
+            CREATE TABLE IF NOT EXISTS call_records (file_path TEXT PRIMARY KEY, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS call_names (name TEXT NOT NULL, file_path TEXT NOT NULL REFERENCES call_records(file_path) ON DELETE CASCADE, PRIMARY KEY(name,file_path)) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_call_names_file ON call_names(file_path);")
             .map_err(|e| err(format!("迁移全文索引失败：{e}")))?;
         super::search::fill_stored_search_index(&tx)?;
         tx.execute("UPDATE meta SET value = ?1 WHERE key = 'schema_version'", params![CODE_INDEX_SCHEMA_VERSION.to_string()])
@@ -214,10 +229,10 @@ impl CodeIndexStore {
         tx.commit().map_err(|e| err(format!("提交索引迁移失败：{e}")))
     }
 
-    /// 旧图尚未采集签名和文档时，下一次刷新补做一次全量提取。
+    /// 旧图缺少文档或独立调用暂存时，下一次刷新补做一次全量提取。
     pub(super) fn has_search_metadata(&self) -> bool {
         self.conn.query_row("SELECT value FROM meta WHERE key = 'search_content_version'", [],
-            |row| row.get::<_, String>(0)).is_ok_and(|version| version == "3")
+            |row| row.get::<_, String>(0)).is_ok_and(|version| version == "4")
     }
 
     pub(super) fn retry_files(&self) -> Result<std::collections::HashSet<String>> {
@@ -245,8 +260,7 @@ impl CodeIndexStore {
             .map_err(|error| err(format!("发现覆盖信息损坏：{error}"))).map(|issues| issues.unwrap_or_default())
     }
 
-    /// 全量替换图内容 + 文件哈希表 + 元信息（整库重写语义，全量与增量共用；
-    /// 对齐参考项目「增量也整体重写 DB」的做法，保证坏库可自愈）。
+    /// 全量替换图内容、调用记录和元信息；增量刷新使用按文件事务更新。
     pub fn replace_all(
         &mut self,
         graph: &GraphBuffer,
@@ -285,44 +299,27 @@ impl CodeIndexStore {
         tx.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')", [])
             .map_err(|e| err(format!("清空全文索引失败：{e}")))?;
 
-        {
-            let mut stmt = tx
-                .prepare(
-                    "INSERT INTO nodes (id, label, name, qualified_name, file_path, start_line, end_line, properties)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                )
-                .map_err(|e| err(format!("准备节点写入失败：{e}")))?;
-            for node in &graph.nodes {
-                if node.id % 512 == 0 && cancelled() { return Ok(false); }
-                stmt.execute(params![
-                    node.id as i64 + 1,
-                    node.label.as_str(),
-                    node.name,
-                    node.qualified_name,
-                    node.file_path,
-                    node.start_line,
-                    node.end_line,
-                    node.properties,
-                ])
-                .map_err(|e| err(format!("写入节点失败：{e}")))?;
-            }
+        // 每批只构造有界参数数组，减少 SQLite 的 prepare/step 次数。
+        for batch in graph.nodes.chunks(256) {
+            if cancelled() { return Ok(false); }
+            let sql = format!("INSERT INTO nodes(id,label,name,qualified_name,file_path,start_line,end_line,properties) VALUES {}",
+                vec!["(?,?,?,?,?,?,?,?)"; batch.len()].join(","));
+            let args: Vec<rusqlite::types::Value> = batch.iter().flat_map(|node| [
+                (node.id as i64 + 1).into(), node.label.as_str().to_string().into(), node.name.clone().into(),
+                node.qualified_name.to_string().into(), node.file_path.to_string().into(),
+                (node.start_line as i64).into(), (node.end_line as i64).into(), node.properties.to_string().into(),
+            ]).collect();
+            tx.prepare_cached(&sql).and_then(|mut stmt| stmt.execute(rusqlite::params_from_iter(args)))
+                .map_err(|error| err(format!("批量写入节点失败：{error}")))?;
         }
-        {
-            let mut stmt = tx
-                .prepare(
-                    "INSERT INTO edges (source_id, target_id, type, properties)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|e| err(format!("准备边写入失败：{e}")))?;
-            for edge in &graph.edges {
-                stmt.execute(params![
-                    edge.source as i64 + 1,
-                    edge.target as i64 + 1,
-                    edge.etype.as_str(),
-                    edge.properties,
-                ])
-                .map_err(|e| err(format!("写入边失败：{e}")))?;
-            }
+        for batch in graph.edges.chunks(512) {
+            if cancelled() { return Ok(false); }
+            let sql = format!("INSERT INTO edges(source_id,target_id,type,properties) VALUES {}", vec!["(?,?,?,?)"; batch.len()].join(","));
+            let args: Vec<rusqlite::types::Value> = batch.iter().flat_map(|edge| [
+                (edge.source as i64 + 1).into(), (edge.target as i64 + 1).into(), edge.etype.as_str().to_string().into(), edge.properties.to_string().into(),
+            ]).collect();
+            tx.prepare_cached(&sql).and_then(|mut stmt| stmt.execute(rusqlite::params_from_iter(args)))
+                .map_err(|error| err(format!("批量写入关系失败：{error}")))?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
@@ -333,7 +330,9 @@ impl CodeIndexStore {
         )
         .map_err(|e| err(format!("重建辅助索引失败：{e}")))?;
 
-        super::search::fill_search_index(&tx, graph)?;
+        super::search::fill_search_index(&tx, graph, cancel)?;
+        tx.execute("DELETE FROM call_records", []).map_err(|error| err(format!("清理调用记录失败：{error}")))?;
+        write_calls(&tx, graph, None, cancel)?;
         {
             let mut stmt = tx
                 .prepare("INSERT INTO file_hashes (rel_path, mtime_ns, size) VALUES (?1, ?2, ?3)")
@@ -344,30 +343,7 @@ impl CodeIndexStore {
             }
         }
 
-        tx.execute("DELETE FROM meta WHERE key != 'schema_version'", [])
-            .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
-        let mut generation_bytes = [0u8; 16];
-        getrandom::fill(&mut generation_bytes).map_err(|e| err(format!("生成索引代际失败：{e}")))?;
-        let generation: String = generation_bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let coverage = super::coverage::summarize(graph).to_string();
-        for (key, value) in [
-            ("repo_name", meta.repo_name.as_str()),
-            ("repo_path", meta.repo_path.as_str()),
-            ("branch", meta.branch.as_str()),
-            ("indexed_at", &meta.indexed_at.to_string()),
-            ("duration_ms", &meta.duration_ms.to_string()),
-            ("mode", meta.mode.as_str()),
-            ("search_content_version", "3"),
-            ("generation", generation.as_str()),
-            ("coverage_summary", coverage.as_str()),
-        ] {
-            tx.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![key, value],
-            )
-            .map_err(|e| err(format!("写入索引元信息失败：{e}")))?;
-        }
+        write_meta(&tx, graph, meta)?;
 
         if cancelled() { return Ok(false); }
         tx.commit()
@@ -375,8 +351,124 @@ impl CodeIndexStore {
         Ok(true)
     }
 
+    pub(super) fn callers_for_names(&self, names: &std::collections::HashSet<String>) -> Result<std::collections::HashSet<String>> {
+        let names: Vec<_> = names.iter().collect();
+        let mut paths = std::collections::HashSet::new();
+        for batch in names.chunks(256) {
+            let sql = format!("SELECT DISTINCT file_path FROM call_names WHERE name IN ({})", vec!["?"; batch.len()].join(","));
+            let mut stmt = self.conn.prepare(&sql).map_err(|error| err(format!("定位受影响调用失败：{error}")))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter().copied()), |row| row.get::<_, String>(0))
+                .map_err(|error| err(format!("定位受影响调用失败：{error}")))?;
+            for row in rows { paths.insert(row.map_err(|error| err(format!("读取调用文件失败：{error}")))?); }
+        }
+        Ok(paths)
+    }
+
+    pub(super) fn load_call_records(&self, graph: &mut GraphBuffer, paths: &std::collections::HashSet<String>) -> Result<()> {
+        let mut stmt = self.conn.prepare("SELECT data FROM call_records WHERE file_path=?1").map_err(|error| err(format!("读取调用记录失败：{error}")))?;
+        for path in paths {
+            if graph.call_records.contains_key(path.as_str()) { continue; }
+            use rusqlite::OptionalExtension;
+            let bytes: Option<Vec<u8>> = stmt.query_row(params![path], |row| row.get(0)).optional()
+                .map_err(|error| err(format!("读取调用数据失败：{error}")))?;
+            if let Some(bytes) = bytes { graph.call_records.insert(path.as_str().into(), super::calls::FileCalls::decode(&bytes)?); }
+        }
+        Ok(())
+    }
+
+    /// 保留未修改行与辅助索引；节点编号通过 QN 映射，不能使用内存紧凑下标作为旧库主键。
+    pub(super) fn update_files_cancellable(
+        &mut self, graph: &GraphBuffer, hashes: &[FileHashRow], meta: &CodeIndexMeta,
+        changed: &std::collections::HashSet<String>, affected: &std::collections::HashSet<String>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool> {
+        let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+        if cancelled() { return Ok(false); }
+        let tx = self.conn.transaction().map_err(|error| err(format!("开启增量事务失败：{error}")))?;
+        for path in changed {
+            if cancelled() { return Ok(false); }
+            super::search::delete_file_search_index(&tx, path)?;
+            tx.execute("DELETE FROM nodes WHERE file_path=?1", params![path]).map_err(|error| err(format!("删除旧文件节点失败：{error}")))?;
+            tx.execute("DELETE FROM file_hashes WHERE rel_path=?1", params![path]).map_err(|error| err(format!("删除旧文件元数据失败：{error}")))?;
+            tx.execute("DELETE FROM call_records WHERE file_path=?1", params![path]).map_err(|error| err(format!("删除旧调用记录失败：{error}")))?;
+        }
+        let mut ids = HashMap::<String, i64>::new();
+        {
+            let mut stmt = tx.prepare("SELECT qualified_name,id FROM nodes").map_err(|error| err(format!("读取节点编号失败：{error}")))?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .map_err(|error| err(format!("读取节点编号失败：{error}")))?;
+            for row in rows { let (qn, id) = row.map_err(|error| err(format!("读取节点编号失败：{error}")))?; ids.insert(qn, id); }
+        }
+        let mut node_ids = Vec::with_capacity(graph.nodes.len());
+        let mut fresh = std::collections::HashSet::new();
+        for node in &graph.nodes {
+            if node.id % 512 == 0 && cancelled() { return Ok(false); }
+            let id = if let Some(&id) = ids.get(node.qualified_name.as_ref()) {
+                if node.label == super::graph::NodeLabel::Project || node.label == super::graph::NodeLabel::Branch
+                    || (node.label == super::graph::NodeLabel::File && affected.contains(node.file_path.as_ref())) {
+                    tx.execute("UPDATE nodes SET properties=?1 WHERE id=?2 AND properties<>?1", params![node.properties.as_ref(), id])
+                        .map_err(|error| err(format!("更新节点覆盖失败：{error}")))?;
+                }
+                id
+            } else {
+                tx.execute("INSERT INTO nodes(label,name,qualified_name,file_path,start_line,end_line,properties) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![node.label.as_str(), node.name, node.qualified_name.as_ref(), node.file_path.as_ref(), node.start_line, node.end_line, node.properties.as_ref()])
+                    .map_err(|error| err(format!("增量写入节点失败：{error}")))?;
+                let id = tx.last_insert_rowid();
+                fresh.insert(node.id);
+                super::search::insert_search_node(&tx, node, id)?;
+                id
+            };
+            node_ids.push(id);
+        }
+        // 重解析的调用文件可能仍指向未修改节点，必须先精确删除其旧 CALLS。
+        for path in affected {
+            tx.execute("DELETE FROM edges WHERE type='CALLS' AND source_id IN (SELECT id FROM nodes WHERE file_path=?1)", params![path])
+                .map_err(|error| err(format!("清理受影响调用失败：{error}")))?;
+        }
+        {
+            let mut stmt = tx.prepare("INSERT OR IGNORE INTO edges(source_id,target_id,type,properties) VALUES(?1,?2,?3,?4)")
+                .map_err(|error| err(format!("准备增量关系失败：{error}")))?;
+            for (index, edge) in graph.edges.iter().enumerate() {
+                if index % 512 == 0 && cancelled() { return Ok(false); }
+                let relevant = fresh.contains(&edge.source) || fresh.contains(&edge.target)
+                    || (edge.etype == EdgeType::Calls && affected.contains(graph.get(edge.source).file_path.as_ref()));
+                if relevant { stmt.execute(params![node_ids[edge.source as usize], node_ids[edge.target as usize], edge.etype.as_str(), edge.properties.as_ref()])
+                    .map_err(|error| err(format!("增量写入关系失败：{error}")))?; }
+            }
+        }
+        // 孤儿模块没有文件路径，需要同步删除；FTS 使用旧内容发出专用删除命令。
+        let modules: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT id,qualified_name FROM nodes WHERE label='Module'").map_err(|error| err(format!("读取旧模块失败：{error}")))?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| err(format!("读取旧模块失败：{error}")))?
+                .collect::<rusqlite::Result<_>>().map_err(|error| err(format!("读取旧模块失败：{error}")))?
+        };
+        let live: std::collections::HashSet<_> = graph.nodes.iter().filter(|node| node.label == super::graph::NodeLabel::Module).map(|node| node.qualified_name.as_ref()).collect();
+        for (id, qn) in modules { if !live.contains(qn.as_str()) {
+            super::search::delete_search_node(&tx, id)?;
+            tx.execute("DELETE FROM nodes WHERE id=?1", params![id]).map_err(|error| err(format!("删除孤儿模块失败：{error}")))?;
+        } }
+        write_calls(&tx, graph, Some(changed), Some(cancel))?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO file_hashes(rel_path,mtime_ns,size) VALUES(?1,?2,?3)")
+                .map_err(|error| err(format!("准备增量文件元数据失败：{error}")))?;
+            for hash in hashes.iter().filter(|hash| changed.contains(&hash.rel_path)) {
+                stmt.execute(params![hash.rel_path, hash.mtime_ns as i64, hash.size as i64]).map_err(|error| err(format!("写入增量文件元数据失败：{error}")))?;
+            }
+        }
+        write_meta(&tx, graph, meta)?;
+        if cancelled() { return Ok(false); }
+        tx.commit().map_err(|error| err(format!("提交增量事务失败：{error}")))?;
+        Ok(true)
+    }
+
     /// 从库载入完整图（增量路径）。数据库行 id 映射回紧凑下标。
-    pub fn load_graph(&self) -> Result<GraphBuffer> {
+    pub fn load_graph(&self) -> Result<GraphBuffer> { self.load_graph_inner(true) }
+
+    /// 增量路径保留数据库中的无关 CALLS，仅加载结构和类型关系。
+    pub(super) fn load_graph_without_calls(&self) -> Result<GraphBuffer> { self.load_graph_inner(false) }
+
+    fn load_graph_inner(&self, calls: bool) -> Result<GraphBuffer> {
         let mut graph = GraphBuffer::new();
         let mut id_map: HashMap<i64, NodeId> = HashMap::new();
 
@@ -398,8 +490,8 @@ impl CodeIndexStore {
                 ))
             })
             .map_err(|e| err(format!("查询节点失败：{e}")))?;
-        let raw_nodes = rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|error| err(format!("读取节点失败：{error}")))?;
-        for (old_id, label, name, qn, file_path, sl, el, props) in raw_nodes.into_iter() {
+        for row in rows {
+            let (old_id, label, name, qn, file_path, sl, el, props) = row.map_err(|error| err(format!("读取节点失败：{error}")))?;
             let new_id = graph.upsert_node(
                 parse_label(&label),
                 name,
@@ -414,7 +506,7 @@ impl CodeIndexStore {
 
         let mut stmt = self
             .conn
-            .prepare("SELECT source_id, target_id, type, properties FROM edges")
+            .prepare(if calls { "SELECT source_id, target_id, type, properties FROM edges" } else { "SELECT source_id, target_id, type, properties FROM edges WHERE type<>'CALLS'" })
             .map_err(|e| err(format!("读取边失败：{e}")))?;
         let rows = stmt
             .query_map([], |row| {
@@ -526,7 +618,7 @@ impl CodeIndexStore {
 
     /// 带标签过滤的符号搜索：过滤在 SQL 内完成（JOIN nodes），返回
     /// (命中列表, 过滤后真实总数)——总数不受 limit 截断影响，供 MCP 的
-    /// total/has_more 语义使用。rowid 与 nodes.id 相等（落盘时都按缓冲序号 +1）。
+    /// total/has_more 语义使用。rowid 与数据库 nodes.id 相等，增量更新沿用真实主键。
     pub fn search_symbols_filtered(
         &self,
         query: &str,
@@ -596,7 +688,7 @@ pub fn open_read_only_if_exists(db_path: &Path) -> Result<Option<CodeIndexStore>
             [],
             |row| row.get::<_, String>(0),
         )
-        .map(|v| v == "2" || v == CODE_INDEX_SCHEMA_VERSION.to_string())
+        .map(|v| (v == "2" || v == "3") || v == CODE_INDEX_SCHEMA_VERSION.to_string())
         .unwrap_or(false);
     Ok(version_ok.then_some(store))
 }
@@ -608,7 +700,7 @@ fn open_read_only(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn parse_label(text: &str) -> super::graph::NodeLabel {
+pub(super) fn parse_label(text: &str) -> super::graph::NodeLabel {
     match text {
         "Project" => super::graph::NodeLabel::Project,
         "Branch" => super::graph::NodeLabel::Branch,
@@ -677,4 +769,54 @@ pub fn camel_split(input: &str) -> String {
         out.push(c.to_ascii_lowercase());
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn write_meta(tx: &Connection, graph: &GraphBuffer, meta: &CodeIndexMeta) -> Result<()> {
+    tx.execute("DELETE FROM meta WHERE key != 'schema_version'", [])
+        .map_err(|e| err(format!("清理旧元信息失败：{e}")))?;
+    let mut generation_bytes = [0u8; 16];
+    getrandom::fill(&mut generation_bytes).map_err(|e| err(format!("生成索引代际失败：{e}")))?;
+    let generation: String = generation_bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let coverage = super::coverage::summarize(graph).to_string();
+    for (key, value) in [
+        ("repo_name", meta.repo_name.as_str()),
+        ("repo_path", meta.repo_path.as_str()),
+        ("branch", meta.branch.as_str()),
+        ("indexed_at", &meta.indexed_at.to_string()),
+        ("duration_ms", &meta.duration_ms.to_string()),
+        ("mode", meta.mode.as_str()),
+        ("search_content_version", "4"),
+        ("generation", generation.as_str()),
+        ("coverage_summary", coverage.as_str()),
+    ] {
+        tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+        )
+        .map_err(|e| err(format!("写入索引元信息失败：{e}")))?;
+    }
+
+    Ok(())
+}
+
+fn write_calls(conn: &Connection, graph: &GraphBuffer, paths: Option<&std::collections::HashSet<String>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
+    let mut stmt = conn.prepare("INSERT INTO call_records(file_path,data) VALUES(?1,?2) ON CONFLICT(file_path) DO UPDATE SET data=excluded.data")
+        .map_err(|error| err(format!("准备调用记录失败：{error}")))?;
+    for (path, records) in &graph.call_records {
+        if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) { break; }
+        if paths.is_some_and(|paths| !paths.contains(path.as_ref())) { continue; }
+        stmt.execute(params![path.as_ref(), records.encode()?]).map_err(|error| err(format!("写入调用记录失败：{error}")))?;
+        conn.execute("DELETE FROM call_names WHERE file_path=?1", params![path.as_ref()]).map_err(|error| err(format!("清理调用名字失败：{error}")))?;
+        let names: std::collections::HashSet<_> = records.calls.iter().map(|call| call.name.as_ref()).collect();
+        let names: Vec<_> = names.into_iter().collect();
+        for batch in names.chunks(256) {
+            let sql = format!("INSERT INTO call_names(name,file_path) VALUES {}", vec!["(?,?)"; batch.len()].join(","));
+            let args: Vec<_> = batch.iter().flat_map(|name| [*name, path.as_ref()]).collect();
+            conn.prepare_cached(&sql).and_then(|mut stmt| stmt.execute(rusqlite::params_from_iter(args)))
+                .map_err(|error| err(format!("写入调用名字失败：{error}")))?;
+        }
+    }
+    Ok(())
 }

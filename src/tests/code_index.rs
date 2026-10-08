@@ -350,7 +350,7 @@ fn graph_upsert_and_overload_suffix() {
         "{}".to_string(),
     );
     assert_ne!(a, b);
-    assert_eq!(g.get(b).qualified_name, "proj.a.rs.foo#2");
+    assert_eq!(g.get(b).qualified_name.as_ref(), "proj.a.rs.foo#2");
 
     // 幂等结构节点。
     let f1 = g.upsert_node(
@@ -466,7 +466,7 @@ fn resolve_strategy_chain() {
     );
 
     // 重载后缀确认。
-    assert_eq!(g.get(overload_a2).qualified_name, "p.a.rs.work#2");
+    assert_eq!(g.get(overload_a2).qualified_name.as_ref(), "p.a.rs.work#2");
 }
 
 #[test]
@@ -773,7 +773,7 @@ fn caller() {
     assert!(
         call_edges
             .iter()
-            .any(|e| graph.get(e.target).file_path == "src/git/service.rs"
+            .any(|e| graph.get(e.target).file_path.as_ref() == "src/git/service.rs"
                 && e.properties.contains("\"import_map\"")),
         "use crate::git::service 应经 import_map 命中 src/git/service.rs，实际边: {:?}",
         call_edges

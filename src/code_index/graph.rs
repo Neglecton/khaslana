@@ -5,6 +5,7 @@
 //! [`crate::code_index::store`] 一次性落盘。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -103,13 +104,13 @@ pub struct GraphNode {
     pub id: NodeId,
     pub label: NodeLabel,
     pub name: String,
-    pub qualified_name: String,
+    pub qualified_name: Arc<str>,
     /// 相对仓库根路径；Project/Branch/Folder/Module 为空串。
-    pub file_path: String,
+    pub file_path: Arc<str>,
     pub start_line: u32,
     pub end_line: u32,
     /// 附加属性 JSON（CALLS 边的 confidence/strategy、File 的 line_count 等）。
-    pub properties: String,
+    pub properties: Box<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -117,7 +118,7 @@ pub struct GraphEdge {
     pub source: NodeId,
     pub target: NodeId,
     pub etype: EdgeType,
-    pub properties: String,
+    pub properties: Box<str>,
 }
 
 /// 内存图缓冲。
@@ -125,13 +126,29 @@ pub struct GraphEdge {
 pub struct GraphBuffer {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
-    qn_index: HashMap<String, NodeId>,
+    qn_index: HashMap<Arc<str>, NodeId>,
     edge_keys: HashSet<(NodeId, NodeId, EdgeType)>,
+    paths: HashSet<Arc<str>>,
+    pub(super) call_records: HashMap<Arc<str>, super::calls::FileCalls>,
 }
 
 impl GraphBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn intern_path(&mut self, path: String) -> Arc<str> {
+        if let Some(path) = self.paths.get(path.as_str()) { return Arc::clone(path); }
+        let path: Arc<str> = path.into();
+        self.paths.insert(Arc::clone(&path));
+        path
+    }
+
+    /// 进入落盘阶段不再构图，释放去重索引，避免与 SQLite 的事务缓存叠加。
+    pub(super) fn release_build_indexes(&mut self) {
+        self.qn_index = HashMap::new();
+        self.edge_keys = HashSet::new();
+        self.paths = HashSet::new();
     }
 
     pub fn node_count(&self) -> usize {
@@ -173,19 +190,21 @@ impl GraphBuffer {
         properties: String,
     ) -> NodeId {
         let qualified_name = qualified_name.into();
-        if let Some(&existing) = self.qn_index.get(&qualified_name) {
+        if let Some(&existing) = self.qn_index.get(qualified_name.as_str()) {
             return existing;
         }
         let id = self.nodes.len() as NodeId;
+        let qualified_name: Arc<str> = qualified_name.into();
+        let file_path = self.intern_path(file_path.into());
         self.nodes.push(GraphNode {
             id,
             label,
             name: name.into(),
             qualified_name: qualified_name.clone(),
-            file_path: file_path.into(),
+            file_path,
             start_line,
             end_line,
-            properties,
+            properties: properties.into(),
         });
         self.qn_index.insert(qualified_name, id);
         id
@@ -206,20 +225,22 @@ impl GraphBuffer {
     ) -> NodeId {
         let mut qualified_name = base_qualified_name.clone();
         let mut suffix = 2u32;
-        while self.qn_index.contains_key(&qualified_name) {
+        while self.qn_index.contains_key(qualified_name.as_str()) {
             qualified_name = format!("{base_qualified_name}#{suffix}");
             suffix += 1;
         }
         let id = self.nodes.len() as NodeId;
+        let qualified_name: Arc<str> = qualified_name.into();
+        let file_path = self.intern_path(file_path.into());
         self.nodes.push(GraphNode {
             id,
             label,
             name: name.into(),
             qualified_name: qualified_name.clone(),
-            file_path: file_path.into(),
+            file_path,
             start_line,
             end_line,
-            properties,
+            properties: properties.into(),
         });
         self.qn_index.insert(qualified_name, id);
         id
@@ -244,7 +265,7 @@ impl GraphBuffer {
             source,
             target,
             etype,
-            properties,
+            properties: properties.into(),
         });
         true
     }
@@ -255,14 +276,18 @@ impl GraphBuffer {
     pub fn purge_files(&mut self, rel_paths: &HashSet<String>) -> usize {
         let before = self.nodes.len();
         self.nodes
-            .retain(|n| n.file_path.is_empty() || !rel_paths.contains(&n.file_path));
+            .retain(|n| n.file_path.is_empty() || !rel_paths.contains(n.file_path.as_ref()));
+        self.call_records.retain(|path, _| !rel_paths.contains(path.as_ref()));
         self.rebuild_after_removal();
         before - self.nodes.len()
     }
 
-    pub(super) fn remove_call_edges(&mut self) {
-        self.edges.retain(|edge| edge.etype != EdgeType::Calls);
-        self.edge_keys.retain(|(_, _, kind)| *kind != EdgeType::Calls);
+    pub(super) fn remove_call_edges_for(&mut self, paths: Option<&HashSet<String>>) {
+        let nodes = &self.nodes;
+        let keep = |source: NodeId, kind: EdgeType| kind != EdgeType::Calls
+            || paths.is_some_and(|paths| !paths.contains(nodes[source as usize].file_path.as_ref()));
+        self.edges.retain(|edge| keep(edge.source, edge.etype));
+        self.edge_keys.retain(|(source, _, kind)| keep(*source, *kind));
     }
 
     /// 清扫孤儿 Module 节点：没有任何 IMPORTS 入边的 Module（删除导入语句后

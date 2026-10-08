@@ -19,7 +19,7 @@
 //! git 耦合边（FILE_CHANGES_WITH）、相似度边、USAGE 引用边（schema 已支持该
 //! type 字符串）、路由/基建节点。
 
-mod cache;
+mod calls;
 mod coverage;
 mod discover;
 mod extract;
@@ -30,6 +30,7 @@ mod metadata;
 pub mod mcp;
 mod pipeline;
 mod queries;
+mod sql_queries;
 mod resolve;
 mod search;
 mod snapshot;
@@ -159,3 +160,7 @@ mod search_tests;
 #[cfg(test)]
 #[path = "../tests/code_index_engine.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "../tests/code_index_performance.rs"]
+mod performance_tests;

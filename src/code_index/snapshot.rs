@@ -35,43 +35,55 @@ pub fn ensure_commit_index(
     db_path: &Path,
     cancelled: &AtomicBool,
 ) -> Result<bool> {
+    if cancelled.load(Ordering::Relaxed) { return Ok(false); }
+    // 已有快照的只读复用不必排队等待其他仓库的全量任务。
+    if commit_index_ready(repo_path, commit, db_path)? { return Ok(!cancelled.load(Ordering::Relaxed)); }
     // 同提交并发评审共用建库锁；只串行化快照构建，不占用 Git 工作区锁。
-    static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = super::jobs::database_lock(db_path);
     super::jobs::index_task_pool().install(|| {
-        let _guard = BUILD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(err("该提交的评审索引正在构建，请稍后重试")),
+        };
         if cancelled.load(Ordering::Relaxed) {
             return Ok(false);
         }
-        if let Some(store) = open_read_only_if_exists(db_path)? {
-            let indexed: String = store
-                .conn
-                .query_row("SELECT value FROM meta WHERE key='branch'", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or_default();
-            let source: String = store
-                .conn
-                .query_row("SELECT value FROM meta WHERE key='repo_path'", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or_default();
-            let mode: String = store
-                .conn
-                .query_row("SELECT value FROM meta WHERE key='mode'", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or_default();
-            if indexed == commit
-                && source == repo_path.to_string_lossy()
-                && mode == "commit_snapshot"
-                && store.has_search_metadata()
-                && store.retry_files()?.is_empty()
-            {
-                return Ok(true);
-            }
-        }
+        if commit_index_ready(repo_path, commit, db_path)? { return Ok(!cancelled.load(Ordering::Relaxed)); }
         build_commit_index(repo_path, commit, db_path, cancelled)
     })
+}
+
+fn commit_index_ready(repo_path: &Path, commit: &str, db_path: &Path) -> Result<bool> {
+    if let Some(store) = open_read_only_if_exists(db_path)? {
+        let indexed: String = store
+        .conn
+        .query_row("SELECT value FROM meta WHERE key='branch'", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_default();
+        let source: String = store
+        .conn
+        .query_row("SELECT value FROM meta WHERE key='repo_path'", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_default();
+        let mode: String = store
+        .conn
+        .query_row("SELECT value FROM meta WHERE key='mode'", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_default();
+        if indexed == commit
+        && source == repo_path.to_string_lossy()
+        && mode == "commit_snapshot"
+        && store.has_search_metadata()
+        && store.retry_files()?.is_empty()
+        {
+        return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn build_commit_index(
@@ -173,7 +185,7 @@ fn build_commit_index(
     let file_refs = files.iter().collect::<Vec<_>>();
     build_structure_pass(project, commit, &file_refs, &mut graph);
     let mut merger = GraphMerger::new(project);
-    merger.merge_parsed(&mut graph, &parsed);
+    merger.merge_parsed(&mut graph, parsed);
     let mut options = PipelineOptions::new(
         std::sync::Arc::new(AtomicBool::new(false)),
         Box::new(|_| {}),
@@ -183,6 +195,8 @@ fn build_commit_index(
         return Ok(false);
     }
     attach_discovery_issues(&mut graph, &issues);
+    drop(merger);
+    graph.release_build_indexes();
     let mut store = CodeIndexStore::open(db_path)?;
     if !store.replace_all_cancellable(
         &graph,

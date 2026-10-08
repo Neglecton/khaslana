@@ -2,20 +2,21 @@
 //! `pipeline_incremental.c`）。
 //!
 //! 全量：discover → 结构 pass（Project/Branch/Folder/File）→ 提取 pass
-//! （并行，worker 各持独立 Extractor，连续分块免锁保序）→ 合并进图缓冲 →
+//! （共用计算池动态分发，分批释放提取结果）→ 合并进图缓冲 →
 //! 解析 pass（registry 策略链）→ 整库落盘。
 //!
 //! 增量路由与参考项目一致：已有库且 文件数 ≤ 已存哈希数 × 1.5 走增量，
 //! 否则全量。增量 = mtime+size 三分类 → 入边快照 → 按文件清除 → 重解析变更
-//! 文件 → 重链接快照边 → 整库重写（对齐参考项目「增量也整体重写 DB」）。
+//! 文件 → 重解析受名字变化影响的调用文件 → 重链接快照边 → 按文件增量落盘。
 
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::discover::{DiscoveredFile, discover_files};
+use super::discover::{DiscoveredFile, discover_files_cancellable};
 use super::extract::{Extractor, FileExtractResult};
 use super::graph::{
     EdgeType, GraphBuffer, NodeId, NodeLabel, calls_edge_properties,
@@ -89,6 +90,14 @@ pub fn run_index(
     force_full: bool,
     options: &mut PipelineOptions,
 ) -> Result<RunOutcome> {
+    let lock = super::jobs::database_lock(db_path);
+    // Rayon 跨池等待可能执行其他排队任务；不能在重入任务里阻塞等待自己持有的库锁。
+    let _guard = match lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(super::err("该仓库正在索引，请等待当前任务完成")),
+    };
+    if options.cancelled() { return Ok(RunOutcome::Cancelled); }
     let started = Instant::now();
     let repo_name = repo_root
         .file_name()
@@ -98,7 +107,7 @@ pub fn run_index(
     let branch = detect_branch(repo_root);
 
     options.report(IndexPhase::Discover, 0, 0);
-    let outcome = discover_files(repo_root)?;
+    let outcome = discover_files_cancellable(repo_root, Some(&options.cancel))?;
     options.discovery_issues = outcome.issues;
     let files = outcome.files;
     let total_files = files.len();
@@ -198,22 +207,20 @@ fn run_full_inner(
 
     let parse_jobs: Vec<&DiscoveredFile> =
         files.iter().copied().filter(|f| is_parseable(f)).collect();
-    let parsed = run_extraction_pass(&parse_jobs, options)?;
-    if options.cancelled() {
-        return Ok(InnerOutcome::Cancelled);
-    }
-
     let mut merger = GraphMerger::new(repo_name);
-    merger.merge_parsed(&mut graph, &parsed);
+    run_extraction_pass(&parse_jobs, options, |parsed| merger.merge_parsed(&mut graph, parsed))?;
+    if options.cancelled() { return Ok(InnerOutcome::Cancelled); }
     merger.resolve_pending(&mut graph, options)?;
     if options.cancelled() {
         return Ok(InnerOutcome::Cancelled);
     }
 
+    drop(merger);
     options.report(IndexPhase::Write, 0, 0);
     // 全量图为全新构建，Module 恒有 IMPORTS 入边；清扫仅作防御（零成本）。
     graph.prune_orphan_modules();
     super::coverage::attach_discovery_issues(&mut graph, &options.discovery_issues);
+    graph.release_build_indexes();
     if !write_store(
         store,
         repo_root,
@@ -248,15 +255,15 @@ fn write_store(
     hashes: Vec<FileHashRow>,
     cancel: &AtomicBool,
 ) -> Result<bool> {
-    let meta = CodeIndexMeta {
-        repo_name: repo_name.to_string(),
-        repo_path: repo_root.to_string_lossy().to_string(),
-        branch: branch.to_string(),
-        indexed_at: now_millis(),
-        duration_ms: 0,
-        mode: mode.to_string(),
-    };
+    let meta = index_meta(repo_root, repo_name, branch, mode);
     store.replace_all_cancellable(graph, &hashes, &meta, Some(cancel))
+}
+
+fn index_meta(repo_root: &Path, repo_name: &str, branch: &str, mode: &str) -> CodeIndexMeta {
+    CodeIndexMeta {
+        repo_name: repo_name.to_string(), repo_path: repo_root.to_string_lossy().to_string(),
+        branch: branch.to_string(), indexed_at: now_millis(), duration_ms: 0, mode: mode.to_string(),
+    }
 }
 
 fn now_millis() -> u64 {
@@ -314,8 +321,8 @@ fn run_incremental_inner(
 
     options.report(IndexPhase::Parse, 0, changed.len());
 
-    // 1. 整图载入 RAM。
-    let mut graph = store.load_graph()?;
+    // 1. 只载入定义、结构和类型边，无关调用边继续保留在 SQLite。
+    let mut graph = store.load_graph_without_calls()?;
 
     // 2. 入边快照：target 在待清除文件、source 在幸存节点的跨文件边
     //    （级联删除会连带清掉这些边，先按 QN 键控捕获，重解析后恢复）。
@@ -328,32 +335,37 @@ fn run_incremental_inner(
     for edge in &graph.edges {
         let src_file = &graph.get(edge.source).file_path;
         let tgt_file = &graph.get(edge.target).file_path;
-        let src_survives = src_file.is_empty() || !purge_set.contains(src_file);
-        if src_survives && !tgt_file.is_empty() && purge_set.contains(tgt_file) && edge.etype != EdgeType::Calls {
+        let src_survives = src_file.is_empty() || !purge_set.contains(src_file.as_ref());
+        if src_survives && !tgt_file.is_empty() && purge_set.contains(tgt_file.as_ref()) && edge.etype != EdgeType::Calls {
             inbound_snapshot.push((
-                graph.get(edge.source).qualified_name.clone(),
-                graph.get(edge.target).qualified_name.clone(),
+                graph.get(edge.source).qualified_name.to_string(),
+                graph.get(edge.target).qualified_name.to_string(),
                 edge.etype,
-                edge.properties.clone(),
+                edge.properties.to_string(),
             ));
         }
     }
 
+    let mut changed_names: HashSet<String> = graph.nodes.iter().filter(|node| node.label.is_symbol() && purge_set.contains(node.file_path.as_ref()))
+        .map(|node| node.name.clone()).collect();
+
     // 3. 按文件清除（级联删边 + 幸存节点 id 重排）。
     graph.purge_files(&purge_set);
 
-    // 4. 只解析变更文件。
-    let parse_jobs: Vec<&DiscoveredFile> = changed.to_vec();
-    let parsed = run_extraction_pass(&parse_jobs, options)?;
-    if options.cancelled() {
-        return Ok(InnerOutcome::Cancelled);
-    }
-
-    // 5. 结构补建（新文件的 Folder/File 节点可能不存在；upsert 幂等）。
+    // 4. 补建结构后分批提取并合并，只保留一批 AST 提取结果。
     build_structure_pass(repo_name, branch, &changed, &mut graph);
-
     let mut merger = GraphMerger::new(repo_name);
-    merger.merge_parsed(&mut graph, &parsed);
+    run_extraction_pass(&changed, options, |parsed| {
+        changed_names.extend(parsed.iter().filter_map(|output| output.result.as_ref())
+            .flat_map(|result| result.defs.iter().map(|def| def.name.clone())));
+        merger.merge_parsed(&mut graph, parsed);
+    })?;
+    if options.cancelled() { return Ok(InnerOutcome::Cancelled); }
+    let mut affected = purge_set.clone();
+    affected.extend(store.callers_for_names(&changed_names)?);
+    let surviving: HashSet<_> = affected.iter().filter(|path| !purge_set.contains(*path)).cloned().collect();
+    store.load_call_records(&mut graph, &surviving)?;
+    merger.resolve_paths = Some(affected.clone());
     merger.resolve_pending(&mut graph, options)?;
     if options.cancelled() {
         return Ok(InnerOutcome::Cancelled);
@@ -371,22 +383,16 @@ fn run_incremental_inner(
     //    重建播种 registry 天然无此残留）。
     graph.prune_orphan_modules();
 
-    // 8. 整库重写。
+    // 8. 仅替换变更文件和受影响调用文件，数据库节点编号保持稳定。
     super::coverage::attach_discovery_issues(&mut graph, &options.discovery_issues);
     options.report(IndexPhase::Write, 0, 0);
     let mut hashes = unchanged_hashes;
     hashes.extend(files_hash_rows(&changed));
     hashes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    if !write_store(
-        store,
-        repo_root,
-        repo_name,
-        branch,
-        "incremental",
-        &graph,
-        hashes,
-        &options.cancel,
-    )? { return Ok(InnerOutcome::Cancelled); }
+    drop(merger);
+    graph.release_build_indexes();
+    let meta = index_meta(repo_root, repo_name, branch, "incremental");
+    if !store.update_files_cancellable(&graph, &hashes, &meta, &purge_set, &affected, &options.cancel)? { return Ok(InnerOutcome::Cancelled); }
     Ok(InnerOutcome::Done)
 }
 
@@ -503,53 +509,30 @@ pub(super) struct ParseOutput {
     pub coverage: super::coverage::FileCoverage,
 }
 
-/// 并行提取：worker 数 = 可用核数-1 钳到 [1,6]，每个 worker 独立持有
-/// Extractor/Parser 实例，处理一段连续分块（免锁、输出按块序拼接保序）。
-/// 取消在文件边界生效，取消后返回已完成的分块由调用方丢弃。
+/// 共用计算池动态分发文件，先处理大文件，避免连续分块的长尾。
 fn run_extraction_pass(
-    jobs: &[&DiscoveredFile],
-    options: &mut PipelineOptions,
-) -> Result<Vec<ParseOutput>> {
+    jobs: &[&DiscoveredFile], options: &mut PipelineOptions, mut merge: impl FnMut(Vec<ParseOutput>),
+) -> Result<()> {
     let total = jobs.len();
     options.report(IndexPhase::Parse, 0, total);
-    if total == 0 {
-        return Ok(Vec::new());
-    }
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .saturating_sub(1)
-        .clamp(1, 6);
-    let chunk_size = total.div_ceil(workers);
+    let mut jobs = jobs.to_vec();
+    jobs.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.rel_path.cmp(&b.rel_path)));
     let cancel = Arc::clone(&options.cancel);
-
-    let chunks: Vec<Vec<ParseOutput>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .chunks(chunk_size.max(1))
-            .map(|chunk| {
-                let cancel = Arc::clone(&cancel);
-                scope.spawn(move || {
-                    let mut extractor = Extractor::new();
-                    let mut out = Vec::with_capacity(chunk.len());
-                    for file in chunk {
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        out.push(parse_one(file, &mut extractor));
-                    }
-                    out
-                })
-            })
-            .collect();
-        handles.into_iter().map(|handle| handle.join().map_err(|_| super::err("索引解析线程异常，已保留旧索引")))
-            .collect::<Result<Vec<_>>>()
-    })?;
-
-    let done: usize = chunks.iter().map(Vec::len).sum();
-    let mut outputs: Vec<ParseOutput> = chunks.into_iter().flatten().collect();
-    outputs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    options.report(IndexPhase::Parse, done.min(total), total);
-    Ok(outputs)
+    let mut done = 0;
+    // 分批回报进度；每批的解析器和语法树在合并前释放。
+    for batch in jobs.chunks(super::jobs::worker_count() * 8) {
+        if options.cancelled() { break; }
+        let mut parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::jobs::compute_pool().install(|| {
+            batch.par_iter().map_init(Extractor::new, |extractor, file| {
+                (!cancel.load(Ordering::Relaxed)).then(|| parse_one(file, extractor))
+            }).filter_map(|output| output).collect::<Vec<_>>()
+        }))).map_err(|_| super::err("索引解析线程异常，已保留旧索引"))?;
+        done += parsed.len();
+        parsed.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        merge(parsed);
+        options.report(IndexPhase::Parse, done, total);
+    }
+    Ok(())
 }
 
 fn parse_one(file: &DiscoveredFile, extractor: &mut Extractor) -> ParseOutput {
@@ -614,25 +597,6 @@ fn byte_line_count(bytes: &[u8]) -> usize {
 // 合并与解析（参照 registry 构建 + calls pass）
 // ---------------------------------------------------------------------------
 
-/// 待解析调用点：source 已定位（函数优先、文件兜底），目标待 registry 解析。
-struct PendingCall {
-    source: NodeId,
-    source_file: String,
-    imports: Vec<String>,
-    callee_display: String,
-    name: String,
-    qualifier: Option<String>,
-    scope: Vec<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredCall {
-    source_qn: String,
-    callee_display: String,
-    name: String,
-    scope: Vec<String>,
-}
-
 /// 定义键：scope 链 \u{1} 名字。方法归属与调用来源定位共用。
 fn def_key(scope: &[String], name: &str) -> String {
     let mut key = scope.join("\u{1}");
@@ -644,7 +608,7 @@ fn def_key(scope: &[String], name: &str) -> String {
 pub(super) struct GraphMerger {
     project: String,
     def_index: HashMap<String, NodeId>,
-    pending_calls: Vec<PendingCall>,
+    resolve_paths: Option<HashSet<String>>,
     pending_types: Vec<(NodeId, super::extract::TypeRef)>,
 }
 
@@ -653,12 +617,12 @@ impl GraphMerger {
         Self {
             project: project.to_string(),
             def_index: HashMap::new(),
-            pending_calls: Vec::new(),
+            resolve_paths: None,
             pending_types: Vec::new(),
         }
     }
 
-    pub(super) fn merge_parsed(&mut self, graph: &mut GraphBuffer, parsed: &[ParseOutput]) {
+    pub(super) fn merge_parsed(&mut self, graph: &mut GraphBuffer, parsed: Vec<ParseOutput>) {
 
         for output in parsed {
             // 同名函数的归属只在当前文件内查找，不能复用上一文件的定义键。
@@ -669,8 +633,8 @@ impl GraphMerger {
                 continue;
             };
             graph.nodes[file_id as usize].properties = serde_json::json!({
-                "line_count": output.line_count, "coverage": output.coverage }).to_string();
-            let Some(result) = output.result.as_ref() else { continue; };
+                "line_count": output.line_count, "coverage": output.coverage }).to_string().into();
+            let Some(result) = output.result else { continue; };
 
             // 导入 → Module 节点 + IMPORTS 边。
             let import_modules: Vec<String> = result
@@ -747,26 +711,23 @@ impl GraphMerger {
                 }
             }
 
-            // 调用点：归属函数优先定位，找不到退化为文件级调用。
-            let mut stored_calls = Vec::new();
-            for call in &result.calls {
-                let source = call
-                    .owner
-                    .as_ref()
-                    .and_then(|o| self.def_index.get(&def_key(&o.class_chain, &o.fn_name)))
-                    .copied()
-                    .unwrap_or(file_id);
-                stored_calls.push(StoredCall {
-                    source_qn: graph.get(source).qualified_name.clone(),
-                    callee_display: call.callee_display.clone(),
-                    name: call.name.clone(),
-                    scope: call.owner.as_ref().map(|owner| owner.class_chain.clone()).unwrap_or_default(),
-                });
-            }
-            let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
-            properties["call_records"] = serde_json::json!(stored_calls);
-            properties["imports"] = serde_json::json!(import_modules);
-            graph.nodes[file_id as usize].properties = properties.to_string();
+            // 调用点采用类型化文件记录，导入表与路径只保留一份。
+            let mut strings = HashMap::<String, Arc<str>>::new();
+            let mut intern = |value: String| -> Arc<str> {
+                Arc::clone(strings.entry(value.clone()).or_insert_with(|| Arc::from(value)))
+            };
+            let calls = result.calls.into_iter().map(|call| {
+                let source = call.owner.as_ref()
+                    .and_then(|owner| self.def_index.get(&def_key(&owner.class_chain, &owner.fn_name)))
+                    .copied().unwrap_or(file_id);
+                super::calls::StoredCall {
+                    source_qn: Arc::clone(&graph.get(source).qualified_name),
+                    callee_display: intern(call.callee_display), name: intern(call.name),
+                    scope: intern(call.owner.map(|owner| owner.class_chain.join("\u{1}")).unwrap_or_default()),
+                }
+            }).collect();
+            graph.call_records.insert(Arc::clone(&graph.get(file_id).file_path), super::calls::FileCalls { imports: import_modules, calls });
+
         }
 
     }
@@ -783,66 +744,57 @@ impl GraphMerger {
         &mut self, graph: &mut GraphBuffer, options: &mut PipelineOptions, cancelled: Option<&AtomicBool>,
     ) -> Result<()> {
         options.report(IndexPhase::Resolve, 0, 0);
-        // 定义增删会改变未修改文件的唯一性/导入匹配，因此复用调用点重新解析整图。
-        // 不重新解析未改文件 AST，也不能直接恢复可能已变为歧义的旧 CALLS 边。
-        self.pending_calls.clear();
-        for node in &graph.nodes {
-            if node.label != NodeLabel::File { continue; }
-            let properties: serde_json::Value = serde_json::from_str(&node.properties).map_err(|error| super::err(format!("调用点记录损坏：{error}")))?;
-            let imports: Vec<String> = serde_json::from_value(properties.get("imports").cloned().unwrap_or_else(|| serde_json::json!([])))
-                .map_err(|error| super::err(format!("导入记录损坏：{error}")))?;
-            let records: Vec<StoredCall> = serde_json::from_value(properties.get("call_records").cloned().unwrap_or_else(|| serde_json::json!([])))
-                .map_err(|error| super::err(format!("调用点记录损坏：{error}")))?;
-            for record in records {
-                if let Some(source) = graph.find_by_qn(&record.source_qn) {
-                    self.pending_calls.push(PendingCall { source, source_file: node.file_path.clone(), imports: imports.clone(),
-                        qualifier: qualifier_segment(&record.callee_display), callee_display: record.callee_display,
-                        name: record.name, scope: record.scope });
-                }
-            }
-        }
-        graph.remove_call_edges();
-        for node in &mut graph.nodes {
-            if node.label == NodeLabel::File {
-                let mut properties: serde_json::Value = serde_json::from_str(&node.properties).unwrap_or_default();
-                properties["coverage"]["unresolved_calls"] = serde_json::json!(0);
-                node.properties = properties.to_string();
-            }
-        }
+        // 名字变化只重算相关调用文件；缓存包含完整表达式和作用域，也缓存未解析结果。
+        let paths: Vec<_> = graph.call_records.keys().filter(|path|
+            self.resolve_paths.as_ref().is_none_or(|paths| paths.contains(path.as_ref()))).cloned().collect();
+        let mut paths = paths;
+        paths.sort();
+        graph.remove_call_edges_for(self.resolve_paths.as_ref());
         let registry = Registry::build(graph);
-        let calls = std::mem::take(&mut self.pending_calls);
-        let total = calls.len();
-        let mut unresolved = HashMap::<String, usize>::new();
-        for (done, call) in calls.into_iter().enumerate() {
-            if done % 2000 == 0 {
-                options.report(IndexPhase::Resolve, done, total);
-                if options.cancelled() || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                    return Ok(());
+        let total = paths.iter().map(|path| graph.call_records[path].calls.len()).sum();
+        let mut done = 0;
+        for batch in paths.chunks(super::jobs::worker_count() * 2) {
+            if options.cancelled() || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) { return Ok(()); }
+            let cancel = &options.cancel;
+            let results: Vec<_> = super::jobs::compute_pool().install(|| batch.par_iter().map(|path| {
+                let records = &graph.call_records[path];
+                let imports = registry.imported_files(&records.imports);
+                let mut memo = HashMap::<(Arc<str>, Arc<str>, Arc<str>), Option<super::resolve::ResolvedTarget>>::new();
+                let mut edges = Vec::new();
+                let mut keys = HashSet::new();
+                let mut unresolved = 0;
+                for (index, call) in records.calls.iter().enumerate() {
+                    if index % 512 == 0 && (cancel.load(Ordering::Relaxed)
+                        || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed))) { break; }
+                    let key = (Arc::clone(&call.name), Arc::clone(&call.callee_display), Arc::clone(&call.scope));
+                    let resolved = if let Some(target) = memo.get(&key) { target.clone() } else {
+                        let scope: Vec<_> = call.scope.split('\u{1}').filter(|part| !part.is_empty()).map(str::to_string).collect();
+                        let qualifier = qualifier_segment(&call.callee_display);
+                        let target = registry.resolve_prepared(&call.name, path, &imports, qualifier.as_deref(), &scope);
+                        // 有界缓存防御生成代码中的大量不同表达式。
+                        if memo.len() < 16384 { memo.insert(key, target.clone()); }
+                        target
+                    };
+                    if let Some(target) = resolved {
+                        if let Some(source) = graph.find_by_qn(&call.source_qn) {
+                            if source != target.id && keys.insert((source, target.id)) {
+                                edges.push((source, target.id, calls_edge_properties(&call.callee_display, target.confidence, target.strategy)));
+                            }
+                        }
+                    } else { unresolved += 1; }
                 }
+                (Arc::clone(path), edges, unresolved, records.calls.len())
+            }).collect());
+            for (path, edges, unresolved, count) in results {
+                for (source, target, properties) in edges { graph.add_edge(source, target, EdgeType::Calls, properties); }
+                if let Some(file_id) = graph.find_by_qn(&file_qualified_name(&self.project, &path)) {
+                    let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
+                    properties["coverage"]["unresolved_calls"] = serde_json::json!(unresolved);
+                    graph.nodes[file_id as usize].properties = properties.to_string().into();
+                }
+                done += count;
             }
-            if let Some(target) = registry.resolve_call_in_scope(
-                &call.name,
-                &call.source_file,
-                &call.imports,
-                call.qualifier.as_deref(),
-                &call.scope,
-            ) {
-                graph.add_edge(
-                    call.source,
-                    target.id,
-                    EdgeType::Calls,
-                    calls_edge_properties(&call.callee_display, target.confidence, target.strategy),
-                );
-            } else {
-                *unresolved.entry(call.source_file.clone()).or_default() += 1;
-            }
-        }
-        for (path, count) in unresolved {
-            if let Some(file_id) = graph.find_by_qn(&file_qualified_name(&self.project, &path)) {
-                let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
-                properties["coverage"]["unresolved_calls"] = serde_json::json!(count);
-                graph.nodes[file_id as usize].properties = properties.to_string();
-            }
+            options.report(IndexPhase::Resolve, done, total);
         }
         for (host_id, tr) in std::mem::take(&mut self.pending_types) {
             if let Some(target) = registry.resolve_type(&tr.name) {
