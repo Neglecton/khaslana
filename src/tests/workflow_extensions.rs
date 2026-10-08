@@ -173,6 +173,76 @@ fn skill_package_content_is_required_before_authorization() {
 }
 
 #[test]
+fn mcp_command_only_config_saves_without_starting_or_installing_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let server: super::extensions::WorkflowMcpServer = serde_json::from_value(json!({
+        "command": "khaslana-mcp-not-installed", "args": ["--stdio"]
+    })).unwrap();
+    assert!(server.auto_discover);
+    assert!(server.enabled);
+    upsert_user_mcp_server(dir.path(), None, "uninstalled", server).unwrap();
+    let config = load_user_mcp_config(dir.path()).unwrap();
+    assert!(config.servers["uninstalled"].auto_discover);
+    let grant = grant_for("{op:'invoke',id:'read',uses:'mcp.call',with:{server:'uninstalled',tool:'new_tool'}}");
+    assert_eq!(grant.permission_lines(&config).unwrap(),
+        ["写入 MCP 工具：uninstalled / new_tool"]);
+}
+
+#[test]
+fn mcp_legacy_whitelist_and_disabled_service_keep_permission_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_config(&dir.path().join("unused")).servers.remove("fixture").unwrap();
+    assert!(!server.auto_discover);
+    upsert_user_mcp_server(dir.path(), None, "fixture", server).unwrap();
+    let config = load_user_mcp_config(dir.path()).unwrap();
+    let unknown = grant_for("{op:'invoke',id:'read',uses:'mcp.call',with:{server:'fixture',tool:'unknown'}}");
+    assert!(unknown.permission_lines(&config).unwrap_err().to_string().contains("未在本地配置中允许"));
+    super::extensions::set_user_mcp_server_enabled(dir.path(), "fixture", false).unwrap();
+    let config = load_user_mcp_config(dir.path()).unwrap();
+    let read = grant_for("{op:'invoke',id:'read',uses:'mcp.call',with:{server:'fixture',tool:'echo'}}");
+    assert!(read.permission_lines(&config).unwrap_err().to_string().contains("已禁用"));
+    assert!(!config.servers["fixture"].auto_discover);
+    assert_eq!(config.servers["fixture"].tools["echo"].access,
+        super::extensions::WorkflowToolAccess::Read);
+    super::extensions::set_user_mcp_server_enabled(dir.path(), "fixture", true).unwrap();
+    assert!(read.permission_lines(&load_user_mcp_config(dir.path()).unwrap()).is_ok());
+}
+
+#[test]
+fn mcp_auto_discovery_still_requires_grant_and_live_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("not-written.txt");
+    let mut config = test_config(&marker);
+    let server = config.servers.get_mut("fixture").unwrap();
+    server.tools.clear();
+    server.auto_discover = true;
+    // 缓存只是展示记录，不能代替服务实际返回的工具与 schema。
+    server.cached_tools = vec!["echo".into(), "nonexistent".into()];
+    let (_repo_dir, mut repo, service) = git_support::init_repo();
+    let control = WorkflowRunControl::new();
+    let denied = make_registry(config.clone(), None);
+    assert!(denied.get("mcp.call").unwrap().execute_with_control(&service, &mut repo,
+        &json!({"server":"fixture","tool":"write_file","arguments":{"value":"denied"}}),
+        &control).unwrap_err().to_string().contains("尚未授权"));
+    assert!(!marker.exists());
+    let grant = grant_for(r#"
+        {op:'invoke',id:'read',uses:'mcp.call',with:{server:'fixture',tool:'echo'}},
+        {op:'invoke',id:'missing',uses:'mcp.call',with:{server:'fixture',tool:'nonexistent'}}
+    "#);
+    let registry = make_registry(config, Some(grant));
+    let action = registry.get("mcp.call").unwrap();
+    assert!(action.execute_with_control(&service, &mut repo,
+        &json!({"server":"fixture","tool":"echo","arguments":{"value":3}}),
+        &control).unwrap_err().to_string().contains("schema"));
+    assert_eq!(action.execute_with_control(&service, &mut repo,
+        &json!({"server":"fixture","tool":"echo","arguments":{"value":"discovered"}}),
+        &control).unwrap().output, Some(json!({"value":"discovered"})));
+    assert!(action.execute_with_control(&service, &mut repo,
+        &json!({"server":"fixture","tool":"nonexistent"}), &control)
+        .unwrap_err().to_string().contains("未提供工具"));
+}
+
+#[test]
 #[ignore = "需要下载 Playwright MCP 依赖"]
 fn browser_runtime_downloads_and_starts_without_npx() {
     let data = tempfile::tempdir().unwrap();
@@ -470,7 +540,10 @@ fn mcp_session_persists_between_steps_of_one_run() {
         {op:'invoke',id:'set',uses:'mcp.call',with:{server:'fixture',tool:'set_state'}},
         {op:'invoke',id:'get',uses:'mcp.call',with:{server:'fixture',tool:'get_state'}}
     "#);
-    let registry = make_registry(test_config(&dir.path().join("unused.txt")), Some(grant));
+    let mut config = test_config(&dir.path().join("unused.txt"));
+    let discoveries = dir.path().join("discoveries.txt");
+    config.servers.get_mut("fixture").unwrap().args.push(discoveries.to_string_lossy().into_owned());
+    let registry = make_registry(config, Some(grant));
     let (_repo_dir, mut repo, service) = git_support::init_repo();
     let control = WorkflowRunControl::new();
     registry.get("mcp.call").unwrap().execute_with_control(&service, &mut repo,
@@ -479,4 +552,5 @@ fn mcp_session_persists_between_steps_of_one_run() {
     let result = registry.get("mcp.call").unwrap().execute_with_control(&service, &mut repo,
         &json!({"server":"fixture","tool":"get_state"}), &control).unwrap();
     assert_eq!(result.output, Some(json!({"value":"same session"})));
+    assert_eq!(std::fs::read_to_string(discoveries).unwrap().lines().count(), 1);
 }

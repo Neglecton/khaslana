@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $marker = $args[0]
+$listMarker = $args[1]
 $sessionValue = ''
 
 while ($null -ne ($line = [Console]::ReadLine())) {
@@ -16,6 +17,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 }
             }
             'tools/list' {
+                if ($listMarker) { [System.IO.File]::AppendAllText($listMarker, "list`n") }
                 $valueSchema = @{
                     type = 'object'
                     properties = @{ value = @{ type = 'string' } }

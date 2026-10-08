@@ -383,7 +383,7 @@ impl RepositoryView {
             .child(h_flex().w_full().items_center().justify_between().gap_3().pb_4()
                 .child(v_flex().flex_1().min_w(px(0.0)).gap_1()
                     .child(heading("MCP 服务"))
-                    .child(caption(format!("1 个内置 · {custom_count} 个自定义"))))
+                    .child(caption(format!("1 个内置 · {custom_count} 个自定义 · 按需连接"))))
                 .child(settings_command_button("ai-mcp-add", "添加服务", SettingsButtonTone::Primary, !self.ai_extensions.loading, cx)
                     .on_click({ let view = view.clone(); move |_, _, cx| {
                         view.update(cx, |this, cx| {
@@ -428,6 +428,7 @@ impl RepositoryView {
                             }
                         }, cx)))));
             for (name, server) in &self.ai_extensions.mcp.servers {
+                let toggle_name = name.clone();
                 let edit_name = name.clone();
                 let remove_name = name.clone();
                 let menu_view = view.clone();
@@ -467,11 +468,16 @@ impl RepositoryView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(ui_theme::CONTENT_PRIMARY))
                                     .truncate().child(name.clone()))
-                                .child(caption(format!(
-                                    "{} · 已允许 {} 个工具", server.command, server.tools.len()
+                                .child(caption(format!("{} · {}", server.command,
+                                    if server.auto_discover { "自动发现工具".into() }
+                                    else { format!("白名单 {} 个工具", server.tools.len()) }
                                 )).truncate())))
                         .child(h_flex().flex_none().items_center().gap_2()
-                            .child(status_text("已配置", true))
+                            .child(status_text(if server.enabled { "已配置 · 待连接" } else { "已禁用" }, server.enabled))
+                            .child(self.toggle_switch(format!("ai-mcp-enabled-{name}"), server.enabled,
+                                self.ai_extensions.action_busy, move |this, checked, _, _| {
+                                    this.set_ai_mcp_server_enabled(toggle_name.clone(), checked);
+                                }, cx))
                             .child(row_menu(
                                 format!("ai-mcp-menu-{name}"),
                                 build_menu, cx,
@@ -485,7 +491,7 @@ impl RepositoryView {
                     .child(list_row_icon(IconName::Plug))
                     .child(v_flex().flex_1().min_w(px(0.0)).gap_1()
                         .child(heading("还没有自定义 MCP 服务"))
-                        .child(caption("添加本地 stdio 服务，填写启动命令、参数与允许调用的工具。"))));
+                        .child(caption("填写启动命令与参数即可保存，无需先安装或测试连接。"))));
             }
         }
         content = content.child(div().w_full().border_t_1()
@@ -501,7 +507,9 @@ impl RepositoryView {
         let runtime = self.ai_extensions.runtime.as_ref();
         let node_status = runtime.and_then(|info| info.node_version.as_ref()
             .zip(info.node_source)).map(|(version, source)| format!("v{version} · {source}"))
-            .unwrap_or_else(|| "未检测到 Node.js 20 或更新版本".into());
+            .unwrap_or_else(|| if runtime.is_some_and(|info| info.system_checked) {
+                "未检测到 Node.js 20 或更新版本".into()
+            } else { "尚未主动检测本机 Node.js".into() });
         let ready = runtime.is_some_and(|info| info.mcp_ready);
         let node_found = runtime.is_some_and(|info| info.node_version.is_some());
         let downloading = self.browser_runtime_downloading;
@@ -516,7 +524,9 @@ impl RepositoryView {
                         .child(v_flex().flex_1().min_w(px(0.0)).gap_1()
                             .child(heading("Node.js 20+ 环境"))
                             .child(caption(node_status))))
-                    .child(status_text(if node_found { "已就绪" } else { "未检测到" },
+                    .child(status_text(if node_found { "已就绪" }
+                        else if runtime.is_some_and(|info| info.system_checked) { "未检测到" }
+                        else { "待检测" },
                         node_found)))
                 // 来源行：设计稿把「来源」标签与取值、重新检测并排放在卡片底部。
                 .child(h_flex().w_full().items_center().justify_between().gap_3()
@@ -532,7 +542,7 @@ impl RepositoryView {
                     .child(settings_command_button("ai-node-recheck", "重新检测", SettingsButtonTone::Secondary, !self.ai_extensions.loading && !downloading, cx)
                         .on_click({ let view = view.clone(); move |_, _, cx| {
                             view.update(cx, |this, cx| {
-                                this.refresh_ai_extensions();
+                                this.inspect_ai_runtime();
                                 cx.notify();
                             });
                         }})))

@@ -65,11 +65,7 @@ pub(super) fn command(command: &str, args: &[String]) -> Result<tokio::process::
         && let Some(data_dir) = crate::storage::active_data_dir() {
         process.env("npm_config_cache", data_dir.join("workflow-npm-cache"));
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        process.creation_flags(0x08000000); // CREATE_NO_WINDOW：stdio 服务不弹终端。
-    }
+    crate::process::hide_console(&mut process);
     let mut process = tokio::process::Command::from(process);
     process.kill_on_drop(true);
     Ok(process)

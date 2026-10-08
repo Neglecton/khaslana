@@ -68,10 +68,11 @@ pub struct BrowserRuntimeInfo {
     pub node_version: Option<String>,
     pub node_source: Option<&'static str>,
     pub mcp_ready: bool,
+    pub system_checked: bool,
 }
 
-/// 设置页在后台调用；只探测本机与数据目录，不触发下载。
-pub fn inspect(data_dir: &Path) -> BrowserRuntimeInfo {
+/// 普通页面只读取安装记录，不为展示配置启动任何进程。
+pub fn inspect_cached(data_dir: &Path) -> BrowserRuntimeInfo {
     let mcp_ready = ready(data_dir);
     if mcp_ready {
         if let Ok(bytes) = fs::read(runtime_dir(data_dir).join("install.json")) {
@@ -82,21 +83,33 @@ pub fn inspect(data_dir: &Path) -> BrowserRuntimeInfo {
                     node_version: Some(manifest.node_version),
                     node_source: Some(if managed { "应用数据目录" } else { "本机 PATH" }),
                     mcp_ready,
+                    system_checked: false,
                 };
             }
         }
     }
-    let detected = system_node().map(|(path, version)| (path, version, "本机 PATH"))
-        .or_else(|| managed_node(data_dir).map(|(path, version)|
-            (path, version, "应用数据目录")));
+    let detected = managed_node(data_dir).map(|(path, version)|
+        (path, version, "应用数据目录"));
     match detected {
         Some((path, version, source)) => BrowserRuntimeInfo {
             node_path: Some(path), node_version: Some(version),
-            node_source: Some(source), mcp_ready,
+            node_source: Some(source), mcp_ready, system_checked: false,
         },
         None => BrowserRuntimeInfo { node_path: None, node_version: None,
-            node_source: None, mcp_ready },
+            node_source: None, mcp_ready, system_checked: false },
     }
+}
+
+/// 仅主动检测时检查 PATH；安装流程另行检查，普通页面不调用。
+pub fn inspect(data_dir: &Path) -> BrowserRuntimeInfo {
+    let mut info = inspect_cached(data_dir);
+    if !info.mcp_ready && let Some((path, version)) = system_node() {
+        info.node_path = Some(path);
+        info.node_version = Some(version);
+        info.node_source = Some("本机 PATH");
+    }
+    info.system_checked = true;
+    info
 }
 
 pub fn launch_command(data_dir: &Path) -> Result<(PathBuf, Vec<String>)> {
@@ -143,7 +156,9 @@ fn system_node() -> Option<(PathBuf, String)> {
     for dir in std::env::split_paths(&path) {
         let node = dir.join("node.exe");
         if !node.is_file() { continue; }
-        let mut child = match Command::new(&node).arg("--version")
+        let mut command = Command::new(&node);
+        crate::process::hide_console(&mut command);
+        let mut child = match command.arg("--version")
             .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
             Ok(child) => child,
             Err(_) => continue,
@@ -437,3 +452,7 @@ fn remove_stage(root: &Path, path: &Path) {
         if path.parent() == Some(root.as_path()) { let _ = fs::remove_dir_all(path); }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/browser_runtime.rs"]
+mod tests;

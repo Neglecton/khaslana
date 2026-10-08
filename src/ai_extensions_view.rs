@@ -85,6 +85,8 @@ pub(crate) struct AiExtensionsUiState {
     pub(crate) mcp_args: TextFieldState,
     pub(crate) mcp_tools: Vec<McpToolDraft>,
     pub(crate) mcp_tools_expanded: bool,
+    pub(crate) mcp_auto_discover: bool,
+    pub(crate) mcp_enabled: bool,
     pub(crate) mcp_verified: Option<(String, Vec<String>)>,
     pub(crate) mcp_testing: bool,
     pub(crate) mcp_test_request_id: u64,
@@ -113,6 +115,8 @@ impl AiExtensionsUiState {
             mcp_args: TextFieldState::new(cx, "每行一个启动参数"),
             mcp_tools: Vec::new(),
             mcp_tools_expanded: false,
+            mcp_auto_discover: true,
+            mcp_enabled: true,
             mcp_verified: None,
             mcp_testing: false,
             mcp_test_request_id: 0,
@@ -155,6 +159,14 @@ fn settings_row(title: impl Into<SharedString>, description: impl Into<SharedStr
 
 impl RepositoryView {
     pub(crate) fn refresh_ai_extensions(&mut self) {
+        self.load_ai_extensions(false);
+    }
+
+    pub(crate) fn inspect_ai_runtime(&mut self) {
+        self.load_ai_extensions(true);
+    }
+
+    fn load_ai_extensions(&mut self, inspect_runtime: bool) {
         let Some(data_dir) = khaslana::storage::active_data_dir() else {
             self.ai_extensions.error = Some("无法定位应用数据目录".into());
             return;
@@ -169,7 +181,8 @@ impl RepositoryView {
                     .map_err(|err| err.to_string())?;
                 let mcp = extensions::load_user_mcp_config(&data_dir)
                     .map_err(|err| err.to_string())?;
-                let runtime = browser_runtime::inspect(&data_dir);
+                let runtime = if inspect_runtime { browser_runtime::inspect(&data_dir) }
+                    else { browser_runtime::inspect_cached(&data_dir) };
                 Ok((skills, mcp, runtime))
             });
             send_ui_event(&tx, UiEvent::AiExtensionsLoaded { request_id, result });
@@ -303,10 +316,17 @@ impl RepositoryView {
         self.ai_extensions.mcp_tools = existing.map(|server| server.tools.iter()
             .map(|(name, tool)| McpToolDraft { name: name.clone(), allowed: true,
                 access: tool.access }).collect()).unwrap_or_default();
+        self.ai_extensions.mcp_auto_discover = existing.is_none_or(|server| server.auto_discover);
+        self.ai_extensions.mcp_enabled = existing.is_none_or(|server| server.enabled);
+        if let Some(server) = existing {
+            let names = server.cached_tools.iter().cloned()
+                .chain(server.tools.keys().cloned()).collect::<std::collections::BTreeSet<_>>();
+            self.ai_extensions.mcp_tools = discovered_mcp_tools(names.into_iter().collect(),
+                &self.ai_extensions.mcp_tools, server.auto_discover);
+        }
         self.ai_extensions.edit_mcp_name = name;
         self.ai_extensions.mcp_tools_expanded = false;
-        self.ai_extensions.mcp_verified = existing.map(|server|
-            (server.command.clone(), server.args.clone()));
+        self.ai_extensions.mcp_verified = None;
         self.ai_extensions.error = None;
         self.ai_extensions.mcp_testing = false;
         self.ai_extensions.mcp_test_request_id = self.ai_extensions.mcp_test_request_id.wrapping_add(1);
@@ -349,7 +369,7 @@ impl RepositoryView {
         match result {
             Ok(names) => {
                 self.ai_extensions.mcp_tools = discovered_mcp_tools(names,
-                    &self.ai_extensions.mcp_tools, self.ai_extensions.edit_mcp_name.is_none());
+                    &self.ai_extensions.mcp_tools, self.ai_extensions.mcp_auto_discover);
                 self.ai_extensions.mcp_verified = Some((command, args));
                 self.ai_extensions.error = None;
             }
@@ -367,16 +387,24 @@ impl RepositoryView {
         let name = self.ai_extensions.mcp_id.value.trim().to_owned();
         let command = self.ai_extensions.mcp_command.value.trim().to_owned();
         let args = self.ai_mcp_args();
-        if self.ai_extensions.mcp_verified.as_ref() != Some(&(command.clone(), args.clone())) {
-            self.ai_extensions.error = Some("启动命令或参数已更改，请先测试连接".into());
-            return;
-        }
+        let verified = self.ai_extensions.mcp_verified.as_ref() == Some(&(command.clone(), args.clone()));
+        let cached_tools = if verified {
+            self.ai_extensions.mcp_tools.iter().map(|tool| tool.name.clone()).collect()
+        } else {
+            self.ai_extensions.edit_mcp_name.as_ref()
+                .and_then(|name| self.ai_extensions.mcp.servers.get(name))
+                .filter(|server| server.command == command && server.args == args)
+                .map(|server| server.cached_tools.clone()).unwrap_or_default()
+        };
         let server = WorkflowMcpServer {
             command,
             args,
             tools: self.ai_extensions.mcp_tools.iter().filter(|tool| tool.allowed)
                 .map(|tool| (tool.name.clone(), WorkflowMcpTool { access: tool.access }))
                 .collect(),
+            enabled: self.ai_extensions.mcp_enabled,
+            auto_discover: self.ai_extensions.mcp_auto_discover,
+            cached_tools,
         };
         let previous_name = self.ai_extensions.edit_mcp_name.clone();
         self.start_ai_extension_change("保存 MCP 服务", move || {
@@ -395,6 +423,16 @@ impl RepositoryView {
         self.start_ai_extension_change("移除 MCP 服务", move || {
             extensions::remove_user_mcp_server(&data_dir, &name)
                 .map(|()| format!("MCP 服务 {name} 已移除"))
+                .map_err(|err| err.to_string())
+        });
+    }
+
+    pub(crate) fn set_ai_mcp_server_enabled(&mut self, name: String, enabled: bool) {
+        if !self.can_edit_ai_extensions() || self.ai_extensions.action_busy { return; }
+        let Some(data_dir) = khaslana::storage::active_data_dir() else { return; };
+        self.start_ai_extension_change("更新 MCP 服务状态", move || {
+            extensions::set_user_mcp_server_enabled(&data_dir, &name, enabled)
+                .map(|()| format!("MCP 服务 {name} 已{}", if enabled { "启用" } else { "禁用" }))
                 .map_err(|err| err.to_string())
         });
     }
@@ -528,7 +566,7 @@ impl RepositoryView {
         let (panel_width, panel_height) = dialog_panel_size(window, 590.0, 620.0);
         let handle = self.scroll_handle("ai-mcp-form-scroll");
         let mut body = v_flex().w_full().gap_2()
-            .child(meta_text("配置本地 stdio 服务；测试连接只读取工具列表，不调用工具。"))
+            .child(meta_text("填写命令和参数即可保存；首次使用时连接。测试连接只读取工具列表。"))
             .child(primary_text("服务 ID"))
             .child(self.input(FieldId::AiMcpServerId, false, window, cx))
             .child(primary_text("启动命令"))
@@ -537,10 +575,20 @@ impl RepositoryView {
             .child(primary_text("启动参数（每行一个）"))
             .child(self.input(FieldId::AiMcpArgs, false, window, cx))
             .child(h_flex().w_full().justify_between().items_center()
-                .child(meta_text(if verified { "连接已测试" } else { "修改命令或参数后需重新测试" }))
+                .child(meta_text(if verified { "本次连接测试成功" } else { "尚未验证当前配置，可直接保存" }))
                 .child(self.button("测试连接", !busy && !testing,
                     |this, _, _| this.test_ai_mcp_form(), cx)));
         if testing { body = body.child(meta_text("正在连接 MCP 服务并读取工具列表…")); }
+        let form_request_id = self.ai_extensions.mcp_test_request_id;
+        body = body.child(h_flex().w_full().items_center().justify_between().gap_2()
+            .child(meta_text("自动发现工具（运行前仍需授权）"))
+            .child(self.toggle_switch("ai-mcp-auto-discover", self.ai_extensions.mcp_auto_discover,
+                busy || testing, move |this, checked, _, _| {
+                    if this.active_dialog == Some(DialogState::AiMcpForm)
+                        && this.ai_extensions.mcp_test_request_id == form_request_id {
+                        this.ai_extensions.mcp_auto_discover = checked;
+                    }
+                }, cx)));
         let mut tools = v_flex().w_full().gap_2()
             .child(meta_text("可关闭不需要的工具；读写类型用于运行前的提示，未知工具默认按写入处理。"));
         for (index, tool) in self.ai_extensions.mcp_tools.iter().enumerate() {
@@ -555,6 +603,7 @@ impl RepositoryView {
                                 && this.ai_extensions.mcp_test_request_id == form_request_id
                                 && let Some(tool) = this.ai_extensions.mcp_tools.get_mut(index) {
                                 tool.allowed = checked;
+                                this.ai_extensions.mcp_auto_discover = false;
                             }
                         }, cx))
                     .child(primary_text(tool.name.clone()).truncate()))
@@ -574,13 +623,13 @@ impl RepositoryView {
                         });
                     })));
         }
-        if verified {
+        if verified || !self.ai_extensions.mcp_tools.is_empty() {
             let expanded = self.ai_extensions.mcp_tools_expanded;
             let view = cx.entity();
             let form_request_id = self.ai_extensions.mcp_test_request_id;
             body = body.child(Collapsible::new().w_full().gap_2().open(expanded)
                 .child(h_flex().w_full().items_center().justify_between().gap_2()
-                    .child(meta_text(format!("已发现 {} 个工具 · 已启用 {enabled_count} 个",
+                    .child(meta_text(format!("工具记录 {} 个 · 白名单 {enabled_count} 个",
                         self.ai_extensions.mcp_tools.len())))
                     .child(settings_command_button("ai-mcp-tools-advanced",
                         if expanded { "收起高级配置" } else { "高级配置（可选）" },
@@ -596,14 +645,14 @@ impl RepositoryView {
                             });
                         })))
                 .content(tools));
-            if !selected_tools {
+            if !self.ai_extensions.mcp_auto_discover && !selected_tools {
                 body = body.child(error_text("请至少启用一个工具后保存服务"));
             }
         }
         if let Some(error) = &self.ai_extensions.error {
             body = body.child(error_text(error.clone()));
         }
-        body = body.child(meta_text("新服务连接后默认启用全部工具；工作流运行前会确认本次使用的工具。"));
+        body = body.child(meta_text("自动发现的未知工具按写入请求授权；关闭自动发现后只允许白名单工具。"));
         let viewport = div().id("ai-mcp-form-viewport").size_full().min_h(px(0.0))
             .overflow_y_scroll().track_scroll(&handle).child(body.flex_none());
         self.dialog_panel(if editing { "编辑 MCP 服务" } else { "添加 MCP 服务" }, cx)
@@ -613,7 +662,10 @@ impl RepositoryView {
             .child(dialog_actions().flex_none().bg(rgb(ui_theme::WB_PANEL))
                 .child(self.button("取消", !busy && !testing,
                     |this, _, _| this.close_dialog(), cx))
-                .child(self.primary_button("保存服务", !busy && !testing && verified && selected_tools,
+                .child(self.primary_button("保存服务", !busy && !testing
+                    && !self.ai_extensions.mcp_id.value.trim().is_empty()
+                    && !self.ai_extensions.mcp_command.value.trim().is_empty()
+                    && (self.ai_extensions.mcp_auto_discover || selected_tools),
                     |this, _, _| this.save_ai_mcp_form(), cx)))
     }
 

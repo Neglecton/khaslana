@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod external_merge;
 pub mod git;
 pub mod proxy;
+mod process;
 pub mod storage;
 pub mod syntax;
 pub mod types;

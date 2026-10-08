@@ -44,13 +44,42 @@ pub struct WorkflowMcpConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", from = "McpServerConfig")]
 pub struct WorkflowMcpServer {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub tools: BTreeMap<String, WorkflowMcpTool>,
+    pub enabled: bool,
+    pub auto_discover: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cached_tools: Vec<String>,
+}
+
+// 缺省 tools 的新配置自动发现；旧配置显式 tools 白名单不扩大权限。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpServerConfig {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    tools: Option<BTreeMap<String, WorkflowMcpTool>>,
+    enabled: Option<bool>,
+    auto_discover: Option<bool>,
+    #[serde(default)]
+    cached_tools: Vec<String>,
+}
+
+impl From<McpServerConfig> for WorkflowMcpServer {
+    fn from(config: McpServerConfig) -> Self {
+        Self {
+            auto_discover: config.auto_discover.unwrap_or(config.tools.is_none()),
+            command: config.command, args: config.args,
+            tools: config.tools.unwrap_or_default(),
+            enabled: config.enabled.unwrap_or(true), cached_tools: config.cached_tools,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -158,10 +187,16 @@ impl WorkflowExternalGrant {
 
 impl WorkflowMcpConfig {
     fn tool_access(&self, server: &str, tool: &str) -> Result<WorkflowToolAccess> {
-        self.servers.get(server)
-            .and_then(|entry| entry.tools.get(tool))
-            .map(|entry| entry.access)
-            .ok_or_else(|| GitError::Message(format!("MCP 工具未在本地配置中允许：{server} / {tool}")))
+        let entry = self.servers.get(server).ok_or_else(||
+            GitError::Message(format!("MCP 服务未配置：{server}")))?;
+        if !entry.enabled {
+            return Err(GitError::Message(format!("MCP 服务已禁用：{server}")));
+        }
+        if let Some(configured) = entry.tools.get(tool) { return Ok(configured.access); }
+        if entry.auto_discover && !tool.trim().is_empty() {
+            return Ok(WorkflowToolAccess::Write);
+        }
+        Err(GitError::Message(format!("MCP 工具未在本地配置中允许：{server} / {tool}")))
     }
 
     pub fn configure_browser_proxy(&mut self, settings: &NetworkProxySettings) -> Result<()> {
@@ -226,7 +261,8 @@ fn read_mcp_config_file(data_dir: &Path) -> Result<WorkflowMcpConfig> {
 
 fn validate_custom_mcp_config(config: &WorkflowMcpConfig) -> Result<()> {
     for (name, server) in &config.servers {
-        if name.trim().is_empty() || server.command.trim().is_empty() || server.tools.is_empty() {
+        if name.trim().is_empty() || server.command.trim().is_empty()
+            || (!server.auto_discover && server.tools.is_empty()) {
             return Err(GitError::Message(format!("MCP 服务 {name} 缺少命令或工具白名单")));
         }
         if server.tools.keys().any(|tool| tool.trim().is_empty()) {
@@ -246,7 +282,8 @@ pub fn builtin_browser_server() -> WorkflowMcpServer {
         ("browser_type", WorkflowToolAccess::Write),
         ("browser_click", WorkflowToolAccess::Write),
     ].into_iter().map(|(name, access)| (name.into(), WorkflowMcpTool { access })).collect();
-    WorkflowMcpServer { command: browser_runtime::COMMAND_MARKER.into(), args: Vec::new(), tools }
+    WorkflowMcpServer { command: browser_runtime::COMMAND_MARKER.into(), args: Vec::new(), tools,
+        enabled: true, auto_discover: false, cached_tools: Vec::new() }
 }
 
 /// 设置页只编辑用户配置，内置 browser.edge 不写回磁盘。
@@ -264,15 +301,19 @@ fn valid_mcp_server_name(name: &str) -> bool {
 
 fn validate_mcp_server_form(name: &str, server: &WorkflowMcpServer) -> Result<()> {
     if !valid_mcp_server_name(name) || server.command.trim().is_empty()
-        || server.command == browser_runtime::COMMAND_MARKER {
+        || server.command.contains('\0') || server.command == browser_runtime::COMMAND_MARKER {
         return Err(GitError::Message("MCP 服务 ID 或启动命令无效".into()));
     }
     if server.args.len() > 64 || server.args.iter().any(|arg| arg.len() > 4096 || arg.contains('\0')) {
         return Err(GitError::Message("MCP 启动参数超过限制".into()));
     }
-    if server.tools.is_empty() || server.tools.len() > 1024
+    if (!server.auto_discover && server.tools.is_empty()) || server.tools.len() > 1024
         || server.tools.keys().any(|name| name.trim().is_empty() || name.len() > 256) {
         return Err(GitError::Message("请至少允许一个有效的 MCP 工具".into()));
+    }
+    if server.cached_tools.len() > 1024
+        || server.cached_tools.iter().any(|name| name.trim().is_empty() || name.len() > 256) {
+        return Err(GitError::Message("MCP 工具缓存超过限制或包含无效名称".into()));
     }
     Ok(())
 }
@@ -338,6 +379,14 @@ pub fn remove_user_mcp_server(data_dir: &Path, name: &str) -> Result<()> {
     write_user_mcp_config(data_dir, &config)
 }
 
+pub fn set_user_mcp_server_enabled(data_dir: &Path, name: &str, enabled: bool) -> Result<()> {
+    let mut config = load_user_mcp_config(data_dir)?;
+    let server = config.servers.get_mut(name).ok_or_else(||
+        GitError::Message("MCP 服务已被移除，请刷新列表".into()))?;
+    server.enabled = enabled;
+    write_user_mcp_config(data_dir, &config)
+}
+
 /// 测试本地 stdio 服务的握手并读取工具名；不调用任何工具。
 pub fn inspect_mcp_server_tools(command: &str, args: &[String]) -> Result<Vec<String>> {
     if command.trim().is_empty() || command == browser_runtime::COMMAND_MARKER {
@@ -353,9 +402,10 @@ pub fn inspect_mcp_server_tools(command: &str, args: &[String]) -> Result<Vec<St
             .map_err(|_| GitError::Message("MCP 服务连接超时；首次使用 npx 可能需要下载 npm 包，请检查网络后重试".into()))?
             .map_err(|_| GitError::Message("MCP 服务握手失败".into()))?;
         let tools = tokio::time::timeout(Duration::from_secs(12), client.list_all_tools()).await
-            .map_err(|_| GitError::Message("读取 MCP 工具列表超时".into()))?
-            .map_err(|_| GitError::Message("读取 MCP 工具列表失败".into()))?;
+            .map_err(|_| GitError::Message("读取 MCP 工具列表超时".into()))
+            .and_then(|result| result.map_err(|_| GitError::Message("读取 MCP 工具列表失败".into())));
         let _ = client.close_with_timeout(Duration::from_secs(4)).await;
+        let tools = tools?;
         if tools.len() > 1024 {
             return Err(GitError::Message("MCP 工具列表超过 1024 项".into()));
         }
@@ -404,6 +454,7 @@ struct WorkflowExternalHost {
 struct McpSession {
     runtime: tokio::runtime::Runtime,
     client: RunningService<RoleClient, ()>,
+    tools: Vec<rmcp::model::Tool>,
 }
 
 impl Drop for McpSession {
@@ -438,7 +489,7 @@ impl WorkflowExternalHost {
         };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|err| GitError::Message(format!("MCP 运行时创建失败：{err}")))?;
-        let client = runtime.block_on(async {
+        let (client, tools) = runtime.block_on(async {
             let mut command = super::mcp_process::command(
                 &command_path.to_string_lossy(), &command_args)?;
             if config.command == browser_runtime::COMMAND_MARKER {
@@ -450,9 +501,18 @@ impl WorkflowExternalHost {
             }
             let transport = TokioChildProcess::new(command)
                 .map_err(|err| GitError::Message(format!("MCP 服务 {server} 启动失败：{err}")))?;
-            wait_checked(().serve(transport), control, deadline, "MCP 连接").await
+            let mut client = wait_checked(().serve(transport), control, deadline, "MCP 连接").await?;
+            let tools = match wait_checked(client.list_all_tools(), control, deadline, "MCP 工具列表").await {
+                Ok(tools) if tools.len() <= 1024 => tools,
+                outcome => {
+                    let _ = client.close_with_timeout(Duration::from_secs(4)).await;
+                    return Err(outcome.err().unwrap_or_else(||
+                        GitError::Message("MCP 工具列表超过 1024 项".into())));
+                }
+            };
+            Ok((client, tools))
         })?;
-        Ok(McpSession { runtime, client })
+        Ok(McpSession { runtime, client, tools })
     }
 
     fn skill_tool_catalog(&self, allowed: &BTreeSet<(String, String)>,
@@ -471,14 +531,7 @@ impl WorkflowExternalHost {
                 sessions.insert(server.clone(), session);
             }
             let session = sessions.get_mut(&server).expect("MCP 会话已创建");
-            let tools = match session.runtime.block_on(wait_checked(
-                session.client.list_all_tools(), control, deadline, "MCP 工具列表")) {
-                Ok(tools) => tools,
-                Err(error) => { sessions.remove(&server); return Err(error); }
-            };
-            if tools.len() > 1024 {
-                return Err(GitError::Message("MCP 工具列表超过 1024 项".into()));
-            }
+            let tools = &session.tools;
             for name in names {
                 let tool = tools.iter().find(|tool| tool.name == name)
                     .ok_or_else(|| GitError::Message(format!("MCP 服务 {server} 未提供工具 {name}")))?;
@@ -514,10 +567,7 @@ impl WorkflowExternalHost {
         let session = sessions.get_mut(server).expect("MCP 会话已创建");
         let outcome = session.runtime.block_on(async {
             let client = &session.client;
-            let tools = wait_checked(client.list_all_tools(), control, deadline, "MCP 工具列表").await?;
-            if tools.len() > 1024 {
-                return Err(GitError::Message("MCP 工具列表超过 1024 项".into()));
-            }
+            let tools = &session.tools;
             let selected = tools.iter().find(|entry| entry.name == tool)
                 .ok_or_else(|| GitError::Message(format!("MCP 服务 {server} 未提供工具 {tool}")))?;
             let schema = Value::Object((*selected.input_schema).clone());
