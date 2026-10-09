@@ -18,7 +18,6 @@
 //! 启动），供 Claude Code / Cursor / ZCode 等 AI 工具作为 MCP 服务器挂载，
 //! 查询本机已索引仓库的代码知识图谱。
 
-use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -35,6 +34,9 @@ const SERVER_NAME: &str = "khaslana-code-index";
 const MAX_FRAME_BYTES: usize = 10 * 1024 * 1024;
 /// trace_path / 详情查询的默认 BFS 节点上限（对齐参考项目 MCP_BFS_LIMIT）。
 const DEFAULT_MAX_NODES: usize = 100;
+
+#[path = "mcp_transport.rs"]
+mod transport;
 
 /// 单个仓库的查询上下文：根目录（按 repo 键解析且 meta 缺路径时可能未知）
 /// 与索引库路径。
@@ -58,6 +60,10 @@ pub struct McpServer {
 #[cfg(test)]
 #[path = "../tests/code_index_mcp_jobs.rs"]
 mod jobs_tests;
+
+#[cfg(test)]
+#[path = "../tests/code_index_mcp_protocol.rs"]
+mod protocol_tests;
 
 impl Drop for McpServer {
     fn drop(&mut self) { self.coordinator.stop(); }
@@ -116,8 +122,10 @@ impl McpServer {
         let repo_root = repo_path
             .canonicalize()
             .map_err(|e| super::err(format!("仓库路径不可用 {}: {e}", repo_path.display())))?;
-        git2::Repository::open(&repo_root)
+        let repo = git2::Repository::open(&repo_root)
             .map_err(|e| super::err(format!("{} 不是 Git 仓库：{e}", repo_root.display())))?;
+        let repo_root = repo.workdir().ok_or_else(|| super::err("裸仓库没有工作区，不能建立工作区代码索引"))?
+            .canonicalize().map_err(|e| super::err(format!("仓库工作区不可用：{e}")))?;
         let repo_key = crate::ai::review_store::repo_key(&repo_root.to_string_lossy());
         let db_path = super::open_index_db_path(data_dir, &repo_key)?;
         Ok(RepoContext {
@@ -144,11 +152,15 @@ impl McpServer {
             let key = spec.to_ascii_lowercase();
             let db_path = self.data_dir.join("code-index").join(&key).join("index.db");
             if db_path.is_file() {
-                let stats = read_index_stats(&db_path)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                return Ok(Self::context_from_entry(&self.data_dir, &key, &stats));
+                // 路由只需要仓库路径；不能每次 search/trace 都先 COUNT 全库节点和边。
+                use rusqlite::OptionalExtension;
+                let store = super::store::open_read_only_if_exists(&db_path)
+                    .map_err(|error| json!({ "error": error.to_string() }))?
+                    .ok_or_else(|| json!({ "error": "索引库不可用或版本不兼容", "repo": key }))?;
+                let root: Option<String> = store.conn.query_row("SELECT value FROM meta WHERE key='repo_path'", [], |row| row.get(0))
+                    .optional().map_err(|error| json!({ "error": format!("读取仓库路径失败：{error}") }))?;
+                return Ok(RepoContext { repo_root: root.filter(|root| !root.is_empty()).map(PathBuf::from),
+                    db_path, repo_key: key });
             }
         }
         Err(json!({
@@ -188,7 +200,7 @@ impl McpServer {
             };
             entries.push((dir.file_name().to_string_lossy().to_string(), stats));
         }
-        entries.sort_by(|a, b| b.1.indexed_at.cmp(&a.1.indexed_at));
+        entries.sort_by(|a, b| b.1.indexed_at.cmp(&a.1.indexed_at).then(a.0.cmp(&b.0)));
         entries
     }
 
@@ -294,8 +306,13 @@ impl McpServer {
             Err(value) => return text_result(&value, true),
         };
         if name != "refresh_index" { self.ensure_index_background(&ctx); }
-        let guarded = matches!(name, "search_symbols" | "search_graph" | "get_symbol_detail" | "get_code_snippet" | "trace_path" | "get_architecture" | "check_index_coverage");
-        let generation = if guarded { super::store::index_generation(&ctx.db_path).ok().flatten() } else { None };
+        let guarded = matches!(name, "search_symbols" | "search_graph" | "get_symbol_detail" | "get_code_snippet" | "trace_path" | "get_architecture" | "check_index_coverage" | "detect_changes");
+        let generation = if guarded {
+            match super::store::index_generation(&ctx.db_path) {
+                Ok(generation) => generation,
+                Err(error) => return text_result(&json!({ "error": error.to_string() }), true),
+            }
+        } else { None };
         if guarded && Self::arg_str(arguments, "generation").is_some_and(|expected| generation.as_deref() != Some(expected)) {
             return text_result(&json!({ "error": "索引已刷新，旧分页代际失效", "hint": "移除 generation 并从 offset=0 重新查询" }), true);
         }
@@ -322,7 +339,11 @@ impl McpServer {
         match result {
             Ok(mut value) => {
                 if guarded {
-                    if generation != super::store::index_generation(&ctx.db_path).ok().flatten() {
+                    let current = match super::store::index_generation(&ctx.db_path) {
+                        Ok(generation) => generation,
+                        Err(error) => return text_result(&json!({ "error": error.to_string() }), true),
+                    };
+                    if generation != current {
                         return text_result(&json!({ "error": "查询期间索引已更新", "hint": "从 offset=0 重新查询" }), true);
                     }
                     value["generation"] = json!(generation);
@@ -603,16 +624,23 @@ impl McpServer {
                 "hint": "改传 repo 参数为仓库绝对路径再刷新",
             }));
         };
-        self.coordinator.wait(&ctx.repo_key);
         let db_path = ctx.db_path.clone();
-        if !self.coordinator.schedule(ctx.repo_key.clone(), true, move |cancel| {
+        let scheduled = self.coordinator.schedule(ctx.repo_key.clone(), true, move |cancel| {
             Self::run_index_inner(&repo_root, &db_path, force_full, cancel, |message| {
                 eprintln!("[khaslana-mcp] {message}");
             }).map_err(|error| error.to_string())
-        }) {
-            return Err(json!({ "error": "同仓库索引任务仍在运行或调度器已关闭" }));
+        });
+        if !scheduled && (force_full || !self.indexing(&ctx.repo_key)) {
+            return Err(json!({ "error": "刷新未安排：同仓库任务仍在运行或调度器已关闭",
+                "repo": ctx.repo_key, "scheduled": false, "refresh": self.coordinator.status(&ctx.repo_key),
+                "hint": "先用 index_status 等待当前任务结束，再重新调用 refresh_index" }));
         }
-        self.coordinator.wait(&ctx.repo_key);
+        // stdio 串行分发不能等分钟级建库；小任务保留直接返回结果的兼容行为。
+        if !self.coordinator.wait_timeout(&ctx.repo_key, std::time::Duration::from_millis(100)) {
+            return Ok(json!({ "status": "indexing", "indexing": true, "repo": ctx.repo_key,
+                "scheduled": scheduled, "refresh": self.coordinator.status(&ctx.repo_key),
+                "hint": "索引仍在后台处理，请用 index_status 查询完成或失败状态；无需重复 refresh_index" }));
+        }
         if let Some(error) = self.coordinator.status(&ctx.repo_key)["last_error"].as_str() {
             return Err(json!({ "error": error }));
         }
@@ -635,9 +663,13 @@ impl McpServer {
         let parsed: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(_) => {
-                return Some(jsonrpc_error(&json!(0), -32700, "Parse error"));
+                return Some(jsonrpc_error(&Value::Null, -32700, "Parse error"));
             }
         };
+        let valid_id = parsed.get("id").is_none_or(|id| id.is_string() || id.is_i64() || id.is_u64());
+        if !parsed.is_object() || parsed["jsonrpc"] != "2.0" || !parsed["method"].is_string() || !valid_id {
+            return Some(jsonrpc_error(&Value::Null, -32600, "Invalid Request"));
+        }
         // 无 id 的消息按 JSON-RPC 通知处理：不产生任何响应。
         let Some(id) = parsed.get("id").cloned() else {
             return None;
@@ -649,6 +681,9 @@ impl McpServer {
                 "Invalid Request: missing method",
             ));
         };
+        if parsed.get("params").is_some_and(|params| !params.is_object()) {
+            return Some(jsonrpc_error(&id, -32602, "params 必须是对象"));
+        }
 
         match method {
             "initialize" => {
@@ -667,11 +702,10 @@ impl McpServer {
                         "protocolVersion": negotiated,
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": "先用 list_projects 选择 repo，再用 search_graph/search_symbols 找定义；query 支持名称、签名和文档关键词，name_pattern 是正则，file_pattern 是仓库相对路径 glob。has_more=true 时带 next_offset 和 generation 继续翻页，保留其他参数；代际失效从 offset=0 重查。取得 qualified_name 后用 get_code_snippet 读源码、trace_path 查调用关系；同名歧义按 suggestions 重查。对证据文件调用 check_index_coverage，部分解析、过期或未索引时回读源码。查询按需触发后台增量检查，可用 index_status.refresh 查看排队/失败/退避状态；refresh_index 可立即刷新。tree-sitter 和启发式调用解析不能证明代码不存在。",
+                        "instructions": "Select repo via list_projects; omit only for a single repo. Single-repo servers ignore repo overrides; ambiguous selection lists choices. Search definitions, then pass returned qualified_name to get_code_snippet or trace_path; resolve ambiguity via suggestions, never guess symbols from tool names. When has_more, keep filters and use offset=next_offset plus generation; on stale generation restart at offset=0 without generation. Check evidence paths with check_index_coverage; read source for partial, stale or missing coverage. Tree-sitter and heuristic calls are incomplete: empty results do not prove absence; clean coverage does not prove completeness. Queries trigger background incremental checks; index_status.refresh reports queue, errors and backoff. After refresh_index returns indexing, poll index_status for completion/failure, do not refresh repeatedly.",
                     }),
                 ))
             }
-            m if m.starts_with("notifications/") => None,
             "ping" => Some(jsonrpc_result(&id, &json!({}))),
             "tools/list" => Some(jsonrpc_result(&id, &json!({ "tools": tool_definitions() }))),
             "tools/call" => {
@@ -683,6 +717,12 @@ impl McpServer {
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                let Some(definition) = tool_definitions().iter().find(|tool| tool["name"] == name) else {
+                    return Some(jsonrpc_error(&id, -32602, &format!("未知工具 {name}")));
+                };
+                if let Err(error) = validate_arguments(&definition["inputSchema"], &arguments, "arguments") {
+                    return Some(jsonrpc_error(&id, -32602, &error));
+                }
                 Some(jsonrpc_result(&id, &self.call_tool(name, &arguments)))
             }
             _ => Some(jsonrpc_error(&id, -32601, "Method not found")),
@@ -738,16 +778,68 @@ fn jsonrpc_error(id: &Value, code: i64, message: &str) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
 }
 
+/// 只校验本服务工具清单使用的 schema 子集，避免文档与实际参数规则各维护一套。
+fn validate_arguments(schema: &Value, value: &Value, path: &str) -> std::result::Result<(), String> {
+    let valid_type = match schema["type"].as_str() {
+        Some("object") => value.is_object(),
+        Some("array") => value.is_array(),
+        Some("string") => value.is_string(),
+        Some("integer") => value.is_i64() || value.is_u64(),
+        Some("boolean") => value.is_boolean(),
+        _ => true,
+    };
+    if !valid_type { return Err(format!("{path} 类型无效，应为 {}", schema["type"])); }
+    if let Some(values) = schema["enum"].as_array() {
+        if !values.contains(value) { return Err(format!("{path} 不在允许的取值中")); }
+    }
+    if let Some(minimum) = schema["minimum"].as_i64() {
+        if value.as_i64().is_some_and(|number| number < minimum) {
+            return Err(format!("{path} 不得小于 {minimum}"));
+        }
+    }
+    if let Some(maximum) = schema["maximum"].as_u64() {
+        if value.as_u64().is_some_and(|number| number > maximum) {
+            return Err(format!("{path} 不得大于 {maximum}"));
+        }
+    }
+    if let Some(required) = schema["required"].as_array() {
+        for key in required.iter().filter_map(Value::as_str) {
+            if value.get(key).is_none() { return Err(format!("缺少必填参数 {path}.{key}")); }
+        }
+    }
+    if let Some(choices) = schema["anyOf"].as_array() {
+        if !choices.iter().any(|choice| validate_arguments(choice, value, path).is_ok()) {
+            return Err(format!("{path} 缺少必需的查询条件，请参考 tools/list"));
+        }
+    }
+    if let Some(properties) = schema["properties"].as_object() {
+        for (key, property) in properties {
+            if let Some(value) = value.get(key) { validate_arguments(property, value, &format!("{path}.{key}"))?; }
+        }
+    }
+    if let Some(items) = value.as_array() {
+        for (index, item) in items.iter().enumerate() {
+            validate_arguments(&schema["items"], item, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// 工具定义（name/title/description/inputSchema，中文描述与评审 agent 工具一致）
+// 工具定义：中文展示标题，紧凑英文供模型读取；默认值由 schema 表达。
 // ---------------------------------------------------------------------------
 
-fn tool_definitions() -> Vec<Value> {
+fn tool_definitions() -> &'static [Value] {
+    static DEFINITIONS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    DEFINITIONS.get_or_init(build_tool_definitions)
+}
+
+fn build_tool_definitions() -> Vec<Value> {
     let output_schema = json!({ "type": "object", "additionalProperties": true });
     // 多仓库模式共用的可选 repo 参数说明。
     let repo_prop = json!({
         "type": "string",
-        "description": "可选：目标仓库（仓库绝对路径，或 list_projects 返回的 repo 键）。单仓库挂载、或本机仅一个已索引仓库时可省略；多个仓库且未传时会报错并列出可选清单"
+        "description": "Absolute worktree path or list_projects repo key; omit for a single repo."
     });
     let with_repo = |mut schema: Value| {
         schema["properties"]["repo"] = repo_prop.clone();
@@ -757,24 +849,24 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "list_projects",
             "title": "项目清单",
-            "description": "列出本机全部已索引仓库（repo 键、仓库路径、文件/符号/边统计、最近索引时间）。多仓库模式下先用它了解可选目标；其余工具的 repo 参数可传仓库绝对路径或这里的 repo 键。",
+            "description": "List local indexed repos: keys, paths, file/symbol/edge counts and index times. Select a repo for subsequent tools.",
             "inputSchema": { "type": "object", "properties": {} },
             "outputSchema": output_schema,
         }),
         json!({
             "name": "search_symbols",
             "title": "符号搜索",
-            "description": "查找函数/类型/方法定义的首选工具。搜索名称、路径、声明签名和文档注释，支持 camelCase/snake_case 拆词；精确名称优先，多词完全无命中时自动放宽。默认只返回定义符号，可按标签、路径 glob、名称正则过滤。返回位置、签名、文档摘要与 total/has_more/next_offset；has_more 时保持参数并带 offset=next_offset 翻页。拿到 qualified_name 后可用 get_code_snippet / trace_path。索引是尽力解析，空结果不能证明代码不存在。",
+            "description": "Keyword search over definition names, paths, signatures and docs. Exact names rank first; relax all-words matching only if empty. Filters AND together. Returns locations, signatures, doc excerpts and total/has_more/next_offset; use qualified_name for snippet/trace. No match is not proof of absence.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "搜索词，支持多词与驼峰拆分" },
-                    "label": { "type": "string", "description": "可选：按节点标签过滤（Function/Method/Class/Struct/Interface/Enum/Trait/Type/Field）" },
-                    "file_pattern": { "type": "string", "description": "仓库相对路径 glob，如 src/git/*；支持 *、?、[...]，不是正则" },
-                    "name_pattern": { "type": "string", "description": "名称正则，如 ^(push|pull).*；与其他条件同时过滤" },
-                    "qn_pattern": { "type": "string", "description": "qualified_name 正则，用于限定模块或类型作用域" },
-                    "offset": { "type": "integer", "minimum": 0, "description": "跳过的结果数，默认 0；翻页传上次 next_offset" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "返回条数上限，默认 20，最大 200" }
+                    "query": { "type": "string", "description": "Names/paths/signatures/docs; splits camelCase/snake_case." },
+                    "label": { "type": "string", "description": "Node label: Function/Method/Class/Struct/Interface/Enum/Trait/Type/Field." },
+                    "file_pattern": { "type": "string", "description": "Repo-relative glob (* ? [...]), e.g. src/git/*; not regex." },
+                    "name_pattern": { "type": "string", "description": "Name regex, e.g. ^(push|pull).*" },
+                    "qn_pattern": { "type": "string", "description": "Qualified-name regex for module/type scope." },
+                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Use next_offset with unchanged filters and generation." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20 }
                 },
                 "required": ["query"]
             })),
@@ -783,11 +875,11 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "get_symbol_detail",
             "title": "符号详情",
-            "description": "查某符号的定义详情：精确位置、直接调用方/被调用方、定义处源码片段（钳 200 行）。回答『这个函数在哪个文件、长什么样』用它。同名歧义时返回 status=ambiguous + suggestions 数组——改用其中的 qualified_name 重查，不要拿 MCP 工具名或猜测名当符号名。",
+            "description": "Definition location, direct callers/callees and source (max 200 lines). On status=ambiguous, retry a suggestions qualified_name. Use names from search, not tool names.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "符号名或完整 qualified_name" }
+                    "name": { "type": "string", "description": "Symbol name or exact qualified_name from search." }
                 },
                 "required": ["name"]
             })),
@@ -796,16 +888,16 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "trace_path",
             "title": "调用链追踪",
-            "description": "沿 CALLS 边追踪调用方和被调用方，每跳带风险分级。function_name 优先传搜索所得 qualified_name；direction 默认 both，depth 默认 3、最大 8。callers_total/callees_total 是当前索引中该深度内的可达总数，两个方向分别分页（limit 默认 100，最大 200）；has_more 时保持参数并传 offset=next_offset。启发式解析可能漏掉动态调用，结果不是完整语义分析。",
+            "description": "Traverse CALLS with optional per-hop risk labels. callers_total/callees_total count reachable indexed nodes within depth; each direction pages independently. Heuristic links may miss dynamic calls.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
-                    "function_name": { "type": "string", "description": "函数/方法名" },
-                    "direction": { "type": "string", "enum": ["inbound", "outbound", "both"], "description": "默认 both" },
-                    "depth": { "type": "integer", "description": "BFS 层数，默认 3，最大 8" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "每个方向的返回条数，默认 100" },
-                    "offset": { "type": "integer", "minimum": 0, "description": "每个方向跳过的节点数，默认 0" },
-                    "risk_labels": { "type": "boolean", "description": "是否附带风险分级，默认 true" }
+                    "function_name": { "type": "string", "description": "Function/method name; prefer qualified_name from search." },
+                    "direction": { "type": "string", "enum": ["inbound", "outbound", "both"], "default": "both", "description": "inbound=callers; outbound=callees." },
+                    "depth": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3, "description": "BFS depth." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100, "description": "Nodes per direction." },
+                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip per direction; use next_offset with unchanged args and generation." },
+                    "risk_labels": { "type": "boolean", "default": true }
                 },
                 "required": ["function_name"]
             })),
@@ -814,19 +906,19 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "get_architecture",
             "title": "架构概览",
-            "description": "接手陌生仓库或开始代码审查前，先调用一次建立全局认知：节点/边总量与类型分布、语言构成、顶层目录符号密度、fan-in 调用热点 Top 10。一次调用替代数十次逐文件浏览。",
+            "description": "Repo overview: node/edge totals and types, languages, top-level folder symbol density and top 10 fan-in hotspots.",
             "inputSchema": with_repo(json!({ "type": "object", "properties": {} })),
             "outputSchema": output_schema,
         }),
         json!({
             "name": "detect_changes",
             "title": "变更影响分析",
-            "description": "提交或代码审查前评估未提交改动的影响面：工作区三态变更（未暂存+已暂存+未跟踪；可选 base_branch 走三点 diff）→ 受影响符号 → 上游调用方（带风险分级）。scope=files 只给文件清单，默认 symbols 给全量。注意：底层实现函数是 impacted_symbols / changed_files_via_git，不要拿本工具名当符号名去 search_symbols。",
+            "description": "Impact of unstaged, staged and untracked changes: files, affected symbols and upstream callers with risk labels. Optional base_branch includes committed changes via three-dot diff.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
-                    "scope": { "type": "string", "enum": ["files", "symbols"], "description": "files=仅变更文件列表；symbols=文件+受影响符号+调用方（默认）" },
-                    "base_branch": { "type": "string", "description": "可选：基线分支名（三点 diff，已提交+未提交一起算）" }
+                    "scope": { "type": "string", "enum": ["files", "symbols"], "default": "symbols", "description": "files=paths only; symbols=files, symbols and callers." },
+                    "base_branch": { "type": "string", "description": "Three-dot diff base; includes working-tree changes." }
                 }
             })),
             "outputSchema": output_schema,
@@ -834,18 +926,18 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "index_status",
             "title": "索引状态",
-            "description": "查询当前索引的状态与统计（文件/符号/边/分支/最近索引时间/库大小）。首次使用或怀疑索引过期时先调用确认；空索引时按返回的 hint 调 refresh_index。",
+            "description": "Index status, file/symbol/edge counts, branch, time and DB size; refresh reports this process's queue, errors and backoff. If empty, follow hint to refresh_index.",
             "inputSchema": with_repo(json!({ "type": "object", "properties": {} })),
             "outputSchema": output_schema,
         }),
         json!({
             "name": "refresh_index",
             "title": "刷新索引",
-            "description": "同步重建索引：incremental（默认，mtime+size 增量，通常秒级）或 full（全量重建）。长时间编辑后 search/trace 结果可疑时先刷新；工作区大量增删文件后也建议调用。对尚未索引的仓库调用即建立索引（多仓库模式需传 repo 参数为仓库绝对路径）。",
+            "description": "Refresh index; first build needs an absolute repo path. Returns ready or indexing: poll index_status, do not repeat refresh. An active local job is reused for incremental; full is rejected until it finishes.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "string", "enum": ["incremental", "full"], "description": "默认 incremental" }
+                    "mode": { "type": "string", "enum": ["incremental", "full"], "default": "incremental", "description": "incremental=mtime+size check; full=rebuild." }
                 }
             })),
             "outputSchema": output_schema,
@@ -854,7 +946,7 @@ fn tool_definitions() -> Vec<Value> {
     let mut search_graph = definitions[1].clone();
     search_graph["name"] = json!("search_graph");
     search_graph["title"] = json!("结构与关键词搜索");
-    search_graph["description"] = json!("定位代码结构的首选工具。query 按名称、签名和文档关键词检索；也可省略 query，仅用 name_pattern/qn_pattern 正则、file_pattern 路径 glob 或 label 浏览定义。条件同时生效，返回位置、签名和摘要。total 是过滤后的真实总数；has_more=true 时保持条件并传 offset=next_offset 继续翻页。精确源码用 get_code_snippet，调用关系用 trace_path。空结果不是代码不存在的证明。");
+    search_graph["description"] = json!("Find definitions by keywords and/or structural filters (AND). Without query, supply any regex/glob/label filter. Returns locations, signatures, doc excerpts, filtered total/has_more/next_offset. Use qualified_name for snippet/trace. No match is not proof of absence.");
     search_graph["inputSchema"].as_object_mut().unwrap().remove("required");
     search_graph["inputSchema"]["anyOf"] = json!([
         { "required": ["query"] }, { "required": ["name_pattern"] },
@@ -863,7 +955,7 @@ fn tool_definitions() -> Vec<Value> {
     let mut snippet = definitions[2].clone();
     snippet["name"] = json!("get_code_snippet");
     snippet["title"] = json!("定义源码");
-    snippet["description"] = json!("先从 search_graph/search_symbols 取得 qualified_name，再精确读取该定义的源码（最多 200 行，truncated 表示截断）、签名和文档。返回的 source.lines 是源码行数组，source.start_line 是首行行号。该工具不搜索名称；同名歧义时按 suggestions 中的 qualified_name 重查。调用关系另用 trace_path。");
+    snippet["description"] = json!("Read a definition found by search_graph/search_symbols, not a search tool. Returns signature, docs and source.lines/start_line (max 200; source.truncated). On ambiguity, retry a suggestions qualified_name. For calls use trace_path.");
     let name_schema = snippet["inputSchema"]["properties"]["name"].clone();
     snippet["inputSchema"]["properties"].as_object_mut().unwrap().remove("name");
     snippet["inputSchema"]["properties"]["qualified_name"] = name_schema;
@@ -871,12 +963,12 @@ fn tool_definitions() -> Vec<Value> {
     definitions.extend([search_graph, snippet]);
     definitions.push(json!({
         "name": "check_index_coverage", "title": "索引覆盖检查",
-        "description": "确认搜索或调用结果之前，检查已涉及文件的覆盖与新鲜度。paths 是精确相对路径数组；scopes 是目录前缀数组（. 表示仓库），至少传一个。返回 indexed/partial/read_failed/parse_failed/excluded/unsupported/not_indexed/unknown、语法错误范围、未解析调用数及 metadata_matches/metadata_changed。失败或部分覆盖需直接回读源码；状态正常也不证明语义完整。按 offset/next_offset 翻页。",
+        "description": "Check evidence files: indexed/partial/read_failed/parse_failed/excluded/unsupported/not_indexed/unknown, parse gaps, unresolved calls and metadata_matches/metadata_changed. Read source for gaps or stale/missing coverage; clean status is no proof of completeness. Supply paths or scopes.",
         "inputSchema": with_repo(json!({ "type": "object", "properties": {
-            "paths": { "type": "array", "items": { "type": "string" } },
-            "scopes": { "type": "array", "items": { "type": "string" } },
-            "offset": { "type": "integer", "minimum": 0 },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+            "paths": { "type": "array", "items": { "type": "string" }, "description": "Exact repo-relative file paths." },
+            "scopes": { "type": "array", "items": { "type": "string" }, "description": "Directory prefixes; '.' covers the repo." },
+            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Use next_offset with unchanged args and generation." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
         }, "anyOf": [{ "required": ["paths"] }, { "required": ["scopes"] }] })),
         "outputSchema": output_schema
     }));
@@ -884,8 +976,11 @@ fn tool_definitions() -> Vec<Value> {
         let read_only = definition["name"] != "refresh_index";
         definition["annotations"] = json!({ "readOnlyHint": read_only, "destructiveHint": false,
             "idempotentHint": true, "openWorldHint": false });
-        if matches!(definition["name"].as_str(), Some("search_symbols" | "search_graph" | "trace_path" | "get_code_snippet" | "get_symbol_detail" | "get_architecture" | "check_index_coverage")) {
-            definition["inputSchema"]["properties"]["generation"] = json!({ "type": "string", "description": "可选：沿用上一页返回的 generation，刷新后会明确报代际失效，需从 offset=0 重查" });
+        if definition["inputSchema"]["properties"].get("offset").is_some() {
+            definition["inputSchema"]["properties"]["offset"]["maximum"] = json!(i64::MAX);
+        }
+        if matches!(definition["name"].as_str(), Some("search_symbols" | "search_graph" | "trace_path" | "get_code_snippet" | "get_symbol_detail" | "get_architecture" | "check_index_coverage" | "detect_changes")) {
+            definition["inputSchema"]["properties"]["generation"] = json!({ "type": "string", "description": "Reuse result generation; if stale, omit and restart at offset=0." });
         }
     }
     definitions
@@ -917,107 +1012,12 @@ pub fn run(repo_path: Option<&Path>) -> i32 {
     );
 
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
-    let mut reader = stdin.lock();
-    let mut pending_content_length: Option<usize> = None;
-    // 响应帧格式跟随请求：客户端以 Content-Length 帧发来时按同格式回
-    // （对齐参考项目）；换行分隔则回换行。
-    let mut content_length_mode = false;
-
-    loop {
-        let line = if let Some(length) = pending_content_length.take() {
-            // Content-Length 帧模式：读满 length 字节。
-            let mut frame = vec![0u8; length];
-            if reader.read_exact(&mut frame).is_err() {
-                break;
-            }
-            String::from_utf8_lossy(&frame).trim().to_string()
-        } else {
-            let mut raw = String::new();
-            match reader.read_line(&mut raw) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    content_length_mode = false;
-                    raw.trim().to_string()
-                }
-            }
-        };
-
-        if line.is_empty() {
-            continue;
-        }
-        // 兼容 LSP 风格 Content-Length 帧：读头部直到空行，取长度后整帧读入。
-        if !content_length_mode && line.to_ascii_lowercase().starts_with("content-length:") {
-            content_length_mode = true;
-            let length = line
-                .split(':')
-                .next_back()
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            // 消费剩余头部行（直到空行）。
-            let mut header_line = String::new();
-            loop {
-                header_line.clear();
-                match reader.read_line(&mut header_line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if header_line.trim().is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-            if length > MAX_FRAME_BYTES {
-                eprintln!("[khaslana-mcp] 帧超过 {MAX_FRAME_BYTES} 字节上限，已丢弃");
-                pending_content_length = None;
-                continue;
-            }
-            pending_content_length = Some(length);
-            continue;
-        }
-
-        if line.len() > MAX_FRAME_BYTES {
-            eprintln!("[khaslana-mcp] 消息超过 {MAX_FRAME_BYTES} 字节上限，已丢弃");
-            continue;
-        }
-        // 请求帧可能一帧一对象（换行分隔约定）；逐行处理。
-        // panic 隔离：单条消息内的意外 panic（索引/文件状态异常等）降级为
-        // 该请求的 -32603 Internal error，不杀死服务器进程。
-        let request_id = serde_json::from_str::<Value>(&line)
-            .ok()
-            .and_then(|v| v.get("id").cloned());
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            server.handle_message(&line)
-        })) {
-            Ok(response) => response,
-            Err(payload) => {
-                let message = if let Some(m) = payload.downcast_ref::<&str>() {
-                    (*m).to_string()
-                } else if let Some(m) = payload.downcast_ref::<String>() {
-                    m.clone()
-                } else {
-                    "未知原因".to_string()
-                };
-                eprintln!("[khaslana-mcp] 消息处理 panic：{message}");
-                Some(jsonrpc_error(
-                    &request_id.unwrap_or(json!(null)),
-                    -32603,
-                    "Internal error: 工具调用异常，请重试或调用 refresh_index 后再试",
-                ))
-            }
-        };
-        if let Some(response) = response {
-            if content_length_mode {
-                let _ = write!(
-                    stdout,
-                    "Content-Length: {}\r\n\r\n{response}",
-                    response.len()
-                );
-            } else {
-                let _ = writeln!(stdout, "{response}");
-            }
-            let _ = stdout.flush();
+    let stdout = std::io::stdout();
+    match transport::serve(&server, &mut stdin.lock(), &mut stdout.lock()) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("[khaslana-mcp] 连接结束：{error}");
+            1
         }
     }
-    0
 }

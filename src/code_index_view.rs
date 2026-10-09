@@ -1,13 +1,13 @@
 // 设置中心「代码索引」页：MCP 接入卡 + 多仓库列表（每仓库开关、状态徽标、
 // 进度条与增量/重建/删除入口）。列表条目在打开设置页时构建（已打开 tabs +
 // 最近仓库 + 索引偏好记录三路合并），随设置页内容区整体滚动；任务仍为全局
-// 单任务（TaskKind::Index 池单线程 + code_index_task 守卫双保险），事件按
-// repo_path 键控回传（索引中关闭仓库标签不影响完成落盘）。
+// 单任务（code_index_task 守卫），事件按仓库与任务身份回传
+// （索引中关闭仓库标签不影响完成落盘）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use gpui::{Context, Window, div, prelude::*, px};
 use gpui_kit::component::setting::{SettingGroup, SettingItem};
@@ -647,7 +647,10 @@ impl RepositoryView {
         };
 
         let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = next_code_index_request_id();
+        self.code_index_stats_requests.remove(repo_key);
         self.code_index_task = Some(CodeIndexTaskState {
+            task_id,
             repo_path: repo_key.to_string(),
             cancel: Arc::clone(&cancel),
             user_initiated,
@@ -658,7 +661,6 @@ impl RepositoryView {
 
         let tx = self.tx.clone();
         let task_repo = repo_key.to_string();
-        let fail_repo = task_repo.clone();
         self.tasks.spawn(TaskKind::Index, move || {
             let progress_tx = tx.clone();
             let event_repo = task_repo.clone();
@@ -668,6 +670,7 @@ impl RepositoryView {
                     send_ui_event(
                         &progress_tx,
                         UiEvent::CodeIndexProgress {
+                            task_id,
                             repo_path: event_repo.clone(),
                             message: progress.message,
                             done: progress.done,
@@ -676,38 +679,11 @@ impl RepositoryView {
                     );
                 }),
             );
-            let outcome = run_index(Path::new(&task_repo), &db_path, force_full, &mut options);
-            match outcome {
-                Ok(RunOutcome::Completed(stats)) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::CodeIndexFinished {
-                            repo_path: task_repo,
-                            stats: Some(stats),
-                        },
-                    );
-                }
-                Ok(RunOutcome::Unchanged) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::CodeIndexFinished {
-                            repo_path: task_repo,
-                            stats: None,
-                        },
-                    );
-                }
-                Ok(RunOutcome::Cancelled) => {
-                    // 取消由 UI 侧置位时同步复位，无需事件。
-                }
-                Err(error) => {
-                    send_ui_event(
-                        &tx,
-                        UiEvent::CodeIndexFailed {
-                            repo_path: fail_repo,
-                            error: error.to_string(),
-                        },
-                    );
-                }
+            let event = code_index_task_event(task_id, &task_repo, || {
+                run_index(Path::new(&task_repo), &db_path, force_full, &mut options)
+            });
+            if let Some(event) = event {
+                send_ui_event(&tx, event);
             }
         });
         cx.notify();
@@ -754,6 +730,7 @@ impl RepositoryView {
             .unwrap_or_else(|| db_path.clone());
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
+                self.code_index_stats_requests.remove(repo_key);
                 self.code_index_stats.remove(repo_key);
                 self.notify_success("索引数据已删除", cx);
             }
@@ -763,6 +740,7 @@ impl RepositoryView {
                     self.notify_error(format!("删除索引数据失败：{err}"), cx);
                     return;
                 }
+                self.code_index_stats_requests.remove(repo_key);
                 self.code_index_stats.remove(repo_key);
                 self.notify_success("索引数据已删除", cx);
             }
@@ -833,11 +811,14 @@ impl RepositoryView {
         };
         let tx = self.tx.clone();
         let repo = repo_key.to_string();
+        let request_id = next_code_index_request_id();
+        self.code_index_stats_requests.insert(repo.clone(), request_id);
         self.tasks.spawn(TaskKind::Short, move || {
             let stats = read_index_stats(&db_path).ok().flatten();
             send_ui_event(
                 &tx,
                 UiEvent::CodeIndexStatsLoaded {
+                    request_id,
                     repo_path: repo,
                     stats,
                 },
@@ -851,20 +832,18 @@ impl RepositoryView {
 
     pub(crate) fn handle_code_index_progress(
         &mut self,
+        task_id: u64,
         repo_path: String,
         message: String,
         done: usize,
         total: usize,
     ) {
-        if self
-            .code_index_task
-            .as_ref()
-            .is_some_and(|t| t.repo_path == repo_path)
-        {
-            self.code_index_progress_message = message.clone();
-            self.code_index_progress_done = done;
-            self.code_index_progress_total = total;
+        if !code_index_task_ownership(self.code_index_task.as_ref(), &repo_path, task_id).0 {
+            return;
         }
+        self.code_index_progress_message = message.clone();
+        self.code_index_progress_done = done;
+        self.code_index_progress_total = total;
         // 进度同时反映到当前活动仓库的状态栏。
         if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
             self.status = format!("代码索引：{message}");
@@ -873,18 +852,18 @@ impl RepositoryView {
 
     pub(crate) fn handle_code_index_finished(
         &mut self,
+        task_id: u64,
         repo_path: String,
         stats: Option<IndexRunStats>,
         cx: &mut Context<Self>,
     ) {
         let (was_tracked, user_initiated) =
-            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path);
-        if was_tracked {
-            self.code_index_task = None;
-            self.code_index_progress_message.clear();
-            self.code_index_progress_done = 0;
-            self.code_index_progress_total = 0;
-        }
+            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path, task_id);
+        if !was_tracked { return; }
+        self.code_index_task = None;
+        self.code_index_progress_message.clear();
+        self.code_index_progress_done = 0;
+        self.code_index_progress_total = 0;
         match stats {
             Some(stats) => {
                 self.code_index_stats
@@ -906,9 +885,6 @@ impl RepositoryView {
                         stats.files, stats.symbols, stats.edges
                     );
                 }
-                // 完成即后台重读库统计：to_cached_stats 无 db_bytes/时间/分支
-                // （这些只在库里），先粗填避免空窗，读库回来覆盖为精确值。
-                self.request_code_index_stats(&repo_path);
             }
             None => {
                 if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
@@ -916,23 +892,25 @@ impl RepositoryView {
                 }
             }
         }
+        // 即使内容未变，也需替换任务开始前失效的统计请求；精确字段从库中回填。
+        self.request_code_index_stats(&repo_path);
         cx.notify();
     }
 
     pub(crate) fn handle_code_index_failed(
         &mut self,
+        task_id: u64,
         repo_path: String,
         error: String,
         cx: &mut Context<Self>,
     ) {
         let (was_tracked, user_initiated) =
-            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path);
-        if was_tracked {
-            self.code_index_task = None;
-            self.code_index_progress_message.clear();
-            self.code_index_progress_done = 0;
-            self.code_index_progress_total = 0;
-        }
+            code_index_task_ownership(self.code_index_task.as_ref(), &repo_path, task_id);
+        if !was_tracked { return; }
+        self.code_index_task = None;
+        self.code_index_progress_message.clear();
+        self.code_index_progress_done = 0;
+        self.code_index_progress_total = 0;
         tracing::warn!(target: "khaslana::code_index", "索引失败 {repo_path}: {error}");
         if self.active_repo_key().as_deref() == Some(repo_path.as_str()) {
             // 与完成提示同一规则：只有用户主动触发才弹错误窗；自动刷新失败
@@ -948,9 +926,13 @@ impl RepositoryView {
 
     pub(crate) fn handle_code_index_stats_loaded(
         &mut self,
+        request_id: u64,
         repo_path: String,
         stats: Option<khaslana::code_index::IndexStats>,
     ) {
+        if !take_code_index_stats_request(&mut self.code_index_stats_requests, &repo_path, request_id) {
+            return;
+        }
         match stats {
             Some(stats) => {
                 self.code_index_stats.insert(repo_path, stats);
@@ -966,10 +948,20 @@ impl RepositoryView {
 // 渲染纯函数与小部件
 // ----------------------------------------------------------------------
 
+fn next_code_index_request_id() -> u64 {
+    static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn take_code_index_stats_request(requests: &mut HashMap<String, u64>, repo_path: &str, request_id: u64) -> bool {
+    if requests.get(repo_path) != Some(&request_id) { return false; }
+    requests.remove(repo_path);
+    true
+}
+
 /// 索引完成/失败事件的任务归属判定：`(是否在途, 是否用户主动触发)`。
 ///
-/// 事件按仓库键寻址：库路径相同但任务已结束时（迟到事件）返回 `(false, false)`，
-/// 两个标志都为假，调用方只更新统计、不动任务状态。
+/// 仓库键与任务编号都必须匹配；取消后重启同仓库时，迟到事件不能污染新任务。
 ///
 /// `user_initiated` 决定完成时是弹提示还是只落状态栏：自动增量刷新（仓库加载、
 /// 工作区操作后）随时可能发生，逐个弹「索引已更新」会变成噪音；只有用户点了
@@ -977,9 +969,29 @@ impl RepositoryView {
 fn code_index_task_ownership(
     task: Option<&CodeIndexTaskState>,
     repo_path: &str,
+    task_id: u64,
 ) -> (bool, bool) {
-    task.filter(|t| t.repo_path == repo_path)
+    task.filter(|t| t.repo_path == repo_path && t.task_id == task_id)
         .map_or((false, false), |t| (true, t.user_initiated))
+}
+
+/// 索引 panic 按原任务身份收尾，不能借用全局异常事件清空其他任务状态。
+fn code_index_task_event(
+    task_id: u64,
+    repo_path: &str,
+    task: impl FnOnce() -> khaslana::types::Result<RunOutcome>,
+) -> Option<UiEvent> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task))
+        .map_err(|payload| format!("索引任务异常退出：{}", crate::tasks::panic_message(payload)))
+        .and_then(|result| result.map_err(|error| error.to_string()));
+    let repo_path = repo_path.to_string();
+    match result {
+        Ok(RunOutcome::Completed(stats)) => Some(UiEvent::CodeIndexFinished { task_id, repo_path, stats: Some(stats) }),
+        Ok(RunOutcome::Unchanged) => Some(UiEvent::CodeIndexFinished { task_id, repo_path, stats: None }),
+        // 取消由 UI 侧置位时同步复位，无需事件。
+        Ok(RunOutcome::Cancelled) => None,
+        Err(error) => Some(UiEvent::CodeIndexFailed { task_id, repo_path, error }),
+    }
 }
 
 /// 状态徽标 pill（圆点 + 文字）。

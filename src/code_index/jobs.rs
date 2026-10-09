@@ -55,6 +55,24 @@ pub(super) fn database_lock(path: &std::path::Path) -> Arc<Mutex<()>> {
     lock
 }
 
+/// 独立 MCP 进程与 GUI 共用系统文件锁；锁文件保留，句柄关闭或进程退出即解锁。
+/// 不能锁数据库本身：旧 schema 重建会替换数据库文件，导致锁身份分裂。
+pub(super) fn database_process_lock(path: &std::path::Path) -> crate::types::Result<std::fs::File> {
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let parent = path.parent().and_then(|parent| std::fs::canonicalize(parent).ok());
+        parent.map_or_else(|| path.to_path_buf(), |parent| parent.join(path.file_name().unwrap_or_default()))
+    });
+    let mut name = absolute.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    let file = std::fs::File::options().read(true).write(true).create(true).truncate(false)
+        .open(absolute.with_file_name(name)).map_err(|error| super::err(format!("打开索引写锁失败：{error}")))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => super::err("该仓库正在被其他进程索引，请稍后重试"),
+        std::fs::TryLockError::Error(error) => super::err(format!("获取索引写锁失败：{error}")),
+    })?;
+    Ok(file)
+}
+
 #[derive(Default)]
 struct JobState {
     active: bool,
@@ -149,6 +167,7 @@ impl IndexCoordinator {
         true
     }
 
+    #[cfg(test)]
     pub fn wait(&self, key: &str) {
         let states = self.states.0.lock().unwrap_or_else(|e| e.into_inner());
         drop(
@@ -159,6 +178,14 @@ impl IndexCoordinator {
                 })
                 .unwrap_or_else(|e| e.into_inner()),
         );
+    }
+
+    pub fn wait_timeout(&self, key: &str, timeout: Duration) -> bool {
+        let states = self.states.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (states, _) = self.states.1.wait_timeout_while(states, timeout,
+            |states| states.get(key).is_some_and(|state| state.active))
+            .unwrap_or_else(|e| e.into_inner());
+        !states.get(key).is_some_and(|state| state.active)
     }
 
     pub fn status(&self, key: &str) -> Value {
@@ -199,3 +226,7 @@ impl IndexCoordinator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/code_index_process_lock.rs"]
+mod process_lock_tests;

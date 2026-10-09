@@ -49,6 +49,7 @@ pub fn ensure_commit_index(
         if cancelled.load(Ordering::Relaxed) {
             return Ok(false);
         }
+        let _process_guard = super::jobs::database_process_lock(db_path)?;
         if commit_index_ready(repo_path, commit, db_path)? { return Ok(!cancelled.load(Ordering::Relaxed)); }
         build_commit_index(repo_path, commit, db_path, cancelled)
     })

@@ -307,6 +307,26 @@ impl GraphBuffer {
         before - self.nodes.len()
     }
 
+    /// 工作区图只保留当前分支与仍包含已发现文件的目录链。
+    pub(super) fn prune_stale_structure(&mut self, project: &str, branch: &str) {
+        let mut dirs = HashSet::new();
+        for node in self.nodes.iter().filter(|node| node.label == NodeLabel::File) {
+            let mut path = node.file_path.as_ref();
+            while let Some((parent, _)) = path.rsplit_once('/') {
+                if !dirs.insert(parent) { break; }
+                path = parent;
+            }
+        }
+        let live: HashSet<_> = dirs.into_iter().map(|path| folder_qualified_name(project, path)).collect();
+        let branch_qn = format!("{project}.branch.{branch}");
+        self.nodes.retain(|node| match node.label {
+            NodeLabel::Folder => live.contains(node.qualified_name.as_ref()),
+            NodeLabel::Branch => node.qualified_name.as_ref() == branch_qn,
+            _ => true,
+        });
+        self.rebuild_after_removal();
+    }
+
     /// 删除节点后重建索引：id 重排维持「id == nodes 下标」不变量，
     /// 引用了已删节点的边一并清除。
     fn rebuild_after_removal(&mut self) {

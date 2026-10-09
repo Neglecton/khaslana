@@ -7,13 +7,13 @@
 // 2. [`extract`] tree-sitter 提取：每语言一张「节点类型字符串表 + 通用 walk」
 //    （不使用 .scm query），产出单文件的 定义 / 导入 / 调用点 / 类型关系；
 // 3. [`graph`] 内存图缓冲：全部节点/边驻留 RAM，qualified_name 全局去重，
-//    索引期间不碰 SQLite，结束一次性落盘；
+//    提取和解析完成后通过事务落盘；
 // 4. [`resolve`] 调用解析：符号注册表 + 多级策略链把调用点解析成 CALLS 边，
 //    边属性记录 confidence/strategy（解析是概率性的，与参考项目一致）；
 // 5. [`store`] SQLite 存储：nodes/edges/file_hashes + FTS5 全文索引，schema 与
 //    参考项目同构（单仓库单库文件，去掉 project 列）；
 // 6. [`pipeline`] 编排全量与增量索引。增量 = mtime+size 对比 file_hashes 分类 +
-//    入边快照恢复 + 按文件清除重解析 + 整库重写。
+//    入边快照恢复 + 按文件清除重解析 + 按变更及受影响文件更新。
 //
 //! Phase 1 明确不做（后续阶段的扩展点）：Embedding 向量、LSP 类型级解析、
 //! git 耦合边（FILE_CHANGES_WITH）、相似度边、USAGE 引用边（schema 已支持该

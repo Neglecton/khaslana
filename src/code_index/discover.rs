@@ -155,6 +155,8 @@ pub fn discover_files(repo_root: &Path) -> Result<DiscoverOutcome> {
 }
 
 pub(super) fn discover_files_cancellable(repo_root: &Path, cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<DiscoverOutcome> {
+    // 根目录不可读不能当作空仓库，否则刷新会清空上一代有效索引。
+    std::fs::read_dir(repo_root).map_err(|error| err(format!("无法扫描仓库目录：{error}")))?;
     let outcomes = Mutex::new(DiscoverOutcome::default());
     let count = AtomicUsize::new(0);
     let root = repo_root.to_path_buf();
@@ -256,6 +258,10 @@ pub(super) fn discover_files_cancellable(repo_root: &Path, cancel: Option<&std::
         return Err(err(format!("仓库文件数超过索引上限 {} 个，已终止索引", MAX_INDEX_FILES)));
     }
     let mut outcome = outcomes.into_inner().unwrap_or_else(|error| error.into_inner());
+    // 遍历失败时无法区分“文件已删除”和“目录未扫描到”，不能提交不完整的发现域。
+    if let Some(issue) = outcome.issues.iter().find(|issue| issue.path == "." && issue.status == "read_failed") {
+        return Err(err(format!("扫描仓库失败，已保留原有索引：{}", issue.reason)));
+    }
 
     outcome.excluded_count += pruned_dirs.load(Ordering::Relaxed);
     outcome.issues.extend(issues.lock().unwrap_or_else(|e| e.into_inner()).drain(..));

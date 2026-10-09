@@ -19,6 +19,9 @@ use crate::types::Result;
 /// v4 增加独立调用记录表；旧库保持可查询，下一次刷新补建调用暂存。
 pub const CODE_INDEX_SCHEMA_VERSION: u32 = 4;
 
+// 内容版本独立于 schema；v5 补全目录链，旧图在下次刷新时事务重建。
+const INDEX_CONTENT_VERSION: &str = "5";
+
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
 pub fn open_index_db_path(data_dir: &Path, repo_hash8: &str) -> Result<PathBuf> {
@@ -232,7 +235,14 @@ impl CodeIndexStore {
     /// 旧图缺少文档或独立调用暂存时，下一次刷新补做一次全量提取。
     pub(super) fn has_search_metadata(&self) -> bool {
         self.conn.query_row("SELECT value FROM meta WHERE key = 'search_content_version'", [],
-            |row| row.get::<_, String>(0)).is_ok_and(|version| version == "4")
+            |row| row.get::<_, String>(0)).is_ok_and(|version| version == INDEX_CONTENT_VERSION)
+    }
+
+    pub(super) fn branch_matches(&self, branch: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        self.conn.query_row("SELECT value FROM meta WHERE key='branch'", [], |row| row.get::<_, String>(0))
+            .optional().map(|stored| stored.as_deref() == Some(branch))
+            .map_err(|error| err(format!("读取索引分支失败：{error}")))
     }
 
     pub(super) fn retry_files(&self) -> Result<std::collections::HashSet<String>> {
@@ -437,16 +447,17 @@ impl CodeIndexStore {
                     .map_err(|error| err(format!("增量写入关系失败：{error}")))?; }
             }
         }
-        // 孤儿模块没有文件路径，需要同步删除；FTS 使用旧内容发出专用删除命令。
-        let modules: Vec<(i64, String)> = {
-            let mut stmt = tx.prepare("SELECT id,qualified_name FROM nodes WHERE label='Module'").map_err(|error| err(format!("读取旧模块失败：{error}")))?;
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| err(format!("读取旧模块失败：{error}")))?
-                .collect::<rusqlite::Result<_>>().map_err(|error| err(format!("读取旧模块失败：{error}")))?
+        // 模块、目录和分支没有文件路径，按存活集合删除；保留未变化行及其编号。
+        let structures: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT id,qualified_name FROM nodes WHERE label IN ('Module','Folder','Branch')").map_err(|error| err(format!("读取旧结构节点失败：{error}")))?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| err(format!("读取旧结构节点失败：{error}")))?
+                .collect::<rusqlite::Result<_>>().map_err(|error| err(format!("读取旧结构节点失败：{error}")))?
         };
-        let live: std::collections::HashSet<_> = graph.nodes.iter().filter(|node| node.label == super::graph::NodeLabel::Module).map(|node| node.qualified_name.as_ref()).collect();
-        for (id, qn) in modules { if !live.contains(qn.as_str()) {
+        let live: std::collections::HashSet<_> = graph.nodes.iter().filter(|node| matches!(node.label,
+            super::graph::NodeLabel::Module | super::graph::NodeLabel::Folder | super::graph::NodeLabel::Branch)).map(|node| node.qualified_name.as_ref()).collect();
+        for (id, qn) in structures { if !live.contains(qn.as_str()) {
             super::search::delete_search_node(&tx, id)?;
-            tx.execute("DELETE FROM nodes WHERE id=?1", params![id]).map_err(|error| err(format!("删除孤儿模块失败：{error}")))?;
+            tx.execute("DELETE FROM nodes WHERE id=?1", params![id]).map_err(|error| err(format!("删除过期结构节点失败：{error}")))?;
         } }
         write_calls(&tx, graph, Some(changed), Some(cancel))?;
         {
@@ -639,7 +650,10 @@ pub fn read_index_stats(db_path: &Path) -> Result<Option<IndexStats>> {
     }
     let conn = open_read_only(db_path)?;
     let store = CodeIndexStore { conn };
+    // MCP 与其他进程刷新可并行，所有计数和代际必须来自同一个 SQLite 读取快照。
+    let tx = store.conn.unchecked_transaction().map_err(|error| err(format!("开启索引统计快照失败：{error}")))?;
     let mut stats = store.read_stats()?;
+    tx.commit().map_err(|error| err(format!("结束索引统计快照失败：{error}")))?;
     if let Some(s) = stats.as_mut() {
         s.db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     }
@@ -785,7 +799,7 @@ fn write_meta(tx: &Connection, graph: &GraphBuffer, meta: &CodeIndexMeta) -> Res
         ("indexed_at", &meta.indexed_at.to_string()),
         ("duration_ms", &meta.duration_ms.to_string()),
         ("mode", meta.mode.as_str()),
-        ("search_content_version", "4"),
+        ("search_content_version", INDEX_CONTENT_VERSION),
         ("generation", generation.as_str()),
         ("coverage_summary", coverage.as_str()),
     ] {

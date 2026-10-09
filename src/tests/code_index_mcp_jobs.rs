@@ -80,3 +80,44 @@ fn failed_automatic_build_reports_error_and_retries_after_backoff() {
     assert_eq!(ready["result"]["structuredContent"]["total"], 1);
     assert_eq!(server.coordinator.status("")["failures"], 0);
 }
+
+#[test]
+fn refresh_returns_pending_without_blocking_ping_or_duplicating_the_active_job() {
+    let (dir, _repo, _service) = init_repo();
+    let data = tempfile::tempdir().unwrap();
+    let server = std::sync::Arc::new(McpServer::for_test(dir.path(), data.path().join("index.db")));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    server.coordinator.schedule("".into(), true, move |_| { release_rx.recv().unwrap(); Ok(()) });
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::sync::Arc::clone(&server);
+    let thread = std::thread::spawn(move || {
+        result_tx.send(call(&worker, "refresh_index", json!({}))).unwrap();
+    });
+    let result = result_rx.recv_timeout(std::time::Duration::from_secs(2));
+    // 先释放假任务，断言失败也不遗留占用共享池的线程。
+    release_tx.send(()).unwrap();
+    thread.join().unwrap();
+    let result = result.expect("refresh_index 不能无限等待当前任务");
+    assert_eq!(result["result"]["structuredContent"]["status"], "indexing");
+    assert_eq!(result["result"]["structuredContent"]["scheduled"], false);
+    let ping = server.handle_message(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&ping).unwrap()["result"], json!({}));
+    server.coordinator.wait("");
+}
+
+#[test]
+fn full_refresh_during_another_task_explicitly_reports_not_scheduled() {
+    let (dir, _repo, _service) = init_repo();
+    let data = tempfile::tempdir().unwrap();
+    let server = McpServer::for_test(dir.path(), data.path().join("index.db"));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    server.coordinator.schedule("".into(), true, move |_| {
+        release_rx.recv_timeout(std::time::Duration::from_secs(2)).ok(); Ok(())
+    });
+    let result = call(&server, "refresh_index", json!({"mode":"full"}));
+    release_tx.send(()).ok();
+    server.coordinator.wait("");
+    assert_eq!(result["result"]["isError"], true);
+    let payload: Value = serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["scheduled"], false);
+}

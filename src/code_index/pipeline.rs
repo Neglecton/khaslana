@@ -11,6 +11,7 @@
 
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -98,6 +99,7 @@ pub fn run_index(
         Err(std::sync::TryLockError::WouldBlock) => return Err(super::err("该仓库正在索引，请等待当前任务完成")),
     };
     if options.cancelled() { return Ok(RunOutcome::Cancelled); }
+    let _process_guard = super::jobs::database_process_lock(db_path)?;
     let started = Instant::now();
     let repo_name = repo_root
         .file_name()
@@ -296,12 +298,9 @@ fn run_incremental_inner(
     // 读取失败由覆盖记录单独披露，下次发现/解析继续重试。
     let mut changed: Vec<&DiscoveredFile> = Vec::new();
     let retry_files = store.retry_files()?;
-    let mut unchanged_hashes: Vec<FileHashRow> = Vec::new();
     for file in files {
         match old_by_path.get(file.rel_path.as_str()) {
-            Some(old) if old.mtime_ns == file.mtime_ns && old.size == file.size && !retry_files.contains(&file.rel_path) => {
-                unchanged_hashes.push((*old).clone());
-            }
+            Some(old) if old.mtime_ns == file.mtime_ns && old.size == file.size && !retry_files.contains(&file.rel_path) => {}
             _ => changed.push(file),
         }
     }
@@ -312,7 +311,7 @@ fn run_incremental_inner(
         }
     }
 
-    if changed.is_empty() && deleted_paths.is_empty() {
+    if changed.is_empty() && deleted_paths.is_empty() && store.branch_matches(branch)? {
         return Ok(InnerOutcome::NoChange);
     }
     if options.cancelled() {
@@ -382,13 +381,12 @@ fn run_incremental_inner(
     //    模块（Module 无 file_path，purge_files 清不到；参考项目靠整图
     //    重建播种 registry 天然无此残留）。
     graph.prune_orphan_modules();
+    graph.prune_stale_structure(repo_name, branch);
 
     // 8. 仅替换变更文件和受影响调用文件，数据库节点编号保持稳定。
     super::coverage::attach_discovery_issues(&mut graph, &options.discovery_issues);
     options.report(IndexPhase::Write, 0, 0);
-    let mut hashes = unchanged_hashes;
-    hashes.extend(files_hash_rows(&changed));
-    hashes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    let hashes = files_hash_rows(&changed);
     drop(merger);
     graph.release_build_indexes();
     let meta = index_meta(repo_root, repo_name, branch, "incremental");
@@ -427,16 +425,17 @@ pub(super) fn build_structure_pass(
     graph.add_edge(project_id, branch_id, EdgeType::HasBranch, "{}".to_string());
 
     // 目录链去重并按路径排序，保证 Folder 创建顺序父先于子且确定。
-    let mut dirs: Vec<String> = files
-        .iter()
-        .filter_map(|f| {
-            let dir = parent_dir(&f.rel_path);
-            (!dir.is_empty()).then_some(dir)
-        })
-        .collect();
+    let mut dirs = HashSet::new();
+    for file in files {
+        let mut path = file.rel_path.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            // 已收集的目录必定也已收集全部祖先，重复文件不用再走完整目录链。
+            if !dirs.insert(parent) { break; }
+            path = parent;
+        }
+    }
+    let mut dirs: Vec<_> = dirs.into_iter().collect();
     dirs.sort();
-    dirs.dedup();
-    let mut dir_ids: HashMap<String, NodeId> = HashMap::new();
     for dir in dirs {
         let qn = folder_qualified_name(project, &dir);
         let name = dir.rsplit('/').next_back().unwrap_or(&dir).to_string();
@@ -455,7 +454,6 @@ pub(super) fn build_structure_pass(
         };
         let parent_id = graph.find_by_qn(&parent_qn).unwrap_or(project_id);
         graph.add_edge(parent_id, id, EdgeType::ContainsFolder, "{}".to_string());
-        dir_ids.insert(dir, id);
     }
 
     for f in files {
@@ -540,7 +538,13 @@ fn parse_one(file: &DiscoveredFile, extractor: &mut Extractor) -> ParseOutput {
         return ParseOutput { rel_path: file.rel_path.clone(), result: None, line_count: 0,
             coverage: initial_coverage(file) };
     }
-    match std::fs::read(&file.abs_path) {
+    // 扫描与读取之间文件可能增长；最多读取上限加一字节以识别超限。
+    let bytes = std::fs::File::open(&file.abs_path).and_then(|source| {
+        let mut bytes = Vec::new();
+        source.take(super::PARSE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+    match bytes {
         Ok(bytes) => parse_content(file, &bytes, extractor),
         Err(error) => ParseOutput { rel_path: file.rel_path.clone(), result: None, line_count: 0,
             coverage: super::coverage::FileCoverage::new(&file.rel_path, "read_failed", error.to_string()) },
@@ -554,6 +558,11 @@ pub(super) fn parse_content(file: &DiscoveredFile, bytes: &[u8], extractor: &mut
         line_count: 0,
         coverage: initial_coverage(file),
     };
+    if bytes.len() as u64 > super::PARSE_MAX_BYTES {
+        output.coverage.status = "excluded".into();
+        output.coverage.reason = "超过单文件解析上限".into();
+        return output;
+    }
     let Some(lang) = lang_of_rel_path(&file.rel_path) else {
         return output;
     };

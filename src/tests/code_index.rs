@@ -1234,12 +1234,16 @@ mod mcp_tests {
     }
 
     #[test]
-    fn tool_call_missing_argument_is_business_error() {
+    fn tool_call_missing_argument_is_protocol_error() {
         let (_tmp, server) = server();
-        let result = call_tool(&server, "search_symbols", serde_json::json!({}));
-        assert_eq!(result["isError"], true);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("query"));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "search_symbols", "arguments": {}}
+        });
+        let response: Value = serde_json::from_str(&server.handle_message(&request.to_string()).unwrap()).unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"].as_str().unwrap().contains("query"));
     }
 
     #[test]

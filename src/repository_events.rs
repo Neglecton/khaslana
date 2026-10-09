@@ -1236,25 +1236,26 @@ impl RepositoryView {
                 });
             }
             UiEvent::CodeIndexProgress {
+                task_id,
                 repo_path,
                 message,
                 done,
                 total,
             } => {
-                self.handle_code_index_progress(repo_path, message, done, total);
+                self.handle_code_index_progress(task_id, repo_path, message, done, total);
                 cx.notify();
             }
-            UiEvent::CodeIndexFinished { repo_path, stats } => {
-                self.handle_code_index_finished(repo_path, stats, cx);
+            UiEvent::CodeIndexFinished { task_id, repo_path, stats } => {
+                self.handle_code_index_finished(task_id, repo_path, stats, cx);
             }
-            UiEvent::CodeIndexFailed { repo_path, error } => {
-                self.handle_code_index_failed(repo_path, error, cx);
+            UiEvent::CodeIndexFailed { task_id, repo_path, error } => {
+                self.handle_code_index_failed(task_id, repo_path, error, cx);
             }
             UiEvent::AppSearchRepositoryLoaded { request_id, path, result } => {
                 self.handle_app_search_repository_loaded(request_id, path, result);
             }
-            UiEvent::CodeIndexStatsLoaded { repo_path, stats } => {
-                self.handle_code_index_stats_loaded(repo_path, stats);
+            UiEvent::CodeIndexStatsLoaded { request_id, repo_path, stats } => {
+                self.handle_code_index_stats_loaded(request_id, repo_path, stats);
                 cx.notify();
             }
             UiEvent::WorkflowTemplatesLoaded { request_id, result } => {
@@ -1791,10 +1792,7 @@ impl RepositoryView {
                 self.update_downloading = false;
                 self.remote_workflow_loading = false;
                 self.remote_workflow_downloading = None;
-                // 代码索引任务无法区分是否 panic 来源：置空全局单任务守卫，
-                // 否则卡死的守卫会永久挡掉手动/自动索引入口与设置页状态卡。
-                self.code_index_task = None;
-                self.code_index_progress_message.clear();
+                // 索引任务有带身份的 panic 兜底，其他任务异常不能清除其运行态。
                 self.reset_ai_loading_after_panic();
                 self.status = "后台任务异常".into();
                 self.notify_toast(

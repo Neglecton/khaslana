@@ -1637,8 +1637,9 @@ pub(crate) struct AiReviewHistoryState {
     pub error: Option<String>,
 }
 
-/// 在途代码索引任务状态（全局单任务，Index 池单线程串行化）。
+/// 在途代码索引任务状态（UI 全局单任务，后台按数据库互斥）。
 pub(crate) struct CodeIndexTaskState {
+    pub task_id: u64,
     pub repo_path: String,
     /// 置位后任务在文件/阶段边界退出，不落盘。
     pub cancel: Arc<AtomicBool>,
@@ -2649,8 +2650,9 @@ pub(crate) enum UiEvent {
         request_id: u64,
         result: Result<(), String>,
     },
-    /// 代码索引构建进度（按 repo_path 键控：索引中关闭仓库标签任务照常完成）。
+    /// 代码索引构建进度（按仓库与任务身份键控，关闭仓库标签不影响完成落盘）。
     CodeIndexProgress {
+        task_id: u64,
         repo_path: String,
         message: String,
         done: usize,
@@ -2658,10 +2660,12 @@ pub(crate) enum UiEvent {
     },
     /// 代码索引完成（stats 为空 None 表示增量检查后无变化）。
     CodeIndexFinished {
+        task_id: u64,
         repo_path: String,
         stats: Option<khaslana::code_index::IndexRunStats>,
     },
     CodeIndexFailed {
+        task_id: u64,
         repo_path: String,
         error: String,
     },
@@ -2673,6 +2677,7 @@ pub(crate) enum UiEvent {
     },
     /// 设置页打开/刷新时后台读库回填的索引统计。
     CodeIndexStatsLoaded {
+        request_id: u64,
         repo_path: String,
         stats: Option<khaslana::code_index::IndexStats>,
     },
@@ -3724,10 +3729,12 @@ pub(crate) struct RepositoryView {
     /// 思考弹窗钉底跟随的跨帧状态（内容长度键），见 `AiThinkingFollowState`。
     pub(crate) ai_thinking_follow_state: std::rc::Rc<AiThinkingFollowState>,
     // ── 代码索引 ──
-    /// 在途索引任务（全局单任务：Index 池单线程 + 此守卫双保险）。
+    /// 在途索引任务（UI 全局单任务，后台按数据库互斥）。
     pub(crate) code_index_task: Option<CodeIndexTaskState>,
     /// 各仓库最近一次索引统计缓存（事件回填；设置页打开时也会后台查库刷新）。
     pub(crate) code_index_stats: HashMap<String, khaslana::code_index::IndexStats>,
+    /// 按仓库记录最新统计请求；删除或重新索引后丢弃迟到回填。
+    pub(crate) code_index_stats_requests: HashMap<String, u64>,
     /// 设置页仓库列表过滤框（按仓库名称或路径过滤）。
     pub(crate) code_index_filter: TextFieldState,
     /// AI 设置页分类侧栏的搜索框（按分类标题过滤分类项）。

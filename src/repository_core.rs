@@ -265,6 +265,7 @@ impl RepositoryView {
             }),
             code_index_task: None,
             code_index_stats: HashMap::new(),
+            code_index_stats_requests: HashMap::new(),
             code_index_filter: TextFieldState::new(cx, "按名称或路径过滤"),
             ai_settings_category_search: TextFieldState::new(cx, "搜索设置分类"),
             code_index_list_entries: Vec::new(),
