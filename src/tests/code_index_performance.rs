@@ -78,7 +78,7 @@ fn local_queries_do_not_deserialize_unrelated_graph_rows() {
 }
 
 #[test]
-fn legacy_v3_remains_queryable_until_call_records_are_rebuilt() {
+fn legacy_v3_keeps_definition_search_but_requires_rebuild_for_relations() {
     let (dir, _repo, _service) = init_repo();
     let data = tempfile::tempdir().unwrap();
     let db = data.path().join("index.db");
@@ -87,12 +87,13 @@ fn legacy_v3_remains_queryable_until_call_records_are_rebuilt() {
     let conn = Connection::open(&db).unwrap();
     conn.execute_batch("DROP TABLE call_names; DROP TABLE call_records; UPDATE meta SET value='3' WHERE key IN ('schema_version','search_content_version');").unwrap();
     let generation = index_generation(&db).unwrap();
-    assert!(matches!(symbol_detail(&db, None, "target").unwrap(), DetailOutcome::Found(_)));
+    assert!(symbol_detail(&db, None, "target").unwrap_err().to_string().contains("需重建"));
     CodeIndexStore::open(&db).unwrap();
     assert_eq!(index_generation(&db).unwrap(), generation);
     assert_eq!(search_symbols(&db, "caller", 10).unwrap().len(), 1);
     run_index(dir.path(), &db, false, &mut options()).unwrap();
     assert_ne!(index_generation(&db).unwrap(), generation);
+    assert!(matches!(symbol_detail(&db, None, "target").unwrap(), DetailOutcome::Found(_)));
     assert_eq!(conn.query_row("SELECT count(*) FROM call_records", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert!(matches!(run_index(dir.path(), &db, false, &mut options()).unwrap(), RunOutcome::Unchanged));
 }

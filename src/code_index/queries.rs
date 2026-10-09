@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::err;
 use super::graph::NodeLabel;
@@ -35,6 +35,17 @@ pub struct TraceHop {
     pub file_path: String,
     pub hop: u32,
     pub risk: &'static str,
+    /// 单目标查询的直接边提供调用点证据，total 仍统计去重的调用者节点。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sites: Option<CallSiteSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CallSiteSummary {
+    pub file_path: String,
+    pub count: usize,
+    pub lines: Vec<u32>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

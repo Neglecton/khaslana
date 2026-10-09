@@ -461,7 +461,7 @@ pub(super) fn build_structure_pass(
         let name = f
             .rel_path
             .rsplit('/')
-            .next_back()
+            .next()
             .unwrap_or(&f.rel_path)
             .to_string();
         let file_id = graph.upsert_node(
@@ -733,6 +733,7 @@ impl GraphMerger {
                     source_qn: Arc::clone(&graph.get(source).qualified_name),
                     callee_display: intern(call.callee_display), name: intern(call.name),
                     scope: intern(call.owner.map(|owner| owner.class_chain.join("\u{1}")).unwrap_or_default()),
+                    line: call.line,
                 }
             }).collect();
             graph.call_records.insert(Arc::clone(&graph.get(file_id).file_path), super::calls::FileCalls { imports: import_modules, calls });
@@ -769,9 +770,9 @@ impl GraphMerger {
                 let records = &graph.call_records[path];
                 let imports = registry.imported_files(&records.imports);
                 let mut memo = HashMap::<(Arc<str>, Arc<str>, Arc<str>), Option<super::resolve::ResolvedTarget>>::new();
-                let mut edges = Vec::new();
-                let mut keys = HashSet::new();
+                let mut edges = HashMap::<(NodeId, NodeId), (super::resolve::ResolvedTarget, Arc<str>, usize, Vec<u32>)>::new();
                 let mut unresolved = 0;
+                let mut no_candidate = 0;
                 for (index, call) in records.calls.iter().enumerate() {
                     if index % 512 == 0 && (cancel.load(Ordering::Relaxed)
                         || cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed))) { break; }
@@ -786,19 +787,32 @@ impl GraphMerger {
                     };
                     if let Some(target) = resolved {
                         if let Some(source) = graph.find_by_qn(&call.source_qn) {
-                            if source != target.id && keys.insert((source, target.id)) {
-                                edges.push((source, target.id, calls_edge_properties(&call.callee_display, target.confidence, target.strategy)));
+                            if source != target.id {
+                                let edge = edges.entry((source, target.id)).or_insert_with(|| (target, Arc::clone(&call.callee_display), 0, Vec::new()));
+                                edge.2 += 1;
+                                if edge.3.len() < 100 && call.line > 0 { edge.3.push(call.line); }
                             }
                         }
-                    } else { unresolved += 1; }
+                    } else {
+                        unresolved += 1;
+                        if !registry.has_call_candidate(&call.name, path) { no_candidate += 1; }
+                    }
                 }
-                (Arc::clone(path), edges, unresolved, records.calls.len())
+                let mut edges: Vec<_> = edges.into_iter().map(|((source, target), (resolved, callee, count, lines))| {
+                    let mut properties: serde_json::Value = serde_json::from_str(&calls_edge_properties(&callee, resolved.confidence, resolved.strategy)).unwrap();
+                    properties["call_sites"] = serde_json::json!({ "file_path": path, "count": count, "truncated": lines.len() < count, "lines": lines });
+                    (source, target, properties.to_string())
+                }).collect();
+                edges.sort_by_key(|(source, target, _)| (*source, *target));
+                (Arc::clone(path), edges, unresolved, no_candidate, records.calls.len())
             }).collect());
-            for (path, edges, unresolved, count) in results {
+            for (path, edges, unresolved, no_candidate, count) in results {
                 for (source, target, properties) in edges { graph.add_edge(source, target, EdgeType::Calls, properties); }
                 if let Some(file_id) = graph.find_by_qn(&file_qualified_name(&self.project, &path)) {
                     let mut properties: serde_json::Value = serde_json::from_str(&graph.nodes[file_id as usize].properties).unwrap_or_default();
                     properties["coverage"]["unresolved_calls"] = serde_json::json!(unresolved);
+                    properties["coverage"]["unresolved_no_candidate"] = serde_json::json!(no_candidate);
+                    properties["coverage"]["unresolved_with_candidates"] = serde_json::json!(unresolved - no_candidate);
                     graph.nodes[file_id as usize].properties = properties.to_string().into();
                 }
                 done += count;
@@ -806,7 +820,7 @@ impl GraphMerger {
             options.report(IndexPhase::Resolve, done, total);
         }
         for (host_id, tr) in std::mem::take(&mut self.pending_types) {
-            if let Some(target) = registry.resolve_type(&tr.name) {
+            if let Some(target) = registry.resolve_type(&tr.name, &graph.get(host_id).file_path) {
                 let etype = if tr.inherits {
                     EdgeType::Inherits
                 } else {

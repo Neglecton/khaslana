@@ -13,6 +13,7 @@ pub(super) struct StoredCall {
     pub callee_display: Arc<str>,
     pub name: Arc<str>,
     pub scope: Arc<str>,
+    pub line: u32,
 }
 
 #[derive(Debug, Default)]
@@ -35,8 +36,9 @@ impl FileCalls {
         let imports = self.imports.iter().map(|value| intern(&mut dictionary, &mut strings, value)).collect::<Result<Vec<_>>>()?;
         let calls = self.calls.iter().map(|call| Ok([
             intern(&mut dictionary, &mut strings, &call.source_qn)?, intern(&mut dictionary, &mut strings, &call.callee_display)?, intern(&mut dictionary, &mut strings, &call.name)?, intern(&mut dictionary, &mut strings, &call.scope)?,
+            call.line,
         ])).collect::<Result<Vec<_>>>()?;
-        let mut bytes = b"KCALL1".to_vec();
+        let mut bytes = b"KCALL2".to_vec();
         let put = |bytes: &mut Vec<u8>, value: usize| -> Result<()> {
             bytes.extend_from_slice(&u32::try_from(value).map_err(|_| err("调用记录过大"))?.to_le_bytes());
             Ok(())
@@ -51,7 +53,8 @@ impl FileCalls {
     }
 
     pub fn decode(mut bytes: &[u8]) -> Result<Self> {
-        if !bytes.starts_with(b"KCALL1") { return Err(err("调用记录格式不兼容")); }
+        let with_lines = bytes.starts_with(b"KCALL2");
+        if !with_lines && !bytes.starts_with(b"KCALL1") { return Err(err("调用记录格式不兼容")); }
         bytes = &bytes[6..];
         fn number(bytes: &mut &[u8]) -> Result<usize> {
             let raw = bytes.get(..4).ok_or_else(|| err("调用记录截断"))?;
@@ -76,11 +79,11 @@ impl FileCalls {
         let mut imports = Vec::with_capacity(count);
         for _ in 0..count { imports.push(string(&mut bytes)?.to_string()); }
         let count = number(&mut bytes)?;
-        if count > bytes.len() / 16 { return Err(err("调用记录列表损坏")); }
+        if count > bytes.len() / if with_lines { 20 } else { 16 } { return Err(err("调用记录列表损坏")); }
         let mut calls = Vec::with_capacity(count);
         for _ in 0..count {
             calls.push(StoredCall { source_qn: string(&mut bytes)?, callee_display: string(&mut bytes)?,
-                name: string(&mut bytes)?, scope: string(&mut bytes)? });
+                name: string(&mut bytes)?, scope: string(&mut bytes)?, line: if with_lines { number(&mut bytes)? as u32 } else { 0 } });
         }
         if !bytes.is_empty() { return Err(err("调用记录存在多余数据")); }
         Ok(Self { imports, calls })

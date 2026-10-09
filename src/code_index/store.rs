@@ -19,8 +19,8 @@ use crate::types::Result;
 /// v4 增加独立调用记录表；旧库保持可查询，下一次刷新补建调用暂存。
 pub const CODE_INDEX_SCHEMA_VERSION: u32 = 4;
 
-// 内容版本独立于 schema；v5 补全目录链，旧图在下次刷新时事务重建。
-const INDEX_CONTENT_VERSION: &str = "5";
+// 内容版本独立于 schema；v6 修正调用接收者、语言隔离、文件名和调用点证据。
+const INDEX_CONTENT_VERSION: &str = "6";
 
 /// 建库路径：`<数据目录>/code-index/<repo哈希8>/index.db`。
 /// 目录不存在时创建。
@@ -54,6 +54,7 @@ pub struct CodeIndexMeta {
 #[derive(Clone, Debug, Default)]
 pub struct IndexStats {
     pub generation: String,
+    pub needs_rebuild: bool,
     pub coverage: serde_json::Value,
     pub files: usize,
     pub symbols: usize,
@@ -606,6 +607,7 @@ impl CodeIndexStore {
         };
         Ok(Some(IndexStats {
             generation: meta_of("generation"),
+            needs_rebuild: !self.has_search_metadata(),
             coverage: serde_json::from_str(&meta_of("coverage_summary")).unwrap_or_default(),
             files: files as usize,
             symbols: symbols as usize,

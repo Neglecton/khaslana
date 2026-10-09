@@ -490,7 +490,7 @@ impl McpServer {
                 let mut value = serde_json::to_value(&result)
                     .map_err(|e| json!({ "error": format!("序列化结果失败：{e}") }))?;
                 if result.has_more { value["next_offset"] = json!(offset.saturating_add(limit)); }
-                value["coverage_note"] = json!("调用边来自 tree-sitter 与启发式解析，可能缺少动态调用或类型信息；total 只统计当前索引中指定深度内的可达节点。");
+                value["coverage_note"] = json!("total 统计指定深度内去重的节点，不是调用次数；hop=1 的 call_sites 给出直接边的调用次数和最多 100 个行号。启发式调用图仍可能缺少动态调用或类型信息。");
                 Ok(value)
             }
             TraceOutcome::Ambiguous(candidates) => Ok(json!({
@@ -558,6 +558,7 @@ impl McpServer {
                 value["indexing"] = json!(indexing);
                 value["refresh"] = self.coordinator.status(&ctx.repo_key);
                 if indexing { value["status"] = json!("indexing"); }
+                if stats.needs_rebuild { value["hint"] = json!("索引需升级重建；等待后台刷新结束，或调用 refresh_index，再确认 needs_rebuild=false"); }
                 value["coverage_note"] = json!("索引基于 tree-sitter 和启发式调用解析；统计正常不等于所有定义和关系均已覆盖。");
                 Ok(value)
             }
@@ -733,8 +734,9 @@ impl McpServer {
 /// 读取索引统计为 JSON（index_status / refresh_index / list_projects 共用）。
 fn stats_to_json(stats: &IndexStats) -> Value {
     json!({
-        "status": "ready",
+        "status": if stats.needs_rebuild { "rebuild_required" } else { "ready" },
         "generation": stats.generation,
+        "needs_rebuild": stats.needs_rebuild,
         "coverage": stats.coverage,
         "nodes": stats.nodes,
         "edges": stats.edges,
@@ -888,7 +890,7 @@ fn build_tool_definitions() -> Vec<Value> {
         json!({
             "name": "trace_path",
             "title": "调用链追踪",
-            "description": "Traverse CALLS with optional per-hop risk labels. callers_total/callees_total count reachable indexed nodes within depth; each direction pages independently. Heuristic links may miss dynamic calls.",
+            "description": "Traverse CALLS with risk labels. Totals count distinct reachable nodes within depth, not calls; directions page independently. hop=1 call_sites has count/file_path/lines (max 100, truncated). Heuristic links may miss calls.",
             "inputSchema": with_repo(json!({
                 "type": "object",
                 "properties": {
@@ -926,7 +928,7 @@ fn build_tool_definitions() -> Vec<Value> {
         json!({
             "name": "index_status",
             "title": "索引状态",
-            "description": "Index status, file/symbol/edge counts, branch, time and DB size; refresh reports this process's queue, errors and backoff. If empty, follow hint to refresh_index.",
+            "description": "Index stats and this process's refresh queue/errors/backoff. If empty or needs_rebuild, use refresh_index; old relations are blocked until rebuilt.",
             "inputSchema": with_repo(json!({ "type": "object", "properties": {} })),
             "outputSchema": output_schema,
         }),
@@ -963,7 +965,7 @@ fn build_tool_definitions() -> Vec<Value> {
     definitions.extend([search_graph, snippet]);
     definitions.push(json!({
         "name": "check_index_coverage", "title": "索引覆盖检查",
-        "description": "Check evidence files: indexed/partial/read_failed/parse_failed/excluded/unsupported/not_indexed/unknown, parse gaps, unresolved calls and metadata_matches/metadata_changed. Read source for gaps or stale/missing coverage; clean status is no proof of completeness. Supply paths or scopes.",
+        "description": "Check evidence files: coverage status, parse gaps, unresolved calls and metadata freshness. unresolved_no_candidate=no same-language repo definition; unresolved_with_candidates=target uncertain. Neither is a parse error rate. Read source for gaps/stale/missing coverage; clean status is no proof of completeness. Supply paths or scopes.",
         "inputSchema": with_repo(json!({ "type": "object", "properties": {
             "paths": { "type": "array", "items": { "type": "string" }, "description": "Exact repo-relative file paths." },
             "scopes": { "type": "array", "items": { "type": "string" }, "description": "Directory prefixes; '.' covers the repo." },

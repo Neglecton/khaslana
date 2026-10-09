@@ -20,6 +20,8 @@ pub enum CallNameStrategy {
     Field(&'static str),
     /// 无字段标注的语法（Kotlin ng）：取第一个 identifier 后代。
     FirstIdentifier,
+    /// Java 方法名和接收者是独立字段，必须一起保留。
+    JavaMethod,
 }
 
 /// 类型继承关系的来源描述（用于 INHERITS / IMPLEMENTS 边）。
@@ -269,7 +271,7 @@ pub static LANG_SPECS: &[(LangId, LangSpec)] = &[
             transparent_types: &[],
             field_types: &["field_declaration"],
             call_types: &[
-                ("method_invocation", CallNameStrategy::Field("name")),
+                ("method_invocation", CallNameStrategy::JavaMethod),
                 (
                     "object_creation_expression",
                     CallNameStrategy::Field("type"),

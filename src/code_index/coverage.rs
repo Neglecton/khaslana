@@ -28,6 +28,10 @@ pub struct FileCoverage {
     #[serde(default)]
     pub unresolved_calls: usize,
     #[serde(default)]
+    pub unresolved_no_candidate: usize,
+    #[serde(default)]
+    pub unresolved_with_candidates: usize,
+    #[serde(default)]
     pub call_sites: usize,
 }
 
@@ -45,6 +49,8 @@ impl FileCoverage {
 pub(super) fn summarize(graph: &GraphBuffer) -> Value {
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     let mut unresolved = 0;
+    let mut no_candidate = 0;
+    let mut with_candidates = 0;
     for node in &graph.nodes {
         if node.label != NodeLabel::File {
             continue;
@@ -57,6 +63,8 @@ pub(super) fn summarize(graph: &GraphBuffer) -> Value {
         unresolved += properties["coverage"]["unresolved_calls"]
             .as_u64()
             .unwrap_or(0);
+        no_candidate += properties["coverage"]["unresolved_no_candidate"].as_u64().unwrap_or(0);
+        with_candidates += properties["coverage"]["unresolved_with_candidates"].as_u64().unwrap_or(0);
     }
     if let Some(project) = graph
         .nodes
@@ -74,7 +82,8 @@ pub(super) fn summarize(graph: &GraphBuffer) -> Value {
         }
     }
     json!({ "counts": counts, "unresolved_calls": unresolved,
-        "coverage_note": "统计为已记录覆盖问题，不是完整性证明；未解析调用也包括外部库和动态调用" })
+        "unresolved_no_candidate": no_candidate, "unresolved_with_candidates": with_candidates,
+        "coverage_note": "未解析调用分为无同语言仓库定义（可能为外部库）和有候选但无法安全确定目标；旧库可能没有分类，均不代表语法解析失败率。统计不是完整性证明。" })
 }
 
 pub(super) fn source_freshness(
@@ -254,6 +263,6 @@ pub fn check_coverage(
     Ok(
         json!({ "generation": generation, "total": total, "offset": offset, "results": returned,
         "has_more": next < total, "next_offset": (next < total).then_some(next),
-        "coverage_note": "尽力记录。metadata_matches 只证明时间和大小一致，不证明语义完整；部分解析、未解析调用和未索引文件需回读源码。" }),
+        "coverage_note": "metadata_matches 只证明时间和大小一致。unresolved_no_candidate 为无同语言仓库定义，unresolved_with_candidates 为有候选但目标不确定；旧库可能缺分类，未解析调用不等于语法解析失败。缺口与过期需回读源码。" }),
     )
 }

@@ -164,3 +164,7 @@ mod engine_tests;
 #[cfg(test)]
 #[path = "../tests/code_index_performance.rs"]
 mod performance_tests;
+
+#[cfg(test)]
+#[path = "../tests/code_index_quality.rs"]
+mod quality_tests;

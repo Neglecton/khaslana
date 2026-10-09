@@ -34,6 +34,13 @@ fn nodes(conn: &Connection, sql: &str, args: &[Value]) -> Result<Vec<Node>> {
 
 const COLUMNS: &str = "id,label,name,qualified_name,file_path,start_line,end_line,properties";
 
+fn require_current_relations(store: &CodeIndexStore) -> Result<()> {
+    if !store.has_search_metadata() {
+        return Err(err("旧索引调用关系需重建，不能作为当前证据；请调用 refresh_index，并等待 index_status.needs_rebuild=false"));
+    }
+    Ok(())
+}
+
 fn named(conn: &Connection, name: &str) -> Result<Vec<Node>> {
     nodes(conn, &format!("SELECT {COLUMNS} FROM nodes WHERE qualified_name=?1 OR name=?1 ORDER BY id"), &[name.to_string().into()])
 }
@@ -66,15 +73,19 @@ fn bfs(conn: &Connection, starts: &[i64], inbound: bool, depth: u32, max_nodes: 
         if frontier.is_empty() || hops.len() >= max_nodes { break; }
         let mut next = Vec::new();
         for batch in frontier.chunks(256) {
-            let sql = format!("SELECT n.id,n.label,n.name,n.qualified_name,n.file_path,n.start_line,n.end_line,''
+            let sql = format!("SELECT n.id,n.label,n.name,n.qualified_name,n.file_path,n.start_line,n.end_line,e.properties
                 FROM edges e JOIN nodes n ON n.id=e.{target} WHERE e.type='CALLS' AND e.{source} IN ({}) ORDER BY n.id", placeholders(batch.len()));
             let args: Vec<_> = batch.iter().copied().map(Value::Integer).collect();
             for node in nodes(conn, &sql, &args)? {
                 if !visited.insert(node.id) { continue; }
                 let candidate = node.candidate;
                 next.push(node.id);
+                let call_sites = (hop == 1 && starts.len() == 1).then(|| {
+                    serde_json::from_str::<serde_json::Value>(&node.properties).ok()
+                        .and_then(|properties| serde_json::from_value(properties["call_sites"].clone()).ok())
+                }).flatten();
                 hops.push(TraceHop { name: candidate.name, qualified_name: candidate.qualified_name,
-                    file_path: candidate.file_path, hop, risk: risk_for_hop(hop) });
+                    file_path: candidate.file_path, hop, risk: risk_for_hop(hop), call_sites });
             }
         }
         frontier = next;
@@ -86,6 +97,7 @@ fn bfs(conn: &Connection, starts: &[i64], inbound: bool, depth: u32, max_nodes: 
 
 pub(super) fn trace_calls_page(path: &Path, name: &str, direction: TraceDirection, depth: u32, limit: usize, offset: usize) -> Result<TraceOutcome> {
     read(path, |store| {
+        require_current_relations(store)?;
         let mut candidates = resolve(&store.conn, name, true)?;
         if candidates.is_empty() { return Ok(TraceOutcome::NotFound); }
         if candidates.len() > 1 { return Ok(TraceOutcome::Ambiguous(candidates.into_iter().map(|node| node.candidate).collect())); }
@@ -103,6 +115,7 @@ pub(super) fn trace_calls_page(path: &Path, name: &str, direction: TraceDirectio
 
 pub(super) fn symbol_detail(path: &Path, root: Option<&Path>, name: &str) -> Result<DetailOutcome> {
     read(path, |store| {
+        require_current_relations(store)?;
         let mut candidates = resolve(&store.conn, name, false)?;
         if candidates.is_empty() { return Ok(DetailOutcome::NotFound); }
         if candidates.len() > 1 { return Ok(DetailOutcome::Ambiguous(candidates.into_iter().map(|node| node.candidate).collect())); }
@@ -127,6 +140,7 @@ pub(super) fn symbol_detail(path: &Path, root: Option<&Path>, name: &str) -> Res
 
 pub(super) fn impacted_symbols_for_files(path: &Path, files: &[String], depth: u32) -> Result<ImpactReport> {
     read(path, |store| {
+        require_current_relations(store)?;
         let mut impacted = Vec::new();
         let mut seen = HashSet::new();
         for batch in files.chunks(256) {
@@ -143,6 +157,7 @@ pub(super) fn impacted_symbols_for_files(path: &Path, files: &[String], depth: u
 
 pub(super) fn index_overview(path: &Path) -> Result<IndexOverview> {
     read(path, |store| {
+        require_current_relations(store)?;
         let conn = &store.conn;
         let stats = store.read_stats()?.unwrap_or_default();
         let counts = |sql: &str| -> Result<Vec<(String, usize)>> {
@@ -157,15 +172,14 @@ pub(super) fn index_overview(path: &Path) -> Result<IndexOverview> {
         let mut dirs = HashMap::<String, usize>::new();
         let mut symbols = HashMap::<String, usize>::new();
         {
-            let mut stmt = conn.prepare("SELECT label,name,file_path FROM nodes WHERE file_path<>''").map_err(|error| err(format!("读取目录统计失败：{error}")))?;
+            let mut stmt = conn.prepare("SELECT label,file_path FROM nodes WHERE file_path<>''").map_err(|error| err(format!("读取目录统计失败：{error}")))?;
             let mut rows = stmt.query([]).map_err(|error| err(format!("读取目录统计失败：{error}")))?;
             while let Some(row) = rows.next().map_err(|error| err(format!("读取目录统计失败：{error}")))? {
                 let label: String = row.get(0).map_err(|error| err(error.to_string()))?;
-                let name: String = row.get(1).map_err(|error| err(error.to_string()))?;
-                let file: String = row.get(2).map_err(|error| err(error.to_string()))?;
+                let file: String = row.get(1).map_err(|error| err(error.to_string()))?;
                 let dir = file.split_once('/').map_or("(根目录)", |(dir, _)| dir).to_string();
                 if label == "File" {
-                    let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).unwrap_or_else(|| "other".into());
+                    let ext = Path::new(&file).extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).unwrap_or_else(|| "other".into());
                     *languages.entry(ext).or_default() += 1;
                     dirs.entry(dir).or_default();
                 } else if parse_label(&label).is_symbol() { *symbols.entry(dir).or_default() += 1; }

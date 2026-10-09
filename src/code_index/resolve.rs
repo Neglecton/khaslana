@@ -10,7 +10,7 @@
 //! 4. `suffix`（0.60）：限定调用（`GitService::open` / `a.b.c()`）的限定段
 //!    与候选 QN 尾部吻合。
 //!
-//! 解析失败不建边——宁缺毋滥，边上的 confidence/strategy 忠实记录来源。
+//! 候选先按语言、接收者、类作用域和可见性过滤；解析失败不建边。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,6 +27,10 @@ struct SymbolCandidate {
     scope: Vec<String>,
     logical_container: String,
     scope_name: String,
+    language: Option<super::LangId>,
+    private: bool,
+    static_member: bool,
+    file_path: Arc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +55,12 @@ pub struct Registry {
     import_files: HashMap<String, Vec<(Arc<str>, usize)>>,
 }
 
+#[derive(Default)]
+pub(super) struct ImportContext {
+    files: HashSet<Arc<str>>,
+    static_members: HashMap<Arc<str>, HashSet<String>>,
+}
+
 fn unique<'a>(mut candidates: impl Iterator<Item = &'a SymbolCandidate>) -> Option<&'a SymbolCandidate> {
     let first = candidates.next()?;
     candidates.next().is_none().then_some(first)
@@ -63,9 +73,12 @@ impl Registry {
         let mut files = HashSet::new();
         for node in &graph.nodes {
             if !node.label.is_symbol() || node.label == NodeLabel::Field { continue; }
-            let scope: Vec<String> = serde_json::from_str::<serde_json::Value>(&node.properties).ok()
-                .and_then(|properties| properties["scope"].as_array().cloned())
+            let properties: serde_json::Value = serde_json::from_str(&node.properties).unwrap_or_default();
+            let scope: Vec<String> = properties["scope"].as_array().cloned()
                 .unwrap_or_default().iter().filter_map(|part| part.as_str().map(str::to_string)).collect();
+            let signature = properties["signature"].as_str().unwrap_or("");
+            let (private, static_member) = signature.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                .fold((false, false), |(private, static_member), word| (private || word == "private", static_member || word == "static"));
             let scope_name = scope.join(".");
             let stem = node.file_path.rsplit_once('.').map_or(node.file_path.as_ref(), |(stem, _)| stem)
                 .replace(['/', '\\'], ".");
@@ -73,6 +86,9 @@ impl Registry {
             let logical_container = if scope.is_empty() { stem.to_string() } else { format!("{stem}.{scope_name}") };
             let candidate = SymbolCandidate { id: node.id,
                 qualified_name: Arc::clone(&node.qualified_name), scope, scope_name, logical_container,
+                language: super::graph::lang_of_rel_path(&node.file_path),
+                private, static_member,
+                file_path: Arc::clone(&node.file_path),
                 callable: matches!(node.label, NodeLabel::Function | NodeLabel::Method),
                 container: matches!(node.label, NodeLabel::Class | NodeLabel::Struct | NodeLabel::Interface | NodeLabel::Trait | NodeLabel::Enum) };
             if files.insert(Arc::clone(&node.file_path)) {
@@ -101,20 +117,27 @@ impl Registry {
     }
 
     /// 导入可达文件只算一次，调用点复用；保留旧策略的路径深度约束。
-    pub(super) fn imported_files(&self, imports: &[String]) -> HashSet<Arc<str>> {
-        let mut files = HashSet::new();
+    pub(super) fn imported_files(&self, imports: &[String]) -> ImportContext {
+        let mut context = ImportContext::default();
         for import in imports {
-            let parts: Vec<_> = import.split('.').filter(|part| !part.is_empty()).map(str::to_ascii_lowercase).collect();
+            let (module, member) = match import.strip_prefix("static:") {
+                Some(value) => match value.rsplit_once('.') { Some((module, member)) => (module, Some(member)), None => continue },
+                None => (import.as_str(), None),
+            };
+            let parts: Vec<_> = module.split('.').filter(|part| !part.is_empty()).map(str::to_ascii_lowercase).collect();
             let start = parts.iter().take_while(|part| RUST_PATH_ROOTS.contains(&part.as_str())).count();
             let parts = &parts[start..];
             if parts.is_empty() { continue; }
-            for suffix in [Some(parts), (parts.len() > 1).then(|| &parts[..parts.len() - 1])].into_iter().flatten() {
+            for suffix in [Some(parts), (member.is_none() && parts.len() > 1).then(|| &parts[..parts.len() - 1])].into_iter().flatten() {
                 if let Some(candidates) = self.import_files.get(&suffix.join(".")) {
-                    files.extend(candidates.iter().filter(|(_, depth)| *depth >= parts.len()).map(|(file, _)| Arc::clone(file)));
+                    for (file, _) in candidates.iter().filter(|(_, depth)| *depth >= parts.len()) {
+                        context.files.insert(Arc::clone(file));
+                        if let Some(member) = member { context.static_members.entry(Arc::clone(file)).or_default().insert(member.to_string()); }
+                    }
                 }
             }
         }
-        files
+        context
     }
 
     /// 解析一个调用点。`qualifier` 是限定表达式的完整前缀
@@ -136,47 +159,88 @@ impl Registry {
     }
 
     pub(super) fn resolve_prepared(
-        &self, name: &str, calling_file: &str, imports: &HashSet<Arc<str>>, qualifier: Option<&str>, scope: &[String],
+        &self, name: &str, calling_file: &str, imports: &ImportContext, qualifier: Option<&str>, scope: &[String],
     ) -> Option<ResolvedTarget> {
         let bucket = self.name_index.get(name)?;
-        let explicit_members = matches!(super::graph::lang_of_rel_path(calling_file),
+        let language = super::graph::lang_of_rel_path(calling_file);
+        let java = language == Some(super::LangId::Java);
+        let explicit_members = matches!(language,
             Some(super::LangId::Rust | super::LangId::Python | super::LangId::JavaScript | super::LangId::TypeScript | super::LangId::Tsx | super::LangId::Go));
-        let eligible = |candidate: &&SymbolCandidate| !explicit_members || qualifier.is_some() || candidate.scope.is_empty();
+        let compatible = |candidate: &&SymbolCandidate| same_language(language, candidate.language);
+        let eligible = |candidate: &&SymbolCandidate| same_language(language, candidate.language)
+            && if java { candidate.scope == scope || candidate.scope.is_empty() }
+               else { !explicit_members || qualifier.is_some() || candidate.scope.is_empty() };
         let local = bucket.local.get(calling_file).map(Vec::as_slice).unwrap_or_default();
         let target = |candidate: &SymbolCandidate, confidence, strategy| ResolvedTarget { id: candidate.id, confidence, strategy };
         if let Some(qualifier) = qualifier {
-            let qualifier = match qualifier { "self" | "this" | "Self" => scope.last()?.as_str(), value => value };
+            // this/self 没有当前类的定义时，不得跳到其他文件的同名类或唯一方法。
+            if matches!(qualifier, "self" | "this" | "Self") {
+                if scope.is_empty() { return None; }
+                return unique(local.iter().map(|id| &bucket.candidates[*id]).filter(compatible)
+                    .filter(|candidate| candidate.scope == scope)).map(|candidate| target(candidate, 0.95, "scope"));
+            }
             let normalized = qualifier.replace("::", ".");
             let qualifier = normalized.trim_start_matches("crate.");
             let ids = bucket.qualified.get(qualifier.rsplit('.').next()?)?;
-            if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(|candidate| qualifier_matches(candidate, qualifier))) {
+            let qualified = |candidate: &&SymbolCandidate| same_language(language, candidate.language)
+                && qualifier_matches(candidate, qualifier)
+                && (!java || candidate.static_member)
+                && (!java || candidate.file_path.as_ref() == calling_file || imports.files.contains(&candidate.file_path)
+                    || std::path::Path::new(candidate.file_path.as_ref()).parent() == std::path::Path::new(calling_file).parent())
+                && (!java || !candidate.private || candidate.file_path.as_ref() == calling_file && candidate.scope == scope);
+            if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(qualified)) {
                 return Some(target(candidate, 0.90, "suffix"));
             }
-            return unique(ids.iter().map(|id| &bucket.candidates[*id]).filter(|candidate| qualifier_matches(candidate, qualifier)))
+            return unique(ids.iter().map(|id| &bucket.candidates[*id]).filter(qualified))
                 .map(|candidate| target(candidate, 0.90, "suffix"));
         }
         if !scope.is_empty() {
-            if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(eligible).filter(|candidate| candidate.scope == scope)) {
-                return Some(target(candidate, 0.95, "scope"));
+            let mut candidates = local.iter().map(|id| &bucket.candidates[*id]).filter(eligible)
+                .filter(|candidate| candidate.scope == scope).peekable();
+            if candidates.peek().is_some() {
+                return unique(candidates).map(|candidate| target(candidate, 0.95, "scope"));
             }
         }
-        if let Some(candidate) = unique(local.iter().map(|id| &bucket.candidates[*id]).filter(eligible)) {
-            return Some(target(candidate, 0.95, "local"));
+        let mut candidates = local.iter().map(|id| &bucket.candidates[*id]).filter(eligible).peekable();
+        if candidates.peek().is_some() {
+            // 当前层存在歧义就停止，不能把本地重载错误转移到导入的同名方法。
+            return unique(candidates).map(|candidate| target(candidate, 0.95, "local"));
         }
         // 只遍历可达文件中的同名符号，避免常见名字扫全仓库。
-        if let Some(candidate) = unique(imports.iter().filter_map(|file| bucket.local.get(file.as_ref()))
-            .flat_map(|ids| ids.iter().map(|id| &bucket.candidates[*id])).filter(eligible)) {
+        if let Some(candidate) = unique(imports.files.iter().filter_map(|file| bucket.local.get(file.as_ref()))
+            .flat_map(|ids| ids.iter().map(|id| &bucket.candidates[*id]))
+            .filter(|candidate| same_language(language, candidate.language)
+                && if java { candidate.static_member && !candidate.private
+                    && imports.static_members.get(&candidate.file_path).is_some_and(|members| members.contains(name) || members.contains("*"))
+                } else { eligible(candidate) })) {
             return Some(target(candidate, 0.90, "import_map"));
         }
+        // Java 裸方法只能来自当前类或已导入的静态成员；全仓库唯一不代表可达。
+        if java { return None; }
         let ids = if explicit_members { &bucket.bare } else { &bucket.callable };
-        (ids.len() == 1).then(|| target(&bucket.candidates[ids[0]], 0.80, "unique"))
+        unique(ids.iter().map(|id| &bucket.candidates[*id]).filter(compatible))
+            .map(|candidate| target(candidate, 0.80, "unique"))
+    }
+
+    /// 无同语言仓库定义与有候选但接收者/作用域不明确分开统计，不能把二者都当解析失败率。
+    pub(super) fn has_call_candidate(&self, name: &str, calling_file: &str) -> bool {
+        let language = super::graph::lang_of_rel_path(calling_file);
+        self.name_index.get(name).is_some_and(|bucket| bucket.candidates.iter()
+            .any(|candidate| (candidate.callable || candidate.container) && same_language(language, candidate.language)))
     }
 
     /// 解析类型引用（INHERITS/IMPLEMENTS 目标）：只接受唯一容器，歧义时不建边。
-    pub fn resolve_type(&self, name: &str) -> Option<NodeId> {
+    pub fn resolve_type(&self, name: &str, calling_file: &str) -> Option<NodeId> {
         let bucket = self.name_index.get(name)?;
-        unique(bucket.candidates.iter().filter(|candidate| candidate.container)).map(|candidate| candidate.id)
+        let language = super::graph::lang_of_rel_path(calling_file);
+        unique(bucket.candidates.iter().filter(|candidate| candidate.container && same_language(language, candidate.language))).map(|candidate| candidate.id)
     }
+}
+
+fn same_language(left: Option<super::LangId>, right: Option<super::LangId>) -> bool {
+    use super::LangId::{C, Cpp, JavaScript, TypeScript, Tsx};
+    left == right || matches!((left, right),
+        (Some(JavaScript | TypeScript | Tsx), Some(JavaScript | TypeScript | Tsx)) | (Some(C | Cpp), Some(C | Cpp)))
 }
 
 fn qualifier_matches(candidate: &SymbolCandidate, qualifier: &str) -> bool {

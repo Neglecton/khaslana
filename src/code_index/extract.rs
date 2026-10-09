@@ -173,7 +173,12 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
             .child_by_field_name("source")
             .and_then(|s| s.utf8_text(ctx.source).ok())
             .unwrap_or_else(|| node.utf8_text(ctx.source).unwrap_or_default());
-        let module = clean_import_text(text);
+        let mut module = clean_import_text(text);
+        // 保留静态导入的语义，否则 import Tools 会被误当成 import static Tools.method。
+        if kind == "import_declaration" && text.trim_start().starts_with("import static ") {
+            let wildcard = text.trim().trim_end_matches(';').ends_with(".*");
+            module = format!("static:{module}{}", if wildcard { ".*" } else { "" });
+        }
         if !module.is_empty() {
             ctx.result.imports.push(ImportRef { module });
         }
@@ -239,6 +244,18 @@ fn walk(node: Node, depth: usize, ctx: &mut WalkContext) {
         return;
     }
 
+    // 顶层匿名回调没有外层函数可归属，单独记录稳定位置，避免整个测试文件合并为一个调用者。
+    // 已在命名函数中的闭包仍归属该函数，保留现有调用图的语义。
+    if ctx.fn_stack.is_empty() && matches!(kind, "arrow_function" | "function_expression") {
+        let name = format!("callback@{}:{}", node.start_position().row + 1, node.start_position().column + 1);
+        let (signature, docstring) = super::metadata::symbol_metadata(node, ctx.source);
+        ctx.result.defs.push(SymbolDef { label: NodeLabel::Function, name: name.clone(), scope: ctx.class_stack.clone(),
+            start_line: node.start_position().row as u32 + 1, end_line: node.end_position().row as u32 + 1, signature, docstring });
+        ctx.fn_stack.push(name);
+        recurse_children(node, depth, ctx);
+        ctx.fn_stack.pop();
+        return;
+    }
     recurse_children(node, depth, ctx);
 }
 
@@ -481,6 +498,13 @@ fn context_name_of(node: Node, source: &[u8]) -> Option<String> {
 
 fn extract_call_site(node: Node, strategy: CallNameStrategy, source: &[u8]) -> Option<CallSite> {
     let callee_display = match strategy {
+        CallNameStrategy::JavaMethod => {
+            let name = node.child_by_field_name("name")?.utf8_text(source).ok()?;
+            match node.child_by_field_name("object") {
+                Some(receiver) => format!("{}.{name}", receiver.utf8_text(source).ok()?),
+                None => name.to_string(),
+            }
+        }
         CallNameStrategy::Field(field) => {
             let target = node.child_by_field_name(field)?;
             let mut text = target.utf8_text(source).ok()?.to_string();
