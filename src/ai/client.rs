@@ -15,6 +15,16 @@ use crate::ai::config::AiProviderSettings;
 use crate::ai::prompt::ChatMessage;
 use crate::types::{GitError, Result as KhaslanaResult};
 
+/// 所有大模型请求附带的 User-Agent 标头。
+/// 格式遵循标准规范：`Khaslana/<version> (<target>)`。
+pub const AI_USER_AGENT: &str = concat!(
+    "Khaslana/",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("KHASLANA_TARGET"),
+    ")"
+);
+
 /// 单次聊天请求的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatResult {
@@ -367,6 +377,7 @@ impl ChatClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.settings.api_key))
             .header("Content-Type", "application/json")
+            .header("User-Agent", AI_USER_AGENT)
             .send_json(&body)
             .map_err(classify_agent_http_error)?;
 
@@ -533,6 +544,7 @@ impl ChatClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.settings.api_key))
             .header("Content-Type", "application/json")
+            .header("User-Agent", AI_USER_AGENT)
             .send_json(&body)
             .map_err(|err| GitError::Message(format!("AI 请求失败：{err}")))?;
 
@@ -594,6 +606,7 @@ impl ChatClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.settings.api_key))
             .header("Content-Type", "application/json")
+            .header("User-Agent", AI_USER_AGENT)
             .send_json(&body)
             .map_err(|err| GitError::Message(format!("AI 请求失败：{err}")))?;
 
