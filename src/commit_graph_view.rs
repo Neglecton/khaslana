@@ -45,6 +45,8 @@ const GRAPH_DIM_ALPHA: f32 = 0.35;
 const COMMIT_GRAPH_DETAILS_HEIGHT: f32 = 200.0;
 const COMMIT_GRAPH_LIST_SCROLL_ID: &str = "commit-graph-list";
 const COMMIT_GRAPH_BRANCH_MENU_SCROLL_ID: &str = "commit-graph-branch-menu-scroll";
+// 虚拟列表槽位与内部命中区域必须共用行高，长分支名不能撑到相邻行。
+const BRANCH_MENU_ROW_HEIGHT: f32 = 26.0;
 
 /// 泳道行数据：某一行提交的轨道几何（自 history_view.rs 迁入，语义不变）。
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -670,7 +672,6 @@ impl RepositoryView {
         // 虚拟化：与侧边栏同一数据集（远端分支可达上万条），预建全量
         // 行元素会在每次搜索键入时整表重建。轻量下标模型 + uniform_list，
         // 只为可视 range 创建行；全部行固定 26px 槽位保证等高。
-        const BRANCH_MENU_ROW_HEIGHT: f32 = 26.0;
         const BRANCH_MENU_MAX_HEIGHT: f32 = 320.0;
         #[derive(Clone, Copy)]
         enum BranchMenuRow {
@@ -798,7 +799,9 @@ impl RepositoryView {
                                 };
                                 // 固定槽位保证 uniform_list 等高约束。
                                 div()
+                                    .w_full()
                                     .h(px(BRANCH_MENU_ROW_HEIGHT))
+                                    .overflow_hidden()
                                     .flex()
                                     .flex_col()
                                     .justify_center()
@@ -846,10 +849,16 @@ impl RepositoryView {
             format!("commit-graph-branch-local-{branch}")
         };
         let branch_for_click = (!is_off).then(|| branch.to_string());
+        let tooltip = label.clone();
         div()
             .id(id)
+            .w_full()
+            .h(px(BRANCH_MENU_ROW_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .overflow_hidden()
             .px_3()
-            .py_1()
             .text_size(px(ui_theme::TYPE_BODY))
             // 远端分支名（origin/…）用次要色与本地分支区分（选中仍以主色突出）。
             .text_color(rgb(if selected {
@@ -866,12 +875,13 @@ impl RepositoryView {
             }))
             .cursor_pointer()
             .hover(|this| this.bg(rgb(ui_theme::PRIMARY_SUBTLE)))
+            .tooltip(move |_, cx| tooltip_text(tooltip.clone(), cx))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 this.set_commit_graph_highlight(branch_for_click.clone());
                 cx.notify();
             }))
-            .child(label)
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
             .into_any_element()
     }
 

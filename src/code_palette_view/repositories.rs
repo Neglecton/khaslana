@@ -237,7 +237,11 @@ impl RepositoryView {
         result: Result<Vec<BranchInfo>, String>,
     ) {
         if let Some(palette) = self.code_search_palette.as_mut() {
-            if palette.repositories.apply(request_id, &path, result) {
+            if palette.scope.scans_saved_repositories(&self.code_palette_search.value)
+                && palette.repositories.as_mut().is_some_and(|repositories| {
+                    repositories.apply(request_id, &path, result)
+                })
+            {
                 // 新结果可能改变排序；旧列表回调须等新模型挂载后才能再次确认。
                 palette.catalog_changed = true;
             }

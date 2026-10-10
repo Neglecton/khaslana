@@ -19,12 +19,13 @@ use crate::ui::components::{
 use crate::ui::icons::ToolbarIcon;
 use crate::ui::theme::{self as theme, rgb};
 use crate::{FieldId, MainMode, RepositoryView, SettingsCategory};
-use catalog::{SearchEntry, SearchTarget, filter_entries, function_entries};
+use catalog::{SearchEntry, SearchScope, SearchTarget, filter_entries, function_entries};
 
 pub(crate) struct CodeSearchPaletteState {
     command: Entity<CommandState>,
     query: String,
-    repositories: repositories::RepositorySearchCatalog,
+    scope: SearchScope,
+    repositories: Option<repositories::RepositorySearchCatalog>,
     catalog_changed: bool,
 }
 
@@ -43,11 +44,12 @@ impl RepositoryView {
 
     pub(crate) fn open_code_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popups();
-        let repositories = self.start_saved_repository_search();
+        self.code_palette_search.clear();
         self.code_search_palette = Some(CodeSearchPaletteState {
             command: cx.new(|cx| CommandState::new(window, cx)),
             query: self.code_palette_search.value.clone(),
-            repositories,
+            scope: SearchScope::default(),
+            repositories: None,
             catalog_changed: false,
         });
         // 挂载后由 maintain_overlay_focus 聚焦字段，保留触发器的返回焦点。
@@ -61,6 +63,19 @@ impl RepositoryView {
         self.code_search_palette = None;
     }
 
+    pub(crate) fn sync_code_search_scope(&mut self) {
+        let Some(palette) = self.code_search_palette.as_mut() else {
+            return;
+        };
+        if !palette.scope.scans_saved_repositories(&self.code_palette_search.value) {
+            // 丢弃目录会取消扫描；迟到结果仍由请求代际守卫拒绝。
+            palette.repositories = None;
+        } else if palette.repositories.is_none() {
+            let repositories = self.start_saved_repository_search();
+            self.code_search_palette.as_mut().unwrap().repositories = Some(repositories);
+        }
+    }
+
     fn app_search_entries(&self) -> Vec<SearchEntry> {
         let mut entries = function_entries(
             self.active_tab_id(),
@@ -68,7 +83,19 @@ impl RepositoryView {
             self.snapshot.as_ref(),
             self.ai_settings.enabled,
         );
+        // 空输入只构造设置结果，不遍历各仓库的分支、标签和贮藏。
+        if self.code_palette_search.value.trim().is_empty() {
+            return filter_entries(entries, "");
+        }
+        let scope = self
+            .code_search_palette
+            .as_ref()
+            .map(|palette| palette.scope)
+            .unwrap_or_default();
         for tab in &self.tabs {
+            if !scope.includes_repository(tab.id, self.active_tab_id()) {
+                continue;
+            }
             let Some(path) = tab.repo_path.as_ref() else {
                 continue;
             };
@@ -101,8 +128,12 @@ impl RepositoryView {
                 ));
             }
         }
-        if let Some(palette) = &self.code_search_palette {
-            for repo in &palette.repositories.repositories {
+        if let Some(repositories) = self
+            .code_search_palette
+            .as_ref()
+            .and_then(|palette| palette.repositories.as_ref())
+        {
+            for repo in &repositories.repositories {
                 entries.extend(repositories::saved_repository_entries(repo));
             }
         }
@@ -271,6 +302,7 @@ impl RepositoryView {
             palette.catalog_changed = false;
         }
         let command_state = palette.command.clone();
+        let search_all = palette.scope == SearchScope::AllRepositories;
         let entries = self.app_search_entries();
         let count = entries.len();
         let progress_label = self
@@ -278,7 +310,9 @@ impl RepositoryView {
             .as_ref()
             .unwrap()
             .repositories
-            .progress_label(count);
+            .as_ref()
+            .map(|repositories| repositories.progress_label(count))
+            .unwrap_or_else(|| format!("{count} 个结果"));
         let items: Vec<_> = entries
             .iter()
             .map(|entry| {
@@ -365,7 +399,7 @@ impl RepositoryView {
                 }
             });
         let (width, height) = dialog_panel_size(window, 680.0, 500.0);
-        let command = command.max_h(px(f32::from(height) - 160.0));
+        let command = command.max_h(px(f32::from(height) - 196.0));
         dialog_overlay()
             .id("code-palette-overlay")
             .focus_trap("code-palette-overlay-trap", &self.code_palette_focus)
@@ -480,6 +514,38 @@ impl RepositoryView {
                         window,
                         cx,
                     )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .pb_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(theme::CONTENT_SECONDARY))
+                                    .child(if search_all { "搜索全部仓库" } else { "仅搜索当前仓库" }),
+                            )
+                            .child(self.toggle_switch(
+                                "app-search-all-repositories",
+                                search_all,
+                                false,
+                                |this, next, _, _| {
+                                    if let Some(palette) = this.code_search_palette.as_mut() {
+                                        palette.scope = if next {
+                                            SearchScope::AllRepositories
+                                        } else {
+                                            SearchScope::CurrentRepository
+                                        };
+                                        palette.catalog_changed = true;
+                                    }
+                                    this.sync_code_search_scope();
+                                },
+                                cx,
+                            ).label("搜索全部仓库")),
+                    )
                     .child(div().flex_1().min_h(px(0.0)).px_2().child(command))
                     .child(
                         div()

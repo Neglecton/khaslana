@@ -4,6 +4,23 @@ use crate::{MainMode, RepoTabId, SettingsCategory, ai_extensions_view::AiSetting
 use khaslana::{BranchKind, RepositorySnapshot};
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum SearchScope {
+    #[default]
+    CurrentRepository,
+    AllRepositories,
+}
+
+impl SearchScope {
+    pub fn includes_repository(self, id: RepoTabId, active: Option<RepoTabId>) -> bool {
+        self == Self::AllRepositories || active == Some(id)
+    }
+
+    pub fn scans_saved_repositories(self, query: &str) -> bool {
+        self == Self::AllRepositories && !query.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SearchTarget {
     Mode(RepoTabId, MainMode),
@@ -489,7 +506,12 @@ pub(super) fn append_repository_entries(
 pub(super) fn filter_entries(entries: Vec<SearchEntry>, query: &str) -> Vec<SearchEntry> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
-        return entries;
+        return entries
+            .into_iter()
+            .filter(|entry| {
+                matches!(entry.target, SearchTarget::Settings(_) | SearchTarget::AiSettings(_))
+            })
+            .collect();
     }
     let tokens: Vec<_> = query.split_whitespace().collect();
     let mut matches: Vec<_> = entries

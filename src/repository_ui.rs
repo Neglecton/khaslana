@@ -1,6 +1,7 @@
 //! RepositoryView 的通用输入、菜单、差异与状态渲染。
 
 use crate::*;
+use crate::ui::components::icon_button;
 use gpui_kit::base::{Button as BaseButton, FocusTrapElement};
 use gpui_kit::component::{Disableable, Sizable, Size, status_bar::StatusBar, switch::Switch};
 
@@ -51,7 +52,7 @@ impl RepositoryView {
         disabled: bool,
         on_change: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Switch {
         Switch::new(id)
             .checked(checked)
             .disabled(disabled)
@@ -310,78 +311,6 @@ impl RepositoryView {
             .w_full()
             .overflow_y_scroll()
             .track_scroll(&switcher_handle)
-            // ── 功能区：克隆 / 打开 / 搜索仓库 ──
-            .child(self.repo_switcher_action_item(
-                "repo-switcher-clone",
-                ToolbarIcon::Clone,
-                "克隆仓库…",
-                |this, window, cx| {
-                    this.close_repo_switcher();
-                    this.open_clone_dialog(window, cx);
-                },
-                cx,
-            ))
-            .child(self.repo_switcher_action_item(
-                "repo-switcher-open",
-                ToolbarIcon::Open,
-                "打开仓库…",
-                |this, _window, _cx| {
-                    this.close_repo_switcher();
-                    this.browse_open();
-                },
-                cx,
-            ))
-            // 搜索仓库：默认为按钮，点击展开输入框 + 小叉
-            .when(!self.repo_switcher_search_open, |this| {
-                this.child(self.repo_switcher_action_item(
-                    "repo-switcher-search-toggle",
-                    ToolbarIcon::Search,
-                    "搜索仓库",
-                    |this, window, cx| {
-                        this.repo_switcher_search_open = true;
-                        window.focus(&this.repo_switcher_search.focus, cx);
-                    },
-                    cx,
-                ))
-            })
-            .when(self.repo_switcher_search_open, |this| {
-                this.child(
-                    div()
-                        .id("repo-switcher-search-row")
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
-                        .child(div().flex_1().min_w(px(0.0)).child(self.input(
-                            FieldId::RepoSwitcherSearch,
-                            false,
-                            window,
-                            cx,
-                        )))
-                        .child(
-                            div()
-                                .id("repo-switcher-search-close")
-                                .flex_none()
-                                .size(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(ui_theme::RADIUS_XS))
-                                .text_size(px(12.0))
-                                .text_color(rgb(ui_theme::CONTENT_SECONDARY))
-                                .cursor_pointer()
-                                .hover(|this| this.bg(rgb(ui_theme::WB_ROW_HOVER)))
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    // 收起输入框，恢复「搜索仓库」按钮并取消过滤
-                                    this.repo_switcher_search_open = false;
-                                    this.repo_switcher_search.clear();
-                                    cx.notify();
-                                }))
-                                .child("✕"),
-                        ),
-                )
-            })
             // ── 打开项目区 ──
             .when(!sections.open.is_empty(), |this| {
                 this.child(self.repo_switcher_section_header("打开项目"))
@@ -414,7 +343,7 @@ impl RepositoryView {
             )
             .into_any_element();
 
-        // 外层仅做定位与最大高度约束，滚动与滚动条交给 scrollable_frame_when。
+        // 搜索和仓库操作固定在顶部，只有仓库列表滚动。
         glass_menu()
             .id("repo-switcher-menu")
             .absolute()
@@ -425,14 +354,72 @@ impl RepositoryView {
             .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                 cx.stop_propagation();
             })
-            .child(scrollable_frame_when(
-                "repo-switcher-scroll",
-                ScrollbarMode::Vertical,
-                switcher_content,
-                switcher_handle,
-                true,
+            .child(self.repo_switcher_action_item(
+                "repo-switcher-clone",
+                ToolbarIcon::Clone,
+                "克隆仓库…",
+                |this, window, cx| {
+                    this.close_repo_switcher();
+                    this.open_clone_dialog(window, cx);
+                },
                 cx,
             ))
+            .child(self.repo_switcher_action_item(
+                "repo-switcher-open",
+                ToolbarIcon::Open,
+                "打开仓库…",
+                |this, _, _| {
+                    this.close_repo_switcher();
+                    this.browse_open();
+                },
+                cx,
+            ))
+            .child(
+                div()
+                    .id("repo-switcher-search-row")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p_2()
+                    .child(div().flex_1().min_w(px(0.0)).child(self.input(
+                        FieldId::RepoSwitcherSearch,
+                        false,
+                        window,
+                        cx,
+                    )))
+                    .when(query_active, |row| {
+                        row.child(
+                            icon_button(
+                                "repo-switcher-search-clear".into(),
+                                ToolbarIcon::Close,
+                                "清空仓库搜索",
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.repo_switcher_search.clear();
+                                window.focus(&this.repo_switcher_search.focus, cx);
+                                cx.notify();
+                            })),
+                        )
+                    }),
+            )
+            .child(menu_separator())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_h(px(0.0))
+                    .max_h(px(REPO_SWITCHER_MENU_HEIGHT - 128.0))
+                    .child(scrollable_frame_when(
+                        "repo-switcher-scroll",
+                        ScrollbarMode::Vertical,
+                        switcher_content,
+                        switcher_handle,
+                        true,
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1600,9 +1587,8 @@ impl RepositoryView {
             self.active_dialog.is_some(),
             self.any_popup_menu_open(),
         );
-        // 悬浮工作台：拖拽区默认就是面板之间的空隙，不画线；悬停才浮出指示条，
-        // 拖拽中常亮。侧栏那一列的面板间隙由拖拽区自身宽度提供（16px），
-        // 页面内部相邻面板仍用 8px。
+        // 侧栏和变更列表的拖拽区只保留透明命中范围，悬停和拖动均不画线。
+        // 其他分栏仍保留既有指示；侧栏间隙为 16px，页面内部面板间隙为 8px。
         let gap = if target == ResizeTarget::Sidebar {
             crate::chrome_view::SHELL_PADDING
         } else if target == ResizeTarget::HistoryInspectorHeight {
@@ -1646,7 +1632,9 @@ impl RepositoryView {
                     }
                 }),
             )
-            .child(if horizontal {
+            .child(if matches!(target, ResizeTarget::Sidebar | ResizeTarget::Changes) {
+                div().into_any_element()
+            } else if horizontal {
                 if target == ResizeTarget::HistoryInspectorHeight {
                     div()
                         .absolute()
@@ -1804,14 +1792,15 @@ impl RepositoryView {
         // 状态栏用 Kit StatusBar 的三区结构（left 固定左、center 伸缩、right 固定右）。
         // Kit 默认带底色与顶边线，这里覆盖掉：状态栏坐在外壳的环境底上，
         // 自己铺色会糊掉窗口底部两角，面板投影已经足够分层。
-        // 单行窄条：垂直内边距归零、9px 小字，状态点与间距同步缩小。
+        // 单行状态文字使用 11px 辅助信息尺寸，显式行高保证文字完整显示。
         StatusBar::new()
             .h(px(chrome_view::STATUS_BAR_HEIGHT))
             .py(px(0.0))
             .px(px(ui_theme::SPACE_4))
             .bg(ui_theme::rgba(0x00000000))
             .border_color(ui_theme::rgba(0x00000000))
-            .text_size(px(9.0))
+            .text_size(px(ui_theme::TYPE_META))
+            .line_height(px(18.0))
             .left(
                 div()
                     .flex()
@@ -1820,7 +1809,7 @@ impl RepositoryView {
                     .child(
                         div()
                             .flex_none()
-                            .size(px(5.0))
+                            .size(px(6.0))
                             .rounded_full()
                             .bg(rgb(if self.busy {
                                 ui_theme::PRIMARY

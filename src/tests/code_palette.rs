@@ -133,3 +133,37 @@ fn settings_remain_available_while_git_operations_are_busy() {
         Some("当前操作进行中，请稍候")
     );
 }
+
+#[test]
+fn empty_query_only_shows_settings_including_ai_settings() {
+    let mut entries = function_entries(Some(RepoTabId(1)), false, None, true);
+    append_repository_entries(
+        &mut entries,
+        RepoTabId(1),
+        "仓库甲",
+        &RepositorySnapshot {
+            branches: vec![branch("main", BranchKind::Local)],
+            ..Default::default()
+        },
+    );
+    let results = filter_entries(entries, " \t ");
+    assert!(!results.is_empty());
+    assert!(results.iter().all(|entry| matches!(
+        entry.target,
+        SearchTarget::Settings(_) | SearchTarget::AiSettings(_)
+    )));
+    assert!(results.iter().any(|entry| matches!(entry.target, SearchTarget::AiSettings(_))));
+}
+
+#[test]
+fn search_scope_defaults_to_current_and_scans_all_only_with_a_query() {
+    let scope = SearchScope::default();
+    assert!(scope.includes_repository(RepoTabId(1), Some(RepoTabId(1))));
+    assert!(!scope.includes_repository(RepoTabId(2), Some(RepoTabId(1))));
+    assert!(!scope.includes_repository(RepoTabId(1), None));
+    assert!(!scope.scans_saved_repositories("main"));
+    let scope = SearchScope::AllRepositories;
+    assert!(scope.includes_repository(RepoTabId(2), Some(RepoTabId(1))));
+    assert!(scope.scans_saved_repositories("main"));
+    assert!(!scope.scans_saved_repositories(" \t "));
+}

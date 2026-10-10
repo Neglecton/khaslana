@@ -3605,8 +3605,6 @@ pub(crate) struct RepositoryView {
     commit_graph_search: TextFieldState,
     /// 提交图谱页分支高亮下拉的菜单内搜索框（打开菜单即清空并聚焦）。
     commit_graph_branch_search: TextFieldState,
-    /// 搜索框是否展开：默认只显示「搜索仓库」按钮，点击后替换为输入框 + 小叉。
-    repo_switcher_search_open: bool,
     save_credential: bool,
     credential_scope: CredentialScope,
     credential_form_mode: CredentialFormMode,
@@ -4049,13 +4047,13 @@ impl Render for RepositoryView {
                     .min_w(px(0.0))
                     .min_h(px(0.0))
                     .relative()
-                    // 悬浮工作台：内容区四周留白，导航与页面各成一张抬起的面板。
-                    // 面板之间不设 gap——拖拽区自身就是那段间隙（默认无可见分割线，
-                    // 悬停/拖拽时才显示指示），收起窄条用右边距留出同样的间隙。
+                    // 悬浮工作台：内容区上方与左右留白，底部仅留少量状态栏间隙。
+                    // 面板之间不设 gap——透明拖拽区自身提供间隙，
+                    // 收起窄条用右边距留出同样的间隙。
                     // 顶栏与主界面之间同样留出 SHELL_PADDING，避免顶栏贴住页面。
                     .px(px(chrome_view::SHELL_PADDING))
                     .pt(px(chrome_view::SHELL_PADDING))
-                    .pb(px(chrome_view::SHELL_PADDING))
+                    .pb(px(ui_theme::SPACE_1))
                     // 左侧列：Docked 展开完整导航器（模式按钮 + 分组列表）；
                     // 其余情况（收起偏好/窄窗/专用页面）一律渲染 48px 收起窄条
                     // （模式图标 + 展开箭头 + 设置），模式入口在任何页面都常驻。

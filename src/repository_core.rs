@@ -182,7 +182,6 @@ impl RepositoryView {
             repo_switcher_search: TextFieldState::new(cx, "搜索仓库"),
             commit_graph_search: TextFieldState::new(cx, "搜索提交/作者/SHA"),
             commit_graph_branch_search: TextFieldState::new(cx, "搜索分支"),
-            repo_switcher_search_open: false,
             save_credential: false,
             credential_scope: CredentialScope::RemoteUrl,
             credential_form_mode: CredentialFormMode::Https,
@@ -1595,6 +1594,9 @@ impl RepositoryView {
     }
 
     pub(crate) fn notify_text_field_changed(&mut self, field: FieldId) {
+        if field == FieldId::CodePaletteSearch {
+            self.sync_code_search_scope();
+        }
         if matches!(field, FieldId::WorkflowInput(_)) {
             self.workflow_input_changed();
         }
@@ -2092,14 +2094,12 @@ impl RepositoryView {
             })
             .unwrap_or((MENU_VIEWPORT_MARGIN, MENU_VIEWPORT_MARGIN));
         self.repo_switcher_menu = Some(RepoSwitcherMenu { x, y });
-        // 搜索默认收起为「搜索仓库」按钮；清掉上一次的搜索词。
-        self.repo_switcher_search_open = false;
+        // 搜索框常驻顶部；每次打开清掉上一次的搜索词。
         self.repo_switcher_search.clear();
     }
 
     pub(crate) fn close_repo_switcher(&mut self) {
         self.repo_switcher_menu = None;
-        self.repo_switcher_search_open = false;
         self.repo_switcher_search.clear();
     }
 

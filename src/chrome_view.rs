@@ -27,8 +27,8 @@ use crate::{
 /// 原生控制区固定在标题栏最右侧，窗口不能缩到把它们挤出视口。
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 520.0;
-/// 底部状态栏保持单行高度，避免占用工作区。
-pub(crate) const STATUS_BAR_HEIGHT: f32 = 18.0;
+/// 底部状态栏为正文尺寸的单行文字预留完整高度。
+pub(crate) const STATUS_BAR_HEIGHT: f32 = 28.0;
 pub(crate) const NARROW_LAYOUT_WIDTH: f32 = 1120.0;
 pub(crate) const COMFORTABLE_LAYOUT_WIDTH: f32 = 1440.0;
 /// 悬浮工作台的内容区留白：四周与面板间隙同值（画板 16px）。
