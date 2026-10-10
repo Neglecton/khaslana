@@ -578,11 +578,10 @@ impl RepositoryView {
                             khaslana::MERGE_CONTEXT_BUDGET_CHARS,
                         )
                     };
-                    // 默认 max_tokens（800）放不下整段输出：按段长放宽
+                    // 冲突合并输出固定放宽上限至 64000，避免长文件/大冲突块输出被截断
                     // （每段独立建客户端，代理设置与全局一致）。
                     let mut request_settings = base_settings.clone();
-                    request_settings.max_tokens =
-                        (segment.text.chars().count() / 3 + 1024).clamp(1024, 16_384) as u32;
+                    request_settings.max_tokens = 64_000;
                     let segment_client = ChatClient::new(request_settings, proxy_url.clone());
                     let result =
                         segment_client.request_stream(&messages, &mut |delta| on_delta(delta))?;

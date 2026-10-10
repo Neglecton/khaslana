@@ -526,3 +526,18 @@ fn plain_stream_truncation_message_length_and_missing_done() {
     // [DONE] 且供应商未给 finish_reason：视为正常完成
     assert!(plain_stream_truncation_message(true, None, 800).is_none());
 }
+
+#[test]
+fn ai_user_agent_format_contains_app_version_and_target() {
+    let ua = AI_USER_AGENT;
+    assert!(ua.starts_with("Khaslana/"), "UA 应以 Khaslana/ 开头：{ua}");
+    assert!(
+        ua.contains(env!("CARGO_PKG_VERSION")),
+        "UA 应包含完整版本号（含预发布标识）：{ua}"
+    );
+    assert!(
+        ua.contains(env!("KHASLANA_TARGET")),
+        "UA 应包含编译 target：{ua}"
+    );
+    assert!(ua.ends_with(')'), "UA 应以包含 target 的括号结尾：{ua}");
+}
