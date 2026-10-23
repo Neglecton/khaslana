@@ -9,6 +9,8 @@ pub mod ui_i18n;
 pub mod proxy;
 mod process;
 pub mod storage;
+pub mod ssh_keys;
+pub mod ssh_host_trust;
 pub mod syntax;
 pub mod types;
 pub mod update;

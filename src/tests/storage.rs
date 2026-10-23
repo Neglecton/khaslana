@@ -238,6 +238,43 @@ fn remote_credential_bindings_round_trip() {
 }
 
 #[test]
+fn ssh_host_pins_round_trip_without_overwriting_identity() {
+    let (_temp, storage) = temp_storage();
+    assert_eq!(storage.load_ssh_host_pin("example.com", 22).unwrap(), None);
+    assert!(storage.insert_ssh_host_pin("example.com", 22, "ssh-ed25519", &[0, 1, 255]).unwrap());
+    assert!(!storage.insert_ssh_host_pin("example.com", 22, "ssh-rsa", &[9]).unwrap());
+    assert_eq!(storage.load_ssh_host_pin("example.com", 22).unwrap(), Some(("ssh-ed25519".into(), vec![0, 1, 255])));
+    assert!(storage.insert_ssh_host_pin("example.com", 2222, "ssh-ed25519", &[2]).unwrap());
+    assert_eq!(storage.list_ssh_host_pins().unwrap(), vec![
+        ("example.com".into(), 22, "ssh-ed25519".into(), vec![0, 1, 255]),
+        ("example.com".into(), 2222, "ssh-ed25519".into(), vec![2]),
+    ]);
+    storage.delete_ssh_host_pin("example.com", 22).unwrap();
+    storage.delete_ssh_host_pin("example.com", 22).unwrap();
+    assert_eq!(storage.load_ssh_host_pin("example.com", 22).unwrap(), None);
+    assert!(storage.load_ssh_host_pin("example.com", 2222).unwrap().is_some());
+}
+
+#[test]
+fn ssh_host_pin_atomic_insert_across_connections() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("settings.sqlite3");
+    let first = AppStorage::open(&path).unwrap();
+    let second = AppStorage::open(&path).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = [first, second].into_iter().enumerate().map(|(index, storage)| {
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            storage.insert_ssh_host_pin("example.com", 22, "ssh-ed25519", &[index as u8]).unwrap()
+        })
+    }).collect();
+    let inserted = handles.into_iter().map(|handle| usize::from(handle.join().unwrap())).sum::<usize>();
+    assert_eq!(inserted, 1);
+    assert_eq!(AppStorage::open(path).unwrap().list_ssh_host_pins().unwrap().len(), 1);
+}
+
+#[test]
 fn credential_records_round_trip() {
     let (_temp, storage) = temp_storage();
     let records = vec![CredentialRecord {
@@ -249,6 +286,7 @@ fn credential_records_round_trip() {
         remote_url: "git@github.com:owner/repo.git".into(),
         username: "git".into(),
         key_path: Some("C:/Users/test/.ssh/id_ed25519".into()),
+        managed_key_id: None,
         created_at: 1,
         updated_at: 2,
         last_used: Some(3),
@@ -716,6 +754,83 @@ fn perform_portable_migration_files_copies_and_cleans_legacy() {
     assert!(count >= 0);
 }
 
+// 密钥复制已成功后，数据库验证、发布或标记失败均须回滚本次密钥并允许安全重试。
+#[test]
+fn portable_migration_rolls_back_copied_keys_after_database_or_marker_failure() {
+    use crate::ssh_keys::{GenerateSshKeyRequest, KeyProtection, SshKeyManager};
+    use std::sync::Arc;
+
+    for failure in ["validation", "rename", "existing", "marker"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("legacy");
+        let target = temp.path().join("portable");
+        let source_db = source.join(DB_FILE_NAME);
+        let target_db = target.join(DB_FILE_NAME);
+        // 标记父路径被普通文件占用，写入失败但不会伪造“已迁移”标记。
+        let marker = if failure == "marker" { source.join("blocked").join(PORTABLE_MIGRATED_MARKER) }
+            else { source.join(PORTABLE_MIGRATED_MARKER) };
+        let source_storage = Arc::new(AppStorage::open(&source_db).unwrap());
+        let source_manager = SshKeyManager::new(source_storage.clone());
+        let key = source_manager.generate(GenerateSshKeyRequest {
+            display_name: "migration".into(), comment: String::new(), protection: KeyProtection::Unencrypted,
+        }).unwrap();
+        let original_private = fs::read(source_manager.private_key_path(&key.id).unwrap()).unwrap();
+        drop(source_manager);
+        drop(source_storage);
+
+        // 目标已有的合法密钥必须完整保留，不能用递归删除 keys 的方式回滚。
+        let target_storage = Arc::new(AppStorage::open(target.join("existing.sqlite3")).unwrap());
+        let target_manager = SshKeyManager::new(target_storage.clone());
+        let existing = target_manager.generate(GenerateSshKeyRequest {
+            display_name: "existing".into(), comment: String::new(), protection: KeyProtection::Unencrypted,
+        }).unwrap();
+        let existing_path = target_manager.private_key_path(&existing.id).unwrap();
+        let existing_private = fs::read(&existing_path).unwrap();
+        let copied_path = target.join("ssh/keys").join(&key.id);
+
+        match failure {
+            "validation" => {
+                let conn = Connection::open(&source_db).unwrap();
+                conn.execute("DROP TABLE schema_meta", []).unwrap();
+            }
+            "rename" => { fs::create_dir(&target_db).unwrap(); }
+            "existing" => { fs::write(&target_db, b"existing database untouched").unwrap(); }
+            "marker" => { fs::write(marker.parent().unwrap(), "blocked").unwrap(); }
+            _ => unreachable!(),
+        }
+        assert!(perform_portable_migration_files(&source_db, &target_db,
+            &source.join("updates"), &target.join("updates"), &marker).is_err(), "{failure}");
+        assert!(!copied_path.exists(), "失败必须清理本次复制的密钥：{failure}");
+        assert!(source_db.exists(), "失败必须保留源数据库：{failure}");
+        if failure == "marker" {
+            assert!(!target_db.exists(), "标记失败必须撤回已发布库");
+            assert_eq!(pick_active_path(Some(source_db.clone()), Some(target_db.clone()),
+                Some(source.clone()), None, None, ExeLocationRisk::Safe), Some(source_db.clone()));
+        }
+        if failure == "existing" {
+            assert_eq!(fs::read(&target_db).unwrap(), b"existing database untouched");
+        }
+        assert_eq!(fs::read(&existing_path).unwrap(), existing_private);
+        assert_eq!(fs::read(source.join("ssh/keys").join(&key.id).join("id_ed25519")).unwrap(), original_private);
+
+        match failure {
+            "validation" => { drop(AppStorage::open(&source_db).unwrap()); }
+            "rename" => { fs::remove_dir(&target_db).unwrap(); }
+            "existing" => { fs::remove_file(&target_db).unwrap(); }
+            "marker" => { fs::remove_file(marker.parent().unwrap()).unwrap(); }
+            _ => unreachable!(),
+        }
+        perform_portable_migration_files(&source_db, &target_db,
+            &source.join("updates"), &target.join("updates"), &marker).unwrap();
+        assert_eq!(fs::read(copied_path.join("id_ed25519")).unwrap(), original_private);
+        assert_eq!(fs::read(&existing_path).unwrap(), existing_private);
+        assert!(marker.is_file());
+        assert!(!source_db.exists());
+        assert_eq!(pick_active_path(Some(source_db.clone()), Some(target_db.clone()),
+            Some(source.clone()), None, None, ExeLocationRisk::Safe), Some(target_db));
+    }
+}
+
 // meta 通用读写与「忽略便携迁移提示」标记。
 #[test]
 fn meta_value_round_trip_and_portable_migration_dismissed() {
@@ -749,11 +864,28 @@ fn perform_exe_relocation_files_moves_program_and_data() {
         storage.set_meta_value("relocation-test", "1").unwrap();
     }
     fs::write(home.join("data").join("ai-reviews").join("abc.json"), b"{}").unwrap();
+    {
+        use crate::ssh_keys::{GenerateSshKeyRequest, KeyProtection, SshKeyManager};
+        let manager = SshKeyManager::new(std::sync::Arc::new(AppStorage::open(&db_path).unwrap()));
+        manager.generate(GenerateSshKeyRequest { display_name: "relocate".into(),
+            comment: String::new(), protection: KeyProtection::Unencrypted }).unwrap();
+    }
+    fs::create_dir_all(home.join("data/ssh/custom/nested")).unwrap();
+    fs::write(home.join("data/ssh/config"), b"custom config").unwrap();
+    fs::write(home.join("data/ssh/custom/nested/keep"), b"custom payload").unwrap();
 
     let target = tmp.path().join("Programs").join("Khaslana");
     let target_exe = perform_exe_relocation_files(&exe, Some(&home.join("data")), &target).unwrap();
     assert_eq!(target_exe, target.join("khaslana.exe"));
     assert_eq!(fs::read(&target_exe).unwrap(), b"exe-bytes");
+    assert_eq!(fs::read(target.join("data/ssh/config")).unwrap(), b"custom config");
+    assert_eq!(fs::read(target.join("data/ssh/custom/nested/keep")).unwrap(), b"custom payload");
+    {
+        let manager = crate::ssh_keys::SshKeyManager::new(std::sync::Arc::new(
+            AppStorage::open(target.join("data").join(DB_FILE_NAME)).unwrap()));
+        let key = manager.list().unwrap().remove(0);
+        assert!(manager.private_key_path(&key.id).unwrap().is_file());
+    }
     // 数据整体落位且库可打开。
     let relocated_db = target.join("data").join(DB_FILE_NAME);
     assert!(relocated_db.exists());

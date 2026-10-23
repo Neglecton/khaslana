@@ -1757,6 +1757,7 @@ fn is_gitee_https_record_matches_host_key_form_only() {
         remote_url: "https://gitee.com/team/repo.git".into(),
         username: "user".into(),
         key_path: None,
+        managed_key_id: None,
         created_at: 1,
         updated_at: 1,
         last_used: None,

@@ -29,6 +29,8 @@ mod remote_branch_operation;
 mod repository_actions;
 mod repository_core;
 mod repository_credentials;
+mod repository_ssh_ui;
+mod ssh_ui_resources;
 mod repository_events;
 mod repository_operations;
 mod repository_ui;
@@ -97,7 +99,6 @@ use khaslana::{
     credential_kind_label, credential_record_is_compatible_with_url, credential_record_label,
     credential_record_matches_remote_url, credential_scope_label, normalize_remote_url,
     syntax::SyntaxSpans as SharedSyntaxSpans,
-    test_credential_connection,
     update::{self, UpdateCheckResult, UpdateManifest, UpdatePlatformAsset},
 };
 use lru::LruCache;
@@ -493,6 +494,10 @@ enum FieldId {
     CredentialSecret,
     CredentialKeyPath,
     CredentialPassphrase,
+    SshKeyName,
+    SshKeyComment,
+    SshKeyPassphrase,
+    SshKeyPassphraseConfirm,
     CredentialRemoteUrl,
     CredentialDisplayName,
     CredentialTestUrl,
@@ -576,6 +581,10 @@ const DEDICATED_FIELDS: &[(FieldId, DedicatedFieldAccessor)] = &[
     (FieldId::CredentialPassphrase, |view: &RepositoryView| {
         &view.credential_passphrase
     }),
+    (FieldId::SshKeyName, |view: &RepositoryView| &view.ssh_ui.name),
+    (FieldId::SshKeyComment, |view: &RepositoryView| &view.ssh_ui.comment),
+    (FieldId::SshKeyPassphrase, |view: &RepositoryView| &view.ssh_ui.passphrase),
+    (FieldId::SshKeyPassphraseConfirm, |view: &RepositoryView| &view.ssh_ui.passphrase_confirm),
     (FieldId::CredentialRemoteUrl, |view: &RepositoryView| {
         &view.credential_remote_url
     }),
@@ -673,6 +682,10 @@ pub(crate) const ALL_FIELD_IDS: &[FieldId] = &[
     FieldId::CredentialSecret,
     FieldId::CredentialKeyPath,
     FieldId::CredentialPassphrase,
+    FieldId::SshKeyName,
+    FieldId::SshKeyComment,
+    FieldId::SshKeyPassphrase,
+    FieldId::SshKeyPassphraseConfirm,
     FieldId::CredentialRemoteUrl,
     FieldId::CredentialDisplayName,
     FieldId::CredentialTestUrl,
@@ -850,6 +863,10 @@ pub(crate) enum DialogState {
     TestCredential {
         record_id: String,
     },
+    GenerateSshKey,
+    DeleteSshKey { key_id: String, name: String },
+    ForgetSshHost { host: String, port: u16, algorithm: String },
+    VerifySshHost { challenge_id: u64 },
     SubmoduleManager,
     RemoteManager,
     RemoteForm {
@@ -2371,6 +2388,7 @@ impl RepositoryLoading {
 #[derive(Clone, Debug)]
 pub(crate) enum UiEvent {
     UiTick,
+    SshUi(repository_ssh_ui::SshUiEvent),
     Recovery(recovery_view::RecoveryEvent),
     ConflictFilesLoaded {
         tab_id: RepoTabId,
@@ -3509,6 +3527,7 @@ pub(crate) struct RepositoryView {
     tasks: TaskExecutor,
     storage: Arc<khaslana::AppStorage>,
     credential_store: Arc<KeyringCredentialStore>,
+    ssh_ui: repository_ssh_ui::SshUiState,
     remote_credential_bindings: Arc<Mutex<RemoteCredentialBindings>>,
     credential_records: Vec<CredentialRecord>,
     pub(crate) workflow_templates: Vec<WorkflowTemplateItem>,
@@ -4179,7 +4198,7 @@ impl Render for RepositoryView {
             .child(self.render_code_search_palette(window, cx))
             .child(self.render_ai_thinking_overlay(window, cx))
             .child(self.render_credential_context_menu(cx))
-            .child(self.render_operation_blocker(cx))
+            .when(!matches!(self.active_dialog, Some(DialogState::VerifySshHost { .. })), |this| this.child(self.render_operation_blocker(cx)))
             .child(self.render_credentials(window, cx))
             .child(self.render_feedback_layer(cx))
     }

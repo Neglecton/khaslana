@@ -2,7 +2,6 @@ use crate::types::domain_ui_resources;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,6 +55,9 @@ pub struct CredentialRecord {
     pub remote_url: String,
     pub username: String,
     pub key_path: Option<String>,
+    /// 托管密钥使用稳定身份；旧凭据仍保留外部路径语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_key_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_used: Option<i64>,
@@ -342,6 +344,7 @@ impl CredentialStore for MemoryCredentialStore {
                 remote_url: request.url.clone(),
                 username: credential.username().to_string(),
                 key_path: credential.key_path().map(str::to_string),
+                managed_key_id: None,
                 created_at: now,
                 updated_at: now,
                 last_used: Some(now),
@@ -633,6 +636,9 @@ impl CredentialStore for KeyringCredentialStore {
         let Some(credential) = GitCredential::from_record(&record, secret) else {
             return Ok(None);
         };
+        if let Some(id) = record.managed_key_id.as_deref() {
+            crate::ssh_keys::SshKeyManager::new(self.storage.clone()).private_key_path(id)?;
+        }
         let record = self.touch_record(&record.id)?.unwrap_or(record);
         Ok(Some(StoredCredential { record, credential }))
     }
@@ -680,6 +686,7 @@ impl CredentialStore for KeyringCredentialStore {
                 remote_url: request.url.clone(),
                 username: credential.username().to_string(),
                 key_path: credential.key_path().map(str::to_string),
+                managed_key_id: None,
                 created_at: now,
                 updated_at: now,
                 last_used: Some(now),
@@ -688,6 +695,12 @@ impl CredentialStore for KeyringCredentialStore {
             record
         };
 
+        // 保存时从本存储的托管路径取得稳定 id，迁移后不依赖旧绝对路径。
+        let mut record = record;
+        record.managed_key_id = self.storage.managed_id_for_credential_path(credential.key_path());
+        if let Some(index_record) = index.records.iter_mut().find(|item| item.id == record.id) {
+            index_record.managed_key_id = record.managed_key_id.clone();
+        }
         let entry = Self::entry_for_record(&record.id, credential.username())?;
         entry
             .set_password(&credential.secret_for_keyring())
@@ -775,7 +788,12 @@ impl CredentialStore for KeyringCredentialStore {
         };
         let entry = Self::entry_for_record(&record.id, &record.username)?;
         match entry.get_password() {
-            Ok(secret) => Ok(GitCredential::from_record(&record, secret)),
+            Ok(secret) => {
+                if let Some(id) = record.managed_key_id.as_deref() {
+                    crate::ssh_keys::SshKeyManager::new(self.storage.clone()).private_key_path(id)?;
+                }
+                Ok(GitCredential::from_record(&record, secret))
+            },
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(err) => Err(GitError::LocalizedCredential(crate::ui_i18n::LocalizedMessage::new(domain_ui_resources::FAILED_TO_READ_SYSTEM_CREDENTIALS, &[("err", &format!("{:?}", err))]))),
         }
@@ -884,6 +902,17 @@ pub fn test_credential_connection(
     store: &dyn CredentialStore,
     record: &CredentialRecord,
 ) -> Result<()> {
+    test_credential_connection_with_policy(store, record, &crate::proxy::NetworkProxySettings::default(), Arc::new(crate::ssh_host_trust::RejectHostTrust))
+}
+
+pub fn test_credential_connection_with_policy(
+    store: &dyn CredentialStore,
+    record: &CredentialRecord,
+    proxy: &crate::proxy::NetworkProxySettings,
+    trust: Arc<dyn crate::ssh_host_trust::HostTrustProvider>,
+) -> Result<()> {
+    crate::ssh_host_trust::ensure_supported_proxy(proxy, Some(&record.remote_url))?;
+    let proxy_options = proxy.proxy_options_for_remote(Some(&record.remote_url))?;
     let credential = store
         .credential_for_record(&record.id)?
         .ok_or_else(|| GitError::LocalizedCredential(crate::ui_i18n::LocalizedMessage::new(domain_ui_resources::THE_ENCRYPTED_CREDENTIAL_WAS_NOT_FOUND_IN_THE_SYSTEM_CREDENTIAL_MANAGER, &[])))?;
@@ -903,6 +932,7 @@ pub fn test_credential_connection(
     let repo = git2::Repository::init_bare(&temp)?;
     let mut remote = repo.remote_anonymous(&record.remote_url)?;
     let mut callbacks = git2::RemoteCallbacks::new();
+    crate::ssh_host_trust::install_certificate_check(&mut callbacks, Some(&record.remote_url), trust);
     let callback_credential = credential.clone();
     let mut credential_attempted = false;
     callbacks.credentials(move |_url, username_from_url, allowed_types| {
@@ -916,21 +946,14 @@ pub fn test_credential_connection(
         )
     });
     let result = remote
-        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+        .connect_auth(git2::Direction::Fetch, Some(callbacks), proxy_options)
         .map(|_| ())
         .map_err(GitError::from);
+    drop(remote);
+    drop(repo);
     let _ = fs::remove_dir_all(temp);
-    match result {
-        Ok(()) => Ok(()),
-        Err(libgit2_error) if record.kind == StoredCredentialKind::SshKey => {
-            // Windows 上 libssh2 对部分 OpenSSH 私钥格式兼容性有限，使用系统 Git 复核同一凭据。
-            ssh_credential_test_result(
-                libgit2_error,
-                test_ssh_credential_with_system_git(&record.remote_url, &credential),
-            )
-        }
-        Err(error) => Err(error),
-    }
+    // 不能自动切换系统 Git：它的代理和主机信任来源与应用策略不同。
+    result
 }
 
 fn ssh_username_from_remote_url(url: &str) -> Option<String> {
@@ -962,6 +985,7 @@ fn credential_for_connection_test(
     to_git_credential(request, credential)
 }
 
+#[cfg(test)]
 fn ssh_credential_test_result(libgit2_error: GitError, system_result: Result<()>) -> Result<()> {
     // 实际推拉仍走 libgit2；系统 Git 的成功只能用于诊断，不能掩盖内置后端失败。
     Err(GitError::LocalizedCredential(match system_result {
@@ -970,30 +994,7 @@ fn ssh_credential_test_result(libgit2_error: GitError, system_result: Result<()>
     }))
 }
 
-fn test_ssh_credential_with_system_git(url: &str, credential: &GitCredential) -> Result<()> {
-    let ssh_command = git_ssh_command_for_credential(credential)
-        .ok_or_else(|| GitError::LocalizedCredential(crate::ui_i18n::LocalizedMessage::new(domain_ui_resources::THE_SELECTED_RECORD_IS_NOT_AN_SSH_CREDENTIAL, &[])))?;
-    let output = Command::new("git")
-        .args(["ls-remote", "--exit-code", url, "HEAD"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .env("GIT_SSH_COMMAND", ssh_command)
-        .output()
-        .map_err(|error| GitError::LocalizedCredential(crate::ui_i18n::LocalizedMessage::new(domain_ui_resources::CANNOT_START_SYSTEM_GIT, &[("error", &format!("{}", error))])))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        Err(GitError::LocalizedCredential(crate::ui_i18n::LocalizedMessage::new(
-            domain_ui_resources::SYSTEM_GIT_EXITED_WITH_STATUS,
-            &[("value0", &output.status.to_string())],
-        )))
-    } else {
-        Err(GitError::Credential(stderr))
-    }
-}
-
+#[cfg(test)]
 fn git_ssh_command_for_credential(credential: &GitCredential) -> Option<String> {
     let GitCredential::SshPassphrase {
         private_key_path, ..

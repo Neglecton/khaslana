@@ -94,6 +94,10 @@ impl RepositoryView {
             DialogState::TestCredential { record_id } => self
                 .render_test_credential_dialog(record_id, window, cx)
                 .into_any_element(),
+            DialogState::GenerateSshKey => self.render_generate_ssh_key_dialog(window, cx),
+            DialogState::DeleteSshKey { key_id, name } => self.render_delete_ssh_key_dialog(key_id, name, cx),
+            DialogState::ForgetSshHost { host, port, algorithm } => self.render_forget_ssh_host_dialog(host, port, algorithm, cx),
+            DialogState::VerifySshHost { challenge_id } => self.render_verify_ssh_host_dialog(challenge_id, cx),
             DialogState::SubmoduleManager => {
                 self.render_submodule_manager_dialog(cx).into_any_element()
             }
@@ -2196,7 +2200,9 @@ impl RepositoryView {
             .when(
                 self.credential_form_mode == CredentialFormMode::Ssh,
                 |this| {
-                    this.child(self.render_ssh_credential_discovery(cx))
+                    this.child(self.button(khaslana::ui_i18n::text(crate::ssh_ui_resources::GENERATE), !self.ssh_ui.generating,
+                        |this, _, _| this.open_generate_ssh_key(), cx))
+                    .child(self.render_ssh_credential_discovery(cx))
                     .child(
                         div()
                             .text_size(px(11.0))
@@ -2488,7 +2494,9 @@ impl RepositoryView {
                 }
             }));
 
-        vec![group]
+        let mut groups = vec![group];
+        groups.extend(self.settings_ssh_groups(cx));
+        groups
     }
 
     fn render_credential_details_dialog(

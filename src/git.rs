@@ -190,6 +190,7 @@ impl ProgressEmitter for NoopProgress {
 #[derive(Clone)]
 pub struct GitService {
     credential_provider: Arc<dyn CredentialProvider>,
+    host_trust_provider: Arc<dyn crate::ssh_host_trust::HostTrustProvider>,
     progress: Arc<dyn ProgressEmitter>,
     remote_context: Arc<Mutex<Option<RemoteOperationContext>>>,
     next_remote_operation_id: Arc<AtomicU64>,
@@ -229,11 +230,17 @@ impl GitService {
     ) -> Self {
         Self {
             credential_provider,
+            host_trust_provider: Arc::new(crate::ssh_host_trust::RejectHostTrust),
             progress,
             remote_context: Arc::new(Mutex::new(None)),
             next_remote_operation_id: Arc::new(AtomicU64::new(1)),
             proxy_settings: Arc::new(Mutex::new(NetworkProxySettings::default())),
         }
+    }
+
+    pub fn with_host_trust_provider(mut self, provider: Arc<dyn crate::ssh_host_trust::HostTrustProvider>) -> Self {
+        self.host_trust_provider = provider;
+        self
     }
 
     pub fn with_proxy_settings(self, proxy_settings: NetworkProxySettings) -> Self {
@@ -267,7 +274,7 @@ impl GitService {
             .emit(OperationEvent::Started(crate::ui_i18n::format(domain_ui_resources::CLONING, &[("url", &format!("{}", url))])));
 
         let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(self.remote_callbacks(None));
+        fetch_options.remote_callbacks(self.remote_callbacks_for_url(None, Some(url)));
         self.apply_fetch_proxy(&mut fetch_options, Some(url))?;
 
         let mut checkout = CheckoutBuilder::new();
@@ -750,12 +757,10 @@ impl GitService {
         let _remote_context = self.set_remote_context(repo, remote);
         let mut remote_handle = repo.find_remote(&remote.0)?;
         let remote_url = remote_fetch_url(&remote_handle);
-        let proxy_options = self
-            .proxy_settings()
-            .proxy_options_for_remote(remote_url.as_deref())?;
+        let proxy_options = self.proxy_options_for_remote(remote_url.as_deref())?;
         let connection = remote_handle.connect_auth(
             git2::Direction::Fetch,
-            Some(self.remote_callbacks(Some(repo))),
+            Some(self.remote_callbacks_for_url(Some(repo), remote_url.as_deref())),
             proxy_options,
         )?;
         connection.list()?;
@@ -766,8 +771,8 @@ impl GitService {
         let _remote_context = self.set_remote_context(repo, remote);
         let mut remote_handle = repo.find_remote(&remote.0)?;
         let mut options = FetchOptions::new();
-        options.remote_callbacks(self.remote_callbacks(Some(repo)));
         let remote_url = remote_fetch_url(&remote_handle);
+        options.remote_callbacks(self.remote_callbacks_for_url(Some(repo), remote_url.as_deref()));
         self.apply_fetch_proxy(&mut options, remote_url.as_deref())?;
         // 刷新远端时同步清理已删除的远端跟踪分支，避免继续显示过期的拉取/推送状态。
         options.prune(FetchPrune::On);
@@ -935,8 +940,8 @@ impl GitService {
         let _remote_context = self.set_remote_context(repo, remote);
         let mut remote_handle = repo.find_remote(&remote.0)?;
         let mut options = PushOptions::new();
-        options.remote_callbacks(self.remote_callbacks(Some(repo)));
         let remote_url = remote_push_url(&remote_handle);
+        options.remote_callbacks(self.remote_callbacks_for_url(Some(repo), remote_url.as_deref()));
         self.apply_push_proxy(&mut options, remote_url.as_deref())?;
         let refspec = format!(
             "refs/heads/{}:refs/heads/{}",
@@ -1008,8 +1013,8 @@ impl GitService {
         let _remote_context = self.set_remote_context(repo, remote);
         let mut remote_handle = repo.find_remote(&remote.0)?;
         let mut options = PushOptions::new();
-        options.remote_callbacks(self.remote_callbacks(Some(repo)));
         let remote_url = remote_push_url(&remote_handle);
+        options.remote_callbacks(self.remote_callbacks_for_url(Some(repo), remote_url.as_deref()));
         self.apply_push_proxy(&mut options, remote_url.as_deref())?;
         let refspec = format!(":refs/heads/{}", remote_branch.0);
         let result = remote_handle.push(&[refspec.as_str()], Some(&mut options));
@@ -1198,8 +1203,8 @@ impl GitService {
         let _remote_context = self.set_remote_context(repo, remote);
         let mut remote_handle = repo.find_remote(&remote.0)?;
         let mut options = PushOptions::new();
-        options.remote_callbacks(self.remote_callbacks(Some(repo)));
         let remote_url = remote_push_url(&remote_handle);
+        options.remote_callbacks(self.remote_callbacks_for_url(Some(repo), remote_url.as_deref()));
         self.apply_push_proxy(&mut options, remote_url.as_deref())?;
         let result = remote_handle.push(&[refspec.as_str()], Some(&mut options));
         drop(remote_handle);
@@ -2639,15 +2644,18 @@ impl GitService {
         options: &mut FetchOptions<'a>,
         remote_url: Option<&str>,
     ) -> Result<()> {
-        self.proxy_settings()
-            .apply_to_fetch_options(options, remote_url)
+        let settings = self.proxy_settings();
+        crate::ssh_host_trust::ensure_supported_proxy(&settings, remote_url)?;
+        settings.apply_to_fetch_options(options, remote_url)
     }
 
     pub(crate) fn proxy_options_for_remote<'a>(
         &self,
         remote_url: Option<&str>,
     ) -> Result<Option<ProxyOptions<'a>>> {
-        self.proxy_settings().proxy_options_for_remote(remote_url)
+        let settings = self.proxy_settings();
+        crate::ssh_host_trust::ensure_supported_proxy(&settings, remote_url)?;
+        settings.proxy_options_for_remote(remote_url)
     }
 
     fn apply_push_proxy<'a>(
@@ -2655,13 +2663,15 @@ impl GitService {
         options: &mut PushOptions<'a>,
         remote_url: Option<&str>,
     ) -> Result<()> {
-        self.proxy_settings()
-            .apply_to_push_options(options, remote_url)
+        let settings = self.proxy_settings();
+        crate::ssh_host_trust::ensure_supported_proxy(&settings, remote_url)?;
+        settings.apply_to_push_options(options, remote_url)
     }
 
-    pub(crate) fn remote_callbacks<'a>(
+    pub(crate) fn remote_callbacks_for_url<'a>(
         &'a self,
         repo: Option<&'a Repository>,
+        remote_url: Option<&str>,
     ) -> RemoteCallbacks<'a> {
         let provider = self.credential_provider.clone();
         let progress = self.progress.clone();
@@ -2669,6 +2679,7 @@ impl GitService {
         let remote_context = self.remote_context.clone();
 
         let mut callbacks = RemoteCallbacks::new();
+        crate::ssh_host_trust::install_certificate_check(&mut callbacks, remote_url, self.host_trust_provider.clone());
         callbacks.transfer_progress(move |stats| {
             progress.emit(OperationEvent::Progress(crate::ui_i18n::format(domain_ui_resources::RECEIVED_OBJECTS, &[("value0", &format!("{}", stats.received_objects())), ("value1", &format!("{}", stats.total_objects()))])));
             true

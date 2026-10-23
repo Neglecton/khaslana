@@ -50,6 +50,8 @@ impl TaskExecutor {
         // panic 时向 UI 发事件兜底复位并提示。
         let tx = self.event_tx.clone();
         let wrapped = move || {
+            // 主机信任身份属于本次实际运行的任务；结束和 panic 都使排队弹窗失效。
+            let _host_trust_scope = khaslana::ssh_host_trust::HostTrustOperationScope::enter(None);
             if let Err(payload) = catch_unwind(AssertUnwindSafe(task)) {
                 let message = panic_message(payload);
                 tracing::error!(target: "khaslana::tasks", "后台任务 panic：{message}");

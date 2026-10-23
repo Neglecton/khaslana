@@ -43,7 +43,9 @@ impl RepositoryView {
                     this.maybe_auto_open_external_merge_for_selected_conflict();
                 });
             }
+            UiEvent::SshUi(event) => self.handle_ssh_ui_event(event, cx),
             UiEvent::UiTick => {
+                self.tick_ssh_host_challenges(cx);
                 self.tick_recovery(cx);
                 self.progress_phase = self.progress_phase.wrapping_add(1);
                 let now = Instant::now();

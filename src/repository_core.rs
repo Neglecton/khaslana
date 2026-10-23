@@ -48,6 +48,7 @@ impl RepositoryView {
             credential_store,
             remote_credential_bindings,
             credential_records: Vec::new(),
+            ssh_ui: repository_ssh_ui::SshUiState::new(cx),
             workflow_templates: Vec::new(),
             workflow_templates_request_id: 0,
             workflow_template_dir: workflow_templates_dir(),
@@ -643,6 +644,7 @@ impl RepositoryView {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        self.cancel_ssh_host_operations_for_tab(tab_id);
         self.tabs[index].recovery.cancel_tasks();
         if let Some(run) = self.tabs[index].workflow_state.active_run.as_ref() {
             run.control.cancel();
@@ -1085,6 +1087,9 @@ impl RepositoryView {
             }),
         )
         .with_proxy_settings(self.proxy_settings.clone())
+        .with_host_trust_provider(Arc::new(repository_ssh_ui::TabHostTrustProvider {
+            tx: self.tx.clone(), tab_id: Some(tab_id),
+        }))
     }
 
     pub(crate) fn with_tab_context<R>(
@@ -1589,6 +1594,10 @@ impl RepositoryView {
             if self.active_dialog == Some(DialogState::AiMcpForm) {
                 self.save_ai_mcp_form();
             }
+        } else if matches!(field, FieldId::SshKeyName | FieldId::SshKeyComment | FieldId::SshKeyPassphrase | FieldId::SshKeyPassphraseConfirm) {
+            if self.active_dialog == Some(DialogState::GenerateSshKey) {
+                self.generate_managed_ssh_key();
+            }
         } else if matches!(field, FieldId::CredentialTestUrl) {
             if matches!(self.active_dialog, Some(DialogState::TestCredential { .. })) {
                 self.confirm_test_credential();
@@ -1611,6 +1620,10 @@ impl RepositoryView {
     }
 
     pub(crate) fn notify_text_field_changed(&mut self, field: FieldId) {
+        if field == FieldId::CredentialKeyPath {
+            self.ssh_ui.generated_passphrase = None;
+            self.ssh_ui.generation = self.ssh_ui.generation.wrapping_add(1);
+        }
         if field == FieldId::ReflogSearch {
             self.recovery_search_changed();
         } else if field == FieldId::RecoveryBranchName {
@@ -1667,6 +1680,10 @@ impl RepositoryView {
             .focused_kit_field(window, cx)
             .or_else(|| self.focused_text_field(window, cx))
         {
+            if matches!(field, FieldId::SshKeyName | FieldId::SshKeyComment | FieldId::SshKeyPassphrase | FieldId::SshKeyPassphraseConfirm)
+                && self.kit_field_has_ime_composition(field, window, cx) {
+                return;
+            }
             if !self.submit_workflow_document_field(field, cx) {
                 self.submit_focused_field(field, cx);
             }
@@ -1757,6 +1774,10 @@ impl RepositoryView {
             FieldId::CredentialSecret => &mut self.credential_secret,
             FieldId::CredentialKeyPath => &mut self.credential_key_path,
             FieldId::CredentialPassphrase => &mut self.credential_passphrase,
+            FieldId::SshKeyName => &mut self.ssh_ui.name,
+            FieldId::SshKeyComment => &mut self.ssh_ui.comment,
+            FieldId::SshKeyPassphrase => &mut self.ssh_ui.passphrase,
+            FieldId::SshKeyPassphraseConfirm => &mut self.ssh_ui.passphrase_confirm,
             FieldId::CredentialRemoteUrl => &mut self.credential_remote_url,
             FieldId::CredentialTestUrl => &mut self.credential_test_url,
             FieldId::CredentialDisplayName => &mut self.credential_display_name,
@@ -1948,6 +1969,10 @@ impl RepositoryView {
             self.ai_review_history = None;
             return true;
         }
+        if matches!(self.active_dialog, Some(DialogState::VerifySshHost { .. })) {
+            self.close_dialog();
+            return true;
+        }
         if self.active_dialog.is_some() && !self.busy {
             self.close_dialog();
             return true;
@@ -2118,6 +2143,9 @@ impl RepositoryView {
                     TopOverlayKind::Dialog if this.active_dialog.is_none()
                         && this.workflow_document_picker_focus().is_some() => {
                         this.workflow_document_picker_search_focus()
+                    }
+                    TopOverlayKind::Dialog if this.active_dialog == Some(DialogState::GenerateSshKey) => {
+                        Some(this.ssh_ui.name.focus.clone())
                     }
                     TopOverlayKind::Dialog if this.active_dialog == Some(DialogState::CloneRepo) => {
                         Some(this.clone_url.focus.clone())
@@ -2368,6 +2396,19 @@ impl RepositoryView {
             self.cancel_window_close();
             return;
         }
+        if self.active_dialog == Some(DialogState::GenerateSshKey) {
+            self.close_ssh_key_form();
+            return;
+        }
+        if let Some(DialogState::VerifySshHost { challenge_id }) = self.active_dialog.clone() {
+            self.respond_ssh_host_challenge(challenge_id, false);
+            return;
+        }
+        if matches!(self.active_dialog, Some(DialogState::CredentialForm { .. })) {
+            self.close_credential_form();
+            self.request_overlay_focus_restore();
+            return;
+        }
         // 如果没有 active_dialog 但设置中心打开，关闭设置中心。
         if self.active_dialog.is_none() && self.settings_center.is_some() {
             self.close_settings_center();
@@ -2505,6 +2546,7 @@ impl RepositoryView {
         self.close_popups();
         self.settings_center_generation = self.settings_center_generation.wrapping_add(1);
         self.settings_center = Some(SettingsCategory::Credentials);
+        self.reload_ssh_keys();
         self.reload_credential_records(khaslana::ui_i18n::encode(messages::CREDENTIAL_LIST_LOADED, &[]));
     }
 
@@ -2545,6 +2587,7 @@ impl RepositoryView {
         self.settings_center = Some(category);
         match category {
             SettingsCategory::Credentials => {
+                self.reload_ssh_keys();
                 self.reload_credential_records(khaslana::ui_i18n::encode(messages::CREDENTIAL_LIST_LOADED, &[]));
             }
             SettingsCategory::Proxy => {

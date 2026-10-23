@@ -46,6 +46,7 @@ impl GitService {
             let name = submodule.name()?.to_string();
             let status = match self.submodule_remote_sync_status(repo, &submodule, &name) {
                 Ok(status) => status,
+                Err(err) if crate::ssh_host_trust::is_security_error(&err) => return Err(err),
                 Err(err) => {
                     tracing::warn!("submodule remote sync status skipped: {err}");
                     SubmoduleRemoteSyncStatus::Unavailable(err.to_string())
@@ -185,8 +186,10 @@ impl GitService {
 
         let _remote_context = self.set_submodule_context(repo, name);
         let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(self.remote_callbacks(Some(repo)));
-        let submodule_url = submodule.url()?.map(str::to_string);
+        // init 已将相对 .gitmodules URL 解析到父仓库配置；不能拿相对路径猜测 SSH endpoint。
+        let submodule_url = repo.config()?.get_string(&format!("submodule.{name}.url")).ok()
+            .or(submodule.url()?.map(str::to_string));
+        fetch_options.remote_callbacks(self.remote_callbacks_for_url(Some(repo), submodule_url.as_deref()));
         self.apply_fetch_proxy(&mut fetch_options, submodule_url.as_deref())?;
 
         let mut checkout = CheckoutBuilder::new();
@@ -237,7 +240,7 @@ impl GitService {
             remote_url.as_deref(),
         )?;
         let mut options = FetchOptions::new();
-        options.remote_callbacks(self.remote_callbacks(Some(parent_repo)));
+        options.remote_callbacks(self.remote_callbacks_for_url(Some(parent_repo), remote_url.as_deref()));
         self.apply_fetch_proxy(&mut options, remote_url.as_deref())?;
         let refspec = format!("+refs/heads/{branch_name}:refs/remotes/{remote_name}/{branch_name}");
         remote.fetch(
@@ -359,15 +362,17 @@ impl GitService {
         }
 
         let mut remote = subrepo.find_remote(remote_name)?;
-        let callbacks = self.remote_callbacks(None);
+        let callbacks = self.remote_callbacks_for_url(None, remote_url);
         let proxy_options = self.proxy_options_for_remote(remote_url)?;
-        if let Ok(connection) =
-            remote.connect_auth(Direction::Fetch, Some(callbacks), proxy_options)
-            && let Ok(buf) = connection.default_branch()
-            && let Ok(name) = buf.as_str()
-            && let Some(branch) = name.strip_prefix("refs/heads/")
         {
-            return Ok(branch.to_string());
+            // 安全与认证失败必须向上传递，不得伪装成探测不到默认分支。
+            let connection = remote.connect_auth(Direction::Fetch, Some(callbacks), proxy_options)?;
+            if let Ok(buf) = connection.default_branch()
+                && let Ok(name) = buf.as_str()
+                && let Some(branch) = name.strip_prefix("refs/heads/")
+            {
+                return Ok(branch.to_string());
+            }
         }
         drop(remote);
 

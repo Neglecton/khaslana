@@ -47,7 +47,7 @@ fn list_templates_from_url(
     };
     let mut remote = repo.remote_anonymous(source_url)?;
     let mut fetch = FetchOptions::new();
-    fetch.remote_callbacks(service.remote_callbacks(None));
+    fetch.remote_callbacks(service.remote_callbacks_for_url(None, Some(source_url)));
     service.apply_fetch_proxy(&mut fetch, Some(source_url))?;
     remote.fetch(
         &["+refs/heads/main:refs/remotes/origin/main"],

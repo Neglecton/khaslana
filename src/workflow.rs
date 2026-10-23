@@ -425,6 +425,7 @@ impl<'a> WorkflowExecutor<'a> {
     where
         F: FnMut(WorkflowProgressEvent),
     {
+        let _host_trust_scope = crate::ssh_host_trust::HostTrustOperationScope::enter(Some(control.cancelled.clone()));
         control.check_cancelled()?;
         validate_definition(definition)?;
         self.preflight_actions(definition)?;

@@ -18,7 +18,7 @@ use crate::proxy::{CustomProxySettings, NetworkProxyMode, NetworkProxySettings};
 use crate::types::{DiffEncodingChoice, GitError, Result};
 
 const DB_FILE_NAME: &str = "khaslana.sqlite3";
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 /// 旧数据目录（`%APPDATA%\Khaslana`）下出现该标记文件，表示数据已迁移到便携目录；
 /// 启动解析路径时强制走便携路径，即使旧库文件仍在。
@@ -156,6 +156,7 @@ pub enum ThemeMode {
 
 pub struct AppStorage {
     conn: Mutex<Connection>,
+    data_dir: Option<PathBuf>,
 }
 
 impl AppStorage {
@@ -174,6 +175,7 @@ impl AppStorage {
         initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            data_dir: Some(std::path::absolute(path)?.parent().ok_or_else(|| crate::ssh_keys::error(crate::ssh_keys::UNSAFE))?.into()),
         })
     }
 
@@ -182,6 +184,7 @@ impl AppStorage {
         initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            data_dir: None,
         })
     }
 
@@ -408,9 +411,100 @@ impl AppStorage {
         tx.commit().map_err(storage_error)
     }
 
+    pub fn load_ssh_host_pin(&self, host: &str, port: u16) -> Result<Option<(String, Vec<u8>)>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT algorithm, public_key FROM ssh_host_pins WHERE host=?1 AND port=?2",
+            params![host, port], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(storage_error)
+    }
+
+    /// 单条 INSERT 原子竞争；已存在的主机身份绝不覆盖，即使调用者已检查过空记录。
+    pub fn insert_ssh_host_pin(&self, host: &str, port: u16, algorithm: &str, key: &[u8]) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO ssh_host_pins(host, port, algorithm, public_key) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(host, port) DO NOTHING",
+            params![host, port, algorithm, key],
+        ).map(|changed| changed == 1).map_err(storage_error)
+    }
+
+    pub fn list_ssh_host_pins(&self) -> Result<Vec<(String, u16, String, Vec<u8>)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT host, port, algorithm, public_key FROM ssh_host_pins ORDER BY host, port").map_err(storage_error)?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    pub fn delete_ssh_host_pin(&self, host: &str, port: u16) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM ssh_host_pins WHERE host=?1 AND port=?2", params![host, port]).map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn managed_ssh_root(&self) -> Result<PathBuf> {
+        self.data_dir.as_ref().map(|dir| dir.join("ssh").join("keys"))
+            .ok_or_else(|| crate::ssh_keys::error(crate::ssh_keys::UNSAFE))
+    }
+
+    pub fn load_managed_ssh_keys(&self) -> Result<Vec<crate::ssh_keys::ManagedSshKey>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT payload FROM managed_ssh_keys ORDER BY created_at DESC, id").map_err(storage_error)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(storage_error)?;
+        rows.map(|row| {
+            let payload = row.map_err(storage_error)?;
+            serde_json::from_str(&payload).map_err(|_| crate::ssh_keys::error(crate::ssh_keys::MISSING))
+        }).collect()
+    }
+
+    pub(crate) fn insert_managed_ssh_key(&self, key: &crate::ssh_keys::ManagedSshKey) -> Result<()> {
+        crate::ssh_keys::validate_id(&key.id)?;
+        let conn = self.lock_conn()?;
+        let payload = serde_json::to_string(key).map_err(|_| crate::ssh_keys::error(crate::ssh_keys::INVALID))?;
+        conn.execute("INSERT INTO managed_ssh_keys(id, payload, created_at) VALUES (?1, ?2, ?3)", params![key.id, payload, key.created_at]).map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_managed_ssh_key(&self, id: &str, remove_files: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_ssh_keys WHERE id=?1)", [id], |row| row.get(0)).map_err(storage_error)?;
+        if !exists { return Err(crate::ssh_keys::error(crate::ssh_keys::MISSING)); }
+        // 旧路径引用也守卫，防止旧版记录或未保存的迁移快照绕过 id 守卫。
+        let records = load_credential_records_from_conn(&tx)?;
+        if records.iter().any(|record| record.managed_key_id.as_deref() == Some(id)
+            || record.key_path.as_deref().is_some_and(|path| legacy_managed_id(path).as_deref() == Some(id))) {
+            return Err(crate::ssh_keys::error(crate::ssh_keys::REFERENCED));
+        }
+        remove_files()?;
+        tx.execute("DELETE FROM managed_ssh_keys WHERE id=?1", [id]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn load_credential_records(&self) -> Result<Vec<CredentialRecord>> {
         let conn = self.lock_conn()?;
-        load_credential_records_from_conn(&conn)
+        let mut records = load_credential_records_from_conn(&conn)?;
+        if let Ok(root) = self.managed_ssh_root() {
+            for record in &mut records {
+                // 兼容只有旧绝对路径的托管记录；仅关联已存在的元数据，外部密钥不导入。
+                if record.managed_key_id.is_none() && record.kind == StoredCredentialKind::SshKey {
+                    if let Some(id) = record.key_path.as_deref().and_then(legacy_managed_id) {
+                        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM managed_ssh_keys WHERE id=?1)", [&id], |row| row.get(0)).map_err(storage_error)?;
+                        if exists { record.managed_key_id = Some(id); }
+                    }
+                }
+                if let Some(id) = record.managed_key_id.as_deref() {
+                    crate::ssh_keys::validate_id(id)?;
+                    record.key_path = Some(root.join(id).join("id_ed25519").to_string_lossy().into_owned());
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    pub(crate) fn managed_id_for_credential_path(&self, path: Option<&str>) -> Option<String> {
+        crate::ssh_keys::managed_id_for_path(&self.managed_ssh_root().ok()?, path?)
     }
 
     pub fn save_credential_records(&self, records: &[CredentialRecord]) -> Result<()> {
@@ -774,6 +868,13 @@ fn perform_portable_migration_files(
     let staging_db = dst_db.with_extension("sqlite3.migrating");
     fs::copy(src_db, &staging_db)?;
     copy_dir_recursive(src_updates, dst_updates)?;
+    // 保留回滚守卫直到数据库发布和标记写入完成；后续任一步失败都不会留下
+    // 本次复制的密钥目录，否则重试会被独占创建保护拒绝。
+    let pending_keys = if let (Some(source), Some(target)) = (src_db.parent(), dst_db.parent()) {
+        Some(crate::ssh_keys::prepare_managed_tree_copy(&source.join("ssh/keys"), &target.join("ssh/keys"))?)
+    } else {
+        None
+    };
     // 验证新库可打开且核心表存在，确保拷贝结果可用。
     {
         let conn = Connection::open(&staging_db)
@@ -783,12 +884,31 @@ fn perform_portable_migration_files(
         })
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     }
-    fs::rename(&staging_db, dst_db)?;
-    // 验证通过后才写迁移标记并清理旧数据；删除失败可忽略（标记已决定后续走便携路径）。
-    if let Some(parent) = migrated_marker.parent() {
-        let _ = fs::create_dir_all(parent);
+    // create_new 原子占名且绝不覆盖已有目标；不用硬链接，保留 FAT/exFAT 便携迁移能力。
+    // 源库已验证；复制、落盘或标记写入失败均撤回本次创建的最终文件。
+    let mut published = fs::OpenOptions::new().write(true).create_new(true).open(dst_db)?;
+    let publish_result = (|| -> std::io::Result<()> {
+        let mut staged = fs::File::open(&staging_db)?;
+        std::io::copy(&mut staged, &mut published)?;
+        published.sync_all()
+    })();
+    // Windows 不允许删除仍被本进程打开的文件，必须先释放最终文件句柄。
+    drop(published);
+    let publish_result = publish_result.and_then(|()| {
+        if let Some(parent) = migrated_marker.parent() { fs::create_dir_all(parent)?; }
+        fs::write(migrated_marker, [])
+    });
+    if let Err(marker_error) = publish_result {
+        // 先撤回本次发布的数据库，再让密钥守卫回滚，不能留下优先被启动选中的残库。
+        if let Err(rollback_error) = fs::remove_file(dst_db) {
+            // 撤回失败时必须保留配套密钥，避免活动数据库引用缺失的私钥。
+            if let Some(pending_keys) = pending_keys { pending_keys.commit(); }
+            return Err(rollback_error);
+        }
+        return Err(marker_error);
     }
-    fs::write(migrated_marker, [])?;
+    if let Some(pending_keys) = pending_keys { pending_keys.commit(); }
+    let _ = fs::remove_file(&staging_db);
     let _ = fs::remove_file(src_db);
     if src_updates.exists() {
         let _ = fs::remove_dir_all(src_updates);
@@ -908,7 +1028,30 @@ fn perform_exe_relocation_files(
         let dst_dir = target_dir.join("data");
         let staging = target_dir.join("data.relocating");
         let _ = fs::remove_dir_all(&staging);
-        copy_dir_recursive(src_dir, &staging)?;
+        // 托管密钥不得经普通 fs::copy 继承宽松目标 ACL。
+        fs::create_dir_all(&staging)?;
+        // 先由安全入口建立 ssh/keys 及其父目录权限，再复制非托管 SSH 内容。
+        crate::ssh_keys::copy_managed_tree(&src_dir.join("ssh/keys"), &staging.join("ssh/keys"))?;
+        for entry in fs::read_dir(src_dir)? {
+            let entry = entry?;
+            if entry.file_name() == "ssh" {
+                // 仅托管 keys 走安全复制；其它既有 SSH 文件仍完整搬运，不能随旧目录清理丢失。
+                let source_ssh = entry.path();
+                let target_ssh = staging.join("ssh");
+                fs::create_dir_all(&target_ssh)?;
+                for ssh_entry in fs::read_dir(&source_ssh)? {
+                    let ssh_entry = ssh_entry?;
+                    if ssh_entry.file_name() == "keys" { continue; }
+                    let destination = target_ssh.join(ssh_entry.file_name());
+                    if ssh_entry.file_type()?.is_dir() { copy_dir_recursive(&ssh_entry.path(), &destination)?; }
+                    else { fs::copy(ssh_entry.path(), destination)?; }
+                }
+                continue;
+            }
+            let destination = staging.join(entry.file_name());
+            if entry.file_type()?.is_dir() { copy_dir_recursive(&entry.path(), &destination)?; }
+            else { fs::copy(entry.path(), destination)?; }
+        }
         // 验证 staging 里的库可打开且核心表存在，确保拷贝结果可用。
         let staged_db = staging.join(DB_FILE_NAME);
         if staged_db.exists() {
@@ -993,6 +1136,20 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             last_used INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS ssh_host_pins (
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535),
+            algorithm TEXT NOT NULL,
+            public_key BLOB NOT NULL,
+            PRIMARY KEY (host, port)
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_ssh_keys (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS ai_provider_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             enabled INTEGER NOT NULL,
@@ -1057,6 +1214,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     // CREATE TABLE IF NOT EXISTS 对已存在的表不会加列，需显式 ALTER。
     ensure_theme_accent_column(&conn)?;
     ensure_update_include_beta_column(&conn)?;
+    let has_managed_id = conn.prepare("PRAGMA table_info(credential_records)").map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1)).map_err(storage_error)?
+        .collect::<std::result::Result<Vec<_>, _>>().map_err(storage_error)?.iter().any(|name| name == "managed_key_id");
+    if !has_managed_id {
+        conn.execute("ALTER TABLE credential_records ADD COLUMN managed_key_id TEXT", []).map_err(storage_error)?;
+    }
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -1582,11 +1745,20 @@ fn save_layout_preferences_tx(tx: &Transaction<'_>, preferences: &LayoutPreferen
     Ok(())
 }
 
+fn legacy_managed_id(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    if path.file_name()? != "id_ed25519" || path.parent()?.parent()?.file_name()? != "keys"
+        || path.parent()?.parent()?.parent()?.file_name()? != "ssh" { return None; }
+    let id = path.parent()?.file_name()?.to_str()?;
+    crate::ssh_keys::validate_id(id).ok()?;
+    Some(id.into())
+}
+
 fn load_credential_records_from_conn(conn: &Connection) -> Result<Vec<CredentialRecord>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, display_name, scope, kind, host, remote_url, username, key_path,
-                    created_at, updated_at, last_used
+                    created_at, updated_at, last_used, managed_key_id
              FROM credential_records
              ORDER BY updated_at DESC, host ASC, remote_url ASC, username ASC",
         )
@@ -1617,6 +1789,7 @@ fn load_credential_records_from_conn(conn: &Connection) -> Result<Vec<Credential
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
                 last_used: row.get(10)?,
+                managed_key_id: row.get(11)?,
             })
         })
         .map_err(storage_error)?;
@@ -1629,11 +1802,18 @@ fn save_credential_records_tx(tx: &Transaction<'_>, records: &[CredentialRecord]
     tx.execute("DELETE FROM credential_records", [])
         .map_err(storage_error)?;
     for record in records {
+        if let Some(id) = record.managed_key_id.as_deref() {
+            crate::ssh_keys::validate_id(id)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_ssh_keys WHERE id=?1)", [id], |row| row.get(0)).map_err(storage_error)?;
+            if !exists || record.kind != StoredCredentialKind::SshKey {
+                return Err(crate::ssh_keys::error(crate::ssh_keys::MISSING));
+            }
+        }
         tx.execute(
             "INSERT OR REPLACE INTO credential_records
              (id, display_name, scope, kind, host, remote_url, username, key_path,
-              created_at, updated_at, last_used)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              created_at, updated_at, last_used, managed_key_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 record.id,
                 record.display_name,
@@ -1646,6 +1826,7 @@ fn save_credential_records_tx(tx: &Transaction<'_>, records: &[CredentialRecord]
                 record.created_at,
                 record.updated_at,
                 record.last_used,
+                record.managed_key_id,
             ],
         )
         .map_err(storage_error)?;

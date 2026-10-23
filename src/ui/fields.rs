@@ -609,6 +609,11 @@ where
             if !kit_press_enter_submits(multiline) {
                 return;
             }
+            // 生成密钥不可由 IME 候选确认误触发；只保护本次新增字段。
+            if matches!(id, FieldId::SshKeyName | FieldId::SshKeyComment | FieldId::SshKeyPassphrase | FieldId::SshKeyPassphraseConfirm)
+                && this.kit_field_has_ime_composition(id, window, cx) {
+                return;
+            }
             // 严格寻址与 Change 同理：孤儿宿主的 Enter 不再触发任何提交。
             if !this.try_field(id).is_some_and(|field| field.uid == uid) {
                 return;

@@ -47,6 +47,9 @@ impl RepositoryView {
     }
 
     fn reset_credential_form(&mut self) {
+        // 托管密钥路径的异步选择不能回填后来打开的另一个凭据表单。
+        self.ssh_ui.generated_passphrase = None;
+        self.ssh_ui.generation = self.ssh_ui.generation.wrapping_add(1);
         if self.ssh_credential_discovery.loading {
             // 关闭表单后忽略尚未完成的扫描结果，避免异步结果覆盖其他界面状态。
             self.ssh_credential_discovery.request_id = self
@@ -148,6 +151,8 @@ impl RepositoryView {
     }
 
     pub(crate) fn use_discovered_ssh_agent(&mut self) {
+        self.ssh_ui.generated_passphrase = None;
+        self.ssh_ui.generation = self.ssh_ui.generation.wrapping_add(1);
         self.credential_use_ssh_agent = true;
         self.credential_key_path.clear();
         self.credential_passphrase.clear();
@@ -161,6 +166,7 @@ impl RepositoryView {
     }
 
     pub(crate) fn use_discovered_ssh_key(&mut self, path: PathBuf) {
+        self.ssh_ui.generation = self.ssh_ui.generation.wrapping_add(1);
         if self.credential_key_path.value.trim() != path.to_string_lossy() {
             self.credential_passphrase.clear();
         }
@@ -761,8 +767,10 @@ impl RepositoryView {
         self.begin_global_test_busy(&khaslana::ui_i18n::encode(messages::TESTING_CREDENTIAL_CONNECTION, &[]));
         let store: Arc<dyn CredentialStore> = self.credential_store.clone();
         let tx = self.tx.clone();
+        let proxy = self.proxy_settings.clone();
+        let trust = Arc::new(repository_ssh_ui::TabHostTrustProvider { tx: tx.clone(), tab_id: None });
         self.tasks.spawn(TaskKind::Long, move || {
-            match test_credential_connection(store.as_ref(), &record) {
+            match khaslana::credentials::test_credential_connection_with_policy(store.as_ref(), &record, &proxy, trust) {
                 Ok(()) => {
                     let records = store.list_records().unwrap_or_default();
                     send_ui_event(

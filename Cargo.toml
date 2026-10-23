@@ -45,6 +45,10 @@ rmcp = { version = "=3.5.0", default-features = false, features = ["client", "tr
 rquickjs = "=0.14.0"
 semver = "1"
 sha2 = "0.11"
+# 仅使用成熟稳定版的 Ed25519 与 OpenSSH 加密，不启用 RSA 等无关算法。
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "encryption", "getrandom"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+zeroize = "1"
 zip = "8"
 rfd = "0.17"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -80,6 +84,8 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-php = "0.24.2"
 tree-sitter-kotlin-ng = "1.1.0"
 ignore = "0.4.33"
+# 主机信任在所有平台复用 libssh2 的 known_hosts 解析与匹配。
+libssh2-sys = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # git2 0.21 尚未暴露跳过被占用目录的 checkout 选项，Windows 工作区操作需直接配置 libgit2。
@@ -89,7 +95,10 @@ libgit2-sys = "0.18"
 libssh2-sys = { version = "0.3", features = ["openssl-on-win32"] }
 raw-window-handle = "0.6"
 tray-icon = { version = "0.24.2", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Memory"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -177,6 +177,10 @@ Khaslana 支持三类凭据策略：
 
 HTTPS 凭据支持用户名 + 密码 / PAT；SSH 凭据支持私钥、passphrase 和 SSH agent。
 
+在「设置 → 凭据」中可生成应用托管的 Ed25519 SSH 公私钥，无需安装 `ssh`、`ssh-keygen` 或运行 SSH agent。私钥和 `.pub` 公钥保存在当前应用数据目录的 `ssh/keys/<key-id>/` 中；推荐设置私钥口令，无口令需要显式选择。生成后复制公钥并添加到远端 Git 平台，再将密钥用于 SSH 凭据。私钥不写入 SQLite，保存凭据时口令沿用系统 Keyring。取消表单不会删除已生成密钥；删除凭据也不会删除密钥，仍被凭据引用的托管密钥不可直接删除。
+
+没有 `known_hosts` 时，首次 SSH 连接会显示远端主机与 SHA256 指纹。请通过独立可信渠道核验后选择信任并保存；应用将主机信任记录保存在自身数据库，不写入系统 `known_hosts`。已信任主机更换密钥时会阻止连接，必须先独立核验，再管理旧信任记录。已有系统 `known_hosts` 仅只读检查；无法安全识别的格式会报错，不会静默绕过。应用的信任记录不会同步给外部 OpenSSH。
+
 添加 HTTPS 凭据时可通过浏览器一键登录 GitHub / Gitee 自动获取登录名与令牌，免去手动录入 PAT。GitHub 走 OAuth Device Flow，无需额外服务即可使用；Gitee 走授权码流，因公开分发的客户端不能内置 `client_secret`，需要自部署一个持有 secret 的 broker，部署步骤见独立仓库 [khaslana-broker](https://github.com/Neglecton/khaslana-broker)。未部署 broker 时 Gitee 一键登录不可用，但仍可手动填写 PAT。
 
 ### 网络代理
@@ -195,7 +199,7 @@ HTTPS 凭据支持用户名 + 密码 / PAT；SSH 凭据支持私钥、passphrase
 - HTTPS 代理 URL：允许 `http://`、`https://`。
 - SOCKS5 代理 URL：允许 `socks5://`、`socks5h://`。
 
-SSH 远端默认不使用 HTTP / HTTPS 代理；仅在自定义模式配置 SOCKS5 代理时尝试应用 SOCKS5。
+当前内置 SSH 后端不支持代理传输。若有效代理策略要求 SSH 使用代理，应用会在连接前报错，不会静默改为直连；未配置 SSH 有效代理时可直接连接。HTTP / HTTPS 远端继续使用上述代理设置。
 
 ## 开发命令
 
